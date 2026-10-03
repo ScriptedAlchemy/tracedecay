@@ -826,6 +826,7 @@ fn production_lanes(
         query_view: &query_view,
         generation: generation_id.clone(),
         literals: authority.parse_literals(&query_view, &request),
+        path_prefix: None,
         budget,
     };
     let exact_outcome = exact_lane

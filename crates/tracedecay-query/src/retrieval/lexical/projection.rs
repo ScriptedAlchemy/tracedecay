@@ -379,6 +379,9 @@ fn exact_matches(
     row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
 ) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
+    if !tracedecay_domain::path_matches_scope(row.logical_path, request.path_prefix) {
+        return (Vec::new(), Vec::new());
+    }
     let mut matched_literals = Vec::new();
     let mut matched_kinds = BTreeSet::new();
     for (ordinal, literal) in request.literals.iter().enumerate() {

@@ -44,6 +44,9 @@ pub struct ExactLaneRequest<'a> {
     /// Candidate literals with their typed fields, pre-parsed by the central
     /// admission validator. The lane never re-derives exact status.
     pub literals: Vec<ExactLiteralV1>,
+    /// Applied before the candidate cap, so out-of-scope matches cannot
+    /// crowd in-scope ones out of a bounded selection.
+    pub path_prefix: Option<&'a str>,
     pub budget: RetrievalBudget,
     /// The same live request authority used by the other retrieval lanes.
     pub control: &'a dyn RetrievalExecutionControl,

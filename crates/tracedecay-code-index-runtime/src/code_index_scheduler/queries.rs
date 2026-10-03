@@ -2761,6 +2761,7 @@ fn execute_prepared_exact_query(
     let exact_control = CallableRetrievalExecutionControl::for_request(context.request);
     let lane_request = ExactLaneRequest {
         literals: authority.parse_literals(&query_view, base),
+        path_prefix: request.scope.path_prefix.as_deref(),
         generation: served_generation.clone(),
         budget: base.budget,
         base: base.clone(),
@@ -4209,6 +4210,39 @@ mod tests {
         assert_eq!(page.total, Some(in_scope));
         assert_eq!(evidence.coverage.eligible, Some(in_scope));
         assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_finds_matches_ranked_past_the_lane_cap() {
+        let mut files = (0..64)
+            .map(|index| {
+                (
+                    format!("a/m{index}.rs"),
+                    format!("pub fn a_runner_{index}() {{ run(\"--probe-scope-flag\"); }}\n"),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((
+            "b/lib.rs".to_owned(),
+            "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n".to_owned(),
+        ));
+        let files = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let outcome = exact_occurrences(&files, "--probe-scope-flag", Some("b")).await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("out-of-scope matches must not crowd out the scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        assert_eq!(page.total, Some(page.items.len() as u64));
     }
 
     #[test]

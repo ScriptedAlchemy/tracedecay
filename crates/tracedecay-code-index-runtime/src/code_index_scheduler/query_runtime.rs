@@ -704,6 +704,7 @@ where
             query_view,
             generation: generation.clone(),
             literals: parser.parse_literals(query_view, request),
+            path_prefix: None,
             budget: request.budget,
             control: graph_control.as_ref(),
         })
