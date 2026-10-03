@@ -125,16 +125,6 @@ impl HookConfigurationSubscriberV1 {
         host: NativeHostIdentityV1,
         now: UtcMicros,
     ) -> HookConfigurationReadOutcomeV1 {
-        let outcome = self.load_current_inner(host, now);
-
-        outcome
-    }
-
-    fn load_current_inner(
-        &self,
-        host: NativeHostIdentityV1,
-        now: UtcMicros,
-    ) -> HookConfigurationReadOutcomeV1 {
         let snapshot = match self.store.load(host) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return HookConfigurationReadOutcomeV1::Missing,

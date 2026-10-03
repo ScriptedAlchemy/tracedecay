@@ -78,28 +78,6 @@ pub fn capture_native_event_for_replay(
     now: UtcMicros,
     wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
-    let outcome = capture_native_event_for_replay_inner(
-        data_root,
-        worktree_id,
-        source,
-        payload,
-        material,
-        now,
-        wait_budget,
-    );
-
-    outcome
-}
-
-fn capture_native_event_for_replay_inner(
-    data_root: &Path,
-    worktree_id: [u8; 16],
-    source: NativeHookCaptureSourceV1,
-    payload: &[u8],
-    material: NativeEnvelopeMaterialV1,
-    now: UtcMicros,
-    wait_budget: Duration,
-) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
         NativeHookCaptureSourceV1::Host(host) => decode_native_hook_event(host, payload),
