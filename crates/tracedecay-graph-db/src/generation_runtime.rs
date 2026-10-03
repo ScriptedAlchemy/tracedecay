@@ -414,16 +414,19 @@ impl GraphDb {
         locator: &GenerationLocator,
     ) -> Result<Option<GraphCommit>, GraphDbError> {
         let physical_namespace = locator.physical_namespace()?;
-        if let Some(sealed) = self.sealed_generation_reader(locator) {
-            let guard = sealed.database().read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            if let Some(projection) = latest_projection(
-                database,
-                &physical_namespace,
-                &locator.projection.projection,
-            )? {
-                return Ok(Some(projection.commit));
-            }
+        if let Some(sealed) = self.sealed_generation_reader(locator)
+            && let Some(projection) =
+                sealed
+                    .database()
+                    .read_intact(&crate::NeverCancelled, |database| {
+                        latest_projection(
+                            database,
+                            &physical_namespace,
+                            &locator.projection.projection,
+                        )
+                    })?
+        {
+            return Ok(Some(projection.commit));
         }
         self.staging_generation_commit(locator)
     }
