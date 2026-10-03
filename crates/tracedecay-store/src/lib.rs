@@ -153,7 +153,7 @@ pub use projection::{
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V6,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V7,
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord, message_output_digest,
 };
 pub use provider_descriptor::{

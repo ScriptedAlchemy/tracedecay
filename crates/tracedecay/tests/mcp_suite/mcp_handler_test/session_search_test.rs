@@ -903,9 +903,8 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
-    const USER: &str =
-        r#"[{"text":"Cursor journey: trace the quartzledger importer","type":"text"}]"#;
-    const ASSISTANT: &str = r#"[{"text":"The quartzledger importer reads CSV rows.","type":"text"},{"input":{"description":"inspect importer","model":"fast","prompt":"Inspect the quartzledger importer","subagent_type":"explore"},"name":"Task","type":"tool_use"}]"#;
+    const USER: &str = "Cursor journey: trace the quartzledger importer";
+    const ASSISTANT: &str = "The quartzledger importer reads CSV rows.\n\ninspect importer\n\nInspect the quartzledger importer\n\nexplore";
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let transcripts = composed_transcript_home(&isolation);

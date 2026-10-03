@@ -3375,12 +3375,12 @@ const ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1: usize = 4 * 1024 * 1024;
 /// checked once per buffer, so interruption latency is bounded by one
 /// [`ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1`] read-and-hash step. The read and
 /// hash phases carry separate spans so a profile can attribute a slow pass
-/// to I/O wait or to SHA-256 work.
+/// to I/O wait or to SHA-256 work. `record_bytes` sees each buffer read.
 #[inline]
-fn hash_artifact_file(
+pub(super) fn hash_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
-    mut record_bytes: impl FnMut(u64),
+    mut record_bytes: impl FnMut(&[u8]) -> Result<(), CodeLexicalArtifactErrorV1>,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1];
@@ -3396,13 +3396,11 @@ fn hash_artifact_file(
         if read == 0 {
             break;
         }
-        record_bytes(read as u64);
+        record_bytes(&buffer[..read])?;
         {
             let _span = tracing::trace_span!("query.artifact.digest.sha256_update").entered();
-            {
-                hasher.update(&buffer[..read]);
-            }
-        };
+            hasher.update(&buffer[..read]);
+        }
     }
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
@@ -3412,35 +3410,26 @@ fn digest_content_addressed_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    {
-        let _span = tracing::trace_span!("query.artifact.digest.content_address_preopen").entered();
-        {
-            metrics::gauge!("query.artifact.digest.content_address_preopen.passes_total")
-                .increment((1u64) as f64);
-            hash_artifact_file(file, control, |bytes| {
-                metrics::gauge!("query.artifact.digest.content_address_preopen.bytes_total")
-                    .increment(bytes as f64);
-            })
-        }
-    }
+    let _span = tracing::trace_span!("query.artifact.digest.content_address_preopen").entered();
+    metrics::gauge!("query.artifact.digest.content_address_preopen.passes_total").increment(1.0);
+    hash_artifact_file(file, control, |bytes| {
+        metrics::gauge!("query.artifact.digest.content_address_preopen.bytes_total")
+            .increment(bytes.len() as f64);
+        Ok(())
+    })
 }
 
 fn digest_retained_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    {
-        let _span =
-            tracing::trace_span!("query.artifact.digest.retained_post_validation").entered();
-        {
-            metrics::gauge!("query.artifact.digest.retained_post_validation.passes_total")
-                .increment((1u64) as f64);
-            hash_artifact_file(file, control, |bytes| {
-                metrics::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
-                    .increment(bytes as f64);
-            })
-        }
-    }
+    let _span = tracing::trace_span!("query.artifact.digest.retained_post_validation").entered();
+    metrics::gauge!("query.artifact.digest.retained_post_validation.passes_total").increment(1.0);
+    hash_artifact_file(file, control, |bytes| {
+        metrics::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
+            .increment(bytes.len() as f64);
+        Ok(())
+    })
 }
 
 fn stable_artifact_file_state(
