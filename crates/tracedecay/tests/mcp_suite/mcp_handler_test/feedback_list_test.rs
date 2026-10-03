@@ -185,22 +185,12 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
         }),
     )
     .await;
-    assert!(
-        malformed["result"].is_null(),
-        "a malformed handle is a protocol error, not an empty page: {malformed}"
-    );
-    assert_eq!(malformed["error"]["code"], -32602, "{malformed}");
     assert_eq!(
-        malformed["error"]["data"]["kind"], "invalid_request",
-        "{malformed}"
-    );
-    assert_eq!(
-        malformed["error"]["data"]["reason_code"], "application_surface_invalid_request",
-        "{malformed}"
-    );
-    assert_eq!(
-        malformed["error"]["data"]["retryable"], false,
-        "{malformed}"
+        crate::support::route_refusal(&malformed),
+        crate::support::application_surface_refusal_error(
+            "application surface request handle is invalid"
+        ),
+        "a malformed handle is a typed refusal, not an empty page: {malformed}"
     );
 
     fixture.harness.shutdown().await;

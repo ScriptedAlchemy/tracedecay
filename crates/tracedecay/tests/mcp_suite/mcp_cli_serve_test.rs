@@ -1069,12 +1069,18 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
     }
 
     let refusal = json_rpc_response(&output.stdout, 4);
+    let problem = crate::support::refusal_problem(&refusal["result"]);
     assert_eq!(
         (
-            &refusal["error"]["data"]["reason_code"],
-            &refusal["error"]["data"]["retryable"],
+            &problem["kind"],
+            &problem["diagnostic"]["code"],
+            &problem["retryable"],
         ),
-        (&json!("project_required"), &json!(false)),
+        (
+            &json!("invalid_request"),
+            &json!("project_required"),
+            &json!(false)
+        ),
         "{refusal}"
     );
 }

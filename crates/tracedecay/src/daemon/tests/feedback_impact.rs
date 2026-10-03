@@ -154,31 +154,22 @@ async fn feedback_impact_projects_the_published_cycle_and_conceals_other_handles
 
 fn assert_invalid_request(response: &JsonRpcResponse, detail: &str) {
     assert!(
-        response.result.is_none(),
-        "an invalid impact request must not return a tool result: {response:?}"
+        response.error.is_none(),
+        "an invalid impact request is a typed tool refusal: {response:?}"
     );
-    let error = response
-        .error
-        .as_ref()
-        .expect("invalid impact request is a JSON-RPC error");
     assert_eq!(response.id, json!(1));
-    assert_eq!(error.code, -32602);
+    let result = response
+        .result
+        .as_ref()
+        .expect("invalid impact request result");
+    assert_eq!(result["isError"], true);
+    let problem = &result["structuredContent"]["problem"];
+    assert_eq!(problem["kind"], "invalid_request", "{problem}");
+    assert_eq!(problem["code"], "application_surface_invalid_request");
+    assert_eq!(problem["retryable"], false);
     assert_eq!(
-        error.message,
-        format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
-        )
-    );
-    assert_eq!(
-        error.data,
-        Some(json!({
-            "tool": IMPACT_TOOL,
-            "reason_code": "application_surface_invalid_request",
-            "retryable": false,
-            "detail": detail,
-            "kind": "invalid_request",
-            "code": "application_surface_invalid_request"
-        }))
+        problem["diagnostic"],
+        json!({"code": "application_surface_invalid_request", "message": detail})
     );
 }
 

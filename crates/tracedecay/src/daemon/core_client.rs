@@ -728,6 +728,11 @@ pub async fn recover_truncated_tool_payload(
     result: serde_json::Value,
     deadline: Option<Instant>,
 ) -> Result<serde_json::Value> {
+    if let Some(refusal) =
+        tracedecay_mcp::application_output::tool_result::tool_result_refusal(&result)
+    {
+        return Err(refusal);
+    }
     let payload = tool_json_payload(&result, tool_name)?;
     if !is_truncation_envelope(&payload) {
         return Ok(payload);

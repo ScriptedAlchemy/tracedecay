@@ -167,7 +167,6 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     );
     crate::support::assert_application_invalid_request(
         &node_call(&server, json!([fetch_id])).await,
-        "tracedecay_node",
         "invalid arguments: tracedecay_node expects a JSON object",
     );
     assert_execution_failed(

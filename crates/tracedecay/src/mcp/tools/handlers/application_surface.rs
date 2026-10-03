@@ -560,6 +560,55 @@ pub fn render_settled_route_refusal(
     }))
 }
 
+/// The MCP response for a call of `tool_name` refused by `error`. A settled
+/// route refusal is the same typed tool result `tracedecay tool --json`
+/// prints. A retryable refusal and an effect whose commit is unknown stay
+/// JSON-RPC errors, the transient and indeterminate states callers retry on
+/// or inspect. The refusal text honors the `format` in `args`.
+pub fn tool_refusal_response(
+    id: Value,
+    tool_name: &str,
+    error: &TraceDecayError,
+    args: &Value,
+) -> tracedecay_mcp::JsonRpcResponse {
+    let settled = error
+        .project_route_context()
+        .filter(|(reason_code, retryable, _)| {
+            !retryable
+                && tracedecay_mcp::tool_errors::project_route_problem_kind(reason_code)
+                    != Some("effect_unknown")
+        })
+        .and_then(|_| request_id().ok())
+        .and_then(|request_id| {
+            render_settled_route_refusal(
+                tracedecay_tool_catalog::BindingSurface::Mcp,
+                tool_name,
+                request_id,
+                error,
+                args,
+            )
+        })
+        .and_then(Result::ok);
+    match settled {
+        Some(result) => tracedecay_mcp::JsonRpcResponse::success(id, result.value),
+        None => tracedecay_mcp::tool_errors::tool_error_response(id, tool_name, error),
+    }
+}
+
+/// The one stdout document a first-party `--json` command prints when it is
+/// refused: the typed problem envelope `tracedecay tool --json` carries.
+pub fn command_refusal_document(error: &TraceDecayError) -> Result<String> {
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate a refusal request id".to_owned(),
+        })?;
+    let envelope = tracedecay_api::adapter_problem(request_id, graph_tool_error_problem(error))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("the command refusal violated its problem contract: {error}"),
+        })?;
+    Ok(serde_json::to_string_pretty(&envelope)?)
+}
+
 fn unbound_refusal(
     request_id: RequestId,
     problem: tracedecay_contracts::ApplicationProblem,
@@ -575,14 +624,21 @@ fn unbound_refusal(
     )
 }
 
-/// The graph-tool owner reports handler argument errors as invalid requests,
-/// a typed route detail, a persisted-shape refusal, or a lock that missed its
-/// deadline as that detail, a route refusal as unavailable under its own
+/// The graph-tool owner reports an owner refusal as the owner's own problem,
+/// handler argument errors as invalid requests, a typed route detail, a
+/// persisted-shape refusal, or a lock that missed its deadline as that
+/// detail, a session sync refused at admission as the matching pre-admission
+/// cancellation or timeout, a route refusal as unavailable under its own
 /// reason code, and any other handler failure as an internal execution
 /// failure.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
+    if let Some(record) =
+        tracedecay_mcp::application_output::tool_result::error_problem_record(error)
+    {
+        return record.into_source();
+    }
     if let Some(detail) = error.project_route_typed_detail() {
         return tracedecay_contracts::ApplicationProblem::from_detail(detail.clone());
     }
@@ -623,6 +679,17 @@ pub(crate) fn graph_tool_error_problem(
                     message: detail.clone(),
                 },
             )
+        }
+        TraceDecayError::ProjectRoute { reason_code, .. }
+            if reason_code
+                == tracedecay_mcp::tool_errors::SESSION_SYNC_CANCELLED_BEFORE_ADMISSION =>
+        {
+            tracedecay_contracts::ApplicationProblem::cancelled_before_admission()
+        }
+        TraceDecayError::ProjectRoute { reason_code, .. }
+            if reason_code == tracedecay_mcp::tool_errors::SESSION_SYNC_DEADLINE_EXCEEDED =>
+        {
+            tracedecay_contracts::ApplicationProblem::timed_out_before_admission()
         }
         TraceDecayError::ProjectRoute {
             reason_code,

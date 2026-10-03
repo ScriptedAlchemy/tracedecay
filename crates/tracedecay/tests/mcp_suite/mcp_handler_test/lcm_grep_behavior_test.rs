@@ -8,7 +8,7 @@ use crate::support::{
     TemporalLcmProjectionInput, activate_test_temporal_generation,
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
     open_active_project_session_db, persist_temporal_lcm_observation, real_mcp_server,
-    retained_envelope_payload, setup_empty_project,
+    retained_envelope_payload, route_refusal, setup_empty_project,
 };
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
@@ -94,16 +94,8 @@ fn caller_page(payload: &Value) -> Value {
     })
 }
 
-fn jsonrpc_error(response: &Value) -> Value {
-    json!({
-        "code": response["error"]["code"],
-        "message": response["error"]["message"],
-        "data": response["error"]["data"],
-    })
-}
-
 fn argument_error(detail: &str) -> Value {
-    application_invalid_request_error("tracedecay_lcm_grep", detail)
+    application_invalid_request_error(detail)
 }
 
 fn stable_problem(envelope: &Value) -> Value {
@@ -224,8 +216,10 @@ async fn seed(
 
 async fn call(server: &McpServer, args: Value) -> Value {
     let response = handle_real_server_tool_call_raw(server, "tracedecay_lcm_grep", args).await;
-    if !response["error"].is_null() {
-        return json!({ "jsonrpc_error": jsonrpc_error(&response) });
+    if response["result"]["structuredContent"]["problem"]["diagnostic"]["code"]
+        == "application_surface_invalid_request"
+    {
+        return json!({ "route_refusal": route_refusal(&response) });
     }
     let text = extract_real_server_text(&response["result"]);
     if let Some(payload) = retained_envelope_payload(text) {
@@ -389,8 +383,8 @@ async fn lcm_grep_returns_the_matching_snippet_and_refuses_a_bad_query() {
             hit("codex", SESSION, CODEX_ID, "user", CODEX_TEXT, 5),
         ])},
         "miss": { "page": page("qxqvnomatch", "all", 0, 0, vec![]) },
-        "missing_query": { "jsonrpc_error": argument_error("missing field `query`") },
-        "bad_scope": { "jsonrpc_error": argument_error(
+        "missing_query": { "route_refusal": argument_error("missing field `query`") },
+        "bad_scope": { "route_refusal": argument_error(
             "scope: unknown variant `everything`, expected one of `current`, `session`, `all`"
         )},
         "blank_query": { "refusal": invalid_request_refusal() },

@@ -258,10 +258,10 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     )
     .await;
 
-    assert_eq!(resp["error"]["code"], -32602, "{resp}");
-    assert_eq!(resp["error"]["data"]["code"], "unknown_tool", "{resp}");
-    assert_eq!(resp["error"]["data"]["kind"], "invalid_request", "{resp}");
-    assert_eq!(resp["error"]["data"]["retryable"], false, "{resp}");
+    let refusal = crate::support::route_refusal(&resp);
+    assert_eq!(refusal["diagnostic"]["code"], "unknown_tool", "{resp}");
+    assert_eq!(refusal["kind"], "invalid_request", "{resp}");
+    assert_eq!(refusal["retryable"], false, "{resp}");
 
     server_handle.ledger_writes_settled().await;
     assert_eq!(
