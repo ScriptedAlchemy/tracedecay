@@ -2429,6 +2429,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                 match &stop {
                                     GraphPrepareStopV1::ResidentMemory(detail) => {
                                         if !graph_waits_for_text {
+                                            // The outgoing graph held for reads
+                                            // is the headroom this decode needs.
+                                            if let Some(text) = worker_text_generation
+                                                .read()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .as_ref()
+                                            {
+                                                text.release_graph_predecessor();
+                                            }
                                             if !converged {
                                                 park_convergence(
                                                     &worker_convergence_park,

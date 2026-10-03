@@ -2330,12 +2330,16 @@ impl LatestCodeTextGenerationV1 {
     }
 
     /// The held predecessor serves only until this generation's graph first
-    /// warms or settles; past that it is dropped.
-    pub fn graph_predecessor(&self) -> Option<Self> {
-        if matches!(
-            self.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
-        ) {
+    /// warms or settles, and only while graphs stay enabled; past that it is
+    /// dropped. A graph turned off by configuration leaves this generation
+    /// `Pending` for good, so readiness alone would hold it forever.
+    pub fn graph_predecessor(&self, graph_activation_enabled: bool) -> Option<Self> {
+        if graph_activation_enabled
+            && matches!(
+                self.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+            )
+        {
             return self
                 .graph_predecessor
                 .read()
@@ -2408,13 +2412,19 @@ impl LatestCodeTextGenerationV1 {
     }
 
     pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
-        let mut state = self
-            .graph_activation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+        {
+            let mut state = self
+                .graph_activation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+                return;
+            }
             *state = CodeGraphActivationStateV1::Refused(reason);
         }
+        // A refused graph never serves its predecessor, and a memory refusal
+        // needs the headroom the predecessor's resident graph holds.
+        self.release_graph_predecessor();
     }
 
     fn mark_graph_activation_unavailable(&self, reason: String) {
