@@ -773,6 +773,9 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    /// Streams each outgoing target to `visitor` while the snapshot gate and
+    /// database read locks are held, so the visitor must not call back into
+    /// this graph.
     pub fn visit_outgoing_relation_targets(
         &self,
         start: &GraphEntityId,

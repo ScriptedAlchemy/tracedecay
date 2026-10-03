@@ -890,6 +890,8 @@ impl GraphDb {
         })
     }
 
+    /// Streams each outgoing target to `visitor` while the database read lock
+    /// is held, so the visitor must not call back into this graph.
     #[hotpath::measure(
         label = "graph_db.traversal.outgoing_targets.visit",
         impl_type = "GraphDb"
