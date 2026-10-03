@@ -146,18 +146,16 @@ pub async fn compute_grep(
     ))
 }
 
-/// Renders a grep result as its tool text.
+/// Renders a grep result as its tool text, with `value` as its JSON body.
 pub fn render_grep(
     response_handle_root: Option<&Path>,
     args: &Value,
+    value: &Value,
     result: &GrepSearchResultV1,
 ) -> Result<ToolResult> {
-    let value = serde_json::to_value(result)?;
     let text = hotpath::measure_block!(
         "mcp.search.grep.render",
-        render::finalize(response_handle_root, args, &value, || render_grep_md(
-            result
-        ))
+        render::finalize(response_handle_root, args, value, || render_grep_md(result))
     );
     // Grep aggregates more raw content than any other search tool; the encoded
     // payload size explains transport pressure that timing alone cannot.

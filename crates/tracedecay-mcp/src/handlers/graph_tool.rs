@@ -49,7 +49,7 @@ use crate::handlers::support::{
     unknown_tool_error,
 };
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
-use crate::tools::response_trailers::ResponseTrailer;
+use crate::tools::response_trailers::{CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, ResponseTrailer};
 use crate::tools::{render, renderers};
 use crate::{McpToolContext, ToolResult};
 
@@ -312,6 +312,21 @@ pub fn render_graph_tool(
         analytics,
         cost,
     } = completion;
+    let worktree = code_graph
+        .as_ref()
+        .and_then(|served| served.worktree.as_ref())
+        .filter(|_| git_tool_failure_message(&result).is_none());
+    // A JSON body takes the verdict before it renders, so a truncated
+    // body's stored handle carries it too, not only the preview envelope.
+    let body = || -> Result<Value> {
+        let mut value = result.result_value()?;
+        if render::wants_json(args)
+            && let (Some(freshness), Value::Object(object)) = (worktree, &mut value)
+        {
+            object.insert("freshness".to_owned(), serde_json::to_value(freshness)?);
+        }
+        Ok(value)
+    };
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
@@ -319,32 +334,30 @@ pub fn render_graph_tool(
             not_found_tool_result(not_found)?
         }
         GraphToolResultV1::Dsm(_) => {
-            let value = result.result_value()?;
+            let value = body()?;
             rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                 render_dsm_md(&value)
             })
         }
         GraphToolResultV1::Diagnose(_) => {
-            let value = result.result_value()?;
+            let value = body()?;
             rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                 render::diagnostics_md(&value)
             })
         }
-        GraphToolResultV1::Circular(circular) => rendered_tool_result(
-            response_handle_root,
-            args,
-            &result.result_value()?,
-            Vec::new(),
-            || render_circular_md(circular),
-        ),
+        GraphToolResultV1::Circular(circular) => {
+            rendered_tool_result(response_handle_root, args, &body()?, Vec::new(), || {
+                render_circular_md(circular)
+            })
+        }
         GraphToolResultV1::UnmountedFiles(_) => {
-            let value = result.result_value()?;
+            let value = body()?;
             rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                 render::unmounted_files_md(&value)
             })
         }
         GraphToolResultV1::UnsafePatterns(_) => {
-            let value = result.result_value()?;
+            let value = body()?;
             rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                 render::risky_patterns_md(&value)
             })
@@ -352,56 +365,57 @@ pub fn render_graph_tool(
         GraphToolResultV1::Derives(DerivesResultV1(symbols)) if symbols.is_empty() => {
             text_tool_result("No matching symbol found.", Vec::new())
         }
-        GraphToolResultV1::Grep(grep) => render_grep(response_handle_root, args, grep)?,
-        GraphToolResultV1::Files(files) => rendered_tool_result(
-            response_handle_root,
-            args,
-            &result.result_value()?,
-            Vec::new(),
-            || render_files_md(files),
-        ),
+        GraphToolResultV1::Grep(grep) => render_grep(response_handle_root, args, &body()?, grep)?,
+        GraphToolResultV1::Files(files) => {
+            rendered_tool_result(response_handle_root, args, &body()?, Vec::new(), || {
+                render_files_md(files)
+            })
+        }
         GraphToolResultV1::Search(search) => render_search(response_handle_root, args, search)?,
         GraphToolResultV1::Retrieve(RetrieveResultV1::Page(page)) => {
             render_retrieved_page(args, page)?
         }
         GraphToolResultV1::AstGrepSearch(search) => {
-            render_ast_grep_search(response_handle_root, args, search)?
+            render_ast_grep_search(response_handle_root, args, &body()?, search)?
         }
         GraphToolResultV1::AutomationRunList(_) => render_value_markdown(
             response_handle_root,
             args,
-            &result,
+            &body()?,
             renderers::automation_run_list_md,
-        )?,
+        ),
         GraphToolResultV1::AutomationRunView(_) => render_value_markdown(
             response_handle_root,
             args,
-            &result,
+            &body()?,
             renderers::automation_run_view_md,
-        )?,
+        ),
         GraphToolResultV1::AutomationRunArtifactView(_) => render_value_markdown(
             response_handle_root,
             args,
-            &result,
+            &body()?,
             renderers::automation_artifact_md,
-        )?,
+        ),
         GraphToolResultV1::SkillList(_) => render_value_markdown(
             response_handle_root,
             args,
-            &result,
+            &body()?,
             renderers::skill_list_md,
-        )?,
+        ),
         GraphToolResultV1::SkillView(_) => render_value_markdown(
             response_handle_root,
             args,
-            &result,
+            &body()?,
             renderers::skill_view_md,
-        )?,
-        GraphToolResultV1::Analytics(_) => {
-            render_value_markdown(response_handle_root, args, &result, renderers::analytics_md)?
-        }
+        ),
+        GraphToolResultV1::Analytics(_) => render_value_markdown(
+            response_handle_root,
+            args,
+            &body()?,
+            renderers::analytics_md,
+        ),
         GraphToolResultV1::Status(status) => {
-            let value = result.result_value()?;
+            let value = body()?;
             let mut rendered =
                 rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                     render_status_md(&value)
@@ -419,16 +433,11 @@ pub fn render_graph_tool(
         }
         // A listing renders inline: it is bounded by its own page limit.
         GraphToolResultV1::ProjectList(listing) | GraphToolResultV1::ProjectSearch(listing) => {
-            rendered_tool_result(None, args, &result.result_value()?, Vec::new(), || {
+            rendered_tool_result(None, args, &body()?, Vec::new(), || {
                 render_registry_listing_md(listing)
             })
         }
-        _ => generic_tool_result(
-            response_handle_root,
-            args,
-            &result.result_value()?,
-            Vec::new(),
-        ),
+        _ => generic_tool_result(response_handle_root, args, &body()?, Vec::new()),
     };
     if let Some(message) = git_tool_failure_message(&result) {
         rendered = rendered
@@ -436,11 +445,7 @@ pub fn render_graph_tool(
             .with_failure_message(message);
     }
     let mut structured = result.result_value()?;
-    if git_tool_failure_message(&result).is_none()
-        && let Some(freshness) = code_graph
-            .as_ref()
-            .and_then(|served| served.worktree.as_ref())
-    {
+    if let Some(freshness) = worktree {
         open_with_worktree_freshness(&mut rendered, &mut structured, args, freshness)?;
     }
     rendered = rendered.with_structured_result(structured);
@@ -459,7 +464,9 @@ pub fn render_graph_tool(
 /// Opens a graph read with the worktree verdict search opens with: the
 /// `freshness:` lines in markdown, a `freshness` key in a JSON object body
 /// and in the structured result. A not-found body is JSON in every format,
-/// so it takes the key rather than lines that would break its parse.
+/// so it takes the key rather than lines that would break its parse. A JSON
+/// body that is not an object, such as a signature array, keeps its schema
+/// and carries the verdict in a `code_graph_freshness` block beside it.
 fn open_with_worktree_freshness(
     rendered: &mut ToolResult,
     structured: &mut Value,
@@ -467,6 +474,7 @@ fn open_with_worktree_freshness(
     freshness: &PrimitiveSearchFreshnessV1,
 ) -> Result<()> {
     let verdict = serde_json::to_value(freshness)?;
+    let mut beside = None;
     if let Some(Value::String(text)) = rendered.value.pointer_mut("/content/0/text") {
         match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(mut body)) => {
@@ -474,8 +482,16 @@ fn open_with_worktree_freshness(
                 *text = Value::Object(body).to_string();
             }
             _ if !render::wants_json(args) => text.insert_str(0, &freshness_lines(freshness)),
-            _ => {}
+            _ => beside = Some(format!("\n{CODE_GRAPH_FRESHNESS_TRAILER_PREFIX} {verdict}")),
         }
+    }
+    if let Some(text) = beside
+        && let Some(content) = rendered
+            .value
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+    {
+        content.insert(1, json!({"type": "text", "text": text}));
     }
     if let Value::Object(object) = structured {
         object.insert("freshness".to_owned(), verdict);
@@ -487,17 +503,12 @@ fn open_with_worktree_freshness(
 fn render_value_markdown(
     response_handle_root: Option<&Path>,
     args: &Value,
-    result: &GraphToolResultV1,
+    value: &Value,
     markdown: fn(&Value) -> String,
-) -> Result<ToolResult> {
-    let value = result.result_value()?;
-    Ok(rendered_tool_result(
-        response_handle_root,
-        args,
-        &value,
-        Vec::new(),
-        || markdown(&value),
-    ))
+) -> ToolResult {
+    rendered_tool_result(response_handle_root, args, value, Vec::new(), || {
+        markdown(value)
+    })
 }
 
 #[cfg(test)]
@@ -505,6 +516,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::json;
+    use tracedecay_contracts::retrieval::DerivesSymbolV1;
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
         ContextResultV1, ContextRetrievalPlanV1, ContextStageV1, PrimitiveFreshnessStateV1,
@@ -514,8 +526,10 @@ mod tests {
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
+    use tracedecay_runtime_core::tracedecay::current_timestamp;
 
     use super::*;
+    use crate::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 
     fn todos_completion(code_graph: Option<ServedCodeGraphGenerationV1>) -> GraphToolCompletionV1 {
         GraphToolCompletionV1 {
@@ -715,6 +729,93 @@ mod tests {
         );
         assert!(payload.get("context_memory").is_none(), "{payload}");
         assert!(payload.get("analytics").is_none(), "{payload}");
+    }
+
+    fn fresh_worktree_seat() -> ServedCodeGraphGenerationV1 {
+        ServedCodeGraphGenerationV1 {
+            generation: "generation.render.worktree".to_owned(),
+            worktree: Some(PrimitiveSearchFreshnessV1 {
+                state: PrimitiveFreshnessStateV1::Fresh,
+                indexing: None,
+            }),
+            freshness: CodeGraphReadFreshnessV1::Current,
+        }
+    }
+
+    #[test]
+    fn a_json_array_read_carries_the_worktree_verdict_beside_its_array() {
+        let symbols = vec![DerivesSymbolV1 {
+            node_id: "symbol.config".to_owned(),
+            name: "Config".to_owned(),
+            qualified_name: "crate::Config".to_owned(),
+            kind: "struct".to_owned(),
+            file: "src/lib.rs".to_owned(),
+            line: 1,
+            derives: Vec::new(),
+        }];
+        let rendered = render_graph_tool(
+            None,
+            &json!({"format": "json"}),
+            GraphToolCompletionV1 {
+                result: GraphToolResultV1::Derives(DerivesResultV1(symbols.clone())),
+                touched_files: Vec::new(),
+                code_graph: Some(fresh_worktree_seat()),
+                analytics: None,
+                cost: None,
+            },
+        )
+        .expect("rendered");
+        let blocks = texts(&rendered);
+        let body: Value = serde_json::from_str(&blocks[0]).expect("array body");
+        assert_eq!(body, serde_json::to_value(&symbols).expect("symbols"));
+        assert_eq!(rendered.structured_result(), Some(&body));
+        let verdicts: Vec<Value> = blocks[1..]
+            .iter()
+            .filter_map(|block| block.strip_prefix("\ncode_graph_freshness: "))
+            .map(|verdict| serde_json::from_str(verdict).expect("verdict json"))
+            .collect();
+        assert_eq!(verdicts, vec![json!({"state": "fresh"})]);
+    }
+
+    #[test]
+    fn a_truncated_json_read_stores_the_worktree_verdict_in_its_full_body() {
+        let root = tempfile::tempdir().expect("project");
+        let markers = (0..400)
+            .map(|line| TodoMarkerV1 {
+                kind: "TODO".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                line,
+                text: format!("// TODO: probe the truncated freshness body {line}"),
+                enclosing: None,
+            })
+            .collect::<Vec<_>>();
+        let rendered = render_graph_tool(
+            Some(root.path()),
+            &json!({"format": "json"}),
+            GraphToolCompletionV1 {
+                result: GraphToolResultV1::Todos(TodosResultV1 {
+                    match_count: 400,
+                    by_kind: BTreeMap::from([("TODO".to_owned(), 400)]),
+                    markers,
+                }),
+                touched_files: Vec::new(),
+                code_graph: Some(fresh_worktree_seat()),
+                analytics: None,
+                cost: None,
+            },
+        )
+        .expect("rendered");
+        let envelope: Value = serde_json::from_str(&texts(&rendered)[0]).expect("envelope");
+        assert_eq!(envelope["truncated"], true, "{envelope}");
+        let handle = envelope["handle"].as_str().expect("retrieval handle");
+        let ResponseHandleLookup::Found(stored) =
+            retrieve_response_handle(root.path(), handle, current_timestamp()).expect("lookup")
+        else {
+            panic!("stored body expected");
+        };
+        let full: Value = serde_json::from_str(&stored.content).expect("full body");
+        assert_eq!(full["freshness"], json!({"state": "fresh"}));
+        assert_eq!(full["match_count"], 400);
     }
 
     #[test]
