@@ -865,23 +865,30 @@ impl CodeIndexSchedulerRegistryV1 {
         let root = &root;
         let Ok(waited) = self
             .wait_for_seat(root, deadline, |_| async move {
+                // Read the seat before asking whether it serves. A seat the
+                // worker installs after the servability read must not be
+                // judged unservable; its signal re-runs this probe instead.
+                let (seated, text_published) = {
+                    let mounted = self.mounted.lock().await;
+                    let Some(worktree) = mounted.get(root) else {
+                        return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                    };
+                    (
+                        worktree
+                            .serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_some(),
+                        worktree
+                            .text_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_some(),
+                    )
+                };
                 if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
                     return Ok(Some(CodeIndexSeatWaitV1::Seated(latest)));
                 }
-                let mounted = self.mounted.lock().await;
-                let Some(worktree) = mounted.get(root) else {
-                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
-                };
-                let seated = worktree
-                    .serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_some();
-                let text_published = worktree
-                    .text_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_some();
                 Ok::<_, Infallible>(if seated {
                     Some(CodeIndexSeatWaitV1::Parked(
                         CodeIndexSeatParkV1::SeatNotServable,
