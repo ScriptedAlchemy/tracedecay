@@ -157,13 +157,13 @@ pub(super) fn session_sync_poll_state(
         }
         AdminCliSessionSyncV1::Cancelled => Err(sync_failed(
             label,
-            "session_sync_cancelled",
+            tracedecay_mcp::tool_errors::SESSION_SYNC_CANCELLED_BEFORE_ADMISSION,
             false,
             "cancelled",
         )),
         AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(
             label,
-            "session_sync_deadline_exceeded",
+            tracedecay_mcp::tool_errors::SESSION_SYNC_DEADLINE_EXCEEDED,
             true,
             "deadline_exceeded",
         )),
@@ -423,7 +423,7 @@ mod tests {
             ),
             (
                 AdminCliSessionSyncV1::Cancelled,
-                "session_sync_cancelled",
+                "session_sync_cancelled_before_admission",
                 false,
                 "session import did not complete successfully (cancelled)",
             ),
@@ -461,6 +461,25 @@ mod tests {
                 error.project_route_context(),
                 Some((code, retryable, detail)),
                 "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_sync_refused_at_admission_renders_its_own_problem_kind() {
+        for (outcome, kind) in [
+            (AdminCliSessionSyncV1::Cancelled, "cancelled"),
+            (AdminCliSessionSyncV1::DeadlineExceeded, "timed_out"),
+        ] {
+            let error = session_sync_poll_state("session import", outcome).unwrap_err();
+            let document: serde_json::Value = serde_json::from_str(
+                &tracedecay::mcp::tools::command_refusal_document(&error).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["problem"]["kind"], kind, "{document}");
+            assert_eq!(
+                document["problem"]["cancellation_stage"], "before_admission",
+                "{document}"
             );
         }
     }
