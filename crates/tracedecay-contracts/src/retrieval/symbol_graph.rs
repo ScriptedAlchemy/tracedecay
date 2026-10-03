@@ -46,6 +46,11 @@ impl CodeGraphReadFreshnessV1 {
 pub struct ServedCodeGraphGenerationV1 {
     pub generation: String,
     pub freshness: CodeGraphReadFreshnessV1,
+    /// The worktree scheduler's verdict on `generation`. A seat reads
+    /// `Current` once its generation seals, though the worktree may since
+    /// have moved on; only the scheduler can say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<super::PrimitiveSearchFreshnessV1>,
 }
 
 /// Optional narrowing inside the immutable project/repository/worktree scope

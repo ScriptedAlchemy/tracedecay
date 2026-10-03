@@ -94,6 +94,7 @@ fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
             query_view,
             generation: CodeGenerationId::new("generation.contract").unwrap(),
             literals: vec![literal],
+            path_prefix: None,
             budget,
         },
         proof,

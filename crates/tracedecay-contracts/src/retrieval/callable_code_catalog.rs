@@ -298,9 +298,8 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
 
 fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     match kind {
-        CallableCodeOperationKind::ExactOccurrence => {
-            &["textDocument/definition", "textDocument/references"]
-        }
+        CallableCodeOperationKind::ExactOccurrence => &["textDocument/definition"],
+        CallableCodeOperationKind::References => &["textDocument/references"],
         CallableCodeOperationKind::Callees => &["callHierarchy/outgoingCalls"],
         _ => &[],
     }
@@ -336,6 +335,7 @@ fn code_query_capability(
                 1,
                 format!("Query {readable_name}"),
                 match kind {
+                    CallableCodeOperationKind::ExactOccurrence => "Find where an exact name is defined, or where a literal technical term (path, CLI flag, error code, configuration key, quoted phrase) appears. A bare identifier matches definition names only, never its uses, so the page reports partial coverage; use grep or code_references to find every use.".to_owned(),
                     CallableCodeOperationKind::Callees => "What does this call: outgoing calls of a known symbol node ID up to `maximum_depth` (default 3). A callee that is a trait method also returns the concrete impl methods reachable through the trait, tagged `dispatch_via_trait` with `dispatch_from`; set `resolve_trait_dispatch: false` for direct call edges only.".to_owned(),
                     _ => format!(
                         "Invoke the generation-bound query {readable_name} query without replacing its owning kernel."

@@ -176,6 +176,7 @@ async fn port_status_reports_cross_language_partial_coverage() {
     assert_payload(
         &partial,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "source",
             "target_dir": "ported",
             "source_count": 6,
@@ -242,6 +243,7 @@ async fn port_status_reports_cross_language_partial_coverage() {
     assert_payload(
         &methods,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "source",
             "target_dir": "ported",
             "source_count": 3,
@@ -287,6 +289,7 @@ async fn port_status_reports_cross_language_partial_coverage() {
     assert_payload(
         &missing_source,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "nowhere",
             "target_dir": "ported",
             "source_count": 0,

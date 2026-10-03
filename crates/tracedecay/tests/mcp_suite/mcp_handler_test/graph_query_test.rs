@@ -6,6 +6,7 @@ mod relation_page_cost;
 mod restart_seat;
 mod typed_evidence_trailers;
 mod typescript_module_resolution;
+mod unknown_file;
 mod unsealed_graph;
 
 use crate::support::*;
@@ -1919,6 +1920,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&lib),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/lib.rs",
             "total_undocumented": 3,
             "returned_count": 3,
@@ -1958,6 +1960,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&other),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/other.rs",
             "total_undocumented": 1,
             "returned_count": 1,
@@ -1983,6 +1986,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         done,
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/done.rs",
             "total_undocumented": 0,
             "returned_count": 0,
@@ -1999,6 +2003,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&limited),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src",
             "total_undocumented": 4,
             "returned_count": 1,
