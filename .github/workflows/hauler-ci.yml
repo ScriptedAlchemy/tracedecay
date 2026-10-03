@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Publish pending lane checks
-        uses: ScriptedAlchemy/cargo-hauler@9e47493557a6716c185b1bc3247cd22c3b6b5bae
+        uses: ScriptedAlchemy/cargo-hauler@0c6802739ae73827a2ae05565b4997af5d119b3f
         with:
           mode: enqueue
           pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
@@ -78,7 +78,7 @@ jobs:
           persist-credentials: false
       - name: Select lanes with eligible work
         id: plan
-        uses: ScriptedAlchemy/cargo-hauler@9e47493557a6716c185b1bc3247cd22c3b6b5bae
+        uses: ScriptedAlchemy/cargo-hauler@0c6802739ae73827a2ae05565b4997af5d119b3f
         with:
           mode: plan
           token: ${{ github.token }}
@@ -121,7 +121,7 @@ jobs:
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@9e47493557a6716c185b1bc3247cd22c3b6b5bae
+        uses: ScriptedAlchemy/cargo-hauler@0c6802739ae73827a2ae05565b4997af5d119b3f
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
