@@ -3146,6 +3146,7 @@ fn exact_matches_artifact(
 ) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
     exact_matches(
         ExactMatchRowViewV1 {
+            anchor: &row.anchor,
             sanitized_text: row.sanitized_text.as_str(),
             logical_path: &row.logical_path,
             exact_terms: &row.exact_terms,

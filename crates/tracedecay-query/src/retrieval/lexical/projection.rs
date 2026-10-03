@@ -367,6 +367,7 @@ struct LexicalRowScoreV1 {
 /// The borrowed subset of a projected chunk that exact-literal matching
 /// reads, so artifact rows never deep-clone chunk text per visited document.
 struct ExactMatchRowViewV1<'a> {
+    anchor: &'a CodeSearchChunkAnchorV1,
     sanitized_text: &'a str,
     logical_path: &'a str,
     exact_terms: &'a [ExactTechnicalTermV1],
@@ -375,6 +376,11 @@ struct ExactMatchRowViewV1<'a> {
 /// Match one row against every request literal, returning matched literal
 /// ordinals into `request.literals`. Ordinals defer the literal clones to
 /// the cap-bounded winners instead of paying them per visited document.
+///
+/// Chunks nest (a signature inside its body, a member inside its parent's
+/// body), so one source occurrence lies in several rows. Each occurrence
+/// answers from the one row that owns it: a symbol's name from that symbol's
+/// body or member chunk, and every other literal from the top-level chunk.
 fn exact_matches(
     row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
@@ -382,26 +388,37 @@ fn exact_matches(
     if !tracedecay_domain::path_matches_scope(row.logical_path, request.path_prefix) {
         return (Vec::new(), Vec::new());
     }
+    let owns_text = row.anchor.parent_chunk_id.is_none();
+    let owns_term = |kind| match kind {
+        ExactTechnicalTermKindV1::WholeSymbol => {
+            row.anchor.grain != CodeSearchChunkGrainV1::SymbolSignature
+        }
+        _ => owns_text,
+    };
     let mut matched_literals = Vec::new();
     let mut matched_kinds = BTreeSet::new();
     for (ordinal, literal) in request.literals.iter().enumerate() {
         let mut matched = false;
-        if matches!(
-            literal.field,
-            ExactFieldV1::QuotedPhrase
-                | ExactFieldV1::DiagnosticText
-                | ExactFieldV1::CompilerOrRuntimeError
-        ) {
+        if owns_text
+            && matches!(
+                literal.field,
+                ExactFieldV1::QuotedPhrase
+                    | ExactFieldV1::DiagnosticText
+                    | ExactFieldV1::CompilerOrRuntimeError
+            )
+        {
             matched = contains_bytes(row.sanitized_text.as_bytes(), &literal.original_bytes);
         }
-        if literal.field == ExactFieldV1::Path
+        if owns_text
+            && literal.field == ExactFieldV1::Path
             && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
         {
             matched = true;
             matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
         for term in row.exact_terms {
-            if exact_field_for_kind(term.kind()) == literal.field
+            if owns_term(term.kind())
+                && exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
             {
