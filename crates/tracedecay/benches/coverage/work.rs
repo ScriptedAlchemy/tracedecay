@@ -174,9 +174,9 @@ fn step_start_ids(ctx: &QueryContext, run: &'static str, attempt: &'static str) 
 }
 
 fn step_pause_run_id(run: &str) -> PrimeStep {
-    // `auth_v` is captured by the admit-placement step earlier in the same
-    // prime chain; pause_run's result carries no authority_version/graph_version
-    // fields, so a capture here would only discard the working value.
+    // The run control's authority version bumps on every transition, so the
+    // version resume must expect is the one pause just committed — captured
+    // from pause's own payload, not the admit-time `auth_v`.
     PrimeStep {
         inject: Vec::new(),
         tool: "tracedecay_work_pause_run",
@@ -186,7 +186,7 @@ fn step_pause_run_id(run: &str) -> PrimeStep {
             "reason": "operator_request",
             "occurred_at": "{{now}}",
         }),
-        capture: &[],
+        capture: &[("digpath:payload:authority", "run_auth")],
     }
 }
 
@@ -899,7 +899,7 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "task_id": "task.bench.{{iter}}",
                     "run_id": "run.bench.rz.{{iter}}",
                     "reason": "operator_request",
-                    "expected_authority_version": "{{auth_v}}",
+                    "expected_authority_version": "{{run_auth}}",
                     "occurred_at": "{{now}}",
                 }),
                 p_pause_rz,

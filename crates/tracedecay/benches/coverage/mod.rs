@@ -2369,7 +2369,7 @@ async fn seed_work(
                 json!({
                     "definition_id": definition_id,
                     "definition_version": attempt,
-                    "expected_revision": 1,
+                    "expected_revision": attempt,
                     "format": "json",
                 }),
             )
