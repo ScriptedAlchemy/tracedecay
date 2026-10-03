@@ -1178,3 +1178,120 @@ async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
             .is_empty()
     );
 }
+
+/// An atomically replaced transcript (temp file renamed over the original)
+/// is reconciled once: records the new file no longer holds stop being
+/// searchable, and an idle repoll of the replaced file reads no bytes.
+#[tokio::test]
+async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let session = "11111111-1111-4111-8111-111111111111";
+    let row = |uuid: &str, parent: Option<&str>, role: &str, second: u32, text: &str| {
+        serde_json::json!({
+            "type": role,
+            "cwd": project,
+            "sessionId": session,
+            "uuid": uuid,
+            "parentUuid": parent,
+            "timestamp": format!("2026-01-01T00:00:{second:02}.000Z"),
+            "message": {"role": role, "content": [{"type": "text", "text": text}]}
+        })
+    };
+    let alpha = row(
+        "c-u1",
+        None,
+        "user",
+        0,
+        "claudeprobe alpha: where is square_area called?",
+    );
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let write = |target: &std::path::Path, rows: &[serde_json::Value]| {
+        let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        std::fs::write(target, body).unwrap();
+    };
+    write(
+        &path,
+        &[
+            alpha.clone(),
+            row(
+                "c-a1",
+                Some("c-u1"),
+                "assistant",
+                5,
+                "claudeprobe beta: square_area is called twice.",
+            ),
+            row("c-u2", Some("c-a1"), "user", 9, "claudeprobe gamma: thanks"),
+        ],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let ingest = || async {
+        ingest_source_with_observations_with_admission(
+            &source,
+            &project,
+            ObservationScopeV1::Project {
+                project_id: db.project_id().clone(),
+            },
+            &db.runtime().facade(),
+            None,
+            ObservationCancellation::default(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(ingest().await.transcript.messages_upserted, 3);
+
+    let replacement = dir.join(".tmp-replace.jsonl");
+    write(
+        &replacement,
+        &[
+            alpha,
+            row(
+                "c-a1b",
+                Some("c-u1"),
+                "assistant",
+                7,
+                "claudeprobe delta: rewritten answer mentions cube_volume.",
+            ),
+        ],
+    );
+    std::fs::rename(&replacement, &path).unwrap();
+    ingest().await;
+
+    let mut texts: Vec<String> = db
+        .search_session_messages("claude", None, "claudeprobe", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        [
+            "claudeprobe alpha: where is square_area called?",
+            "claudeprobe delta: rewritten answer mentions cube_volume.",
+        ],
+        "superseded messages must not stay searchable"
+    );
+
+    let file_len = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(claude_observation_cursor(&db, &path).await, Some(file_len));
+    for repoll in 0..3 {
+        let idle = ingest().await;
+        assert_eq!(
+            (
+                idle.source_bytes_scanned,
+                idle.transcript.messages_upserted,
+                idle.observations_committed
+            ),
+            (0, 0, 0),
+            "idle repoll {repoll} of the replaced transcript must read nothing"
+        );
+    }
+}

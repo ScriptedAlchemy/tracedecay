@@ -330,11 +330,17 @@ const REGISTRY_READ_TOOLS: [&str; 3] = [
 ];
 
 /// An initialised root is one whose repository carries the `.git/`-side
-/// identity marker (or a path-local profile store); the repo-local
-/// `.tracedecay/tracedecay.db` layout no longer exists.
-fn mark_initialised_project(root: &Path) {
+/// identity marker and whose profile holds the shard it names (or a
+/// path-local profile store); the repo-local `.tracedecay/tracedecay.db`
+/// layout no longer exists.
+fn mark_initialised_project(profile: &tracedecay_runtime_core::config::ProfileRoot, root: &Path) {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, "proj_dispatch")
         .expect("pin fixture repository identity");
+    std::fs::create_dir_all(tracedecay_runtime_core::storage::profile_sharded_data_root(
+        profile.data_dir(),
+        "proj_dispatch",
+    ))
+    .expect("create fixture profile shard");
 }
 
 #[test]
@@ -379,7 +385,7 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     // An initialised explicit project still routes through that project so
     // the listing can mark it active.
     let initialised = tempfile::tempdir().expect("tempdir");
-    mark_initialised_project(initialised.path());
+    mark_initialised_project(profile, initialised.path());
     let dispatch = DaemonToolDispatch::for_tool(
         profile,
         Some(initialised.path().to_string_lossy().into_owned()),
@@ -446,8 +452,8 @@ fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
     // (b) The ambient-root filter protects cwd discovery from walking into the
     // user profile; it must not erase a project the caller named explicitly.
     let home = tempfile::tempdir().expect("tempdir");
-    mark_initialised_project(home.path());
     let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
+    mark_initialised_project(profile, home.path());
     let home_arg = home.path().to_string_lossy().into_owned();
     assert!(
         profile.is_ambient_project_root(home.path()),
@@ -534,7 +540,7 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
     // An initialised explicit project connects through the project instead,
     // and the daemon defaults `path` to the served root itself.
     let initialised = tempfile::tempdir().expect("tempdir");
-    mark_initialised_project(initialised.path());
+    mark_initialised_project(profile, initialised.path());
     let mut args = json!({});
     let dispatch = DaemonToolDispatch::for_tool(
         profile,
