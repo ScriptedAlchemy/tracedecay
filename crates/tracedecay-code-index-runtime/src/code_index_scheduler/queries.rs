@@ -4182,8 +4182,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefixed_identifier_exact_reads_find_the_definition_partially() {
-        for literal in ["identifier:shared_probe_target", "id:shared_probe_target"] {
+    async fn prefixed_identifier_exact_reads_return_the_definition_as_partial() {
+        for literal in [
+            "identifier:shared_probe_target",
+            "id:shared_probe_target",
+            "symbol:shared_probe_target",
+        ] {
             let outcome = exact_occurrences(
                 &[(
                     "src/lib.rs",
@@ -4198,19 +4202,44 @@ mod tests {
                 panic!("`{literal}` reads only identifier definitions: {outcome:?}");
             };
             let page = evidence.payload.as_ref().expect("exact page");
-            assert!(
-                !page.items.is_empty(),
-                "`{literal}` finds the definition: {page:?}"
-            );
-            assert!(
+            assert_eq!(
                 page.items
                     .iter()
-                    .all(|item| item.occurrence.path == "src/lib.rs"
-                        && item.occurrence.span.start_byte == 0
-                        && item.matched_literal == "shared_probe_target"),
-                "`{literal}` matches only the definition, by its bare name: {page:?}"
+                    .map(|item| (
+                        item.occurrence.path.as_str(),
+                        item.occurrence.span.start_byte,
+                        item.matched_literal.as_str(),
+                    ))
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([("src/lib.rs", 0, "shared_probe_target")]),
+                "`{literal}` must return the definition: {page:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn prefixed_flag_exact_read_is_complete() {
+        let outcome = exact_occurrences(
+            &[(
+                "src/lib.rs",
+                "pub fn runner() { run(\"--probe-prefix-flag\"); }\n",
+            )],
+            "flag:--probe-prefix-flag",
+            None,
+        )
+        .await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("a typed flag read is the whole answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.matched_literal.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["--probe-prefix-flag"]),
+            "{page:?}"
+        );
     }
 
     #[tokio::test]
