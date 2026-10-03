@@ -88,11 +88,11 @@ hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 # heap charge reads. The fork's workspace resolves sibling crates
 # by path, so all five crates must name the same `rev`; mixed revisions build
 # type-incompatible instances.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "12c4a250f3aadcc47cfb81e738fa5fe05d8756e3", default-features = false, features = ["algos"] }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "12c4a250f3aadcc47cfb81e738fa5fe05d8756e3", default-features = false }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "12c4a250f3aadcc47cfb81e738fa5fe05d8756e3", default-features = false, features = ["lpg"] }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "12c4a250f3aadcc47cfb81e738fa5fe05d8756e3", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "12c4a250f3aadcc47cfb81e738fa5fe05d8756e3", default-features = false, features = ["wal"] }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4e081b8893895ed1dcd64709f6212d00ed47541a", default-features = false, features = ["algos"] }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4e081b8893895ed1dcd64709f6212d00ed47541a", default-features = false }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4e081b8893895ed1dcd64709f6212d00ed47541a", default-features = false, features = ["lpg"] }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4e081b8893895ed1dcd64709f6212d00ed47541a", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4e081b8893895ed1dcd64709f6212d00ed47541a", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
