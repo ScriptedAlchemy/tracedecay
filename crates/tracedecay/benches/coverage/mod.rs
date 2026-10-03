@@ -1145,10 +1145,9 @@ async fn seed_affected_tests(
     files: &[Value],
     seeds: &mut Seeds,
 ) {
-    let file_path = |f: &Value| f.get("path").and_then(Value::as_str);
     let mut candidates: Vec<String> = files
         .iter()
-        .filter_map(|f| file_path(f))
+        .filter_map(|f| f.get("path").and_then(Value::as_str))
         .filter(|p| p.contains("test"))
         .take(3)
         .map(str::to_owned)
@@ -1156,7 +1155,7 @@ async fn seed_affected_tests(
     candidates.extend(
         files
             .iter()
-            .filter_map(|f| file_path(f))
+            .filter_map(|f| f.get("path").and_then(Value::as_str))
             .take(2)
             .map(str::to_owned),
     );
