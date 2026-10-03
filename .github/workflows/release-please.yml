@@ -45,6 +45,7 @@ jobs:
     name: Open release PR or create GitHub release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: write
       contents: write

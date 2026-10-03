@@ -120,7 +120,7 @@ jobs:
       # The Linux, Windows and macOS test matrices come from the same manifest
       # the partition jobs select their targets from, so a partition cannot
       # exist without a job or a job without a partition.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             .github/linux-test-partitions.json
@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -182,7 +182,7 @@ jobs:
       # a multi-GB copy no other PR can restore that evicts master's
       # entries from the repository's 10 GB cache budget.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-dev-${{ runner.os }}-${{ runner.arch }}
@@ -196,7 +196,7 @@ jobs:
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Publish the binary for the host integration jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: debug-tracedecay-cli
           path: target/debug/tracedecay
@@ -208,7 +208,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The runtime benchmark harness produces the evidence PRs cite; its own
       # unit tests only count if something runs them.
@@ -225,11 +225,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -333,7 +333,7 @@ jobs:
       # product source at that commit. A depth-1 checkout carries only the tip,
       # so every candidate_output/report test fails with "resolve fixture source
       # commit: An object with id ... could not be found".
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -351,13 +351,13 @@ jobs:
         with:
           components: rust-analyzer
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
       - uses: ./.github/actions/setup-pnpm
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -367,7 +367,7 @@ jobs:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
 
       # rust-cache carries the dependency graph, keyed by toolchain and
       # lockfile; the workspace crates compile fresh every run. No per-run
@@ -387,7 +387,7 @@ jobs:
       # pnpm store that setup-pnpm restores, not from this cache. The
       # workspace roots, prefix and push-only save are explained there.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-test-full-${{ runner.os }}
@@ -461,7 +461,7 @@ jobs:
       # `macos-test` folds the group reports back into one report.
       - name: Upload macOS group nextest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-macOS-${{ matrix.group }}
           path: target/nextest/macos/
@@ -481,7 +481,7 @@ jobs:
     steps:
       - name: Merge the group reports into the macOS nextest report
         if: ${{ needs.macos-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-macOS
           pattern: nextest-junit-macOS-*
@@ -517,7 +517,7 @@ jobs:
       # product source at that commit. A depth-1 checkout carries only the tip,
       # so every candidate_output/report test fails with "resolve fixture source
       # commit: An object with id ... could not be found".
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -536,13 +536,13 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
       - uses: ./.github/actions/setup-pnpm
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -557,11 +557,11 @@ jobs:
           npm install --global cargo-hauler@0.9.14
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
 
       # Workspace roots, prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-test-full-Linux-${{ runner.arch }}
@@ -591,7 +591,7 @@ jobs:
       # `linux-test` folds the partition reports back into one report.
       - name: Upload Linux partition reports and timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-Linux-${{ matrix.group }}
           path: target/nextest/linux/
@@ -658,7 +658,7 @@ jobs:
     # plus 25 % headroom, as for the partition budgets.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -667,7 +667,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
 
       # Both modes under the evaluator's own selection; the helper copies
       # each result out of target/perf/examples immediately so the second
@@ -701,7 +701,7 @@ jobs:
       # directory; the partition artifacts themselves expire after a day.
       - name: Merge the partition reports into the Linux nextest report
         if: ${{ needs.linux-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-Linux
           pattern: nextest-junit-Linux-*
@@ -734,8 +734,10 @@ jobs:
     needs: linux-test
     if: ${{ !cancelled() && needs.linux-test.result != 'skipped' && github.event_name == 'workflow_dispatch' && inputs.run_full_nextest }}
     runs-on: ubuntu-24.04-arm
+    # No recent measured run. 240 is 1.5x the largest Linux partition budget (160).
+    timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -747,13 +749,13 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
       - uses: ./.github/actions/setup-pnpm
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -763,7 +765,7 @@ jobs:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
 
       # Build the evaluator selection and the executables its journeys spawn
       # with the same feature set and perf resolution nextest uses below.
@@ -804,7 +806,7 @@ jobs:
 
       - name: Upload full-selection nextest reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-Linux-full-selections
           path: target/nextest/ci/full-*.xml
@@ -839,7 +841,7 @@ jobs:
     steps:
       # Full history for the same reason as the Linux and macOS partition
       # jobs: the pinned search-quality fixture commit must be resolvable here.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -871,13 +873,13 @@ jobs:
 
       # Node so build.rs can produce the embedded dashboard dist assets for
       # the partitions that compile the CLI.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
       - uses: ./.github/actions/setup-pnpm
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
@@ -887,7 +889,7 @@ jobs:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
 
       # One dependency cache for the lane, as on Linux: `root-journeys`
       # resolves the widest graph, so its save covers the other root
@@ -895,7 +897,7 @@ jobs:
       # unify differently, beside their shorter chains. Workspace roots,
       # prefix and push-only save: see the debug-cli step.
       - name: Cache Windows Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-test-full-windows-msvc-lld
@@ -971,7 +973,7 @@ jobs:
       # `windows-test` folds the partition reports back into one report.
       - name: Upload Windows partition nextest report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-Windows-${{ matrix.partition }}
           path: target/nextest/ci/junit.xml
@@ -990,7 +992,7 @@ jobs:
     steps:
       - name: Merge the partition reports into the Windows nextest report
         if: ${{ needs.windows-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-Windows
           pattern: nextest-junit-Windows-*
@@ -1021,7 +1023,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned toolchain and Windows check target
         run: |
@@ -1034,7 +1036,7 @@ jobs:
 
       # Workspace roots, prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-clippy-full-${{ runner.os }}-${{ runner.arch }}
@@ -1096,7 +1098,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -1148,9 +1150,9 @@ jobs:
     env:
       TARGET: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -1193,7 +1195,7 @@ jobs:
       # the test lanes' caches are already evicted from. Workspace roots,
       # prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust
           shared-key: ci-shipped-cli-${{ env.TARGET }}
@@ -1230,9 +1232,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -1272,14 +1274,14 @@ jobs:
       HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
       HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install ast-grep
         uses: ./.github/actions/install-ast-grep
         with:
           version: ${{ env.AST_GREP_VERSION }}
       - name: Fetch the debug CLI built once for this run
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: debug-tracedecay-cli
           path: target/debug
@@ -1297,7 +1299,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
@@ -1327,10 +1329,10 @@ jobs:
       CLAUDE_CODE_VERSION: 2.1.224
       OPENCODE_VERSION: 1.18.4
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Fetch the debug CLI built once for this run
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: debug-tracedecay-cli
           path: target/debug
