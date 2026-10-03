@@ -1981,6 +1981,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     // so a non-repository fixture would fail this journey on the fixture's own
     // shape rather than on anything doctor did to the live database.
     init_committed_git_project_with_cli(&home_path, &project_path);
+    let init_returned = std::time::Instant::now();
 
     let data_root = profile_sharded_data_root(
         &home_path.join(".tracedecay"),
@@ -1991,11 +1992,24 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
             .expect("open graph database");
-        // TEMP PROBE (not for commit): count writer-lock contention from the live init daemon.
-        let mut locked = 0u32;
-        let started = std::time::Instant::now();
+        // TEMP PROBE (not for commit): does a fixture write collide with the
+        // init daemon's own graph-db writes right after init returns?
+        let lock_held = std::fs::File::open(
+            home_path
+                .join(".tracedecay")
+                .join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE),
+        )
+        .map(|file| match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(_) => true,
+        })
+        .unwrap_or(false);
+        let mut locked_at = Vec::new();
         let mut attempts = 0u32;
-        while started.elapsed() < Duration::from_secs(3) {
+        while init_returned.elapsed() < Duration::from_millis(1500) {
             attempts += 1;
             if let Err(error) = db
                 .execute_write_batch(
@@ -2005,15 +2019,18 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
                 .await
             {
                 let text = format!("{error:?}");
-                if text.contains("locked") {
-                    locked += 1;
+                if text.contains("locked") || text.contains("busy") {
+                    locked_at.push(init_returned.elapsed().as_millis());
                 } else {
                     panic!("probe: {text}");
                 }
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        eprintln!("PROBE attempts={attempts} locked={locked}");
+        eprintln!(
+            "PROBE daemon_authority_lock_held={lock_held} attempts={attempts} locked={} locked_at_ms={:?}",
+            locked_at.len(),
+            &locked_at[..locked_at.len().min(8)]
+        );
         db.execute_write_batch(
             "seed doctor daemon reclaimable pages fixture",
             "CREATE TABLE doctor_daemon_probe (payload BLOB);\

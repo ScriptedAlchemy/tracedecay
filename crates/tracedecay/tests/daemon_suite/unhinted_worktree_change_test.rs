@@ -112,6 +112,26 @@ async fn cli_reads_observe_unhinted_renames_and_writes() {
 
     fs::rename(project.join("src/calc.rs"), project.join("src/arith.rs"))
         .expect("rename tracked source without a hook hint");
+    probe_until(
+        home,
+        &project,
+        "unhinted_sum_pair",
+        &["src/arith.rs"],
+        "rename",
+    );
+    fs::write(
+        project.join("src/arith.rs"),
+        "pub fn unhinted_sum_pair(a: i32, b: i32) -> i32 { a + b }\n\
+         pub fn unhinted_probe_write() -> i32 { 3 }\n",
+    )
+    .expect("probe write");
+    probe_until(
+        home,
+        &project,
+        "unhinted_probe_write",
+        &["src/arith.rs"],
+        "write",
+    );
     assert_eq!(
         cli_exact_files_until(home, &project, "unhinted_sum_pair", &["src/arith.rs"]).await,
         ["src/arith.rs"],
@@ -133,4 +153,53 @@ async fn cli_reads_observe_unhinted_renames_and_writes() {
     );
 
     stop_daemon_gracefully(&mut daemon);
+}
+
+/// TEMP PROBE (not for commit): how often does a CLI read land in a graph gap?
+fn cli_exact_outcome(home: &Path, project: &Path, name: &str) -> Result<Vec<String>, String> {
+    let output = tracedecay_command_with_home(home)
+        .args(["tool", "find_exact_symbol", "--json", "--args"])
+        .arg(json!({ "name": name }).to_string())
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tracedecay tool find_exact_symbol");
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let found: Value = serde_json::from_slice(&output.stdout).expect("find_exact_symbol JSON");
+    Ok(found["structuredContent"]["matches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|symbol| symbol["file"].as_str().map(str::to_owned))
+        .collect())
+}
+
+fn probe_until(home: &Path, project: &Path, name: &str, expected: &[&str], label: &str) {
+    let started = Instant::now();
+    let mut refusals = Vec::new();
+    let mut reads = 0u32;
+    loop {
+        reads += 1;
+        match cli_exact_outcome(home, project, name) {
+            Ok(files) if files == expected => break,
+            Ok(_) => {}
+            Err(error) => refusals.push((
+                started.elapsed().as_millis(),
+                error.lines().next().unwrap_or("").to_owned(),
+            )),
+        }
+        assert!(
+            started.elapsed() < OBSERVATION_BUDGET,
+            "{label}: never converged"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "PROBE {label}: converged after {} ms, reads={reads}, refusals={}: {:?}",
+        started.elapsed().as_millis(),
+        refusals.len(),
+        refusals.iter().take(3).collect::<Vec<_>>()
+    );
 }
