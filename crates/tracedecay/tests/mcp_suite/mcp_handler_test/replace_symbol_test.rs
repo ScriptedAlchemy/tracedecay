@@ -46,12 +46,12 @@ const TARGET_OLD_SPAN: &str = "fn target() {\n    let _ = 1;\n}";
 const TARGET_PREVIEW_DIFF: &str = "\
 @@ -3,7 +3,7 @@
  }
-
+ 
  fn target() {
 -    let _ = 1;
 +    let _ = 9;
  }
-
+ 
  fn keep_after() {";
 
 const DOCUMENTED: &str = "\

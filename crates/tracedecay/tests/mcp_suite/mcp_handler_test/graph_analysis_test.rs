@@ -1682,7 +1682,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
 **shape:** stats
 **files:** 5
 **edges:** 2
-**density:**
+**density:** 
 **clusters:** 3
 **largest_cluster:** 3
 
@@ -1814,7 +1814,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
 **shape:** stats
 **files:** 0
 **edges:** 0
-**density:**
+**density:** 
 **clusters:** 0
 **largest_cluster:** 0
 

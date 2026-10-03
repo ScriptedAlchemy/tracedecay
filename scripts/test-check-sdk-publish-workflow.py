@@ -95,12 +95,14 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assert_rejected_after(
             "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
             "    runs-on: ubuntu-latest\n"
+            "    timeout-minutes: 90\n"
             "    permissions:\n"
             "      contents: read\n"
             "    steps:\n"
             "      - uses: actions/checkout@",
             "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
             "    runs-on: ubuntu-latest\n"
+            "    timeout-minutes: 90\n"
             "    permissions:\n"
             "      contents: read\n"
             "      actions: read\n"

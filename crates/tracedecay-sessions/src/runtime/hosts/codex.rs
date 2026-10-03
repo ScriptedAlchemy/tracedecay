@@ -2818,9 +2818,10 @@ fn codex_corpus_identity(
         hasher.update(metadata.ino().to_le_bytes());
         hasher.update(metadata.mtime().to_le_bytes());
         hasher.update(metadata.mtime_nsec().to_le_bytes());
-        // Ext4 reuses the inode inside one coarse timestamp quantum, and a
-        // caller can restore mtime. The allocation generation is what still
-        // changes across that replacement.
+        // Ext4 reuses the inode number inside one coarse timestamp quantum,
+        // and a caller can restore mtime. The generation is what the kernel
+        // keeps unique next to the inode number across such a reuse; alone it
+        // witnesses nothing (ZFS stamps it per transaction, not per file).
         hash_linux_inode_generation(&mut hasher, path)?;
     }
     #[cfg(windows)]
