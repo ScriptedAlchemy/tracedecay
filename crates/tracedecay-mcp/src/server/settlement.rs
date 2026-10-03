@@ -116,31 +116,6 @@ struct ActiveDispatch {
     cancellation: tracedecay_contracts::CancellationSignal,
     live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
-    _gauge: ActiveDispatchGaugeGuard,
-}
-
-struct ActiveDispatchGaugeGuard;
-
-impl ActiveDispatchGaugeGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for ActiveDispatchGaugeGuard {
-    fn drop(&mut self) {}
-}
-
-struct DispatchAdmissionWaitGuard;
-
-impl DispatchAdmissionWaitGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for DispatchAdmissionWaitGuard {
-    fn drop(&mut self) {}
 }
 
 struct DispatchCapacityLease {
@@ -238,13 +213,9 @@ impl RetainedDispatchRegistry {
         F: Future<Output = Result<T>> + Send + 'static,
     {
         let capacity_lease = self.acquire_capacity()?;
-        let admission_wait = DispatchAdmissionWaitGuard::enter();
         let mut state = self.state.lock().await;
-        drop(admission_wait);
         Self::reap_finished(&mut state);
         if !self.accepting.load(Ordering::Acquire) {
-            // Admission refusals are the signal a saturation diagnosis needs;
-            // count them alongside the admitted/settled lifecycle gauges.
             return Err(dispatch_shutdown_error());
         }
 
@@ -267,7 +238,6 @@ impl RetainedDispatchRegistry {
                 cancellation,
                 live_cancellable,
                 settlement: Arc::clone(&settlement),
-                _gauge: ActiveDispatchGaugeGuard::enter(),
             },
         );
         Ok((receiver, settlement))

@@ -290,18 +290,6 @@ where
     build_version: &'static str,
 }
 
-struct RmcpQueueDepthGuard;
-
-impl RmcpQueueDepthGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for RmcpQueueDepthGuard {
-    fn drop(&mut self) {}
-}
-
 impl<C> RmcpConnectionAdapter<C>
 where
     C: McpConnectionContext,
@@ -352,10 +340,7 @@ where
         method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
-        let queued_at = std::time::Instant::now();
-        let queued = RmcpQueueDepthGuard::enter();
         let request_permit = self.acquire_request_permit().await?;
-        drop(queued);
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
         // combined resident frame overflows the worker stack in perf-profile

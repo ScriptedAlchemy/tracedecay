@@ -245,8 +245,6 @@ fn problem_result(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ToolResult> {
-    // Denied and failed multi-root requests are part of the serving story;
-    // success-only timing would hide invalid requests and daemon refusals.
     let application =
         ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
             .map_err(|error| TraceDecayError::Config {
