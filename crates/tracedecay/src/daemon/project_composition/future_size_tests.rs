@@ -145,18 +145,16 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
 }
 
 /// The composition entry holds only borrowed inputs and boxed phase futures.
-/// Measured: 1,248 B in an ordinary build, 2,648 B with instrumentation
-/// (every measured async fn there embeds its body a second time). The boxed
-/// `_inner` it replaced was 6,648 B / 21,200 B behind a 104 B / 424 B shell.
+/// Measured: 1,248 B. The boxed `_inner` it replaced was 6,648 B behind a
+/// 104 B shell.
 const COMPOSITION_ENTRY_CEILING: usize = 4 * 1024;
 
 /// Every phase owns its temporaries and awaits at most one wide leaf at a
-/// time. Measured maxima: 21,200 B (`mount_full_server_owners`, ordinary
-/// build) and 175,424 B (the same phase with instrumentation). The
+/// time. Measured maximum: 21,200 B (`mount_full_server_owners`). The
 /// next-widest phases are `construct_full_server` (7,208 B) and `open_graph`
 /// (6,200 B); the background-CPU authority handle costs its phase well under
 /// 128 B.
-const PHASE_CEILING: usize = if false { 256 * 1024 } else { 32 * 1024 };
+const PHASE_CEILING: usize = 32 * 1024;
 
 #[test]
 fn project_open_future_sizes() {
@@ -197,47 +195,35 @@ fn shared_owner_futures_stay_below_large_future_threshold() {
 mod measured_body {
     use std::mem::size_of_val;
 
-    macro_rules! measured_chain {
-        ($leaf:ident, $one:ident, $two:ident, $three:ident; $($options:tt)*) => {
-            #[tracing::instrument(level = "trace", skip_all)]
-            async fn $leaf() -> usize {
-                let data = [1_u8; 1024];
-                std::future::pending::<()>().await;
-                std::hint::black_box(data).len()
-            }
-            #[tracing::instrument(level = "trace", skip_all)]
-            async fn $one() -> usize {
-                $leaf().await
-            }
-            #[tracing::instrument(level = "trace", skip_all)]
-            async fn $two() -> usize {
-                $one().await
-            }
-            #[tracing::instrument(level = "trace", skip_all)]
-            async fn $three() -> usize {
-                $two().await
-            }
-        };
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn leaf() -> usize {
+        let data = [1_u8; 1024];
+        std::future::pending::<()>().await;
+        std::hint::black_box(data).len()
+    }
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn one() -> usize {
+        leaf().await
+    }
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn two() -> usize {
+        one().await
+    }
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn three() -> usize {
+        two().await
     }
 
-    measured_chain!(timing_leaf, timing_one, timing_two, timing_three;);
-    measured_chain!(logged_leaf, logged_one, logged_two, logged_three; log = true);
-    measured_chain!(future_leaf, future_one, future_two, future_three; future = true);
-    measured_chain!(both_leaf, both_one, both_two, both_three; future = true, log = true);
-
     #[test]
-    fn nested_measurements_retain_one_body_frame_per_level() {
-        let chains = [
-            (size_of_val(&timing_leaf()), size_of_val(&timing_three())),
-            (size_of_val(&logged_leaf()), size_of_val(&logged_three())),
-            (size_of_val(&future_leaf()), size_of_val(&future_three())),
-            (size_of_val(&both_leaf()), size_of_val(&both_three())),
-        ];
-        for (leaf, nested) in chains {
-            // Three measurement guards may add metadata, but must not duplicate
-            // the full child state at every generated async forwarding layer.
-            assert!(nested <= leaf + 3 * 1024, "leaf={leaf}, nested={nested}");
-        }
+    fn nested_instrumented_fns_retain_one_body_frame_per_level() {
+        let leaf_size = size_of_val(&leaf());
+        let nested_size = size_of_val(&three());
+        // Three span guards may add metadata, but must not duplicate the full
+        // child state at every generated async forwarding layer.
+        assert!(
+            nested_size <= leaf_size + 3 * 1024,
+            "leaf={leaf_size}, nested={nested_size}"
+        );
     }
 
     struct DropCount<'a>(&'a std::sync::atomic::AtomicUsize);

@@ -607,7 +607,7 @@ mod tests {
                 &|| Ok(()),
             )
             .unwrap();
-
+        let _ = crate::observe::take_hydration_counters();
         let source =
             checked_decode_replay_source(&publication.canonical_replay_source, &|| Ok(())).unwrap();
         let hydrated = metadata_manifest_from_source(&publication, &source, &|| Ok(()))
