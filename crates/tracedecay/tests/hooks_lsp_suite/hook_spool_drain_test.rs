@@ -316,6 +316,10 @@ fn a_receipt_spool_root_that_is_not_a_directory_is_reported_on_status() {
     }
     std::fs::create_dir_all(receipts.parent().unwrap()).unwrap();
     std::fs::write(&receipts, b"not a receipt spool").unwrap();
+    // An unsafe spool root cannot wake the drain the way a receipt
+    // publication does, so the next sweep would wait out the replay
+    // interval; this record append wakes it now.
+    capture_stop(&home, &project, "drain-wake");
 
     let failed = json!({
         "status": "failed",
