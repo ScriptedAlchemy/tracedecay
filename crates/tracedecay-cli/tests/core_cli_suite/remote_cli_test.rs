@@ -128,11 +128,8 @@ fn remote_cli_fixture() -> RemoteCliFixture {
         .expect("parse remote endpoint");
 
     initialize_tracedecay_cli_project(&home_path, &project_path);
-    let trust_root_path = write_bytes_fixture(
-        &home_path,
-        "root.crt.pem",
-        REMOTE_TLS_ROOT_CERTIFICATE,
-    );
+    let trust_root_path =
+        write_bytes_fixture(&home_path, "root.crt.pem", REMOTE_TLS_ROOT_CERTIFICATE);
 
     RemoteCliFixture {
         _home: home,
@@ -170,7 +167,9 @@ fn provision_remote_node(fixture: &RemoteCliFixture, grant: &EnrollmentGrantV1) 
     let local_endpoint = fixture.authority["http_application_endpoint"]
         .as_str()
         .expect("local endpoint");
-    let local_token = fixture.authority["auth_token"].as_str().expect("auth token");
+    let local_token = fixture.authority["auth_token"]
+        .as_str()
+        .expect("auth token");
     let local_base = format!("http://{local_endpoint}");
     let admission = remote_admission(grant);
     let provisioned = reqwest::blocking::Client::new()
@@ -225,8 +224,7 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
 
     let grant_credential = *b"0123456789abcdef0123456789abcdef";
     let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
-    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id"))
-        .unwrap();
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
     let node_id = BrainNodeId::new("node.remote-cli-enroll").unwrap();
     let grant = remote_grant(brain_id, node_id, project_id, &grant_credential);
     provision_remote_node(&fixture, &grant);
@@ -234,8 +232,7 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
     let request = enrollment_request(&grant);
     let request_path = write_json_fixture(&fixture.home_path, "enroll-request.json", &request);
     let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
-    let enroll_path =
-        write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
+    let enroll_path = write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
 
     let output = run_remote_enroll(&fixture, &grant_path, &enroll_path, &request_path);
 
@@ -273,18 +270,21 @@ fn remote_failover_json_refusal_prints_exactly_one_protocol_document() {
 
     let grant_credential = *b"0123456789abcdef0123456789abcdef";
     let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
-    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id"))
-        .unwrap();
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
     let node_id = BrainNodeId::new("node.remote-cli-failover").unwrap();
-    let mut grant = remote_grant(brain_id.clone(), node_id.clone(), project_id, &grant_credential);
+    let mut grant = remote_grant(
+        brain_id.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
     grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
     provision_remote_node(&fixture, &grant);
 
     let request = enrollment_request(&grant);
     let request_path = write_json_fixture(&fixture.home_path, "enroll-request.json", &request);
     let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
-    let enroll_path =
-        write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
+    let enroll_path = write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
 
     let enrolled = run_remote_enroll(&fixture, &grant_path, &enroll_path, &request_path);
     assert_eq!(
@@ -321,8 +321,11 @@ fn remote_failover_json_refusal_prints_exactly_one_protocol_document() {
         },
     )
     .unwrap();
-    let failover_request_path =
-        write_json_fixture(&fixture.home_path, "failover-request.json", &failover_request);
+    let failover_request_path = write_json_fixture(
+        &fixture.home_path,
+        "failover-request.json",
+        &failover_request,
+    );
 
     let output = tracedecay_command_with_home(&fixture.home_path)
         .current_dir(&fixture.project_path)

@@ -616,7 +616,10 @@ mod tests {
         match error {
             TraceDecayError::ToolRefused(refusal) => {
                 assert_eq!(refusal.tool, "remote request request.cli.remote.7");
-                assert_eq!(refusal.code.as_deref(), Some(expected.problem.code.as_str()));
+                assert_eq!(
+                    refusal.code.as_deref(),
+                    Some(expected.problem.code.as_str())
+                );
                 assert_eq!(
                     refusal.reason.as_deref(),
                     Some(expected.problem.message.as_str())
