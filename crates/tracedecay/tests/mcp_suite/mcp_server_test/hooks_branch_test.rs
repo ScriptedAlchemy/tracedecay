@@ -328,6 +328,16 @@ fn assert_route_failed_closed(response: &Value, label: &str, expected_detail: &s
     );
 }
 
+/// Asserts a routed read was refused as a typed not-found, which names no
+/// project and serves none.
+fn assert_route_denied(response: &Value, label: &str) {
+    assert_eq!(
+        crate::support::route_refusal(response),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
+        "{label} must be refused as not found: {response}"
+    );
+}
+
 /// Asserts a routed read served exactly one project: `present` appears,
 /// `absent` does not, and the call itself succeeded with real text.
 fn assert_served_project(response: &Value, label: &str, present: &str, absent: &str) {
@@ -585,10 +595,9 @@ async fn hook_route_from_unregistered_cwd_fails_closed_without_active_fallback()
         vec![workspace_open(&unregistered_workspace), files_call(1)],
     )
     .await;
-    assert_route_failed_closed(
+    assert_route_denied(
         &response_with_id(&responses, json!(1)),
         "unresolvable hook route",
-        "did not resolve to a registered project",
     );
     projects.shutdown().await;
 }
@@ -607,10 +616,9 @@ async fn unknown_explicit_identity_does_not_inherit_connection_project() {
         ],
     )
     .await;
-    assert_route_failed_closed(
+    assert_route_denied(
         &response_with_id(&responses, json!(1)),
         "unknown explicit identity after a target workspace route",
-        "has no registered private project route",
     );
     projects.shutdown().await;
 }

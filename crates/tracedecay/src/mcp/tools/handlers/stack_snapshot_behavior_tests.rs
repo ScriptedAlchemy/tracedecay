@@ -402,13 +402,14 @@ async fn stack_snapshot_freezes_enrolled_refs_and_refuses_the_other_inputs() {
     );
     path_bearing["repository_path"] = json!("/tmp/not-a-repository");
     let rejected = call_stack_snapshot(&server, path_bearing).await;
+    assert!(rejected["error"].is_null(), "{rejected}");
     assert_eq!(
-        rejected["error"]["data"]["reason_code"],
-        "application_surface_invalid_request"
-    );
-    assert!(
-        rejected.get("result").is_none() || rejected["result"].is_null(),
+        rejected["result"]["isError"], true,
         "a path-bearing request must not return a frozen snapshot: {rejected}"
+    );
+    assert_eq!(
+        rejected["result"]["structuredContent"]["problem"]["code"],
+        "application_surface_invalid_request"
     );
 
     harness.shutdown().await;

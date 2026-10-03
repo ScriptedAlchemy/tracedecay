@@ -73,13 +73,11 @@ fn body(result: &Value) -> Value {
     extract_json(result)
 }
 
-fn assert_rpc_error(response: &Value, code: i64, message: &str) {
-    assert!(
-        response.get("result").is_none() || response["result"].is_null(),
-        "refused insert must not return a tool result: {response}"
+fn assert_route_refusal(response: &Value, detail: &str) {
+    assert_eq!(
+        crate::support::route_refusal(response),
+        crate::support::application_surface_refusal_error(detail)
     );
-    assert_eq!(response["error"]["code"], code, "{response}");
-    assert_eq!(response["error"]["message"], message);
 }
 
 #[tokio::test]
@@ -486,14 +484,9 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
         }),
     )
     .await;
-    assert_rpc_error(
+    assert_route_refusal(
         &bare_apply,
-        -32602,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
-    );
-    assert_eq!(
-        bare_apply["error"]["data"]["kind"], "invalid_request",
-        "{bare_apply}"
+        "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
     );
     assert_eq!(project.read("src/refuse.rs"), REFUSAL_ORIGINAL);
 
@@ -506,11 +499,7 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
         }),
     )
     .await;
-    assert_rpc_error(
-        &missing_anchor,
-        -32602,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: anchor",
-    );
+    assert_route_refusal(&missing_anchor, "missing required parameter: anchor");
 
     let escaped_result = project
         .call(json!({

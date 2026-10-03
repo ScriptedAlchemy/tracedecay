@@ -2605,6 +2605,61 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     }
 }
 
+fn stdout_problem(output: &std::process::Output) -> Value {
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!("--json refusal must be one JSON document ({error}): {output:?}")
+    });
+    document["problem"].clone()
+}
+
+#[test]
+fn json_command_refusals_print_a_typed_problem_on_stdout() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env(
+            "TRACEDECAY_DAEMON_SOCKET",
+            socket_dir.path().join("missing.sock"),
+        )
+        .args(["status", "--json"])
+        .output()
+        .expect("tracedecay status should run");
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let problem = stdout_problem(&output);
+    assert_eq!(problem["kind"], json!("unavailable"), "{problem}");
+    assert_eq!(problem["retryable"], json!(true), "{problem}");
+
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["projects", "context", "proj_doesnotexist", "--json"])
+        .output()
+        .expect("tracedecay projects context should run");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let problem = stdout_problem(&output);
+    assert_eq!(
+        problem["kind"],
+        json!("not_found_or_not_authorized"),
+        "{problem}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("project_route_not_found"),
+        "{output:?}"
+    );
+}
+
 /// A project-routed client reads the managed unit from the caller's own home,
 /// so a held daemon is named as held and a missing unit as not installed.
 #[cfg(target_os = "linux")]

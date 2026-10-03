@@ -4755,13 +4755,11 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         None,
     )
     .await;
-    // A non-object argument list never reaches the owner's typed parser: the
-    // MCP boundary rejects the call itself.
     assert_eq!(
-        not_object
-            .expect_err("non-object arguments must be refused")
-            .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: invalid arguments: tracedecay_diff_context expects a JSON object"
+        crate::support::refusal_summary(&expect_tool_refusal(not_object)),
+        crate::support::application_invalid_request_error(
+            "invalid arguments: tracedecay_diff_context expects a JSON object"
+        )
     );
 
     let zero_depth = handle_tool_call(

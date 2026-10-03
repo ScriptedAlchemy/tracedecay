@@ -172,16 +172,11 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
     .await;
     assert_eq!(unconfirmed["jsonrpc"], "2.0");
     assert_eq!(unconfirmed["id"], 1);
-    assert!(unconfirmed.get("result").is_none_or(Value::is_null));
-    assert_eq!(unconfirmed["error"]["code"], -32602);
     assert_eq!(
-        unconfirmed["error"]["message"],
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit rollback requires confirm=true from the caller after it checks the receipt; do not pause for a human"
-    );
-    assert_eq!(unconfirmed["error"]["data"]["kind"], "invalid_request");
-    assert_eq!(
-        unconfirmed["error"]["data"]["tool"],
-        "tracedecay_source_edit_rollback"
+        crate::support::route_refusal(&unconfirmed),
+        crate::support::application_surface_refusal_error(
+            "source edit rollback requires confirm=true from the caller after it checks the receipt; do not pause for a human"
+        )
     );
     assert!(
         !read_project_file(&moved.project, "src/source.rs").contains(ANCHOR),
@@ -200,10 +195,11 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
         ),
     )
     .await;
-    assert_eq!(same_key["error"]["code"], -32602);
     assert_eq!(
-        same_key["error"]["message"],
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: rollback idempotency key must differ from the original edit key"
+        crate::support::route_refusal(&same_key),
+        crate::support::application_surface_refusal_error(
+            "rollback idempotency key must differ from the original edit key"
+        )
     );
     assert!(
         read_project_file(&moved.project, "src/dest.rs").contains(ANCHOR),

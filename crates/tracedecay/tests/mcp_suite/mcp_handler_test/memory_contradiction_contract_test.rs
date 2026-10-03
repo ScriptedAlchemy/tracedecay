@@ -168,23 +168,19 @@ async fn fact_store_contradict_rejects_noncanonical_arguments() {
     ] {
         let body = rejection_body(&fixture, arguments).await;
         assert_eq!(
-            body,
-            application_invalid_request_error(
-                "tracedecay_fact_store_contradict",
-                &format!(
-                    "{field}: unknown field `{field}`, expected one of `threshold_millionths`, \
+            crate::support::refusal_summary(&body["problem"]),
+            application_invalid_request_error(&format!(
+                "{field}: unknown field `{field}`, expected one of `threshold_millionths`, \
                      `memory_scope`, `category`, `limit`, `project_selector`"
-                )
-            ),
+            )),
             "{body}"
         );
     }
 
     let category = rejection_body(&fixture, json!({"category": "legacy-generalized"})).await;
     assert_eq!(
-        category,
+        crate::support::refusal_summary(&category["problem"]),
         application_invalid_request_error(
-            "tracedecay_fact_store_contradict",
             "category: unknown variant `legacy-generalized`, expected one of `general`, \
              `user_pref`, `project`, `tool`, `decision`, `code_area`"
         ),
