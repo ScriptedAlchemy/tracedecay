@@ -210,9 +210,9 @@ pub(crate) fn gather_local_projects(profile: &ProfileRoot) -> Vec<std::path::Pat
 
 /// Same as [`gather_local_projects`] but takes the starting directory explicitly.
 ///
-/// Ancestors count when they host a profile-sharded store or, at a worktree
-/// root, the repository identity marker; ambient roots (filesystem root, the
-/// user's home) never do. Descendants count by repository identity marker.
+/// A directory counts when [`ProfileRoot::is_initialized_project_root`] says
+/// this profile holds its store; ambient ancestors (filesystem root, the
+/// user's home) never do. Descendants are checked at each repository root.
 pub(crate) fn gather_local_projects_from(
     profile: &ProfileRoot,
     cwd: &Path,
@@ -229,19 +229,20 @@ pub(crate) fn gather_local_projects_from(
         }
     }
 
-    find_descendant_tracedecay(cwd, &mut seen, &mut out);
+    find_descendant_tracedecay(profile, cwd, &mut seen, &mut out);
 
     out
 }
 
-/// Iteratively walks `start` looking for repository roots carrying the
-/// repository identity marker.
+/// Iteratively walks `start` looking for repository roots this profile holds
+/// a store for.
 ///
 /// Skips common heavy directories (node_modules, target, .git, etc.) and
 /// `.tracedecay` data dirs. Tracks canonicalized directories to break
 /// symlink/junction cycles, and uses an explicit worklist instead of
 /// recursion so deep trees can't overflow the stack.
 pub(crate) fn find_descendant_tracedecay(
+    profile: &ProfileRoot,
     start: &Path,
     seen: &mut std::collections::HashSet<std::path::PathBuf>,
     out: &mut Vec<std::path::PathBuf>,
@@ -279,7 +280,7 @@ pub(crate) fn find_descendant_tracedecay(
                 continue;
             }
             if name_str == ".git" {
-                if repository_identity_root_exists(&dir) && seen.insert(dir.clone()) {
+                if profile.is_initialized_project_root(&dir) && seen.insert(dir.clone()) {
                     out.push(dir.clone());
                 }
                 continue;
@@ -300,13 +301,6 @@ pub(crate) fn find_descendant_tracedecay(
             work.push(path);
         }
     }
-}
-
-/// A repository checkout root whose `.git/` carries the repository identity
-/// marker, the only identity a current install writes.
-fn repository_identity_root_exists(dir: &Path) -> bool {
-    dir.join(".git").exists()
-        && tracedecay_runtime_core::storage::has_repository_identity_marker(dir)
 }
 
 /// Prints the big flashing warning shown before a wipe.
@@ -378,9 +372,60 @@ mod gather_tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
-    fn make_enrolled_project(root: &Path, project_id: &str) {
+    fn make_enrolled_project(profile: &ProfileRoot, root: &Path, project_id: &str) {
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project_id)
             .unwrap();
+        fs::create_dir_all(tracedecay_runtime_core::storage::profile_sharded_data_root(
+            profile.data_dir(),
+            project_id,
+        ))
+        .unwrap();
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn ignores_repository_marker_enrolled_by_another_profile() {
+        let owner_dir = tempfile::tempdir().unwrap();
+        let owner = &ProfileRoot::new(owner_dir.path());
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = &ProfileRoot::new(other_dir.path());
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().canonicalize().unwrap();
+        let repo = parent.join("repo");
+        let worktree = parent.join("wt");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        git(
+            &repo,
+            &["worktree", "add", "--quiet", worktree.to_str().unwrap()],
+        );
+        make_enrolled_project(owner, &repo, "proj_foreign");
+
+        assert!(gather_local_projects_from(other, &worktree).is_empty());
+        assert!(gather_local_projects_from(other, &parent).is_empty());
+        assert_eq!(gather_local_projects_from(owner, &worktree), vec![worktree]);
     }
 
     #[test]
@@ -389,7 +434,7 @@ mod gather_tests {
         let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
-        make_enrolled_project(&cwd, "proj_cwd");
+        make_enrolled_project(profile, &cwd, "proj_cwd");
 
         let out = gather_local_projects_from(profile, &cwd);
         assert_eq!(out, vec![cwd]);
@@ -441,8 +486,8 @@ mod gather_tests {
         fs::create_dir_all(&cwd).unwrap();
         let child = cwd.join("child");
         fs::create_dir_all(&child).unwrap();
-        make_enrolled_project(&child, "proj_child");
-        make_enrolled_project(&root, "proj_root");
+        make_enrolled_project(profile, &child, "proj_child");
+        make_enrolled_project(profile, &root, "proj_root");
 
         let out = gather_local_projects_from(profile, &cwd);
         assert!(out.contains(&root));
@@ -464,8 +509,8 @@ mod gather_tests {
         fs::create_dir_all(&unenrolled).unwrap();
         // Nested repositories first: pinning the outer root first would make
         // the children resolve to its `.git/` instead of their own.
-        make_enrolled_project(&child, "proj_child");
-        make_enrolled_project(&root, "proj_root");
+        make_enrolled_project(profile, &child, "proj_child");
+        make_enrolled_project(profile, &root, "proj_root");
         let status = std::process::Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(&unenrolled)
@@ -555,7 +600,7 @@ mod gather_tests {
         let cwd = dir.path().canonicalize().unwrap();
         let buried = cwd.join("node_modules").join("pkg");
         fs::create_dir_all(&buried).unwrap();
-        make_enrolled_project(&buried, "proj_buried");
+        make_enrolled_project(profile, &buried, "proj_buried");
 
         let out = gather_local_projects_from(profile, &cwd);
         assert!(
