@@ -1263,6 +1263,24 @@ jobs:
           pnpm run build
           (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
+      - name: Build TypeScript SDK for the ChatGPT extension
+        working-directory: sdks/typescript
+        run: pnpm run build
+
+      - name: Typecheck ChatGPT extension
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run typecheck
+
+      # extension.test.ts needs a tracedecay binary, which this job does not
+      # build; the adapter tests run against a fake `serve`.
+      - name: Run ChatGPT extension adapter tests
+        working-directory: plugin/chatgpt-extension
+        run: pnpm exec vitest run test/adapter.test.ts
+
+      - name: Verify ChatGPT extension embedded artifacts
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run check:embedded
+
   hermes-integration:
     name: Hermes integration (stock)
     needs: [scope-gate, debug-cli]

@@ -48,6 +48,27 @@ fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
 }
 
 #[test]
+fn codex_plugin_mcp_pins_explorer_binary_and_plugin_relative_adapter() {
+    let raw = codex_embedded_plugin_files()
+        .into_iter()
+        .find_map(|(relative, contents)| (relative == ".mcp.json").then_some(contents))
+        .expect("codex bundle ships .mcp.json");
+    let bin = "/opt/tracedecay/bin/tracedecay";
+    for scope in [InstallScope::Global, InstallScope::ProjectLocal] {
+        let rendered = codex_plugin_mcp(raw, bin, CodexBundlePolicy::for_scope(scope)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let explorer = &value["mcpServers"]["tracedecay-explorer"];
+        assert_eq!(explorer["command"], json!("node"));
+        assert_eq!(
+            explorer["args"],
+            json!(["chatgpt-extension/embedded/server.mjs", "--binary", bin]),
+            "Codex does not expand ${{PLUGIN_ROOT}}; the adapter path must be plugin-relative"
+        );
+        assert_eq!(value["mcpServers"]["graph"]["command"], json!(bin));
+    }
+}
+
+#[test]
 fn native_memories_injection_detection_covers_config_shapes() {
     let parse = |raw: &str| toml::from_str::<toml::Value>(raw).unwrap();
     // Feature on (bool form), use_memories defaulting to true.
