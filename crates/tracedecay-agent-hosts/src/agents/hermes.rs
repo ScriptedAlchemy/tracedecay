@@ -40,7 +40,7 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mHermes integration\x1b[0m");
+        dc.section("Hermes integration");
         doctor_check_plugin(dc, &ctx.home);
     }
 
