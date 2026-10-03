@@ -29,6 +29,7 @@ jobs:
     name: Resolve release source
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       attestations: read
@@ -108,6 +109,7 @@ jobs:
     needs: validate-release
     if: needs.validate-release.outputs.build_required == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,6 +141,8 @@ jobs:
     needs: [validate-release, dashboard-assets]
     if: needs.validate-release.outputs.build_required == 'true'
     runs-on: ${{ matrix.runner }}
+    # Same matrix as release-beta. Windows 81 min, macOS 54 min. 180 is ~2x Windows.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.validate-release.outputs.matrix) }}
@@ -364,6 +368,7 @@ jobs:
       (needs.dashboard-assets.result == 'success' || needs.dashboard-assets.result == 'skipped') &&
       needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -421,6 +426,7 @@ jobs:
       needs.verify-release.result == 'success' &&
       needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       id-token: write
@@ -658,6 +664,7 @@ jobs:
       needs.validate-release.outputs.prerelease == 'false'
     needs: [validate-release, build, publish-assets]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -756,6 +763,7 @@ jobs:
     needs: validate-release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -870,6 +878,7 @@ jobs:
     needs: [validate-release, build-typescript, verify-release]
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm-tracedecay-sdk
     permissions:
       contents: read

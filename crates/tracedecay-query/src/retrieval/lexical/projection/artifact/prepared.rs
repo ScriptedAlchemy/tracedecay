@@ -39,7 +39,12 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) payload_bytes: u64,
     pub(super) import_count: u64,
     pub(super) import_payload_bytes: u64,
-    pub(super) import_dictionary_digest: ManifestDigest,
+    /// Digest of this page's import records alone.
+    pub(super) import_digest: ManifestDigest,
+    /// The file every row on this page belongs to.
+    pub(super) file_ordinal: u64,
+    /// The page's first chunk position; its documents count from it.
+    pub(super) first_document: u64,
     pub(super) previous_cursor: Option<Vec<u8>>,
     pub(super) next_cursor: Vec<u8>,
     pub(super) clone_bodies: Vec<PreparedCloneBodyV1>,
@@ -211,7 +216,9 @@ pub(super) fn prepare_page(
             &mut row_dictionary,
             control,
         )?;
-        let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
+        // Page receipts name documents by their place on the page, so a
+        // carried page keeps its receipts wherever earlier files move it.
+        let document = u32::try_from(offset).map_err(contract_number)?;
         logical_ngram_postings = logical_ngram_postings
             .checked_add(ngrams.len())
             .ok_or_else(|| {
@@ -254,24 +261,16 @@ pub(super) fn prepare_page(
         });
     }
     drop(ngram_postings);
-    let ngram_digest = ngram_page_digest(
-        page.page_ordinal(),
-        ngram_shards.iter().map(|shard| {
-            (
-                shard.kind,
-                shard.ngram,
-                shard.documents.as_slice(),
-                shard.cardinality,
-            )
-        }),
-    )?;
-    let base_sections_receipt = prepare_base_sections_receipt(
-        page.page_ordinal(),
-        &documents,
-        &texts,
-        &ngram_shards,
-        control,
-    )?;
+    let ngram_digest = ngram_page_digest(ngram_shards.iter().map(|shard| {
+        (
+            shard.kind,
+            shard.ngram,
+            shard.documents.as_slice(),
+            shard.cardinality,
+        )
+    }))?;
+    let base_sections_receipt =
+        prepare_base_sections_receipt(first_document, &documents, &texts, &ngram_shards, control)?;
     checkpoint(control)?;
     let row_blocks = encode_row_blocks(
         &documents
@@ -311,7 +310,9 @@ pub(super) fn prepare_page(
         payload_bytes: page.payload_bytes(),
         import_count: page.import_count(),
         import_payload_bytes: page.import_payload_bytes(),
-        import_dictionary_digest: page.next_cursor().import_dictionary_digest().clone(),
+        import_digest: page.import_digest().clone(),
+        file_ordinal: page.file_ordinal(),
+        first_document,
         previous_cursor,
         next_cursor,
         clone_bodies,
@@ -386,30 +387,28 @@ fn prepare_clone_body(
 }
 
 fn prepare_base_sections_receipt(
-    page_ordinal: u64,
+    first_document: u64,
     documents: &[PreparedDocumentV1],
     texts: &[PreparedTextV1],
     ngram_shards: &[PreparedNgramShardV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let mut document_integrity =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[0])?;
-    let mut rows = PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[1])?;
-    let mut term_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[2])?;
-    let mut exact_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[3])?;
-    let mut ngram_postings =
-        PageBaseSectionReceiptBuilderV1::new(page_ordinal, BASE_SECTION_NAMES[4])?;
+    let first_document = i64::try_from(first_document).map_err(contract_number)?;
+    let mut document_integrity = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[0])?;
+    let mut rows = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[1])?;
+    let mut term_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[2])?;
+    let mut exact_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[3])?;
+    let mut ngram_postings = PageBaseSectionReceiptBuilderV1::new(BASE_SECTION_NAMES[4])?;
 
     for (document, text) in documents.iter().zip(texts) {
         checkpoint(control)?;
+        let local_document = document.document_id - first_document;
         document_integrity.begin_row()?;
-        document_integrity.integer(document.document_id);
+        document_integrity.integer(local_document);
         document_integrity.blob(&document.integrity_digest_bytes)?;
 
         rows.begin_row()?;
-        rows.integer(document.document_id);
+        rows.integer(local_document);
         rows.text(&document.chunk_id)?;
         rows.blob(&document.row)?;
         rows.text(&text.text)?;
@@ -419,7 +418,7 @@ fn prepare_base_sections_receipt(
             term_postings.begin_row()?;
             term_postings.text(&posting.field)?;
             term_postings.text(&posting.term)?;
-            term_postings.integer(document.document_id);
+            term_postings.integer(local_document);
             term_postings.integer(posting.frequency);
         }
         for (field, term) in &document.exact_postings {
@@ -427,29 +426,25 @@ fn prepare_base_sections_receipt(
             exact_postings.begin_row()?;
             exact_postings.text(field)?;
             exact_postings.blob(term)?;
-            exact_postings.integer(document.document_id);
+            exact_postings.integer(local_document);
         }
     }
     for shard in ngram_shards {
         checkpoint(control)?;
         ngram_postings.begin_row()?;
-        ngram_postings.integer(i64::try_from(page_ordinal).map_err(contract_number)?);
         ngram_postings.integer(shard.kind);
         ngram_postings.integer(shard.ngram);
         ngram_postings.blob(&shard.documents)?;
         ngram_postings.integer(i64::try_from(shard.cardinality).map_err(contract_number)?);
     }
 
-    encode_page_base_sections_receipt(
-        page_ordinal,
-        vec![
-            document_integrity.finish()?,
-            rows.finish()?,
-            term_postings.finish()?,
-            exact_postings.finish()?,
-            ngram_postings.finish()?,
-        ],
-    )
+    encode_page_base_sections_receipt(vec![
+        document_integrity.finish()?,
+        rows.finish()?,
+        term_postings.finish()?,
+        exact_postings.finish()?,
+        ngram_postings.finish()?,
+    ])
 }
 
 /// A prepared row's text and parent chunk, held only until the page's row
@@ -558,7 +553,6 @@ fn prepare_document(
     };
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let (integrity_digest, integrity_digest_bytes) = document_integrity_digest(
-        document_id,
         chunk_id.as_bytes(),
         &row,
         text.text.as_bytes(),
@@ -605,8 +599,9 @@ pub(super) fn document_ngram_keys(
     Ok(keys)
 }
 
+/// One document's content digest. It names no position: the page receipt
+/// row that carries it names the document's place on its page.
 fn document_integrity_digest(
-    document: i64,
     chunk_id: &[u8],
     row: &[u8],
     text: &[u8],
@@ -614,8 +609,7 @@ fn document_integrity_digest(
     exact_postings: &[(String, Vec<u8>)],
 ) -> Result<(ManifestDigest, [u8; 32]), CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v4\0");
-    hasher.update(document.to_le_bytes());
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v5\0");
     hash_table(&mut hasher, "row", 1, |hasher, _| {
         hash_text(hasher, chunk_id)?;
         hash_blob(hasher, row)?;
@@ -698,7 +692,7 @@ fn prepared_retained_bytes(
         .as_str()
         .len()
         .checked_add(page.cumulative_digest.as_str().len())
-        .and_then(|bytes| bytes.checked_add(page.import_dictionary_digest.as_str().len()))
+        .and_then(|bytes| bytes.checked_add(page.import_digest.as_str().len()))
         .and_then(|bytes| bytes.checked_add(page.next_cursor.capacity()))
         .and_then(|bytes| bytes.checked_add(page.previous_cursor.as_ref().map_or(0, Vec::capacity)))
         .and_then(|bytes| bytes.checked_add(clone_body_bytes))
@@ -830,7 +824,7 @@ fn estimated_sqlite_writes(
     let mut bytes = estimated_source_page_receipt_write_bytes(
         page.page_digest.as_str(),
         page.cumulative_digest.as_str(),
-        page.import_dictionary_digest.as_str(),
+        page.import_digest.as_str(),
         page.ngram_digest.as_str(),
         &page.base_sections_receipt,
         &page.next_cursor,
@@ -931,7 +925,7 @@ fn estimated_clone_body_writes(
 fn estimated_source_page_receipt_write_bytes(
     page_digest: &str,
     cumulative_digest: &str,
-    import_dictionary_digest: &str,
+    import_digest: &str,
     ngram_digest: &str,
     base_sections_receipt: &[u8],
     next_cursor: &[u8],
@@ -939,7 +933,7 @@ fn estimated_source_page_receipt_write_bytes(
     page_digest
         .len()
         .checked_add(cumulative_digest.len())
-        .and_then(|bytes| bytes.checked_add(import_dictionary_digest.len()))
+        .and_then(|bytes| bytes.checked_add(import_digest.len()))
         .and_then(|bytes| bytes.checked_add(ngram_digest.len()))
         .and_then(|bytes| bytes.checked_add(base_sections_receipt.len()))
         .and_then(|bytes| bytes.checked_add(next_cursor.len()))

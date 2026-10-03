@@ -149,6 +149,15 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
     let orphan_path = segments_root.join(format!("segment-{orphan_digest}.json"));
     std::fs::write(&orphan_path, orphan_bytes).expect("write orphan segment");
+    let index_bytes = b"unreferenced resolution index page";
+    let index_digest = encode_lowercase_hex(&Sha256::digest(index_bytes));
+    let index_path = segments_root.join(format!("segment-{index_digest}.json"));
+    std::fs::write(&index_path, index_bytes).expect("write orphan index segment");
+    let index_segment = serde_json::json!({
+        "segment_digest": format!("sha256:{index_digest}"),
+        "segment_size_bytes": index_bytes.len(),
+        "decoded_size_bytes": index_bytes.len()
+    });
 
     let pool_root = store.path().join("graph-replay-pool");
     ensure_replay_pool(&pool_root);
@@ -158,6 +167,8 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
             "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
             "snapshot": { "files": [] },
             "file_segments": [],
+            "file_evidence": [],
+            "code_graph_pages": [],
             "generation_evidence": {
                 "segment_digest": format!("sha256:{orphan_digest}"),
                 "segment_size_bytes": orphan_bytes.len(),
@@ -166,6 +177,11 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
                     "page_digest": format!("sha256:{orphan_digest}"),
                     "page_size_bytes": orphan_bytes.len()
                 }]
+            },
+            "resolution_index": {
+                "definitions": [index_segment],
+                "references": [index_segment],
+                "import_aliases": index_segment
             }
         }
     }))
@@ -198,11 +214,11 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     .expect("mark while replay unlink is staged");
     assert!(
         !plan.has_collectable_work(),
-        "the hidden replay manifest must mark its evidence pack live"
+        "the hidden replay manifest must mark its evidence pack and resolution index live"
     );
     assert!(
-        orphan_path.is_file(),
-        "planning must preserve the segment while replay liveness is ambiguous"
+        orphan_path.is_file() && index_path.is_file(),
+        "planning must preserve the segments while replay liveness is ambiguous"
     );
 
     std::fs::remove_file(&staged_unlink).expect("finish staged replay unlink");
@@ -216,8 +232,8 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     .expect("collect after replay pool becomes empty");
     assert!(report.deleted_generations.is_empty());
     assert!(
-        !orphan_path.exists(),
-        "maintenance must reclaim the orphan after replay ambiguity clears"
+        !orphan_path.exists() && !index_path.exists(),
+        "maintenance must reclaim both orphans after replay ambiguity clears"
     );
 }
 
