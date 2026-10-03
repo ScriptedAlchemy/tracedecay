@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1,
-    GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, ProjectId, RefId, RepositoryId, RepositoryIndexSnapshotV1,
-    RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
-    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
+    ActorId, ComponentVersion, GitBlobExpectationV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1,
+    GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
+    GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1,
+    HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId, RepositoryId,
+    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
+    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -70,27 +70,37 @@ fn snapshot(repository: &str) -> RepositoryStateSnapshotV1 {
     .expect("native snapshot")
 }
 
-fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: UtcMicros(1_000_000),
-    };
-    GitIndexCommitIntentV1::new(
-        message.to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .expect("commit intent")
+fn hunk(preview_id: &GitIndexPreviewId, snapshot_digest: ManifestDigest) -> HunkRefV1 {
+    HunkRefV1 {
+        repository: id("repository.fixture"),
+        worktree: id("worktree.fixture"),
+        direction: HunkDirectionV1::WorkingTreeToIndex,
+        path: "src/lib.rs".to_owned(),
+        original_path: None,
+        expected_base_blob: GitBlobExpectationV1::Present(oid('c')),
+        expected_index_entry: GitIndexEntryExpectationV1 {
+            blob: GitBlobExpectationV1::Present(oid('c')),
+            mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).expect("regular mode")),
+            unmerged_stage: None,
+        },
+        expected_worktree_blob: Some(GitBlobExpectationV1::Present(oid('e'))),
+        expected_worktree_mode: Some(
+            GitFileModeV1::new(GitFileModeV1::REGULAR).expect("regular mode"),
+        ),
+        hunk_header: "@@ -1,1 +1,1 @@".to_owned(),
+        context_digest: digest('f'),
+        patch_digest: digest('0'),
+        selected_line_bitmap: vec![1],
+        attributes_digest: None,
+        preview_id: preview_id.as_str().to_owned(),
+        schema_version: "hunkref.v1".to_owned(),
+        snapshot_digest,
+    }
 }
 
-fn request_for_repository(
-    intent: GitIndexCommitIntentV1,
-    repository: &str,
-) -> GitIndexPreviewRequestV1 {
-    let capability_id = CapabilityId::new("capability.git.commit-index").expect("capability");
-    let use_case_id = UseCaseId::new("use-case.git.commit-index").expect("use case");
+fn request_for_repository(repository: &str) -> GitIndexPreviewRequestV1 {
+    let capability_id = CapabilityId::new("capability.git.stage-hunks").expect("capability");
+    let use_case_id = UseCaseId::new("use-case.git.stage-hunks").expect("use case");
     let scope = ResolvedScope::new(
         id("project.fixture"),
         id(repository),
@@ -132,24 +142,27 @@ fn request_for_repository(
         UtcMicros(2),
     )
     .expect("authority");
+    let preview_id = GitIndexPreviewId::new("preview.fixture").expect("preview id");
+    let repository_snapshot = snapshot(repository);
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&repository_snapshot).expect("digest");
     GitIndexPreviewRequestV1 {
         context,
         authority,
         binding: GitIndexOperationBindingV1 {
             capability_id,
             use_case_id,
-            operation: GitIndexTransactionOperationV1::CommitIndex,
+            operation: GitIndexTransactionOperationV1::StageHunks,
         },
-        preview_id: GitIndexPreviewId::new("preview.fixture").expect("preview id"),
-        repository_snapshot: snapshot(repository),
-        selected_hunks: Vec::new(),
-        commit_intent: Some(intent),
+        preview_id: preview_id.clone(),
+        repository_snapshot,
+        selected_hunks: vec![hunk(&preview_id, snapshot_digest)],
         observed_at: UtcMicros(10),
     }
 }
 
-fn request(intent: GitIndexCommitIntentV1) -> GitIndexPreviewRequestV1 {
-    request_for_repository(intent, "repository.fixture")
+fn request() -> GitIndexPreviewRequestV1 {
+    request_for_repository("repository.fixture")
 }
 
 fn apply_request(
@@ -175,20 +188,21 @@ fn apply_request(
 }
 
 #[test]
-fn preview_validation_rejects_a_different_commit_intent_than_requested() {
-    let request = request(commit_intent("requested message\n"));
+fn preview_validation_rejects_unrequested_hunks() {
+    let request = request();
     request.validate().expect("request");
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&request.repository_snapshot)
             .expect("snapshot digest");
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
+    let mut extra = request.selected_hunks[0].clone();
+    extra.path = "src/other.rs".to_owned();
+    let preview = GitIndexPreviewV1::new(
         request.preview_id.clone(),
-        GitIndexTransactionOperationV1::CommitIndex,
+        GitIndexTransactionOperationV1::StageHunks,
         request.repository_snapshot.clone(),
         snapshot_digest,
-        Vec::new(),
+        vec![request.selected_hunks[0].clone(), extra],
         request.repository_snapshot.index.tree_id.clone(),
-        Some(&commit_intent("different message\n")),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(10),
         UtcMicros(20),
@@ -212,15 +226,15 @@ fn preview_validation_rejects_a_different_commit_intent_than_requested() {
     assert!(matches!(
         result.validate_for(&request),
         Err(crate::ApplicationContractError::Inconsistent {
-            field: "git index preview commit intent binding"
+            field: "git index preview selected hunk binding"
         })
     ));
 }
 
 #[test]
 fn operation_binding_must_match_the_native_operation() {
-    let mut wrong_operation = request(commit_intent("requested message\n"));
-    wrong_operation.binding.operation = GitIndexTransactionOperationV1::StageHunks;
+    let mut wrong_operation = request();
+    wrong_operation.binding.operation = GitIndexTransactionOperationV1::UnstageHunks;
     assert!(matches!(
         wrong_operation.validate(),
         Err(crate::ApplicationContractError::Inconsistent {
@@ -245,18 +259,17 @@ fn repository_reference_binding_is_exact_and_never_implicit() {
 
 #[test]
 fn apply_request_must_bind_the_exact_preview_before_native_mutation() {
-    let preview_request = request(commit_intent("requested message\n"));
+    let preview_request = request();
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&preview_request.repository_snapshot)
             .expect("snapshot digest");
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
+    let preview = GitIndexPreviewV1::new(
         preview_request.preview_id.clone(),
-        GitIndexTransactionOperationV1::CommitIndex,
+        GitIndexTransactionOperationV1::StageHunks,
         preview_request.repository_snapshot.clone(),
         snapshot_digest,
-        Vec::new(),
+        preview_request.selected_hunks.clone(),
         preview_request.repository_snapshot.index.tree_id.clone(),
-        preview_request.commit_intent.as_ref(),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(10),
         UtcMicros(20),
@@ -268,7 +281,7 @@ fn apply_request_must_bind_the_exact_preview_before_native_mutation() {
         .expect("exact apply binding");
 
     let mut wrong_operation = request.clone();
-    wrong_operation.binding.operation = GitIndexTransactionOperationV1::StageHunks;
+    wrong_operation.binding.operation = GitIndexTransactionOperationV1::UnstageHunks;
     assert!(matches!(
         wrong_operation.validate_for_preview(&preview),
         Err(crate::ApplicationContractError::Inconsistent {
@@ -285,10 +298,7 @@ fn apply_request_must_bind_the_exact_preview_before_native_mutation() {
         })
     ));
 
-    let wrong_scope_source = request_for_repository(
-        commit_intent("other repository message\n"),
-        "repository.other",
-    );
+    let wrong_scope_source = request_for_repository("repository.other");
     let wrong_scope = apply_request(&wrong_scope_source, &preview);
     assert!(matches!(
         wrong_scope.validate_for_preview(&preview),
@@ -300,18 +310,17 @@ fn apply_request_must_bind_the_exact_preview_before_native_mutation() {
 
 #[test]
 fn apply_idempotency_digest_excludes_volatile_revalidation_evidence() {
-    let preview_request = request(commit_intent("requested message\n"));
+    let preview_request = request();
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&preview_request.repository_snapshot)
             .expect("snapshot digest");
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
+    let preview = GitIndexPreviewV1::new(
         preview_request.preview_id.clone(),
-        GitIndexTransactionOperationV1::CommitIndex,
+        GitIndexTransactionOperationV1::StageHunks,
         preview_request.repository_snapshot.clone(),
         snapshot_digest,
-        Vec::new(),
+        preview_request.selected_hunks.clone(),
         preview_request.repository_snapshot.index.tree_id.clone(),
-        preview_request.commit_intent.as_ref(),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(10),
         UtcMicros(20),

@@ -66,6 +66,16 @@ const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
+/// Feedback reads with no dashboard dispatch tail keep the callable
+/// transports only. The dashboard adapter's closed route table answers just
+/// `get`, `expand`, `list`, and `proximity`; a Dashboard binding for a read
+/// outside that table is an unmounted mount claim.
+const CALLABLE_FEEDBACK_READ_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+
 /// Advisory producers retain the shared callable transports. Their LSP/native
 /// delivery is an internal event path, not a JSON-RPC method binding. Hook
 /// delivery is likewise host-registration metadata rather than a callable
@@ -101,7 +111,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Read the canonical completed feedback cycle for the authorized branch head.",
         example: "Read diagnostics from the current branch feedback cycle",
         paginated: false,
-        surfaces: &FEEDBACK_READ_SURFACES,
+        surfaces: &CALLABLE_FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_GET_CAPABILITY_ID_V1,
@@ -149,7 +159,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Project the canonical impact and affected-test state from an authorized completed feedback cycle.",
         example: "Read impact from the current branch feedback cycle",
         paginated: false,
-        surfaces: &FEEDBACK_READ_SURFACES,
+        surfaces: &CALLABLE_FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.affected-tests",
@@ -161,7 +171,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Project affected-test state from an authorized completed feedback cycle.",
         example: "Read affected tests from this feedback cycle",
         paginated: true,
-        surfaces: &FEEDBACK_READ_SURFACES,
+        surfaces: &CALLABLE_FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.test-results",
@@ -173,7 +183,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Read the latest daemon-retained managed test result for the admitted project root.",
         example: "Read the latest managed test results",
         paginated: false,
-        surfaces: &FEEDBACK_READ_SURFACES,
+        surfaces: &CALLABLE_FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: ADVISORY_CYCLE_CAPABILITY_ID_V1,

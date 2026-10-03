@@ -377,8 +377,8 @@ mod tests {
             compose_application_catalog(ParityDispatcher).expect("application composition");
         let operations = dashboard_operations_shared_with_http();
         assert!(
-            operations.contains(&"diagnostics_read".to_owned()),
-            "the shared dashboard/HTTP set must include the diagnostics read: {operations:?}"
+            operations.contains(&"feedback_get".to_owned()),
+            "the shared dashboard/HTTP set must include the feedback read: {operations:?}"
         );
 
         for operation in operations {
@@ -416,8 +416,8 @@ mod tests {
 
         assert_eq!(dashboard_use_case("git_apply"), None);
         assert_eq!(
-            dashboard_use_case("diagnostics_read").as_deref(),
-            Some("use-case.application.primitive.diagnostics-read")
+            dashboard_use_case("feedback_get").as_deref(),
+            Some("use-case.application.feedback.get")
         );
     }
 }

@@ -578,81 +578,27 @@ fn prepare_git_preview(
             map_git_port_problem(error),
         ))
     })?;
-    let preview_input = match operation {
-        GitIndexTransactionOperationV1::CommitIndex => {
-            let Some(commit_intent) = request.commit_intent.clone() else {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            };
-            if request.preview_input_id.is_some() || !request.selected_hunk_digests.is_empty() {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            }
-            let preview_id = mint_git_preview_id().map_err(|problem| {
-                Box::new(application_problem(wire_request_id.clone(), problem))
-            })?;
-            let snapshot = capture_exact_snapshot(
-                &owner.repository_root,
-                authority.scope.project_id.clone(),
-                authority.scope.repository_id.clone(),
-                authority.scope.worktree_id.clone(),
-                authority.evaluated_at,
-            )
-            .map_err(|error| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    map_git_port_problem(error),
-                ))
-            })?;
-            let input = GitIndexPreviewInputV1::new_commit(
-                preview_id,
-                snapshot,
-                commit_intent,
-                authority.evaluated_at,
-                UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
-            )
-            .map_err(|_| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    invalid_git_request(),
-                ))
-            })?;
-            service.save_preview_input(input.clone()).map_err(|error| {
-                Box::new(application_problem(
-                    wire_request_id.clone(),
-                    map_git_port_problem(error),
-                ))
-            })?;
-            input
-        }
-        GitIndexTransactionOperationV1::StageHunks
-        | GitIndexTransactionOperationV1::UnstageHunks => {
-            if request.commit_intent.is_some() || request.selected_hunk_digests.is_empty() {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            }
-            let Some(preview_input_id) = request.preview_input_id.clone() else {
-                return Err(Box::new(application_problem(
-                    wire_request_id,
-                    invalid_git_request(),
-                )));
-            };
-            match service.read_preview_input(&preview_input_id, authority.evaluated_at) {
-                Ok(input) if input.operation == operation => input,
-                Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
-                Err(error) => {
-                    return Err(Box::new(application_problem(
-                        wire_request_id,
-                        map_git_port_problem(error),
-                    )));
-                }
-            }
+    if request.selected_hunk_digests.is_empty() {
+        return Err(Box::new(application_problem(
+            wire_request_id,
+            invalid_git_request(),
+        )));
+    }
+    let Some(preview_input_id) = request.preview_input_id.clone() else {
+        return Err(Box::new(application_problem(
+            wire_request_id,
+            invalid_git_request(),
+        )));
+    };
+    let preview_input = match service.read_preview_input(&preview_input_id, authority.evaluated_at)
+    {
+        Ok(input) if input.operation == operation => input,
+        Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
+        Err(error) => {
+            return Err(Box::new(application_problem(
+                wire_request_id,
+                map_git_port_problem(error),
+            )));
         }
     };
     if preview_input.repository_snapshot.project_id != owner.project_id {
@@ -906,7 +852,6 @@ fn build_git_preview_request(
         preview_id: input.preview_id,
         repository_snapshot: input.repository_snapshot,
         selected_hunks,
-        commit_intent: input.commit_intent,
         observed_at,
     })
 }

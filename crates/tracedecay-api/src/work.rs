@@ -535,26 +535,3 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
         "The Work application request is invalid",
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use super::WorkOperation;
-
-    #[test]
-    fn retired_projection_operations_are_not_public_routes() {
-        for retired in ["snapshot", "delta", "replan_dependencies", "accept_task"] {
-            assert!(
-                WorkOperation::from_str(retired).is_err(),
-                "retired operation {retired} must not decode"
-            );
-            assert!(
-                WorkOperation::ALL
-                    .iter()
-                    .all(|operation| operation.operation_key() != retired),
-                "retired operation {retired} must not be mounted"
-            );
-        }
-    }
-}

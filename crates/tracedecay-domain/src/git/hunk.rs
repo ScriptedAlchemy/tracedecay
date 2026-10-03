@@ -240,9 +240,6 @@ impl HunkRefV1 {
 /// every `HunkRefV1` compare-and-swap precondition.
 pub const GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.snapshot.v1";
 
-/// Domain separator for a canonical commitment to the complete commit intent.
-pub const GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.commit-intent.v1";
-
 /// Domain separator for immutable Git index previews.
 pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.preview.v1";
 

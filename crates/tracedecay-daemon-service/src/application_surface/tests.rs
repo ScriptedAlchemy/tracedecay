@@ -542,15 +542,14 @@ fn git_mutation_surface_rejects_caller_minted_native_authority() {
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitPreview,
             serde_json::json!({
-                "operation": "commit_index",
+                "operation": "stage_hunks",
                 "repository_snapshot": {},
                 "selected_hunks": [],
-                "commit_intent": null,
             }),
         )
         .unwrap_err()
         .to_string(),
-        "application surface request does not match its reviewed schema: unknown field `repository_snapshot`, expected one of `operation`, `preview_input_id`, `selected_hunk_digests`, `commit_intent`"
+        "application surface request does not match its reviewed schema: unknown field `repository_snapshot`, expected one of `operation`, `preview_input_id`, `selected_hunk_digests`"
     );
     assert_eq!(
         parse_application_surface_request(
