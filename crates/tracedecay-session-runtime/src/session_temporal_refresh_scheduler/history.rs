@@ -35,12 +35,10 @@ pub enum SessionHistoricalIngestOutcome {
 }
 
 impl SessionHistoricalIngestOutcome {
-    #[hotpath::skip]
     pub const fn needs_another_pass(self) -> bool {
         matches!(self, Self::Pending { .. } | Self::Retryable { .. })
     }
 
-    #[hotpath::skip]
     pub const fn made_progress(self) -> bool {
         matches!(
             self,

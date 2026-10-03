@@ -134,7 +134,11 @@ fn with_locked_state<T>(
 /// read-modify-write of the dashboard state file. This is the per-tool-call
 /// disk boundary, so it is measured as one unit rather than its internal
 /// dedupe/serialize steps.
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.record")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.record",
+    level = "trace",
+    skip_all
+)]
 pub async fn record(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -175,7 +179,11 @@ pub async fn record(
 
 /// Per-turn boundary write: the same locked state file as [`record`], but
 /// gated on transcript ingestion rather than the raw tool-call receipt.
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.turn_ingested")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.turn_ingested",
+    level = "trace",
+    skip_all
+)]
 pub async fn mark_turn_ingested(
     dashboard_root: &Path,
     route: Option<HookRouteMetadata>,
@@ -202,7 +210,11 @@ pub async fn mark_turn_ingested(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.oldest_ready")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.oldest_ready",
+    level = "trace",
+    skip_all
+)]
 pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostReceipt>> {
     let root = dashboard_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -233,7 +245,11 @@ pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostRecei
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-#[hotpath::measure(future = true, label = "hosts.automation.host_receipts.mark_consumed")]
+#[tracing::instrument(
+    name = "hosts.automation.host_receipts.mark_consumed",
+    level = "trace",
+    skip_all
+)]
 pub async fn mark_consumed(
     dashboard_root: &Path,
     session_key: &str,

@@ -3,13 +3,12 @@
 use crate::cli::WorkflowInvocationArgs;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-#[hotpath::measure(label = "cli.workflow.invoke", future = true)]
+#[tracing::instrument(name = "cli.workflow.invoke", level = "trace", skip_all)]
 pub(crate) async fn run(
     profile: &ProfileRoot,
     invocation: WorkflowInvocationArgs,
 ) -> tracedecay_domain::errors::Result<()> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());
+    tracing::trace!(name: "cli.workflow.operation", value = ?invocation.operation.operation_key());
     let body = crate::application_cli::read_request(
         &invocation.request_file,
         crate::application_cli::WORKFLOW,

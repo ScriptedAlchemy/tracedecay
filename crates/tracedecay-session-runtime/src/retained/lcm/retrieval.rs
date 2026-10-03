@@ -59,7 +59,11 @@ const MAX_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_QUERY_QUERY_CHARS: usize = 1_024;
 
-#[hotpath::measure(label = "daemon.store_runtime.lcm.load_session")]
+#[tracing::instrument(
+    name = "daemon.store_runtime.lcm.load_session",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_load_session(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -127,13 +131,13 @@ pub(super) async fn execute_load_session(
         GitScopeFilter::default(),
     )?;
     let (results, temporal, status, omitted) = retrieval_page(
-        hotpath::future!(
+        tracing::Instrument::instrument(
             service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 query,
             ),
-            label = "daemon.store_runtime.lcm.load_session.retrieve"
+            tracing::trace_span!("daemon.store_runtime.lcm.load_session.retrieve"),
         )
         .await,
     )?;
@@ -160,7 +164,7 @@ pub(super) async fn execute_load_session(
     )
 }
 
-#[hotpath::measure(label = "daemon.store_runtime.lcm.grep")]
+#[tracing::instrument(name = "daemon.store_runtime.lcm.grep", level = "trace", skip_all)]
 pub(super) async fn execute_grep(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -251,13 +255,13 @@ pub(super) async fn execute_grep(
         git_filter,
     )?;
     let (results, temporal, status, omitted) = retrieval_page(
-        hotpath::future!(
+        tracing::Instrument::instrument(
             service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 query,
             ),
-            label = "daemon.store_runtime.lcm.grep.retrieve"
+            tracing::trace_span!("daemon.store_runtime.lcm.grep.retrieve"),
         )
         .await,
     )?;
@@ -277,20 +281,17 @@ pub(super) async fn execute_grep(
                 tracedecay_contracts::CancellationStage::DuringRead,
             ));
         }
-        result = hotpath::future!(
-            crate::retained::bounded_execution(
+        result = tracing::Instrument::instrument(crate::retained::bounded_execution(
                 context,
                 service.lcm_raw_store_ids_admitted(raw_identities),
-            ),
-            label = "daemon.store_runtime.lcm.grep.store_ids"
-        ) => match result {
+            ), tracing::trace_span!("daemon.store_runtime.lcm.grep.store_ids")) => match result {
             Ok(store_ids) => store_ids,
             Err(error @ (
                 RetainedSurfaceExecutionErrorV1::Cancelled(_)
                 | RetainedSurfaceExecutionErrorV1::TimedOut(_)
             )) => return Err(error),
             Err(_) => {
-                hotpath::gauge!("daemon.store_runtime.lcm.grep.store_ids_unavailable").inc(1.0);
+                metrics::gauge!("daemon.store_runtime.lcm.grep.store_ids_unavailable").increment(1.0);
                 BTreeMap::new()
             }
         },
@@ -328,7 +329,7 @@ pub(super) async fn execute_grep(
     )
 }
 
-#[hotpath::measure(label = "daemon.store_runtime.lcm.describe")]
+#[tracing::instrument(name = "daemon.store_runtime.lcm.describe", level = "trace", skip_all)]
 pub(super) async fn execute_describe(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -358,7 +359,7 @@ pub(super) async fn execute_describe(
             RetrievalGrainV1::Occurrence,
         ),
     };
-    let outcome = hotpath::future!(
+    let outcome = tracing::Instrument::instrument(
         service.describe_lcm_admitted(
             context.request_context,
             context.cancellation_signal,
@@ -370,7 +371,7 @@ pub(super) async fn execute_describe(
                 SessionRetrievalStoreScope::Profile,
             ),
         ),
-        label = "daemon.store_runtime.lcm.describe.retrieve"
+        tracing::trace_span!("daemon.store_runtime.lcm.describe.retrieve"),
     )
     .await;
     let result = match outcome {
@@ -445,7 +446,7 @@ pub(super) async fn execute_describe(
     )
 }
 
-#[hotpath::measure(label = "daemon.store_runtime.lcm.expand")]
+#[tracing::instrument(name = "daemon.store_runtime.lcm.expand", level = "trace", skip_all)]
 pub(super) async fn execute_expand(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -496,7 +497,7 @@ pub(super) async fn execute_expand(
     let source_limit = summary
         .then(|| bounded_limit(request.source_limit, 50))
         .transpose()?;
-    let outcome = hotpath::future!(
+    let outcome = tracing::Instrument::instrument(
         service.expand_lcm_admitted(
             context.request_context,
             context.cancellation_signal,
@@ -518,7 +519,7 @@ pub(super) async fn execute_expand(
                 SessionRetrievalStoreScope::Profile,
             ),
         ),
-        label = "daemon.store_runtime.lcm.expand.retrieve"
+        tracing::trace_span!("daemon.store_runtime.lcm.expand.retrieve"),
     )
     .await;
     let result = expand_result(outcome, provider, &session_id)?;
@@ -529,7 +530,11 @@ pub(super) async fn execute_expand(
     )
 }
 
-#[hotpath::measure(label = "daemon.store_runtime.lcm.expand_query")]
+#[tracing::instrument(
+    name = "daemon.store_runtime.lcm.expand_query",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_expand_query(
     service: Option<&dyn SessionApplicationRetrievalPortV1>,
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -1011,13 +1016,13 @@ async fn expand_query_from_search(
         GitScopeFilter::default(),
     )?;
     let (results, temporal, mut status, service_omitted) = retrieval_page(
-        hotpath::future!(
+        tracing::Instrument::instrument(
             service.retrieve_admitted_with_cancellation(
                 context.request_context,
                 context.cancellation_signal,
                 temporal_query,
             ),
-            label = "daemon.store_runtime.lcm.expand_query.retrieve"
+            tracing::trace_span!("daemon.store_runtime.lcm.expand_query.retrieve"),
         )
         .await,
     )?;
@@ -1069,7 +1074,7 @@ async fn expand_query_from_nodes(
             let cursor = cursor.clone();
             let cursor_request = cursor_request.clone();
             async move {
-                let outcome = hotpath::future!(
+                let outcome = tracing::Instrument::instrument(
                     service.expand_lcm_admitted(
                         context.request_context,
                         context.cancellation_signal,
@@ -1090,7 +1095,7 @@ async fn expand_query_from_nodes(
                         )
                         .with_cursor_request(cursor_request),
                     ),
-                    label = "daemon.store_runtime.lcm.expand_query.node"
+                    tracing::trace_span!("daemon.store_runtime.lcm.expand_query.node"),
                 )
                 .await;
                 (index, node_id, outcome)
@@ -1098,9 +1103,9 @@ async fn expand_query_from_nodes(
         })
         .buffer_unordered(EXPAND_QUERY_CONCURRENCY)
         .collect::<Vec<_>>();
-    let mut expansions = hotpath::future!(
+    let mut expansions = tracing::Instrument::instrument(
         expansions,
-        label = "daemon.store_runtime.lcm.expand_query.nodes"
+        tracing::trace_span!("daemon.store_runtime.lcm.expand_query.nodes"),
     )
     .await;
     expansions.sort_unstable_by_key(|(index, _, _)| *index);

@@ -46,7 +46,11 @@ pub(crate) struct LcmSummaryConvergencePage {
     pub(crate) relation_receipts_processed: usize,
 }
 
-#[hotpath::measure(label = "daemon.lcm.summary_convergence.page", future = true)]
+#[tracing::instrument(
+    name = "daemon.lcm.summary_convergence.page",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn run_summary_convergence_page(
     database: RegisteredGlobalDbLeaseV1,
     page_limit: usize,
@@ -110,7 +114,11 @@ pub(crate) async fn run_summary_convergence_page(
 /// the rewrite must still converge on a profile whose history perpetually
 /// needs another window, and unlike summary convergence it carries no model
 /// call, so it fits the same bounded budget a history page takes.
-#[hotpath::measure(label = "daemon.lcm.predecessor_range_rewrite.page", future = true)]
+#[tracing::instrument(
+    name = "daemon.lcm.predecessor_range_rewrite.page",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn run_predecessor_range_rewrite_page(
     database: RegisteredGlobalDbLeaseV1,
 ) -> Result<LcmSummaryConvergencePage, LcmError> {
@@ -616,25 +624,25 @@ fn observe_session_outcome(
     disposition: &LcmSummaryConvergenceDisposition,
     summary_nodes_created: usize,
 ) {
-    hotpath::gauge!("daemon.lcm.summary_convergence.sessions").inc(1.0);
+    metrics::gauge!("daemon.lcm.summary_convergence.sessions").increment(1.0);
     if summary_nodes_created > 0 {
-        hotpath::gauge!("daemon.lcm.summary_convergence.summary_nodes")
-            .inc(summary_nodes_created.min(u32::MAX as usize) as f64);
+        metrics::gauge!("daemon.lcm.summary_convergence.summary_nodes")
+            .increment(summary_nodes_created.min(u32::MAX as usize) as f64);
     }
     match disposition {
         LcmSummaryConvergenceDisposition::Preparing
         | LcmSummaryConvergenceDisposition::Summarized => {}
         LcmSummaryConvergenceDisposition::Current => {
-            hotpath::gauge!("daemon.lcm.summary_convergence.current").inc(1.0);
+            metrics::gauge!("daemon.lcm.summary_convergence.current").increment(1.0);
         }
         LcmSummaryConvergenceDisposition::Pending { .. } => {
-            hotpath::gauge!("daemon.lcm.summary_convergence.pending").inc(1.0);
+            metrics::gauge!("daemon.lcm.summary_convergence.pending").increment(1.0);
         }
         LcmSummaryConvergenceDisposition::Retryable { .. } => {
-            hotpath::gauge!("daemon.lcm.summary_convergence.retryable").inc(1.0);
+            metrics::gauge!("daemon.lcm.summary_convergence.retryable").increment(1.0);
         }
         LcmSummaryConvergenceDisposition::Permanent { .. } => {
-            hotpath::gauge!("daemon.lcm.summary_convergence.permanent").inc(1.0);
+            metrics::gauge!("daemon.lcm.summary_convergence.permanent").increment(1.0);
         }
     }
 }

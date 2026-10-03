@@ -84,7 +84,7 @@ impl Encoder<&[u8]> for ContentLengthCodec {
     }
 }
 
-#[hotpath::measure(label = "lsp.rpc.frame_decode")]
+#[tracing::instrument(name = "lsp.rpc.frame_decode", level = "trace", skip_all)]
 fn decode_frame(input: &mut BytesMut) -> Result<Option<LspFrame>, ContentLengthCodecError> {
     let Some(header_end) = find_header_end(input) else {
         if has_invalid_line_ending(input) || input.len() > MAX_LSP_HEADER_BYTES {
@@ -126,7 +126,7 @@ fn decode_frame(input: &mut BytesMut) -> Result<Option<LspFrame>, ContentLengthC
     Ok(Some(message.to_vec()))
 }
 
-#[hotpath::measure(label = "lsp.rpc.frame_encode")]
+#[tracing::instrument(name = "lsp.rpc.frame_encode", level = "trace", skip_all)]
 fn encode_frame(frame: &[u8], output: &mut BytesMut) -> Result<(), ContentLengthCodecError> {
     if frame.len() > MAX_LSP_FRAME_BYTES {
         return Err(ContentLengthCodecError::FrameTooLarge {

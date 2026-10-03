@@ -9,11 +9,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = [
     "tracedecay-graph-db/test-helpers",
@@ -29,9 +24,7 @@ test-transport = [
 [dependencies]
 getrandom = "0.2"
 hex = "0.4"
-# `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
-# both modes (the plain tokio mutex until a binary selects the backend).
-hotpath = { workspace = true, features = ["tokio"] }
+metrics.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

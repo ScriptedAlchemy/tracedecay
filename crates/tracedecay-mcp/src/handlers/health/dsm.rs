@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[hotpath::measure(label = "mcp.health.dsm.total")]
+#[tracing::instrument(name = "mcp.health.dsm.total", level = "trace", skip_all)]
 pub async fn compute_dsm(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -13,47 +13,50 @@ pub async fn compute_dsm(
     let shape = request.shape.unwrap_or_default();
     let max_files = request.max_files.map_or(30, |v| v.min(200) as usize);
 
-    let adj = hotpath::future!(
+    let adj = tracing::Instrument::instrument(
         graph.build_file_adjacency(path_prefix),
-        label = "mcp.health.dsm.graph"
+        tracing::trace_span!("mcp.health.dsm.graph"),
     )
     .await?;
 
-    let (mut clusters, stats) = hotpath::measure_block!("mcp.health.dsm.compute", {
-        let file_count = adj.len();
-        let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();
-        let density = if file_count > 1 {
-            edge_count as f64 / (file_count * (file_count - 1)) as f64
-        } else {
-            0.0
-        };
+    let (mut clusters, stats) = {
+        let _span = tracing::trace_span!("mcp.health.dsm.compute").entered();
+        {
+            let file_count = adj.len();
+            let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();
+            let density = if file_count > 1 {
+                edge_count as f64 / (file_count * (file_count - 1)) as f64
+            } else {
+                0.0
+            };
 
-        let cluster_rows = dsm_clusters(&adj);
-        let clusters: Vec<DsmClusterV1> = cluster_rows
-            .iter()
-            .map(|cluster| DsmClusterV1 {
-                directory: cluster.directory.clone(),
-                file_count: cluster.file_count as u64,
-                internal_edges: cluster.internal_edges as u64,
-                outgoing_edges: cluster.outgoing_edges as u64,
-                incoming_edges: cluster.incoming_edges as u64,
-                boundary_edges: cluster.boundary_edges() as u64,
-            })
-            .collect();
-        let largest_cluster = cluster_rows
-            .iter()
-            .map(|cluster| cluster.file_count as u64)
-            .max()
-            .unwrap_or(0);
-        let stats = DsmStatsV1 {
-            files: file_count as u64,
-            edges: edge_count as u64,
-            density: (density * 10000.0).round() / 10000.0,
-            clusters: cluster_rows.len() as u64,
-            largest_cluster,
-        };
-        (clusters, stats)
-    });
+            let cluster_rows = dsm_clusters(&adj);
+            let clusters: Vec<DsmClusterV1> = cluster_rows
+                .iter()
+                .map(|cluster| DsmClusterV1 {
+                    directory: cluster.directory.clone(),
+                    file_count: cluster.file_count as u64,
+                    internal_edges: cluster.internal_edges as u64,
+                    outgoing_edges: cluster.outgoing_edges as u64,
+                    incoming_edges: cluster.incoming_edges as u64,
+                    boundary_edges: cluster.boundary_edges() as u64,
+                })
+                .collect();
+            let largest_cluster = cluster_rows
+                .iter()
+                .map(|cluster| cluster.file_count as u64)
+                .max()
+                .unwrap_or(0);
+            let stats = DsmStatsV1 {
+                files: file_count as u64,
+                edges: edge_count as u64,
+                density: (density * 10000.0).round() / 10000.0,
+                clusters: cluster_rows.len() as u64,
+                largest_cluster,
+            };
+            (clusters, stats)
+        }
+    };
     let matrix = match shape {
         DsmShapeV1::Clusters => None,
         DsmShapeV1::Matrix => {

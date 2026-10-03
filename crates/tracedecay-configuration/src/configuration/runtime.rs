@@ -218,13 +218,13 @@ impl ProductionConfigurationDaemonClient {
     pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {
         let store = self.store.clone();
         let target = self.target.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let current = ConfigurationControlStore::current(&store).await?;
                 PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
                     .map_err(|_| ConfigurationError::Unavailable)
             },
-            label = "usecases.configuration.current"
+            tracing::trace_span!("usecases.configuration.current"),
         ))
     }
 }

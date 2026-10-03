@@ -38,17 +38,14 @@ impl SessionRefreshFrontierV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn observed_through(&self) -> u64 {
         self.observed_through
     }
 
-    #[hotpath::skip]
     pub const fn committed_through(&self) -> u64 {
         self.committed_through
     }
 
-    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         self.observed_through == self.committed_through
     }
@@ -93,7 +90,6 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         self
     }
 
-    #[hotpath::skip]
     pub const fn coverage_request(&self) -> &SessionTemporalCoverageRequestV1 {
         &self.coverage_request
     }
@@ -102,7 +98,6 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
@@ -161,17 +156,14 @@ impl SessionRefreshBeginOrJoinReceiptV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
 
-    #[hotpath::skip]
     pub const fn disposition(&self) -> SessionRefreshDispositionV1 {
         self.disposition
     }
 
-    #[hotpath::skip]
     pub const fn accepted_at(&self) -> UtcMicros {
         self.accepted_at
     }
@@ -245,7 +237,6 @@ impl SessionRefreshProgressV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -263,17 +254,14 @@ impl SessionRefreshProgressV1 {
         self.source_coverage.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn committed_batches(&self) -> u64 {
         self.committed_batches
     }
 
-    #[hotpath::skip]
     pub const fn committed_records(&self) -> u64 {
         self.committed_records
     }
 
-    #[hotpath::skip]
     pub const fn updated_at(&self) -> UtcMicros {
         self.updated_at
     }
@@ -383,7 +371,6 @@ impl SessionRefreshCompletionRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -528,7 +515,6 @@ impl SessionRefreshFailureRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -585,7 +571,6 @@ impl SessionRefreshCancellationRequestV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -668,7 +653,6 @@ impl SessionRefreshReceiptV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn frontier(&self) -> SessionRefreshFrontierV1 {
         self.frontier
     }
@@ -686,7 +670,6 @@ impl SessionRefreshReceiptV1 {
         self.source_coverage.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> SessionRefreshTerminalStateV1 {
         self.state
     }
@@ -695,7 +678,6 @@ impl SessionRefreshReceiptV1 {
         self.failure_code.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn terminal_at(&self) -> UtcMicros {
         self.terminal_at
     }

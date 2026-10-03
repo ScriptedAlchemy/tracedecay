@@ -254,7 +254,7 @@ impl TreeSitterExtractor {
         parsed_len: usize,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.extract.incremental", {
+        crate::observe::measure_hot_loop!("code_index.extract.incremental", {
             if cancellation.is_cancelled() {
                 return Err(ExtractionFailureV1::Cancelled);
             }
@@ -427,7 +427,7 @@ fn rows_digest(
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
     let mut imports = artifact.imports.clone();
-    crate::hotpath_observe::measure_hot_loop!("code_index_rows_digest_sort", {
+    crate::observe::measure_hot_loop!("code_index_rows_digest_sort", {
         sort_canonical_rows(&mut nodes);
         sort_canonical_rows(&mut edges);
         sort_canonical_rows(&mut unresolved);
@@ -450,7 +450,7 @@ fn rows_digest(
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
     }
 
-    crate::hotpath_observe::measure_hot_loop!(
+    crate::observe::measure_hot_loop!(
         "code_index_rows_digest_hash",
         canonical_sha256(&RowsPayload {
             separator: EXTRACTION_ROWS_SEPARATOR,
@@ -474,7 +474,7 @@ fn rows_digest(
 pub(crate) fn parser_import_rows_digest(
     imports: &[ExtractedImportEvidenceV1],
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
-    crate::hotpath_observe::measure_hot_loop!("code_index_parser_import_rows_digest", {
+    crate::observe::measure_hot_loop!("code_index_parser_import_rows_digest", {
         let mut imports = imports.to_vec();
         imports.sort();
         canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(
@@ -492,7 +492,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.extract.full", {
+        crate::observe::measure_hot_loop!("code_index.extract.full", {
             if cancellation.is_cancelled() {
                 return Err(ExtractionFailureV1::Cancelled);
             }

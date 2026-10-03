@@ -19,7 +19,7 @@ use super::{
     VersionedTokenEstimator,
 };
 
-#[hotpath::measure(label = "temporal.context.assemble")]
+#[tracing::instrument(name = "temporal.context.assemble", level = "trace", skip_all)]
 pub fn assemble_context_with_frames_controlled(
     hydration: &HydrationBatch,
     grain: RetrievalGrainV1,

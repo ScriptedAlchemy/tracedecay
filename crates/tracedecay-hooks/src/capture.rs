@@ -68,7 +68,7 @@ impl std::fmt::Display for NativeHookCaptureOutcomeV1 {
 /// the coarse boundary that matters for hook latency: it decodes, binds, and
 /// spools one event, so its cost and outcome mix stand in for the whole
 /// capture path without measuring the decode/bind/spool internals separately.
-#[hotpath::measure(label = "hooks.capture.native_event")]
+#[tracing::instrument(name = "hooks.capture.native_event", level = "trace", skip_all)]
 pub fn capture_native_event_for_replay(
     data_root: &Path,
     worktree_id: [u8; 16],
@@ -87,9 +87,9 @@ pub fn capture_native_event_for_replay(
         now,
         wait_budget,
     );
-    #[cfg(feature = "hotpath")]
+
     {
-        hotpath::gauge!(match outcome {
+        metrics::gauge!(match outcome {
             NativeHookCaptureOutcomeV1::AdmissionTimedOut =>
                 "hooks.capture.outcome.admission_timed_out",
             NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
@@ -102,7 +102,7 @@ pub fn capture_native_event_for_replay(
             NativeHookCaptureOutcomeV1::ScopeUnavailable =>
                 "hooks.capture.outcome.scope_unavailable",
         })
-        .inc(1);
+        .increment(1);
     }
     outcome
 }

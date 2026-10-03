@@ -31,7 +31,7 @@ pub struct SccCancelled;
 /// SCCs are emitted in reverse-topological order over the condensation:
 /// if SCC `A` depends on SCC `B`, `B` appears in the result before `A`.
 /// This matches Tarjan's natural emission order.
-#[hotpath::measure(label = "usecases.graph.tarjan_scc")]
+#[tracing::instrument(name = "usecases.graph.tarjan_scc", level = "trace", skip_all)]
 pub fn tarjan_scc<N, S1, S2>(adj: &HashMap<N, HashSet<N, S2>, S1>) -> Vec<Vec<N>>
 where
     N: Eq + Hash + Clone,
@@ -47,7 +47,11 @@ where
 /// [`tarjan_scc`] that consults `cancellation` once per discovered node and
 /// refuses with [`SccCancelled`] as soon as it has fired, so a cancelled
 /// request stops the CPU traversal instead of finishing the whole graph.
-#[hotpath::measure(label = "usecases.graph.tarjan_scc_cancellable")]
+#[tracing::instrument(
+    name = "usecases.graph.tarjan_scc_cancellable",
+    level = "trace",
+    skip_all
+)]
 pub fn tarjan_scc_cancellable<N, S1, S2>(
     adj: &HashMap<N, HashSet<N, S2>, S1>,
     cancellation: &dyn GraphCancellation,

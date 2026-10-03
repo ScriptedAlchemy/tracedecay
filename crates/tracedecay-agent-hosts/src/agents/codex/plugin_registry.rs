@@ -108,7 +108,11 @@ fn plugin_selector(marketplace_name: &str) -> String {
 /// `config.toml` and of every managed versioned-cache registration path are
 /// recorded through the active host transaction so rollback can restore the
 /// pre-command surface when the command fails or a later step rejects it.
-#[hotpath::measure(label = "hosts.agent.codex.plugin_registry_step")]
+#[tracing::instrument(
+    name = "hosts.agent.codex.plugin_registry_step",
+    level = "trace",
+    skip_all
+)]
 fn run_codex_plugin_step(
     codex_cli: &Path,
     args: &[&str],

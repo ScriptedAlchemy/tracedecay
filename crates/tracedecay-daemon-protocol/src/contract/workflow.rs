@@ -31,7 +31,6 @@ pub enum WorkflowApplicationInvocation {
 }
 
 impl WorkflowApplicationInvocation {
-    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",

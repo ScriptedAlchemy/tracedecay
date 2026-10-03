@@ -80,7 +80,6 @@ pub(super) fn require_project_path(project_root: &Path, path: &str) -> Result<St
 /// callers can review before committing. Centralizing the write here keeps
 /// the dry-run gate in one place around each primitive's own validation and
 /// span logic.
-#[hotpath::skip]
 pub(super) async fn commit_or_preview_edit(
     rel_path: &str,
     file: &SourceEditFileAuthority,
@@ -111,7 +110,7 @@ pub(super) async fn commit_or_preview_edit(
 
 /// Performs a single string replacement.
 /// Fails if `old_str` is not found or matches more than once.
-#[hotpath::measure(label = "edits.str_replace", future = true)]
+#[tracing::instrument(name = "edits.str_replace", level = "trace", skip_all)]
 pub(crate) async fn str_replace(
     project_root: &Path,
     path: &str,
@@ -182,7 +181,7 @@ pub(crate) async fn str_replace(
 
 /// Applies multiple string replacements atomically.
 /// Fails if any `old_str` doesn't match exactly once.
-#[hotpath::measure(label = "edits.multi_str_replace", future = true)]
+#[tracing::instrument(name = "edits.multi_str_replace", level = "trace", skip_all)]
 pub(crate) async fn multi_str_replace(
     project_root: &Path,
     path: &str,
@@ -285,7 +284,7 @@ pub(crate) async fn multi_str_replace(
 
 /// Inserts content before or after a unique anchor.
 /// Anchor can be a string or 1-indexed line number.
-#[hotpath::measure(label = "edits.insert_at", future = true)]
+#[tracing::instrument(name = "edits.insert_at", level = "trace", skip_all)]
 pub(crate) async fn insert_at(
     project_root: &Path,
     path: &str,
@@ -393,7 +392,7 @@ pub(crate) async fn insert_at(
 /// match, if the name is ambiguous, callable definitions win; if still
 /// ambiguous after that filter, the edit is refused so we don't clobber
 /// the wrong site.
-#[hotpath::measure(label = "edits.replace_symbol", future = true)]
+#[tracing::instrument(name = "edits.replace_symbol", level = "trace", skip_all)]
 pub(crate) async fn replace_symbol(
     project_root: &Path,
     graph: SourceEditGraphReadV1,
@@ -461,7 +460,7 @@ pub(crate) async fn replace_symbol(
 /// Inserts `content` immediately before or after a named symbol. `position`
 /// is one of `"before"` or `"after"`. Uses the same resolution logic as
 /// `replace_symbol`.
-#[hotpath::measure(label = "edits.insert_at_symbol", future = true)]
+#[tracing::instrument(name = "edits.insert_at_symbol", level = "trace", skip_all)]
 pub(crate) async fn insert_at_symbol(
     project_root: &Path,
     graph: SourceEditGraphReadV1,

@@ -114,7 +114,11 @@ async fn record_pending_effect_journal(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.txn.apply_relation")]
+#[tracing::instrument(
+    name = "session_temporal.txn.apply_relation",
+    level = "trace",
+    skip_all
+)]
 pub async fn apply_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     projection: &SessionRelationProjection,
@@ -162,12 +166,16 @@ pub async fn apply_relation_projection(
             context: "native relation graph watermark",
         });
     }
-    let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-        database
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
+    let transaction = {
+        use tracing::Instrument as _;
+        {
+            database
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(RECEIPT_OPERATION, error))?
+        }
+    };
     let changed = transaction
         .execute(
             "UPDATE session_relation_receipts
@@ -209,12 +217,16 @@ pub async fn apply_relation_projection(
             "relation effect journal changed during native graph acknowledgement",
         ));
     }
-    hotpath::measure_block!("session_temporal.txn.commit", {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
+    {
+        use tracing::Instrument as _;
+        {
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(RECEIPT_OPERATION, error))?
+        }
+    };
     Ok(applied)
 }
 

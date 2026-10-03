@@ -750,7 +750,6 @@ pub enum AddBranchAtRootAuthError {
 }
 
 impl AddBranchAtRootAuthError {
-    #[hotpath::skip]
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::Empty

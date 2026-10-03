@@ -26,7 +26,7 @@ pub(super) enum RemoteDeletionBootMode {
     DeletionOnly(RemoteDeletionReceipt),
 }
 
-#[hotpath::measure(label = "daemon.remote.deletion_boot", future = true)]
+#[tracing::instrument(name = "daemon.remote.deletion_boot", level = "trace", skip_all)]
 pub(super) async fn resume_remote_account_deletion_for_boot(
     owners: &RemoteDeletionRuntimeOwners,
 ) -> tracedecay_domain::errors::Result<RemoteDeletionBootMode> {
@@ -83,19 +83,19 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
 fn observe_remote_deletion_receipt(receipt: &RemoteDeletionReceipt) {
     match receipt.status {
         RemoteDeletionStatus::Deleted => {
-            hotpath::gauge!("daemon.remote.deletion.deleted_total").inc(1_u64);
+            metrics::gauge!("daemon.remote.deletion.deleted_total").increment(1.0);
         }
         RemoteDeletionStatus::Settling => {
-            hotpath::gauge!("daemon.remote.deletion.settling_total").inc(1_u64);
+            metrics::gauge!("daemon.remote.deletion.settling_total").increment(1.0);
         }
         RemoteDeletionStatus::Partial => {
-            hotpath::gauge!("daemon.remote.deletion.partial_total").inc(1_u64);
+            metrics::gauge!("daemon.remote.deletion.partial_total").increment(1.0);
         }
         RemoteDeletionStatus::Denied => {
-            hotpath::gauge!("daemon.remote.deletion.denied_total").inc(1_u64);
+            metrics::gauge!("daemon.remote.deletion.denied_total").increment(1.0);
         }
         RemoteDeletionStatus::Failed => {
-            hotpath::gauge!("daemon.remote.deletion.failed_total").inc(1_u64);
+            metrics::gauge!("daemon.remote.deletion.failed_total").increment(1.0);
         }
     }
 }
@@ -236,7 +236,7 @@ impl RemoteDeletionReceipt {
     }
 }
 
-#[hotpath::measure(label = "daemon.remote.deletion_dispatch", future = true)]
+#[tracing::instrument(name = "daemon.remote.deletion_dispatch", level = "trace", skip_all)]
 pub(super) async fn dispatch_remote_deletion(
     State(registry): State<DaemonHttpApplicationRegistry>,
     request: Request<Body>,
@@ -303,7 +303,7 @@ impl RemoteDeletionExecutionError {
     }
 }
 
-#[hotpath::measure(label = "daemon.remote.deletion_execute", future = true)]
+#[tracing::instrument(name = "daemon.remote.deletion_execute", level = "trace", skip_all)]
 async fn execute_remote_deletion(
     owners: &RemoteDeletionRuntimeOwners,
     request: RemoteDeletionHttpRequest,
@@ -342,9 +342,9 @@ async fn parse_remote_deletion_request(
     if !has_json_content_type(request.headers()) {
         return Err(RemoteDeletionReceipt::invalid_request());
     }
-    let body = hotpath::future!(
+    let body = tracing::Instrument::instrument(
         to_bytes(request.into_body(), MAX_REMOTE_DELETION_BODY_BYTES),
-        label = "daemon.remote.deletion_parse"
+        tracing::trace_span!("daemon.remote.deletion_parse"),
     )
     .await
     .map_err(|_| RemoteDeletionReceipt::invalid_request())?;

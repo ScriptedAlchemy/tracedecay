@@ -45,7 +45,6 @@ pub mod session_review {
         }
 
         /// Requests a review pass for the sessions the ingest pass just wrote.
-        #[hotpath::skip]
         pub async fn schedule(self, provider: &str, session_id: Option<&str>) {
             (self.scheduler)(provider, session_id).await;
         }

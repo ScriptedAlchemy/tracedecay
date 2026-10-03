@@ -1,6 +1,6 @@
 # indexing benchmark workload
 
-The profiled workload for `.github/workflows/hotpath-profile.yml`. It exists
+The benchmark workload for the indexing pipeline. It exists
 so a pull request can be asked one question. *did this diff make indexing
 slower?*, and get an answer that is about the diff rather than about the
 runner.
@@ -10,18 +10,13 @@ built as the `tracedecay-index-bench` binary.
 
 ```text
 cargo build -p tracedecay-query --bin tracedecay-index-bench \
-  --no-default-features --features production,hotpath
+  --no-default-features --features production
 
-HOTPATH_OUTPUT_FORMAT=json \
-HOTPATH_OUTPUT_PATH=/tmp/index-bench.json \
-HOTPATH_REPORT=functions-timing \
-  target/debug/tracedecay-index-bench
+target/debug/tracedecay-index-bench
 ```
 
-The workload summary goes to stdout as JSON; the Hotpath report goes to
-`HOTPATH_OUTPUT_PATH`. Built without the `hotpath` feature the binary runs
-the identical workload, prints the identical summary, and writes no report,
-every instrumentation macro compiles to nothing.
+The workload summary goes to stdout as JSON. Spans and gauges ride the
+workspace's unconditional `tracing`/`metrics` instrumentation.
 
 ## What it measures
 
@@ -44,7 +39,7 @@ on the same span, never a span total against the process total.
 
 ## Bounds
 
-Measured on a 16-core Linux workstation, `production,hotpath`, dev profile
+Measured on a 16-core Linux workstation, `production`, dev profile
 (which this workspace builds optimized):
 
 - wall: ~7.5 s (budget: 180 s)
@@ -60,8 +55,7 @@ nobody can trust.
 
 The run opens no socket (verified with `strace -e trace=socket,connect,bind`:
 zero calls), starts no daemon, resolves no URL, and never reads
-`~/.tracedecay`. Hotpath's localhost metrics server is disabled by the binary
-itself. The publication authority and projection sink are in-memory; the only
+`~/.tracedecay`. The publication authority and projection sink are in-memory; the only
 path written is a scratch directory under the system temp dir, removed before
 exit. The corpus is located from `CARGO_MANIFEST_DIR`, so the working
 directory does not change what is indexed.
@@ -146,7 +140,7 @@ hauler exec -- cargo run --release -p tracedecay-query \
 
 `clone-envelope-20260915.json` is the first envelope receipt. Its 101,154-symbol
 sample failed the 60 s clone-work target (+68.8 s of artifact ingest over the
-revision-14 control). Hotpath put the wait in `query.artifact.batch.sqlite`:
+revision-14 control). The spans put the wait in `query.artifact.batch.sqlite`:
 `clone_fingerprint_postings` was filled row by row in document order into its
 hash-keyed tree, so every batch commit rewrote and journaled leaves across the
 whole tree (27× write amplification on the fingerprint table alone).

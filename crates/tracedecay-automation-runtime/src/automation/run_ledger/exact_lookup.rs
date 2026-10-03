@@ -219,7 +219,11 @@ pub(super) fn read_committed_run_lifecycles(
 /// Logical newest lifecycles of the selected runs for operator pages that
 /// tolerate malformed rows. Unreadable rows are skipped; failed reads and
 /// lifecycle violations still fail the read.
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.lenient_lifecycles")]
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.lenient_lifecycles",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn read_lenient_run_lifecycles(
     file: &std::fs::File,
     path: &Path,
@@ -278,9 +282,10 @@ pub(super) struct ExactRunIdentity {
     pub(super) payload_len: u64,
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.run_ledger_lookup.exact_bounded"
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.exact_bounded",
+    level = "trace",
+    skip_all
 )]
 pub async fn find_run_record_exact_bounded(
     dashboard_root: &Path,
@@ -299,7 +304,11 @@ pub async fn find_run_record_exact_bounded(
     })?
 }
 
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.exact_bounded_blocking")]
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.exact_bounded_blocking",
+    level = "trace",
+    skip_all
+)]
 pub fn find_run_record_exact_bounded_blocking(
     dashboard_root: &Path,
     run_id: &str,
@@ -377,7 +386,11 @@ pub(super) fn read_exact_run_identity_from_file(
 /// Opens the ledger for readers that stabilize visible bytes through the
 /// committed lifecycle index rather than on every open. Write access is
 /// required because the index syncs the handle when it folds foreign rows.
-#[hotpath::measure(label = "hosts.automation.run_ledger_lookup.open")]
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_lookup.open",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn open_committed_run_ledger(
     path: &Path,
     create: bool,

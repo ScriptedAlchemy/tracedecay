@@ -216,7 +216,6 @@
         "tracedecay-framing",
         "tracedecay-hooks",
         "tracedecay-host-integration",
-        "tracedecay-hotpath-guard",
         "tracedecay-mcp-catalog",
         "tracedecay-policy",
         "tracedecay-privacy",
@@ -262,10 +261,7 @@
       "budget_basis": "runtime 28.5-29.6 compile + 5-6 tests, core-storage 13.0-18.6 + 2.7 on a different resolution: 51-57 measured parts (63.6 as this pairing in run 36051245663), x1.25 = 65"
     }
   ],
-  "not_run": {
-    "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it",
-    "tracedecay-hotpath-guard::functions_limit_live": "requires hotpath/hotpath and hotpath/hotpath-mcp to start a live MCP server, which no test lane enables; the hotpath graph check compiles it"
-  },
+  "not_run": {},
   "linux_groups": [
     {
       "name": "root-lib-sessions",

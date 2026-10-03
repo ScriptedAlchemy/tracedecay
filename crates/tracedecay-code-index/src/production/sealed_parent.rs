@@ -202,7 +202,7 @@ impl SealedParentGenerationV1 {
             &bytes,
             &mut restored,
         )?;
-        hotpath::gauge!("code_index.sparse.files_decoded").inc(1_u64);
+        metrics::gauge!("code_index.sparse.files_decoded").increment(1.0);
         restore_file_pages(vec![page])?
             .pop()
             .ok_or_else(|| contract("sealed file segment restored no file"))

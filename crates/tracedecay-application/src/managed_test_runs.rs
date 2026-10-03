@@ -134,7 +134,11 @@ impl CanonicalManagedTestRunReader {
         Self { store, events }
     }
 
-    #[hotpath::measure(label = "usecases.managed_test_runs.read_latest", future = true)]
+    #[tracing::instrument(
+        name = "usecases.managed_test_runs.read_latest",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn latest_current(
         &self,
         current: &ManagedTestRunCurrentScope,

@@ -74,7 +74,6 @@ pub mod registered_schema {
             self.connection.binding()
         }
 
-        #[hotpath::skip]
         pub async fn query<P>(
             &self,
             sql: &str,
@@ -86,7 +85,6 @@ pub mod registered_schema {
             self.connection.query(sql, params).await
         }
 
-        #[hotpath::skip]
         pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
         where
             P: crate::db::engine::IntoParams,
@@ -94,7 +92,6 @@ pub mod registered_schema {
             self.connection.execute(sql, params).await
         }
 
-        #[hotpath::skip]
         pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
             self.connection.execute_batch(sql).await
         }
@@ -105,7 +102,6 @@ pub mod registered_schema {
         /// The long lease renews only when bounded work makes progress.
         /// Shutdown, idleness, and authority revocation remain cancellation
         /// conditions; this does not widen any statement or lease timeout.
-        #[hotpath::skip]
         pub async fn begin_atomic_schema_transaction(
             &self,
         ) -> crate::db::engine::Result<RegisteredSchemaInstallationTransactionV1<'_>> {
@@ -120,7 +116,6 @@ pub mod registered_schema {
 
         /// Runs one independently committed long schema batch while the
         /// underlying runtime continuously revalidates initializing authority.
-        #[hotpath::skip]
         pub async fn execute_authority_revalidated_batch(
             &self,
             sql: &str,
@@ -139,7 +134,6 @@ pub mod registered_schema {
     }
 
     impl QueryExecutor for RegisteredSchemaInstallationV1 {
-        #[hotpath::skip]
         async fn query<P>(
             &self,
             sql: &str,
@@ -153,7 +147,6 @@ pub mod registered_schema {
     }
 
     impl Executor for RegisteredSchemaInstallationV1 {
-        #[hotpath::skip]
         async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
         where
             P: crate::db::engine::IntoParams,
@@ -161,14 +154,12 @@ pub mod registered_schema {
             RegisteredSchemaInstallationV1::execute(self, sql, params).await
         }
 
-        #[hotpath::skip]
         async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
             RegisteredSchemaInstallationV1::execute_batch(self, sql).await
         }
     }
 
     impl RegisteredSchemaInstallationTransactionV1<'_> {
-        #[hotpath::skip]
         pub async fn query<P>(
             &self,
             sql: &str,
@@ -180,7 +171,6 @@ pub mod registered_schema {
             self.transaction.query(sql, params).await
         }
 
-        #[hotpath::skip]
         pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
         where
             P: crate::db::engine::IntoParams,
@@ -188,26 +178,22 @@ pub mod registered_schema {
             self.transaction.execute(sql, params).await
         }
 
-        #[hotpath::skip]
         pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
             self.transaction
                 .execute_authority_revalidated_batch(sql)
                 .await
         }
 
-        #[hotpath::skip]
         pub async fn commit(self) -> crate::db::engine::Result<()> {
             self.transaction.commit().await
         }
 
-        #[hotpath::skip]
         pub async fn rollback(self) -> crate::db::engine::Result<()> {
             self.transaction.rollback().await
         }
     }
 
     impl QueryExecutor for RegisteredSchemaInstallationTransactionV1<'_> {
-        #[hotpath::skip]
         async fn query<P>(
             &self,
             sql: &str,
@@ -221,7 +207,6 @@ pub mod registered_schema {
     }
 
     impl Executor for RegisteredSchemaInstallationTransactionV1<'_> {
-        #[hotpath::skip]
         async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
         where
             P: crate::db::engine::IntoParams,
@@ -229,7 +214,6 @@ pub mod registered_schema {
             RegisteredSchemaInstallationTransactionV1::execute(self, sql, params).await
         }
 
-        #[hotpath::skip]
         async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
             RegisteredSchemaInstallationTransactionV1::execute_batch(self, sql).await
         }
@@ -303,7 +287,6 @@ pub mod registered_schema {
     ///
     /// This is crate-private so no dependent crate can fabricate an
     /// installation capability before Store publication.
-    #[hotpath::skip]
     pub(crate) async fn install_from_authorized_connection(
         connection: Connection,
         cancellation: CancellationToken,
@@ -319,7 +302,6 @@ pub mod registered_schema {
     /// # Errors
     /// Returns [`TraceDecayError::Database`] when no installer is registered,
     /// or whatever the registered installer reports.
-    #[hotpath::skip]
     pub async fn ensure_registered_schema(
         installation: &RegisteredSchemaInstallationV1,
     ) -> Result<()> {

@@ -172,7 +172,7 @@ impl fmt::Debug for WorkflowTopologyStore {
 }
 
 impl WorkflowTopologyStore {
-    #[hotpath::measure(label = "runtime_core.workflow.publish")]
+    #[tracing::instrument(name = "runtime_core.workflow.publish", level = "trace", skip_all)]
     pub fn publish_from_definition(
         definition: &WorkflowDefinition,
         check: &dyn Fn() -> Result<(), GraphDbError>,

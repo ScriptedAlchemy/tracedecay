@@ -42,7 +42,11 @@ pub struct GitEvidencePassOutcome {
     pub later_failure: Option<GitCorrelationError>,
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.converge_pass", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.converge_pass",
+    level = "trace",
+    skip_all
+)]
 pub async fn converge_git_evidence_pass<S, G>(
     session_store: &S,
     git: &G,

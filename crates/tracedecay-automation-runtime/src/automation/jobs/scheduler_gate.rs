@@ -32,7 +32,7 @@ use super::{
 /// The schedule *decision* below deliberately still uses a freshly loaded
 /// summary: a newer view can only make the decision more correct. Only the
 /// scan anchor is pinned to the occurrence snapshot.
-#[hotpath::measure(label = "automation.scheduler.job_gate", future = true)]
+#[tracing::instrument(name = "automation.scheduler.job_gate", level = "trace", skip_all)]
 pub async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
     config: &AutomationConfig,

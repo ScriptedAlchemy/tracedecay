@@ -41,7 +41,11 @@ use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 /// A lease whose own worktree was removed can prove nothing and has nothing
 /// to collect: the leases of the repository's remaining worktrees share this
 /// store and collect the removed worktree's scope.
-#[hotpath::measure(label = "daemon.git.maintenance.scope_reconciliation", future = true)]
+#[tracing::instrument(
+    name = "daemon.git.maintenance.scope_reconciliation",
+    level = "trace",
+    skip_all
+)]
 pub async fn run_code_index_scope_reconciliation(
     lease: &ProjectStoreMaintenanceLeaseV1,
     schedulers: &CodeIndexSchedulerRegistryV1,

@@ -187,7 +187,7 @@ fn pending_session<'a>(
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.vibe.capture", future = true)]
+#[tracing::instrument(name = "sessions.hosts.vibe.capture", level = "trace", skip_all)]
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
     source: &VibeSource,
@@ -197,15 +197,15 @@ pub async fn capture_vibe_observations(
     cancellation: &ObservationCancellation,
     convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
-    let discovery = hotpath::measure_block!(
-        "sessions.hosts.vibe.discover_blocking",
+    let discovery = {
+        let _span = tracing::trace_span!("sessions.hosts.vibe.discover_blocking").entered();
         run_blocking_transcript_section(|| {
             source.discover_transcript_paths(
                 project_root,
                 TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
             )
         })
-    );
+    };
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
         ..VibeCaptureOutcome::default()
@@ -220,12 +220,12 @@ pub async fn capture_vibe_observations(
             outcome.deferred = true;
             break;
         }
-        let Some((pending, meta)) = hotpath::measure_block!(
-            "sessions.hosts.vibe.meta_blocking",
+        let Some((pending, meta)) = {
+            let _span = tracing::trace_span!("sessions.hosts.vibe.meta_blocking").entered();
             run_blocking_transcript_section(|| {
                 pending_session(source, &path, project_root, convergence)
             })
-        )?
+        }?
         else {
             continue;
         };
@@ -361,7 +361,7 @@ fn collect_eligible_messages_jsonl(
     let files_considered = u64::try_from(paths.len())
         .unwrap_or(u64::MAX)
         .saturating_add(skipped_oversized_entries);
-    #[cfg(feature = "hotpath")]
+
     crate::runtime::pipeline_metrics::record_discovery_files(
         files_considered,
         u64::try_from(paths.len()).unwrap_or(u64::MAX),

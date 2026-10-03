@@ -266,7 +266,7 @@ impl HookDeliveryReceiptSpoolV1 {
     /// their budget. A writer publishes its receipt while holding the lock,
     /// so a drain woken by that publication waits it out instead of missing
     /// the receipt. A lock still held after the budget is `Busy`.
-    #[hotpath::measure(label = "hooks.delivery.open")]
+    #[tracing::instrument(name = "hooks.delivery.open", level = "trace", skip_all)]
     pub fn open(
         root: impl Into<PathBuf>,
         wait_budget: Duration,
@@ -274,10 +274,14 @@ impl HookDeliveryReceiptSpoolV1 {
         let root = root.into();
         ensure_root(&root)?;
         let lock = open_lock_file(&root, LOCK_FILE)?;
-        match hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()) {
+        let try_lock_result = {
+            let _span = tracing::trace_span!("hooks.delivery.lock.try_lock").entered();
+            lock.try_lock()
+        };
+        match try_lock_result {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
-                hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
+                metrics::gauge!("hooks.delivery.lock.contended").increment(1);
                 if wait_budget.is_zero() {
                     return Err(HookDeliverySpoolError::Busy);
                 }
@@ -367,7 +371,7 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(false)
     }
 
-    #[hotpath::measure(label = "hooks.delivery.pending")]
+    #[tracing::instrument(name = "hooks.delivery.pending", level = "trace", skip_all)]
     pub fn pending(
         &self,
         limit: usize,
@@ -387,11 +391,11 @@ impl HookDeliveryReceiptSpoolV1 {
             }
             receipts.push(receipt);
         }
-        hotpath::gauge!("hooks.delivery.pending.count").set(receipts.len());
+        metrics::gauge!("hooks.delivery.pending.count").set((receipts.len()) as f64);
         Ok(receipts)
     }
 
-    #[hotpath::measure(label = "hooks.delivery.acknowledge")]
+    #[tracing::instrument(name = "hooks.delivery.acknowledge", level = "trace", skip_all)]
     pub fn acknowledge(self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
         Ok(self.acknowledge_many(&[receipt_id])? > 0)
     }
@@ -400,7 +404,7 @@ impl HookDeliveryReceiptSpoolV1 {
     /// directory sync that makes the removals durable. A receipt whose removal
     /// a crash undoes is settled again idempotently. Returns how many receipts
     /// were still present.
-    #[hotpath::measure(label = "hooks.delivery.acknowledge_many")]
+    #[tracing::instrument(name = "hooks.delivery.acknowledge_many", level = "trace", skip_all)]
     pub fn acknowledge_many(
         self,
         receipt_ids: &[[u8; 16]],
@@ -417,9 +421,10 @@ impl HookDeliveryReceiptSpoolV1 {
         let Self { root, _lock: lock } = self;
         drop(lock);
         if removed > 0 {
-            hotpath::measure_block!("hooks.delivery.fsync.ack", {
+            {
+                let _span = tracing::trace_span!("hooks.delivery.fsync.ack").entered();
                 sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-            })?;
+            }?;
         }
         Ok(removed)
     }
@@ -434,7 +439,7 @@ impl HookDeliveryReceiptSpoolV1 {
 }
 
 /// Every published receipt, sorted; staging, locks, and temporaries excluded.
-#[hotpath::measure(label = "hooks.delivery.receipt_paths")]
+#[tracing::instrument(name = "hooks.delivery.receipt_paths", level = "trace", skip_all)]
 fn receipt_names(root: &Path) -> Result<Vec<PathBuf>, HookDeliverySpoolError> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(root).map_err(|_| HookDeliverySpoolError::Io)? {
@@ -466,7 +471,7 @@ fn receipt_names(root: &Path) -> Result<Vec<PathBuf>, HookDeliverySpoolError> {
 impl HookDeliveryReceiptWriterV1 {
     /// `wait_budget` bounds each lock wait, measured from its own attempt:
     /// the shared staging lease here, and the publish lock in [`Self::retain`].
-    #[hotpath::measure(label = "hooks.delivery.open_writer")]
+    #[tracing::instrument(name = "hooks.delivery.open_writer", level = "trace", skip_all)]
     pub fn open_within(
         root: impl Into<PathBuf>,
         wait_budget: Duration,
@@ -488,7 +493,7 @@ impl HookDeliveryReceiptWriterV1 {
     /// lock, then holds that lock only to publish by rename. A publish lock
     /// held past the budget leaves the receipt staged for the next owner open
     /// instead of failing.
-    #[hotpath::measure(label = "hooks.delivery.retain")]
+    #[tracing::instrument(name = "hooks.delivery.retain", level = "trace", skip_all)]
     pub fn retain(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
@@ -496,7 +501,7 @@ impl HookDeliveryReceiptWriterV1 {
         let root = self.root.as_path();
         receipt.validate()?;
         if let Some(existing) = retained(root, receipt)? {
-            hotpath::gauge!("hooks.delivery.append.deduplicated").inc(1);
+            metrics::gauge!("hooks.delivery.append.deduplicated").increment(1);
             return Ok(HookDeliveryRetentionV1::AlreadyRetained(existing));
         }
         let bytes =
@@ -504,10 +509,11 @@ impl HookDeliveryReceiptWriterV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-        hotpath::gauge!("hooks.delivery.append.bytes").set(bytes.len());
-        let staged = hotpath::measure_block!("hooks.delivery.fsync.stage", {
+        metrics::gauge!("hooks.delivery.append.bytes").set((bytes.len()) as f64);
+        let staged = {
+            let _span = tracing::trace_span!("hooks.delivery.fsync.stage").entered();
             stage(root, receipt.receipt_id, &bytes)
-        })?;
+        }?;
         let publish = match self.writer_lock.try_clone() {
             Ok(publish) => publish,
             Err(_) => {
@@ -518,16 +524,20 @@ impl HookDeliveryReceiptWriterV1 {
         match lock_until(&publish, Instant::now() + self.wait_budget) {
             Ok(()) => {}
             Err(LockAdmissionError::TimedOut) => {
-                hotpath::gauge!("hooks.delivery.staged_for_adoption").inc(1);
+                metrics::gauge!("hooks.delivery.staged_for_adoption").increment(1);
                 let ready = staged
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(|name| root.join(name.replacen(STAGED_MARKER, READY_MARKER, 1)))
                     .ok_or(HookDeliverySpoolError::Io)?;
                 fs::rename(&staged, &ready).map_err(|_| HookDeliverySpoolError::Io)?;
-                hotpath::measure_block!("hooks.delivery.fsync.staged", {
-                    sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-                })?;
+                {
+                    let _span = tracing::trace_span!("hooks.delivery.fsync.staged").entered();
+                    {
+                        sync_directory(root, DIRECTORY_POLICY)
+                            .map_err(|_| HookDeliverySpoolError::Io)
+                    }
+                }?;
                 return Ok(HookDeliveryRetentionV1::Staged);
             }
             Err(LockAdmissionError::Io(_)) => {
@@ -540,9 +550,10 @@ impl HookDeliveryReceiptWriterV1 {
         drop(lease);
         let retention = published?;
         if retention == HookDeliveryRetentionV1::Published {
-            hotpath::measure_block!("hooks.delivery.fsync.append", {
+            {
+                let _span = tracing::trace_span!("hooks.delivery.fsync.append").entered();
                 sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-            })?;
+            }?;
         }
         Ok(retention)
     }
@@ -576,7 +587,7 @@ fn publish_staged(
     let outcome = match retained(root, receipt) {
         Ok(Some(existing)) => Ok(HookDeliveryRetentionV1::AlreadyRetained(existing)),
         Ok(None) if receipt_names(root)?.len() >= MAX_PENDING_RECEIPTS => {
-            hotpath::gauge!("hooks.delivery.refused.full").inc(1);
+            metrics::gauge!("hooks.delivery.refused.full").increment(1);
             Err(HookDeliverySpoolError::Full)
         }
         Ok(None) => {
@@ -734,9 +745,10 @@ fn ensure_root(root: &Path) -> Result<(), HookDeliverySpoolError> {
         fs::set_permissions(root, fs::Permissions::from_mode(0o700))
             .map_err(|_| HookDeliverySpoolError::Io)?;
     }
-    hotpath::measure_block!("hooks.delivery.fsync.directory", {
+    {
+        let _span = tracing::trace_span!("hooks.delivery.fsync.directory").entered();
         sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-    })
+    }
 }
 
 fn decode_receipt(bytes: &[u8]) -> Result<HookDeliverySourceReceiptV1, HookDeliverySpoolError> {

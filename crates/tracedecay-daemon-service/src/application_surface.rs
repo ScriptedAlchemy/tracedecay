@@ -141,7 +141,11 @@ impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
     }
 }
 
-#[hotpath::measure(label = "application_surface.invoker_assemble")]
+#[tracing::instrument(
+    name = "application_surface.invoker_assemble",
+    level = "trace",
+    skip_all
+)]
 fn application_invoker_for_surface(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     surface: BindingSurface,
@@ -196,7 +200,11 @@ fn application_invoker_for_surface(
     Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
 }
 
-#[hotpath::measure(label = "application_surface.multi_root.invoke", future = true)]
+#[tracing::instrument(
+    name = "application_surface.multi_root.invoke",
+    level = "trace",
+    skip_all
+)]
 pub async fn invoke_multi_root_surface_request(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation: ApplicationSurfaceOperation,
@@ -307,17 +315,13 @@ pub fn http_application_router(
     http_application_router_with_executor(Arc::new(client), operation_events, active_project_id)
 }
 
-#[hotpath::measure(label = "application_surface.http.router")]
+#[tracing::instrument(name = "application_surface.http.router", level = "trace", skip_all)]
 pub fn http_application_router_with_executor(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    Ok(with_hotpath_server_layer(assemble_http_application_router(
-        executor,
-        operation_events,
-        active_project_id,
-    )?))
+    assemble_http_application_router(executor, operation_events, active_project_id)
 }
 
 /// Complete HTTP application routes without the process HTTP-server layer.
@@ -364,7 +368,11 @@ pub fn assemble_http_application_router(
 /// descriptor, the same owner, the same dispatch and problem taxonomy. The
 /// attempt-runtime routes are simply not registered here, so the lease protocol
 /// is unreachable from the dashboard rather than merely undocumented.
-#[hotpath::measure(label = "application_surface.http.dashboard_work_router")]
+#[tracing::instrument(
+    name = "application_surface.http.dashboard_work_router",
+    level = "trace",
+    skip_all
+)]
 pub fn dashboard_work_application_router_with_executor(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -376,7 +384,11 @@ pub fn dashboard_work_application_router_with_executor(
     )
 }
 
-#[hotpath::measure(label = "application_surface.http.dashboard_configuration_router")]
+#[tracing::instrument(
+    name = "application_surface.http.dashboard_configuration_router",
+    level = "trace",
+    skip_all
+)]
 pub fn dashboard_configuration_application_router_with_executor(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -394,7 +406,11 @@ pub fn dashboard_configuration_application_router_with_executor(
     )
 }
 
-#[hotpath::measure(label = "application_surface.http.dashboard_feedback_router")]
+#[tracing::instrument(
+    name = "application_surface.http.dashboard_feedback_router",
+    level = "trace",
+    skip_all
+)]
 pub fn dashboard_feedback_application_router_with_executor(
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -407,22 +423,6 @@ pub fn dashboard_feedback_application_router_with_executor(
     Ok(tracedecay_api::feedback_application_router(invoker).layer(
         axum::middleware::from_fn_with_state(cancellations, application_http_context),
     ))
-}
-
-/// Attach Hotpath only after a production HTTP router has its complete route
-/// and middleware assembly. Leaf routers remain unlayered so merged routes
-/// emit exactly one server event and enter exactly one route scope.
-#[cfg(feature = "hotpath")]
-pub fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    router.layer(hotpath::AxumLayer::new())
-}
-
-#[cfg(not(feature = "hotpath"))]
-pub fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
-    router
 }
 
 #[cfg(test)]

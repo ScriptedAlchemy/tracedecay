@@ -43,7 +43,7 @@ WHERE source_shard_json = ?1 AND source_incarnation = ?2
   AND state = ?8 AND entry_json = ?9
 "#;
 
-#[hotpath::measure(label = "rusqlite.ledger.outbox_insert")]
+#[tracing::instrument(name = "rusqlite.ledger.outbox_insert", level = "trace", skip_all)]
 pub(super) fn insert(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -151,7 +151,7 @@ fn validate_source(
     Ok(())
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.outbox_lookup")]
+#[tracing::instrument(name = "rusqlite.ledger.outbox_lookup", level = "trace", skip_all)]
 pub(crate) fn outbox_entry(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,
@@ -264,7 +264,7 @@ fn transition(
     Ok(updated)
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.outbox_transition")]
+#[tracing::instrument(name = "rusqlite.ledger.outbox_transition", level = "trace", skip_all)]
 fn persist_transition(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,

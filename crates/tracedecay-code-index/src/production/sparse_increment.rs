@@ -58,7 +58,6 @@ pub enum CodeIndexColdBuildReasonV1 {
 }
 
 impl CodeIndexColdBuildReasonV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoParent => "no_parent",
@@ -285,7 +284,7 @@ pub(super) fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
 
 impl SparseBuildV1<'_> {
     /// The successor of `parent` for `snapshot`, or why it must build cold.
-    #[hotpath::measure(label = "code_index.build.sparse")]
+    #[tracing::instrument(name = "code_index.build.sparse", level = "trace", skip_all)]
     pub(super) fn build<S: CodeChunkProjectionSink>(
         &self,
         projection_sink: &mut S,
@@ -342,7 +341,7 @@ impl SparseBuildV1<'_> {
             return Ok(Err(CodeIndexColdBuildReasonV1::MovesNameLookups));
         }
         lexical_page_source::checkpoint(control)?;
-        hotpath::gauge!("code_index.sparse.edited_files").set(edited.len() as u64);
+        metrics::gauge!("code_index.sparse.edited_files").set(edited.len() as f64);
 
         let generation_id = manifest.generation_id.clone();
         let parent_id = parent.manifest().generation_id.clone();
@@ -478,7 +477,7 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-        hotpath::gauge!("code_index.sparse.segments_written").set(segments.len() as u64);
+        metrics::gauge!("code_index.sparse.segments_written").set(segments.len() as f64);
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);

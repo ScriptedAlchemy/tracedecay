@@ -5,7 +5,11 @@ use std::path::Path;
 use super::{contract_error, recovery_index};
 use tracedecay_domain::errors::Result;
 
-#[hotpath::measure(label = "daemon.automation.effect.housekeeping", future = true)]
+#[tracing::instrument(
+    name = "daemon.automation.effect.housekeeping",
+    level = "trace",
+    skip_all
+)]
 pub async fn finalize_terminal_housekeeping(
     dashboard_root: &Path,
     journal_path: &Path,

@@ -35,7 +35,7 @@ use super::{StoreAdministration, await_user_profile_host_admission_replay_for_id
 ///
 /// `request_cancellation` is the daemon's registered cancellation for this
 /// request; a transport that cancels relays it into the owner's signal.
-#[hotpath::measure(label = "daemon.profile_retained.invoke", future = true)]
+#[tracing::instrument(name = "daemon.profile_retained.invoke", level = "trace", skip_all)]
 pub(super) async fn invoke_profile_retained(
     store_administration: &StoreAdministration,
     request_id: String,

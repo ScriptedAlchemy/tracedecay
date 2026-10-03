@@ -207,7 +207,11 @@ impl ProjectCiRetainedObservationStoreV1 {
 
     /// Loads only the canonical, structurally validated inventory for the
     /// exact admitted scope. Point records remain behind bounded entry reads.
-    #[hotpath::measure(label = "usecases.advisory.ci.load_inventory", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.ci.load_inventory",
+        level = "trace",
+        skip_all
+    )]
     pub async fn load_inventory_manifest(
         &self,
         context: &RequestContext,
@@ -265,7 +269,7 @@ impl ProjectCiRetainedObservationStoreV1 {
     /// Loads one manifest-selected point record within the caller's remaining
     /// byte budget. The encoded size is checked before deserialization and the
     /// decoded record is bound back to both immutable identities in the entry.
-    #[hotpath::measure(label = "usecases.advisory.ci.load_entry", future = true)]
+    #[tracing::instrument(name = "usecases.advisory.ci.load_entry", level = "trace", skip_all)]
     pub async fn load_bounded_entry(
         &self,
         context: &RequestContext,
@@ -323,7 +327,7 @@ impl ProjectCiRetainedObservationStoreV1 {
 
     /// Loads the exact-scope bounded inventory and verifies every retained
     /// record against the manifest's canonical content identity.
-    #[hotpath::measure(label = "usecases.advisory.ci.load_manifest", future = true)]
+    #[tracing::instrument(name = "usecases.advisory.ci.load_manifest", level = "trace", skip_all)]
     pub async fn load_manifest(
         &self,
         context: &RequestContext,
@@ -410,7 +414,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         context: &'a RequestContext,
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderRecordV1>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !context_allows_feedback_operation(
                     context,
@@ -424,7 +428,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
                 let encoded = self.database.get_metadata(&key).await.ok()??;
                 Self::decode_record(request, &encoded)
             },
-            label = "usecases.advisory.ci.load_record"
+            tracing::trace_span!("usecases.advisory.ci.load_record"),
         ))
     }
 
@@ -436,7 +440,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
         state: CiFailureLocalizationStateV1,
         coverage: CiFailureCoverageV1,
     ) -> FeedbackPortFuture<'a, Option<CiRetainedProviderObservationV1>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !context_allows_feedback_operation(
                     context,
@@ -561,7 +565,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
                 }
                 Some(observation)
             },
-            label = "usecases.advisory.ci.retain_observation"
+            tracing::trace_span!("usecases.advisory.ci.retain_observation"),
         ))
     }
 }
@@ -612,7 +616,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
         request: &'a CiFailureLocalizationRequestV1,
         record: &'a CiRetainedProviderRecordV1,
     ) -> FeedbackPortFuture<'a, Option<CiExactCodeEvidenceV1>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !context_allows_feedback_operation(
                     context,
@@ -810,7 +814,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
                     tests,
                 })
             },
-            label = "usecases.advisory.ci.resolve_code_anchor"
+            tracing::trace_span!("usecases.advisory.ci.resolve_code_anchor"),
         ))
     }
 }

@@ -6,8 +6,7 @@
 //! its module prefix. The shared `common`, `work_registered_store`, and
 //! `registered_workflow_store` harnesses are compiled once here and reached
 //! through `use crate::<harness>;` from the modules that used to declare
-//! them. `tests/hotpath_coverage.rs` stays its own binary because it sets
-//! process environment variables (`HOTPATH_*`) in-process.
+//! them.
 
 mod common;
 mod registered_workflow_store;

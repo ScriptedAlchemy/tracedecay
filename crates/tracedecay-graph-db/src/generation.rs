@@ -454,10 +454,7 @@ impl GraphGenerationRows {
     /// Hydrates the rows a journaled replay names and binds them to its
     /// relational key and digests. A sealed code generation is rebuilt by
     /// `provider` into the spill `spill` creates.
-    #[hotpath::measure(
-        label = "graph_db.generation.replay.hydrate",
-        impl_type = "GraphGenerationRows"
-    )]
+    #[tracing::instrument(name = "graph_db.generation.replay.hydrate", level = "trace", skip_all)]
     pub(crate) fn from_replay_source(
         publication: &GraphPublicationReplayV1,
         source: GraphGenerationReplaySource,
@@ -515,10 +512,8 @@ impl GraphGenerationRows {
         }
         check()?;
         let (entities, relations) = rows.row_counts();
-        crate::hotpath_observe::record_counts(entities, relations, 1, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Replay,
-        );
+        crate::observe::record_counts(entities, relations, 1, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Replay);
         Ok(rows)
     }
 }
@@ -651,7 +646,7 @@ impl GraphGenerationManifest {
         Ok((digest, row_sum))
     }
 
-    #[hotpath::measure(label = "code_index.seal.digest")]
+    #[tracing::instrument(name = "code_index.seal.digest", level = "trace", skip_all)]
     fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -910,7 +905,7 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
 /// `crate::verified_marker` for what that marker does and does not assert.
 ///
 /// Returns the proven digest and the number of canonical bytes it hashed.
-#[hotpath::measure(label = "graph_db.generation.recover.verify")]
+#[tracing::instrument(name = "graph_db.generation.recover.verify", level = "trace", skip_all)]
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -927,7 +922,7 @@ pub(crate) fn verify_recovered_generation(
 /// enumeration count the publication tests pin ("stream the proof exactly
 /// once") stays a statement about the authority's rows; the sealed copy pays
 /// its own post-reopen proof, counted separately.
-#[hotpath::measure(label = "graph_db.sealed_store.verify")]
+#[tracing::instrument(name = "graph_db.sealed_store.verify", level = "trace", skip_all)]
 pub(crate) fn verify_sealed_copy_generation(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -1254,8 +1249,8 @@ impl ManifestDigestPipelineMetrics {
         }
         let current = self.current_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
         self.peak_bytes.fetch_max(current, Ordering::AcqRel);
-        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes").set(current as f64);
-        hotpath::gauge!("graph_db.generation.manifest_digest.peak_in_flight_bytes")
+        metrics::gauge!("graph_db.generation.manifest_digest.in_flight_bytes").set(current as f64);
+        metrics::gauge!("graph_db.generation.manifest_digest.peak_in_flight_bytes")
             .set(self.peak_bytes.load(Ordering::Acquire) as f64);
         drop(gate);
         Ok(ManifestDigestReservation {
@@ -1299,7 +1294,7 @@ impl Drop for ManifestDigestReservation {
             .current_bytes
             .fetch_sub(self.bytes, Ordering::AcqRel);
         let remaining = prior.saturating_sub(self.bytes);
-        hotpath::gauge!("graph_db.generation.manifest_digest.in_flight_bytes")
+        metrics::gauge!("graph_db.generation.manifest_digest.in_flight_bytes")
             .set(remaining as f64);
         self.metrics.reservation_released.notify_all();
     }
@@ -1344,7 +1339,11 @@ fn recovered_generation_digest_with_config(
     recovered_generation_digest_and_rows(manifest, check, config).map(|(digest, _)| digest)
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest",
+    level = "trace",
+    skip_all
+)]
 fn recovered_generation_digest_and_rows(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -1383,8 +1382,8 @@ fn recovered_generation_digest_and_rows(
         )
         .collect::<Vec<_>>();
     let workers = config.effective_workers(chunks.len())?;
-    hotpath::gauge!("graph_db.generation.manifest_digest.effective_workers").set(workers as f64);
-    hotpath::gauge!("graph_db.generation.manifest_digest.chunks").set(chunks.len() as f64);
+    metrics::gauge!("graph_db.generation.manifest_digest.effective_workers").set(workers as f64);
+    metrics::gauge!("graph_db.generation.manifest_digest.chunks").set(chunks.len() as f64);
     if workers == 1 {
         for chunk in chunks {
             digest_manifest_chunk_serial(chunk, &mut writer, &mut canonical, check)?;
@@ -1404,7 +1403,11 @@ fn recovered_generation_digest_and_rows(
     Ok((encode_lowercase_hex(&digest.finalize()), row_sum))
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.parallel")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.parallel",
+    level = "trace",
+    skip_all
+)]
 fn digest_manifest_chunks_parallel(
     chunks: &[ManifestDigestChunk<'_>],
     writer: &mut CheckedDigestWriter<'_>,
@@ -1507,10 +1510,10 @@ fn digest_manifest_chunks_parallel(
                             drop(reservation);
                         }
                         ManifestDigestChunkEncoding::SerialFallback => {
-                            hotpath::gauge!(
+                            metrics::gauge!(
                                 "graph_db.generation.manifest_digest.serial_fallback_chunks"
                             )
-                            .inc(1_u64);
+                            .increment(1.0);
                             // The worker buffer is already gone; release its
                             // reservation before the one-row serial buffer grows.
                             drop(reservation);
@@ -1539,7 +1542,11 @@ fn digest_manifest_chunks_parallel(
     })
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.serial_chunk")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.serial_chunk",
+    level = "trace",
+    skip_all
+)]
 fn digest_manifest_chunk_serial(
     chunk: ManifestDigestChunk<'_>,
     writer: &mut CheckedDigestWriter<'_>,
@@ -1575,7 +1582,11 @@ fn digest_manifest_chunk_serial(
     Ok(())
 }
 
-#[hotpath::measure(label = "graph_db.generation.manifest_digest.encode_chunk")]
+#[tracing::instrument(
+    name = "graph_db.generation.manifest_digest.encode_chunk",
+    level = "trace",
+    skip_all
+)]
 fn encode_manifest_digest_chunk(
     chunk: ManifestDigestChunk<'_>,
     worker_bytes: usize,

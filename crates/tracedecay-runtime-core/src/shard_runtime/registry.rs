@@ -39,7 +39,6 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
 use crate::cancellation::CancellationToken;
-use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -98,7 +97,6 @@ impl StoreRuntimeKey {
         &self.shard_id
     }
 
-    #[hotpath::skip]
     pub const fn incarnation(&self) -> StoreIncarnationV1 {
         self.incarnation
     }
@@ -207,7 +205,7 @@ struct StoreRuntimeLeaseSource {
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
     database_attachments:
-        ProfiledMutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
+        std::sync::Mutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
     next_database_attachment_id: AtomicU64,
     next_database_owner_id: AtomicU64,
     next_database_attachment_reservation_id: AtomicU64,
@@ -921,7 +919,6 @@ impl StoreRuntimeClientLease {
         Ok(counts)
     }
 
-    #[hotpath::skip]
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
@@ -956,7 +953,6 @@ impl StoreRuntimeClientLease {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn run_checkpoint(
         &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
@@ -1069,7 +1065,6 @@ impl StoreRuntimeClientLease {
             })
     }
 
-    #[hotpath::skip]
     pub async fn dispatch_submit_authorized(
         &self,
         request: tracedecay_store::RuntimeSubmitRequestV1,
@@ -1458,7 +1453,7 @@ struct StoreRuntimeRegistryInner {
     /// pin token. Every lookup, open, lease, eviction, and destructive
     /// reservation funnels through `lock_state`, so it is the coarsest lock in
     /// the store runtime and the first place cross-shard queueing shows up.
-    state: ProfiledMutex<RegistryState>,
+    state: std::sync::Mutex<RegistryState>,
     open_cancellation: CancellationToken,
 }
 
@@ -1477,10 +1472,7 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config: StoreRuntimeRegistryConfig::default(),
-                state: hotpath::mutex!(
-                    Mutex::new(RegistryState::default()),
-                    label = "runtime_core.shard_runtime.registry_state"
-                ),
+                state: Mutex::new(RegistryState::default()),
                 open_cancellation: CancellationToken::new(),
             }),
         }
@@ -1509,10 +1501,7 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config,
-                state: hotpath::mutex!(
-                    Mutex::new(RegistryState::default()),
-                    label = "runtime_core.shard_runtime.registry_state"
-                ),
+                state: Mutex::new(RegistryState::default()),
                 open_cancellation: CancellationToken::new(),
             }),
         })
@@ -1721,7 +1710,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, RegistryState> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         self.inner
             .state
             .lock()

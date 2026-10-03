@@ -100,7 +100,11 @@ impl SourceLoadMeasurement {
     }
 }
 
-#[hotpath::measure(label = "runtime_core.memory_graph.query_read")]
+#[tracing::instrument(
+    name = "runtime_core.memory_graph.query_read",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn project_memory_graph(
     db: &Database,
     query: ProjectMemoryGraphQueryV1,
@@ -319,7 +323,7 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         match reconcile_project_memory_graph_pass(&db, None).await {
             Ok(_) => true,
             Err(error) => {
-                hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
+                metrics::gauge!("runtime_core.memory_graph.pass_failures").increment(1.0);
                 tracing::warn!(
                     error_kind = reconciliation_error_kind(&error),
                     "project memory graph reconciliation remains pending"
@@ -344,9 +348,13 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
 }
 
 /// One full reconciliation sweep: diff (canonical source load + manifest
-/// build) then apply (verified-manifest publication). The Hotpath span is the
+/// build) then apply (verified-manifest publication). The tracing span is the
 /// sweep's wall-time authority; per-node work is deliberately unmeasured.
-#[hotpath::measure(label = "runtime_core.memory_graph.reconcile_pass")]
+#[tracing::instrument(
+    name = "runtime_core.memory_graph.reconcile_pass",
+    level = "trace",
+    skip_all
+)]
 async fn reconcile_project_memory_graph_pass(
     db: &Database,
     read_control: Option<&FactReadControl>,
@@ -368,16 +376,16 @@ async fn reconcile_project_memory_graph_pass(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let loaded = load_source(db, &owner, read_control, Some(db)).await?;
-    hotpath::gauge!("runtime_core.memory_graph.source_entities")
+    metrics::gauge!("runtime_core.memory_graph.source_entities")
         .set(loaded.source.entities.len() as f64);
-    hotpath::gauge!("runtime_core.memory_graph.source_relations")
+    metrics::gauge!("runtime_core.memory_graph.source_relations")
         .set(loaded.source.relations.len() as f64);
     let watermark = source_watermark(&owner, &loaded.source, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());
     }
-    let manifest = hotpath::measure_block!(
-        "runtime_core.memory_graph.manifest_build",
+    let manifest = {
+        let _span = tracing::trace_span!("runtime_core.memory_graph.manifest_build").entered();
         build_manifest(
             &owner,
             projection.clone(),
@@ -385,7 +393,7 @@ async fn reconcile_project_memory_graph_pass(
             watermark.clone(),
             None,
         )
-    )?;
+    }?;
     let source_stamp = loaded.lineage_stamp;
     let expected_generation = manifest.generation.clone();
     let idempotency_key =
@@ -402,12 +410,10 @@ async fn reconcile_project_memory_graph_pass(
     ensure_source_read_active(read_control)?;
     let runtime = issue_memory_graph_operation(db)?;
     let snapshot = match tokio::task::spawn_blocking(move || {
-        hotpath::measure_block!(
-            "runtime_core.memory_graph.publish_apply",
-            runtime
-                .runtime()
-                .reconcile_verified_manifest(&manifest, idempotency_key)
-        )
+        let _span = tracing::trace_span!("runtime_core.memory_graph.publish_apply").entered();
+        runtime
+            .runtime()
+            .reconcile_verified_manifest(&manifest, idempotency_key)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -508,7 +514,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
     match reconcile_project_memory_graph_pass(&db, None).await {
         Ok(_) => {}
         Err(error) => {
-            hotpath::gauge!("runtime_core.memory_graph.pass_failures").inc(1.0);
+            metrics::gauge!("runtime_core.memory_graph.pass_failures").increment(1.0);
             tracing::warn!(
                 error_kind = reconciliation_error_kind(&error),
                 "project memory graph publication after write remains pending"
@@ -627,7 +633,11 @@ async fn lineage_stamp_tx(
 
 /// The reconciliation sweep's diff phase: materializes the canonical
 /// entity/relation source the verified graph is compared against.
-#[hotpath::measure(label = "runtime_core.memory_graph.source_load")]
+#[tracing::instrument(
+    name = "runtime_core.memory_graph.source_load",
+    level = "trace",
+    skip_all
+)]
 async fn load_source(
     db: &Database,
     owner: &FactOwnerV1,
@@ -1039,7 +1049,7 @@ fn push_source_relation(
     Ok(())
 }
 
-#[hotpath::measure(label = "runtime_core.memory_graph.hydrate")]
+#[tracing::instrument(name = "runtime_core.memory_graph.hydrate", level = "trace", skip_all)]
 async fn hydrate_page(
     db: &Database,
     owner: FactOwnerV1,

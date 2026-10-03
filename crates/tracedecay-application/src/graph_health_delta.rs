@@ -165,7 +165,11 @@ fn health_delta_digest_from_cursor(cursor: &str) -> Result<&str> {
     Ok(digest)
 }
 
-#[hotpath::measure(label = "usecases.graph.health_delta.persist", future = true)]
+#[tracing::instrument(
+    name = "usecases.graph.health_delta.persist",
+    level = "trace",
+    skip_all
+)]
 async fn persist_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -250,7 +254,11 @@ async fn persist_health_delta_point(
     Ok(cursor)
 }
 
-#[hotpath::measure(label = "usecases.graph.health_delta.persist_canonical", future = true)]
+#[tracing::instrument(
+    name = "usecases.graph.health_delta.persist_canonical",
+    level = "trace",
+    skip_all
+)]
 async fn persist_canonical_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -265,7 +273,7 @@ async fn persist_canonical_health_delta_point(
     }
 }
 
-#[hotpath::measure(label = "usecases.graph.health_delta.find", future = true)]
+#[tracing::instrument(name = "usecases.graph.health_delta.find", level = "trace", skip_all)]
 async fn find_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -282,7 +290,7 @@ async fn find_health_delta_point(
         .transpose()
 }
 
-#[hotpath::measure(label = "usecases.graph.health_delta.load", future = true)]
+#[tracing::instrument(name = "usecases.graph.health_delta.load", level = "trace", skip_all)]
 async fn load_health_delta_point(
     db: &RegisteredGlobalDb,
     scope: &HealthDeltaScopeV1,
@@ -376,7 +384,7 @@ fn health_dimension_deltas(
         .collect()
 }
 
-#[hotpath::measure(label = "usecases.graph.health_delta", future = true)]
+#[tracing::instrument(name = "usecases.graph.health_delta", level = "trace", skip_all)]
 pub async fn compute_verified_health_delta(
     project_id: Option<String>,
     graph: &GraphQueryManager<'_>,
@@ -387,26 +395,26 @@ pub async fn compute_verified_health_delta(
     let scope = health_delta_scope(project_id, path_prefix)?;
     let current_cursor = health_delta_cursor(&scope, graph.generation().as_str())?;
     let pinned_before = if let Some(cursor) = before_cursor {
-        let stored = hotpath::future!(
+        let stored = tracing::Instrument::instrument(
             load_health_delta_point(db, &scope, cursor),
-            label = "usecases.graph.health_delta.load"
+            tracing::trace_span!("usecases.graph.health_delta.load"),
         )
         .await?;
         Some((stored, cursor.to_owned()))
     } else {
         None
     };
-    let current = hotpath::future!(
+    let current = tracing::Instrument::instrument(
         find_health_delta_point(db, &scope, &current_cursor),
-        label = "usecases.graph.health_delta.find"
+        tracing::trace_span!("usecases.graph.health_delta.find"),
     )
     .await?;
     let (after, after_cursor) = if let Some(after) = current {
         (after, current_cursor)
     } else {
-        let snapshot = hotpath::future!(
+        let snapshot = tracing::Instrument::instrument(
             compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()),
-            label = "usecases.graph.health_delta.snapshot"
+            tracing::trace_span!("usecases.graph.health_delta.snapshot"),
         )
         .await?;
         let observed_at = tracedecay_contracts::now_micros();
@@ -427,9 +435,9 @@ pub async fn compute_verified_health_delta(
             function_denominator: snapshot.total_fns as u64,
             dimensions,
         };
-        let after = hotpath::future!(
+        let after = tracing::Instrument::instrument(
             persist_canonical_health_delta_point(db, &scope, &after, &current_cursor),
-            label = "usecases.graph.health_delta.persist_canonical"
+            tracing::trace_span!("usecases.graph.health_delta.persist_canonical"),
         )
         .await?;
         (after, current_cursor)

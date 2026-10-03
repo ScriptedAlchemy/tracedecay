@@ -313,7 +313,7 @@ impl LspSessionRegistry {
         Ok(access)
     }
 
-    #[hotpath::measure(label = "lsp_session_authenticate", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp_session_authenticate", level = "trace", skip_all)]
     pub fn authenticate(
         &mut self,
         access: &LspSessionAccess,
@@ -376,7 +376,7 @@ impl LspSessionRegistry {
             .map_err(LspEndpointError::Lifecycle)
     }
 
-    #[hotpath::measure(label = "lsp.session.close", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp.session.close", level = "trace", skip_all)]
     pub fn close(
         &mut self,
         access: &LspSessionAccess,
@@ -463,7 +463,7 @@ impl LspSessionRegistry {
     }
 
     fn observe_active_sessions(&self) {
-        hotpath::gauge!("lsp.session.active").set(self.sessions.len());
+        metrics::gauge!("lsp.session.active").set((self.sessions.len()) as f64);
     }
 
     fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
@@ -504,7 +504,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "lsp_session_open", impl_type = "DaemonLspSessionEndpoint")]
+    #[tracing::instrument(name = "lsp_session_open", level = "trace", skip_all)]
     pub fn open(
         &mut self,
         request: LspSessionOpenRequest,
@@ -514,10 +514,10 @@ where
         // Separates the daemon admission-authority wait (workspace/root
         // resolution, credential minting) from registry bookkeeping inside
         // the enclosing open span; rejected admissions are recorded too.
-        let authorized = hotpath::measure_block!(
-            "lsp.session.admission_wait",
+        let authorized = {
+            let _span = tracing::trace_span!("lsp.session.admission_wait").entered();
             self.admission.admit_lsp_session(&request, now_ms)
-        )?;
+        }?;
         self.registry.register(authorized, now_ms)
     }
 

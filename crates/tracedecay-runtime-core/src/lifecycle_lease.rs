@@ -330,7 +330,11 @@ fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> 
     acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
 }
 
-#[hotpath::measure(label = "runtime_core.lifecycle.acquire_exclusive")]
+#[tracing::instrument(
+    name = "runtime_core.lifecycle.acquire_exclusive",
+    level = "trace",
+    skip_all
+)]
 fn acquire_exclusive_at_with_timeout(
     path: &Path,
     operation: &str,
@@ -354,7 +358,11 @@ fn acquire_exclusive_at_with_timeout(
     }
 }
 
-#[hotpath::measure(label = "runtime_core.lifecycle.acquire_shared")]
+#[tracing::instrument(
+    name = "runtime_core.lifecycle.acquire_shared",
+    level = "trace",
+    skip_all
+)]
 fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match file.try_lock_shared().map_err(std::io::Error::from) {

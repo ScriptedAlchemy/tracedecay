@@ -42,7 +42,7 @@ pub struct ProductionSemanticAuthorities {
 /// Analyzer processes stay unstarted at project open. An actual LSP session
 /// initializes its retained shared client and uses that standard response as
 /// the upstream capability authority.
-#[hotpath::measure(label = "lsp_runtime.semantic_authorities", future = true)]
+#[tracing::instrument(name = "lsp_runtime.semantic_authorities", level = "trace", skip_all)]
 pub async fn production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,

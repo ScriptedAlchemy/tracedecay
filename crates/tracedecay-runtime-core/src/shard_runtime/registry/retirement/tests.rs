@@ -242,10 +242,7 @@ fn install_ready(
         )
         .unwrap(),
         database_authority: Some(authority),
-        database_attachments: hotpath::mutex!(
-            std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            label = "runtime_core.shard_runtime.database_attachments"
-        ),
+        database_attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
         next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
         next_database_attachment_reservation_id: std::sync::atomic::AtomicU64::new(1),

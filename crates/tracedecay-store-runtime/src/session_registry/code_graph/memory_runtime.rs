@@ -120,7 +120,6 @@ impl tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1
 
 impl DaemonSessionRuntimeRegistryV1 {
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
@@ -142,7 +141,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         .map_err(|failure| failure.error)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn retain_memory_graph_runtime_for_task(
         context: MemoryGraphRuntimeTaskContext,
         shard_id: StoreShardIdV1,

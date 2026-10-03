@@ -51,7 +51,6 @@ pub enum CodeIndexMcpAdmissionUnavailableV1 {
 }
 
 impl CodeIndexMcpAdmissionUnavailableV1 {
-    #[hotpath::skip]
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Unauthenticated => "mcp_route_unauthenticated",

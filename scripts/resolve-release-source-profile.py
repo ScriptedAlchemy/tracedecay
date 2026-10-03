@@ -67,9 +67,9 @@ def main() -> int:
             check=True,
         )
         profile = "production"
-        # Hotpath uses Cargo features as its process-wide activation authority,
-        # so a release binary does not carry them and then try to switch them
-        # off at runtime.
+        # Release archives ship the production profile only: no optional
+        # instrumentation feature lanes ride along to be switched off at
+        # runtime.
         cargo_features = "production"
         cargo_args = "--no-default-features --features production"
     else:

@@ -37,7 +37,6 @@ pub enum SanitizationHeuristicScaleV1 {
 }
 
 impl SanitizationHeuristicScaleV1 {
-    #[hotpath::skip]
     const fn ceiling_per_mille(self) -> u32 {
         match self {
             // log2(256) bits per character.

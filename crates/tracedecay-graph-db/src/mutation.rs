@@ -68,14 +68,14 @@ pub(crate) fn apply(
         generation_dependency_digest,
         publication_record,
     } = metadata;
-    let existing = hotpath::measure_block!(
-        "graph_db.mutation.existing_state",
+    let existing = {
+        let _span = tracing::trace_span!("graph_db.mutation.existing_state").entered();
         ExistingBatchState::load(database, &batch)
-    )?;
-    let external_endpoints = hotpath::measure_block!(
-        "graph_db.mutation.validate_references",
+    }?;
+    let external_endpoints = {
+        let _span = tracing::trace_span!("graph_db.mutation.validate_references").entered();
         validate_references(database, &batch, &existing, endpoint_namespaces, check)
-    )?;
+    }?;
     let sequence = state
         .sequence
         .checked_add(1)
@@ -89,13 +89,13 @@ pub(crate) fn apply(
     };
     let previous_projection = latest_projection(database, &batch.namespace, &batch.projection)?;
     let mut session = database.session();
-    hotpath::measure_block!(
-        "graph_db.mutation.begin_transaction",
+    {
+        let _span = tracing::trace_span!("graph_db.mutation.begin_transaction").entered();
         session.begin_transaction()
-    )
+    }
     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    let result = hotpath::measure_block!(
-        "graph_db.mutation.apply_changes",
+    let result = {
+        let _span = tracing::trace_span!("graph_db.mutation.apply_changes").entered();
         apply_in_transaction(
             &session,
             state,
@@ -109,7 +109,7 @@ pub(crate) fn apply(
             &external_endpoints,
             check,
         )
-    );
+    };
     if let Err(error) = result {
         return Err(rollback_or_poison(&mut session, error, poisoned));
     }
@@ -123,8 +123,11 @@ pub(crate) fn apply(
             poisoned,
         ));
     }
-    hotpath::measure_block!("graph_db.mutation.commit", session.commit())
-        .map_err(map_commit_error)?;
+    {
+        let _span = tracing::trace_span!("graph_db.mutation.commit").entered();
+        session.commit()
+    }
+    .map_err(map_commit_error)?;
     state.sequence = sequence;
     Ok(commit)
 }
@@ -187,8 +190,7 @@ fn apply_in_transaction(
                         && stored.projection == batch.projection
                         && stored.entity == *entity
                     {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("graph_db.mutation.reused_entities_total").inc(1_u64);
+                        metrics::gauge!("graph_db.mutation.reused_entities_total").increment(1.0);
                     } else {
                         replace_entity(session, stored, entity, batch, check)?;
                     }
@@ -217,8 +219,7 @@ fn apply_in_transaction(
                         && stored.source == from
                         && stored.target == to
                     {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("graph_db.mutation.reused_relations_total").inc(1_u64);
+                        metrics::gauge!("graph_db.mutation.reused_relations_total").increment(1.0);
                         continue;
                     }
                     delete_relation(session, stored, batch, check)?;

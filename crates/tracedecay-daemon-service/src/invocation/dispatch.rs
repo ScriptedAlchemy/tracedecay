@@ -22,16 +22,16 @@ struct InvocationDispatchGaugeGuard;
 
 impl InvocationDispatchGaugeGuard {
     fn enter() -> Self {
-        hotpath::gauge!("daemon.service.invocation.active").inc(1_u64);
-        hotpath::gauge!("daemon.service.invocation.requests_total").inc(1_u64);
+        metrics::gauge!("daemon.service.invocation.active").increment(1.0);
+        metrics::gauge!("daemon.service.invocation.requests_total").increment(1.0);
         Self
     }
 }
 
 impl Drop for InvocationDispatchGaugeGuard {
     fn drop(&mut self) {
-        hotpath::gauge!("daemon.service.invocation.active").dec(1_u64);
-        hotpath::gauge!("daemon.service.invocation.settled_total").inc(1_u64);
+        metrics::gauge!("daemon.service.invocation.active").decrement(1.0);
+        metrics::gauge!("daemon.service.invocation.settled_total").increment(1.0);
     }
 }
 
@@ -41,22 +41,22 @@ impl Drop for InvocationDispatchGaugeGuard {
 fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     match problem {
         DaemonInvocationProblem::InvalidRequest => {
-            hotpath::gauge!("daemon.service.invocation.denied.invalid_request").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.invalid_request").increment(1.0);
         }
         DaemonInvocationProblem::UnsupportedRevision => {
-            hotpath::gauge!("daemon.service.invocation.denied.unsupported_revision").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.unsupported_revision").increment(1.0);
         }
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            hotpath::gauge!("daemon.service.invocation.denied.not_authorized").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.not_authorized").increment(1.0);
         }
         DaemonInvocationProblem::ResetRequired => {
-            hotpath::gauge!("daemon.service.invocation.denied.reset_required").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.reset_required").increment(1.0);
         }
         DaemonInvocationProblem::ApplicationContractViolation => {
-            hotpath::gauge!("daemon.service.invocation.denied.contract_violation").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.contract_violation").increment(1.0);
         }
         DaemonInvocationProblem::Unavailable => {
-            hotpath::gauge!("daemon.service.invocation.denied.unavailable").inc(1_u64);
+            metrics::gauge!("daemon.service.invocation.denied.unavailable").increment(1.0);
         }
     }
 }
@@ -102,7 +102,6 @@ impl DaemonInvocationService {
     /// `lsp_workspace` is supplied only after the daemon has resolved every
     /// requested root through registered project ownership.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn invoke(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -127,7 +126,6 @@ impl DaemonInvocationService {
     /// Executes a request with a cancellation lease that was admitted before a
     /// route-local project-open wait. The ordinary `invoke` entry point keeps
     /// owning registration for callers that do not need a pre-admission wait.
-    #[hotpath::skip]
     pub async fn invoke_with_cancellation(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -151,7 +149,6 @@ impl DaemonInvocationService {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn invoke_with_project_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -176,7 +173,7 @@ impl DaemonInvocationService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.service.invocation.dispatch", future = true)]
+    #[tracing::instrument(name = "daemon.service.invocation.dispatch", level = "trace", skip_all)]
     async fn invoke_with_admission(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -225,11 +222,8 @@ impl DaemonInvocationService {
                 .request_runtimes_with_admission(project_root, project_admission),
             _ => {
                 let canonical_root = project_root.and_then(|root| canonical_existing_identity(root).ok());
-                hotpath::future!(
-                    self.project_runtimes
-                        .request_runtimes(project_root, canonical_root.as_deref()),
-                    label = "daemon.service.invocation.admission_wait"
-                )
+                tracing::Instrument::instrument(self.project_runtimes
+                        .request_runtimes(project_root, canonical_root.as_deref()), tracing::trace_span!("daemon.service.invocation.admission_wait"))
                 .await
             }
         };
@@ -244,7 +238,7 @@ impl DaemonInvocationService {
         // foreign `surface_operation` must fail closed as InvalidRequest,
         // never reach a panic path while labeling the request.
         let validated =
-            hotpath::measure_block!("daemon.service.invocation.validate", request.validate());
+            { let _span = tracing::trace_span!("daemon.service.invocation.validate").entered(); request.validate() };
         if let Err(problem) = validated {
             let operation = request.operation();
             let observation_subject =
@@ -316,10 +310,7 @@ impl DaemonInvocationService {
             );
         }
         let now_ms = now_millis();
-        hotpath::future!(
-            self.expire_sessions(now_ms),
-            label = "daemon.service.invocation.expire_sessions"
-        )
+        tracing::Instrument::instrument(self.expire_sessions(now_ms), tracing::trace_span!("daemon.service.invocation.expire_sessions"))
         .await;
         let feedback_service = runtimes.feedback_owner;
         let advisory_cycle = runtimes.advisory_cycle;
@@ -1111,8 +1102,9 @@ impl DaemonInvocationService {
             }
         };
         if is_observable_operation(operation) {
-            hotpath::measure_block!(
-                "daemon.service.invocation.observe_response",
+            {
+                let _span = tracing::trace_span!("daemon.service.invocation.observe_response")
+                    .entered();
                 observe_invocation_response(
                     observations.as_ref(),
                     observation_subject.as_ref(),
@@ -1120,8 +1112,8 @@ impl DaemonInvocationService {
                     delivery_route,
                     dispatched_at,
                     &response,
-                )
-            );
+                );
+            }
         }
         response
         }).await

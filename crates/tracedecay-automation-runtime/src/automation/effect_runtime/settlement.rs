@@ -124,7 +124,6 @@ impl std::fmt::Display for ReusedSchedulerSkipStartError {
 }
 
 impl<T: Send + 'static> RetainedSettlementWaiter<Result<T>> {
-    #[hotpath::skip]
     pub async fn wait(self) -> Result<T> {
         self.task.await.map_err(|error| {
             contract_error(format!(
@@ -308,7 +307,6 @@ pub struct RetainedSettlementPairWaiter {
 }
 
 impl RetainedSettlementPairWaiter {
-    #[hotpath::skip]
     pub async fn wait(
         self,
     ) -> (
@@ -521,16 +519,16 @@ pub enum AutomationEffectAdmission {
 pub fn observe_admission_decision(admission: &AutomationEffectAdmission) {
     match admission {
         AutomationEffectAdmission::Execute(_) => {
-            hotpath::gauge!("daemon.effect_admission.admitted_total").inc(1_u64);
+            metrics::gauge!("daemon.effect_admission.admitted_total").increment(1.0);
         }
         AutomationEffectAdmission::Replay(_) => {
-            hotpath::gauge!("daemon.effect_admission.replayed_total").inc(1_u64);
+            metrics::gauge!("daemon.effect_admission.replayed_total").increment(1.0);
         }
         AutomationEffectAdmission::Conflict => {
-            hotpath::gauge!("daemon.effect_admission.refused.conflict_total").inc(1_u64);
+            metrics::gauge!("daemon.effect_admission.refused.conflict_total").increment(1.0);
         }
         AutomationEffectAdmission::PreAdmissionProblem(_) => {
-            hotpath::gauge!("daemon.effect_admission.refused.pre_admission_total").inc(1_u64);
+            metrics::gauge!("daemon.effect_admission.refused.pre_admission_total").increment(1.0);
         }
     }
 }
@@ -1076,7 +1074,6 @@ impl AutomationEffectAuthority {
         Err(error)
     }
 
-    #[hotpath::skip]
     pub async fn prepare<M, F, Fut>(
         admitted: AdmittedAutomationEffectRequest,
         memory_owner: M,
@@ -1231,14 +1228,15 @@ impl AutomationEffectAuthority {
         let index_path = journal_path.clone();
         let indexed = admission.clone();
         let reservation = tokio::task::spawn_blocking(move || {
-            hotpath::measure_block!("daemon.automation.effect.reserve", {
+            let _span = tracing::trace_span!("daemon.automation.effect.reserve").entered();
+            {
                 reserve_or_replay_indexed_blocking(
                     &reserve_path,
                     requested,
                     || add_pending_blocking(&index_root, &index_path, &indexed),
                     || remove_pending_blocking(&index_root, &index_path),
                 )
-            })
+            }
         })
         .await
         .map_err(|error| {
@@ -1619,7 +1617,6 @@ impl AutomationEffectAuthority {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn abandon_uncommitted(self) -> Result<()> {
         let path = self.journal_path;
         let admission = self.admission;
@@ -1698,7 +1695,6 @@ impl AutomationEffectAuthority {
         .map_err(contract_error)
     }
 
-    #[hotpath::skip]
     async fn promote_prepared_terminal(
         &self,
         terminal: AutomationSettledTerminal,
@@ -1737,7 +1733,6 @@ impl AutomationEffectAuthority {
         Ok(terminal)
     }
 
-    #[hotpath::skip]
     async fn persist_recovered_terminal(
         &self,
         terminal: AutomationSettledTerminal,
@@ -1764,7 +1759,7 @@ fn settle_bound_owner(
     settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.settle")]
+#[tracing::instrument(name = "daemon.automation.effect.settle", level = "trace", skip_all)]
 fn settle_bound_owner_with_budget(
     mut state: RetainedBoundSettlement,
     budget: Duration,
@@ -1877,13 +1872,16 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
         .publication
         .as_ref()
         .ok_or_else(|| contract_error("prepared settlement lost its exact publication"))?;
-    let published = hotpath::measure_block!("daemon.automation.effect.publish", {
-        run_ledger::publish_staged_run_record_exact_blocking(
-            &state.authority.dashboard_root,
-            state.authority.admission.request.run_id.as_str(),
-            publication,
-        )
-    })?;
+    let published = {
+        let _span = tracing::trace_span!("daemon.automation.effect.publish").entered();
+        {
+            run_ledger::publish_staged_run_record_exact_blocking(
+                &state.authority.dashboard_root,
+                state.authority.admission.request.run_id.as_str(),
+                publication,
+            )
+        }
+    }?;
     if published == ExactRunPublishOutcome::MissingPayload {
         return Err(contract_error(
             "prepared automation terminal has neither its spool nor exact ledger row",

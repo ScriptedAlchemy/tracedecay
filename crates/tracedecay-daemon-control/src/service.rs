@@ -455,7 +455,7 @@ pub struct MaintenanceWindowOutcome<T> {
 /// daemon it actually starts: the freshly installed binary after an install,
 /// the acquire-time binary otherwise. An action that fails reports nothing
 /// and the restore validates the acquire-time version.
-#[hotpath::measure(label = "daemon.service.maintenance_window")]
+#[tracing::instrument(name = "daemon.service.maintenance_window", level = "trace", skip_all)]
 pub fn with_exclusive_maintenance_window<T>(
     profile: &ProfileRoot,
     operation: &str,
@@ -511,7 +511,6 @@ impl DaemonServiceState {
     /// unexpected exit. Updates are lifecycle-neutral, so the captured state
     /// remains authoritative. Explicit `daemon start` and `daemon restart`
     /// commands own intentional activation.
-    #[hotpath::skip]
     pub(crate) const fn expected_after_update(self) -> Self {
         self
     }
@@ -1069,7 +1068,7 @@ pub fn install_service(
 /// quiesced daemon lifecycle lease. The public [`install_service`] wrapper
 /// acquires that lease itself and would deadlock if called from a
 /// lease-holding context.
-#[hotpath::measure(label = "daemon.service.install")]
+#[tracing::instrument(name = "daemon.service.install", level = "trace", skip_all)]
 pub fn install_service_under_lease(
     spec: &DaemonServiceSpec,
     start: bool,
@@ -1110,7 +1109,7 @@ pub fn install_service_under_lease(
     operation_result
 }
 
-#[hotpath::measure(label = "daemon.service.refresh")]
+#[tracing::instrument(name = "daemon.service.refresh", level = "trace", skip_all)]
 fn refresh_service_with_runner(
     runner: &ServiceRunner,
     spec: &DaemonServiceSpec,
@@ -1210,7 +1209,7 @@ fn refresh_installed_service_with_state_and_runner(
 /// The daemon owns a shared lifecycle lease for its lifetime, so the order is
 /// intentionally stop-then-lock.
 #[doc(hidden)]
-#[hotpath::measure(label = "daemon.service.quiesce")]
+#[tracing::instrument(name = "daemon.service.quiesce", level = "trace", skip_all)]
 pub fn quiesce_installed_service_before_lease(
     profile: &ProfileRoot,
     expected_version: &str,
@@ -1267,7 +1266,7 @@ fn quiesce_installed_service_before_lease_with_runner(
 /// Verifies that pre-lease quiescence still holds. This never stops or starts
 /// a service while the caller owns the exclusive lifecycle lease.
 #[doc(hidden)]
-#[hotpath::measure(label = "daemon.service.verify_quiesced")]
+#[tracing::instrument(name = "daemon.service.verify_quiesced", level = "trace", skip_all)]
 pub fn verify_installed_service_quiesced_under_lease(
     profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
@@ -1323,7 +1322,7 @@ fn verify_installed_service_quiesced_under_lease_with_runner(
 ///
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
-#[hotpath::measure(label = "daemon.service.restore")]
+#[tracing::instrument(name = "daemon.service.restore", level = "trace", skip_all)]
 pub fn restore_installed_service_after_update(
     profile: &ProfileRoot,
     previous_state: DaemonServiceState,
@@ -1458,7 +1457,7 @@ pub fn installed_service_process_proof(
     ))
 }
 
-#[hotpath::measure(label = "daemon.service.start")]
+#[tracing::instrument(name = "daemon.service.start", level = "trace", skip_all)]
 pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     let service_path = service_unit_path(profile)?;
     if !service_unit_exists(&service_path)? {
@@ -1497,7 +1496,7 @@ pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()
     wait_for_installed_service_state_with_runner(profile, &runner, expected, expected_version)
 }
 
-#[hotpath::measure(label = "daemon.service.stop")]
+#[tracing::instrument(name = "daemon.service.stop", level = "trace", skip_all)]
 pub fn stop_service(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     if matches!(
         installed_service_state(profile)?,
@@ -1515,7 +1514,7 @@ pub fn stop_service(profile: &ProfileRoot, expected_version: &str) -> Result<()>
 /// `TraceDecay` protocol request from the socket configured in their installed
 /// unit and identify as the current installed version; stopped or missing
 /// services must remain quiescent.
-#[hotpath::measure(label = "daemon.service.wait_state")]
+#[tracing::instrument(name = "daemon.service.wait_state", level = "trace", skip_all)]
 pub fn wait_for_installed_service_state(
     profile: &ProfileRoot,
     expected: DaemonServiceState,
@@ -1683,7 +1682,7 @@ fn combine_operation_and_restore<T>(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.uninstall")]
+#[tracing::instrument(name = "daemon.service.uninstall", level = "trace", skip_all)]
 fn uninstall_service_under_lease(
     profile: &ProfileRoot,
     stop: bool,
@@ -1697,7 +1696,7 @@ fn uninstall_service_under_lease(
     Ok(service_path)
 }
 
-#[hotpath::measure(label = "daemon.service.status")]
+#[tracing::instrument(name = "daemon.service.status", level = "trace", skip_all)]
 pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_version: &str) -> String {
     let transport_path = if cfg!(unix) {
         socket_path.to_path_buf()

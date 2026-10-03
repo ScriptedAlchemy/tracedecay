@@ -16,7 +16,7 @@ fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"]
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"
 hmac = "0.13.0"
-hotpath.workspace = true
+metrics.workspace = true
 rayon = "1"
 roaring = { version = "=0.11.4", default-features = false }
 # Lexical artifact finalization installs a SQLite progress_handler, and
@@ -41,11 +41,6 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 zeroize = "1.9.0"
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]
@@ -66,16 +61,10 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-f
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
-# Profiling bench: built only under the opt-in `hotpath` feature so a
-# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
-# instrumentation. Run with `cargo bench -p tracedecay-query
-# --features hotpath --bench code_lexical_catchup`.
 [[bench]]
 name = "code_lexical_catchup"
 harness = false
-required-features = ["hotpath"]
 
-# Daemon-free indexing workload profiled by `.github/workflows/hotpath-profile.yml`.
 [[bin]]
 name = "tracedecay-index-bench"
 path = "src/bin/tracedecay_index_bench.rs"

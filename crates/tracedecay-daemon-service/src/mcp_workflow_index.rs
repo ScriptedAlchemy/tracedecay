@@ -34,7 +34,6 @@ pub struct DaemonWorkflowIndexReadService {
 }
 
 impl DaemonWorkflowIndexReadService {
-    #[hotpath::skip]
     pub const fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
@@ -57,7 +56,6 @@ impl DaemonWorkflowIndexReadService {
     /// installs the git-correlation and workflow-index DDL in a single
     /// transaction, so the correlation tables cannot be absent while these are
     /// present.
-    #[hotpath::skip]
     async fn schema_missing(
         snapshot: &RegisteredWorkflowIndexSnapshot,
     ) -> Result<bool, WorkflowReadError> {
@@ -68,7 +66,6 @@ impl DaemonWorkflowIndexReadService {
             .map_err(workflow_error)
     }
 
-    #[hotpath::skip]
     async fn execute_runs(
         &self,
         command: WorkflowRunListRequest,
@@ -114,7 +111,6 @@ impl DaemonWorkflowIndexReadService {
 
     /// Reads the run and its agents from one snapshot, so both are observed at
     /// the same database generation.
-    #[hotpath::skip]
     async fn execute_run(
         &self,
         command: WorkflowRunDetailRequest,
@@ -152,7 +148,6 @@ impl DaemonWorkflowIndexReadService {
 
     /// Resolves a label with an exact predicate, so a missing agent is never
     /// inferred from the bounded prefix used by run detail.
-    #[hotpath::skip]
     async fn execute_agent(
         &self,
         run_id: String,

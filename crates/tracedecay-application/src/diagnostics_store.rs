@@ -139,7 +139,7 @@ impl DiagnosticsConnection<'_> {
     where
         P: IntoParams,
     {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let params = params
                     .into_params()
@@ -157,7 +157,7 @@ impl DiagnosticsConnection<'_> {
                     Self::Transaction(transaction) => transaction.query_values(sql, params).await,
                 }
             },
-            label = "usecases.diagnostics_store.query"
+            tracing::trace_span!("usecases.diagnostics_store.query"),
         )
         .await
     }
@@ -166,7 +166,7 @@ impl DiagnosticsConnection<'_> {
     where
         P: IntoParams,
     {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let params = params
                     .into_params()
@@ -183,13 +183,13 @@ impl DiagnosticsConnection<'_> {
                     Self::Transaction(transaction) => transaction.execute_values(sql, params).await,
                 }
             },
-            label = "usecases.diagnostics_store.execute"
+            tracing::trace_span!("usecases.diagnostics_store.execute"),
         )
         .await
     }
 
     async fn execute_batch(&self, sql: &str) -> Result<()> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 match self {
                     Self::Database(_) => Err(db_message(
@@ -203,7 +203,7 @@ impl DiagnosticsConnection<'_> {
                     Self::Transaction(transaction) => transaction.execute_batch(sql).await,
                 }
             },
-            label = "usecases.diagnostics_store.execute_batch"
+            tracing::trace_span!("usecases.diagnostics_store.execute_batch"),
         )
         .await
     }
@@ -240,7 +240,7 @@ impl<'a> DiagnosticsStore<'a> {
     /// Creates the diagnostics schema idempotently. Safe to call on every
     /// open; existing rows are never touched.
     pub async fn ensure_schema(&self) -> Result<()> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             self.with_immediate_tx("diagnostics ensure_schema", |store| {
                 Box::pin(async move {
                     store
@@ -250,7 +250,7 @@ impl<'a> DiagnosticsStore<'a> {
                         .map_err(|error| db_error("diagnostics ensure_schema", error))
                 })
             }),
-            label = "usecases.diagnostics_store.ensure_schema"
+            tracing::trace_span!("usecases.diagnostics_store.ensure_schema"),
         )
         .await
     }
@@ -260,7 +260,7 @@ impl<'a> DiagnosticsStore<'a> {
     /// Generation publication is recorded even when the snapshot contains no
     /// diagnostics, preserving clean-generation identity across restarts.
     pub async fn current_generation(&self) -> Result<Option<CodeGenerationId>> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let operation = "diagnostics current_generation";
                 let mut rows = self
@@ -296,7 +296,7 @@ impl<'a> DiagnosticsStore<'a> {
                 }
                 Ok(generation)
             },
-            label = "usecases.diagnostics_store.current_generation"
+            tracing::trace_span!("usecases.diagnostics_store.current_generation"),
         )
         .await
     }
@@ -304,7 +304,11 @@ impl<'a> DiagnosticsStore<'a> {
     /// Runs `work` inside an immediate transaction, committing on success and
     /// rolling back on error or cancellation. The transactional store routes
     /// every statement through that exact transaction.
-    #[hotpath::measure(label = "usecases.diagnostics_store.immediate_tx", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.immediate_tx",
+        level = "trace",
+        skip_all
+    )]
     async fn with_immediate_tx<T>(
         &self,
         operation: &str,
@@ -448,8 +452,7 @@ impl<'a> DiagnosticsStore<'a> {
             ));
         }
         let generation = generation.clone();
-        hotpath::future!(
-            self.with_immediate_tx(operation, move |store| Box::pin(async move {
+        tracing::Instrument::instrument(self.with_immediate_tx(operation, move |store| Box::pin(async move {
             let publication_revision = if let Some((revision, state)) = store
                 .latest_generation_publication(&generation)
                 .await?
@@ -544,9 +547,7 @@ impl<'a> DiagnosticsStore<'a> {
                 .await
                 .map_err(|e| db_error(operation, e))?;
             Ok((records.len() as u64, cleared, false, publication_revision))
-        })),
-            label = "usecases.diagnostics_store.publish"
-        )
+        })), tracing::trace_span!("usecases.diagnostics_store.publish"))
         .await
     }
 
@@ -555,9 +556,9 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             self.query_generation(generation, None),
-            label = "usecases.diagnostics_store.records_for_generation"
+            tracing::trace_span!("usecases.diagnostics_store.records_for_generation"),
         )
         .await
     }
@@ -568,9 +569,9 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             self.query_generation(generation, Some(STATE_CURRENT)),
-            label = "usecases.diagnostics_store.current_records"
+            tracing::trace_span!("usecases.diagnostics_store.current_records"),
         )
         .await
     }
@@ -583,7 +584,7 @@ impl<'a> DiagnosticsStore<'a> {
         after_anchor: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<GenerationDiagnosticV1>, usize, bool)> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let operation = "diagnostics current_records_page";
                 let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
@@ -689,7 +690,7 @@ impl<'a> DiagnosticsStore<'a> {
                 })?;
                 Ok((records, total, has_more))
             },
-            label = "usecases.diagnostics_store.current_records_page"
+            tracing::trace_span!("usecases.diagnostics_store.current_records_page"),
         )
         .await
     }
@@ -700,7 +701,7 @@ impl<'a> DiagnosticsStore<'a> {
         generation: &CodeGenerationId,
         file_occurrence_id: &FileOccurrenceId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let operation = "diagnostics current_records_for_file";
                 let mut rows = self
@@ -723,7 +724,7 @@ impl<'a> DiagnosticsStore<'a> {
                     .map_err(|e| db_error(operation, e))?;
                 collect_rows(&mut rows, operation).await
             },
-            label = "usecases.diagnostics_store.current_records_for_file"
+            tracing::trace_span!("usecases.diagnostics_store.current_records_for_file"),
         )
         .await
     }
@@ -733,7 +734,7 @@ impl<'a> DiagnosticsStore<'a> {
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<Option<GenerationDiagnosticV1>> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async {
                 let operation = "diagnostics record_by_anchor";
                 let mut rows = self
@@ -756,7 +757,7 @@ impl<'a> DiagnosticsStore<'a> {
                 let mut records = collect_rows(&mut rows, operation).await?;
                 Ok(records.pop())
             },
-            label = "usecases.diagnostics_store.record_by_anchor"
+            tracing::trace_span!("usecases.diagnostics_store.record_by_anchor"),
         )
         .await
     }
@@ -783,16 +784,20 @@ impl<'a> DiagnosticsStore<'a> {
             ));
         }
         Ok(MergedGenerationDiagnostics {
-            durable: hotpath::future!(
+            durable: tracing::Instrument::instrument(
                 self.current_records(generation),
-                label = "usecases.diagnostics_store.current_with_overlay"
+                tracing::trace_span!("usecases.diagnostics_store.current_with_overlay"),
             )
             .await?,
             overlay_only: overlay.records(),
         })
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics_store.insert_record", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.insert_record",
+        level = "trace",
+        skip_all
+    )]
     async fn insert_record(
         &self,
         publication_revision: u64,
@@ -864,7 +869,11 @@ impl<'a> DiagnosticsStore<'a> {
         Ok(())
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics_store.publication_state", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.publication_state",
+        level = "trace",
+        skip_all
+    )]
     async fn latest_generation_publication(
         &self,
         generation: &CodeGenerationId,
@@ -895,7 +904,11 @@ impl<'a> DiagnosticsStore<'a> {
             .transpose()
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics_store.query_generation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_store.query_generation",
+        level = "trace",
+        skip_all
+    )]
     async fn query_generation(
         &self,
         generation: &CodeGenerationId,
@@ -943,7 +956,11 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .map_err(|error| port_error("current_diagnostic_generation", error))
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics.for_generation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics.for_generation",
+        level = "trace",
+        skip_all
+    )]
     async fn diagnostics_for_generation(
         &self,
         generation: &CodeGenerationId,
@@ -952,11 +969,11 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .records_for_generation(generation)
             .await
             .map_err(|error| port_error("diagnostics_for_generation", error))?;
-        crate::hotpath_observe::feedback_query(records.len());
+        crate::observe::feedback_query(records.len());
         Ok(records)
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
+    #[tracing::instrument(name = "usecases.diagnostics.current", level = "trace", skip_all)]
     async fn current_diagnostics(
         &self,
         generation: &CodeGenerationId,
@@ -965,11 +982,11 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .current_records(generation)
             .await
             .map_err(|error| port_error("current_diagnostics", error))?;
-        crate::hotpath_observe::feedback_query(records.len());
+        crate::observe::feedback_query(records.len());
         Ok(records)
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics.current_file", future = true)]
+    #[tracing::instrument(name = "usecases.diagnostics.current_file", level = "trace", skip_all)]
     async fn current_diagnostics_for_file(
         &self,
         generation: &CodeGenerationId,
@@ -980,7 +997,7 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .map_err(|error| port_error("current_diagnostics_for_file", error))
     }
 
-    #[hotpath::measure(label = "usecases.diagnostics.by_anchor", future = true)]
+    #[tracing::instrument(name = "usecases.diagnostics.by_anchor", level = "trace", skip_all)]
     async fn diagnostic_by_anchor(
         &self,
         anchor: &RetrievalAnchorId,
@@ -1155,7 +1172,11 @@ const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repositor
         collected_at, record_state, state_generation
      FROM generation_diagnostics";
 
-#[hotpath::measure(label = "usecases.diagnostics_store.collect_rows", future = true)]
+#[tracing::instrument(
+    name = "usecases.diagnostics_store.collect_rows",
+    level = "trace",
+    skip_all
+)]
 async fn collect_rows(rows: &mut Rows, operation: &str) -> Result<Vec<GenerationDiagnosticV1>> {
     let mut records = Vec::new();
     while let Some(row) = rows.next().await.map_err(|e| db_error(operation, e))? {

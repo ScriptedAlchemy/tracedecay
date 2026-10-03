@@ -25,13 +25,13 @@ pub fn normalize_observation(
     // call count. Failures are counted, never hidden.
     let envelope = normalize_opencode_record(native, session_id, stable_record_id, range);
     if envelope.is_err() {
-        hotpath::gauge!("capture.opencode.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.opencode.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// One source-message canonicalization, not a per-part walk.
-#[hotpath::measure(label = "capture.opencode.normalize")]
+#[tracing::instrument(name = "capture.opencode.normalize", level = "trace", skip_all)]
 fn normalize_opencode_record(
     native: &Value,
     session_id: &str,

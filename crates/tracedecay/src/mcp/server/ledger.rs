@@ -114,7 +114,7 @@ impl McpServer {
     /// Reads the upload policy from the owning profile's configuration store.
     /// There is deliberately no `config.toml` fallback: without the canonical
     /// authority, the upload decision is unavailable.
-    #[hotpath::measure(label = "mcp.ledger.read_upload_policy", future = true)]
+    #[tracing::instrument(name = "mcp.ledger.read_upload_policy", level = "trace", skip_all)]
     pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
         let (Some(database), Some(identity)) =
             (self.profile_session_db.clone(), self.profile_identity())
@@ -145,7 +145,7 @@ impl McpServer {
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
     /// Pure lookup, persists nothing.
-    #[hotpath::measure(label = "mcp.ledger.estimate_raw_tokens")]
+    #[tracing::instrument(name = "mcp.ledger.estimate_raw_tokens", level = "trace", skip_all)]
     pub(crate) fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
         if file_paths.is_empty() {
             return 0;
@@ -175,7 +175,11 @@ impl McpServer {
     /// ledger-write path so the response never waits on them and tests can
     /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
     /// persists the final counter independently.
-    #[hotpath::measure(label = "mcp.ledger.persist_token_accounting")]
+    #[tracing::instrument(
+        name = "mcp.ledger.persist_token_accounting",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn spawn_token_accounting_persist(
         &self,
         monitor_project_root: &Path,
@@ -251,7 +255,6 @@ impl McpServer {
     /// (a stuck DB handle, a task that never resolves) can never hang the
     /// caller forever, the earlier unbounded loop made a wedged write
     /// manifest as an un-observable, indefinitely-hung integration test.
-    #[hotpath::skip]
     pub async fn ledger_writes_settled(&self) {
         self.ledger_writes_settled_within(LEDGER_SETTLE_TIMEOUT)
             .await;
@@ -262,7 +265,6 @@ impl McpServer {
     /// within the bound, `false` when the bound elapsed with writes still
     /// pending. A timeout is never silent: it logs a warning naming how many
     /// writes were still outstanding so a wedged recorder is diagnosable.
-    #[hotpath::skip]
     pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
         let wait = async {
             loop {
@@ -311,7 +313,7 @@ impl McpServer {
     ///
     /// The complete flush runs on the observed ledger-write path so responses
     /// never await configuration or cloud I/O and shutdown still drains it.
-    #[hotpath::measure(label = "mcp.ledger.flush_worldwide")]
+    #[tracing::instrument(name = "mcp.ledger.flush_worldwide", level = "trace", skip_all)]
     pub(crate) fn maybe_flush_worldwide(self: &Arc<Self>) {
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let last = self.last_flush_at.load(Ordering::Relaxed);
@@ -375,7 +377,7 @@ impl McpServer {
         });
     }
 
-    #[hotpath::measure(label = "mcp.ledger.record_error_analytics")]
+    #[tracing::instrument(name = "mcp.ledger.record_error_analytics", level = "trace", skip_all)]
     pub(crate) fn record_mcp_tool_error_analytics(
         &self,
         request: McpToolErrorAnalyticsRequest<'_>,
@@ -430,7 +432,7 @@ impl McpServer {
     /// [`HostAdmissionOutcome`]. The durable admission sequence is carried as
     /// the event idempotency identity, so identical but distinct admissions
     /// remain distinct analytics rows.
-    #[hotpath::measure(label = "mcp.ledger.record_route_analytics")]
+    #[tracing::instrument(name = "mcp.ledger.record_route_analytics", level = "trace", skip_all)]
     pub(crate) fn record_hook_route_analytics(
         &self,
         project_root: &std::path::Path,
@@ -477,7 +479,7 @@ impl McpServer {
     /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
     /// (spans merge regardless, so a dropped observation only widens a span
     /// slightly less).
-    #[hotpath::measure(label = "mcp.ledger.record_span_observation")]
+    #[tracing::instrument(name = "mcp.ledger.record_span_observation", level = "trace", skip_all)]
     pub(crate) fn record_hook_span_observation(
         self: &Arc<Self>,
         event: &hook_events::HookEvent,

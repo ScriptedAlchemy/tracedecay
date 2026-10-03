@@ -10,7 +10,11 @@ use super::{
 /// Reapplies already-authorized release markers while publishing an older
 /// physical restore. The caller must attach the quiesced current database as
 /// `current_authority` and hold the staging write transaction.
-#[hotpath::measure(label = "global_db.observation.retention.restore")]
+#[tracing::instrument(
+    name = "global_db.observation.retention.restore",
+    level = "trace",
+    skip_all
+)]
 pub fn replay_current_release_state_for_restore(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<()> {

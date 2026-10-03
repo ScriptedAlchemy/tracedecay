@@ -114,12 +114,10 @@ impl BenchmarkHostPolicy {
         }
     }
 
-    #[hotpath::skip]
     const fn allows_diagnostic_measurement(self) -> bool {
         matches!(self, Self::Linux | Self::Macos)
     }
 
-    #[hotpath::skip]
     const fn allows_contract_refresh(self) -> bool {
         matches!(self, Self::Linux)
     }
@@ -141,7 +139,6 @@ impl Phase {
         Phase::LateHydrate,
     ];
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Phase::RebuildActivate => "rebuild_activate",
@@ -779,7 +776,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
 
     let db = registered.as_ref();
     let started = Instant::now();
-    let root_fixture = root_relation_fixture::refresh_sessions(
+    let root_fixture = Box::pin(root_relation_fixture::refresh_sessions(
         db,
         |session| {
             request_context(
@@ -793,7 +790,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         },
         root_sessions,
         observation_count,
-    )
+    ))
     .await?;
     let rebuild_activate_ns = elapsed_ns(started);
     if root_fixture

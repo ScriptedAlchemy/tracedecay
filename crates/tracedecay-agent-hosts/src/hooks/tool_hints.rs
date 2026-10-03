@@ -532,7 +532,7 @@ impl ToolHintDedupe {
     /// ([`decide_hint_delivery`]) and applies the resulting per-session budget
     /// and per-category escalation state mutations. The policy decision is
     /// returned unchanged; rendering happens only from it.
-    #[hotpath::measure(label = "hosts.hooks.tool_hints.dedupe")]
+    #[tracing::instrument(name = "hosts.hooks.tool_hints.dedupe", level = "trace", skip_all)]
     pub fn decide(
         &mut self,
         session_id: impl Into<String>,
@@ -589,7 +589,7 @@ impl ToolHintDedupe {
         self.categories.len()
     }
 
-    #[hotpath::measure(label = "hosts.hooks.tool_hints.load")]
+    #[tracing::instrument(name = "hosts.hooks.tool_hints.load", level = "trace", skip_all)]
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let persisted = serde_json::from_str::<PersistedHints>(&content)
@@ -623,7 +623,7 @@ impl ToolHintDedupe {
         }
     }
 
-    #[hotpath::measure(label = "hosts.hooks.tool_hints.save")]
+    #[tracing::instrument(name = "hosts.hooks.tool_hints.save", level = "trace", skip_all)]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -695,7 +695,7 @@ struct PersistedCategory {
     escalated: bool,
 }
 
-#[hotpath::measure(label = "hosts.hooks.tool_hints.decide")]
+#[tracing::instrument(name = "hosts.hooks.tool_hints.decide", level = "trace", skip_all)]
 pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if !input.hints_enabled {
         return None;
@@ -704,7 +704,7 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     classify_hint(input).map(hint_for_category)
 }
 
-#[hotpath::measure(label = "hosts.hooks.tool_hints.classify")]
+#[tracing::instrument(name = "hosts.hooks.tool_hints.classify", level = "trace", skip_all)]
 fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
     let facts = HintRequestFacts::new(input);
     CLASSIFICATION_RULES

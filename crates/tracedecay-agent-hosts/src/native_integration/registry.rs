@@ -205,7 +205,11 @@ impl DaemonNativeIntegrationOwner {
     /// Reconciles every cleanup fenced during project-open before holder
     /// runtimes are published. Any unresolved journal keeps its exact-root
     /// fence and fails project-open closed.
-    #[hotpath::measure(label = "daemon.native_integration.worktree_recover", future = true)]
+    #[tracing::instrument(
+        name = "daemon.native_integration.worktree_recover",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recover_worktree_cleanups(&self) -> Result<usize, NativeIntegrationPortError> {
         let service = self
             .worktree_service_arc()
@@ -260,7 +264,8 @@ impl DaemonNativeIntegrationOwner {
         .await
         .map_err(|_| NativeIntegrationPortError::Unavailable)?
         .inspect(|reconciled| {
-            hotpath::gauge!("daemon.native_integration.worktree_recovered").inc(*reconciled as f64);
+            metrics::gauge!("daemon.native_integration.worktree_recovered")
+                .increment(*reconciled as f64);
         })
     }
 
@@ -371,7 +376,11 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// Returns the retained owner for this exact identity, or composes exactly
     /// one: store actor, topology, mechanics, pinned-policy authorization,
     /// then durable startup recovery. A failed recovery mounts nothing.
-    #[hotpath::measure(label = "daemon.native_integration.native_ensure", future = true)]
+    #[tracing::instrument(
+        name = "daemon.native_integration.native_ensure",
+        level = "trace",
+        skip_all
+    )]
     pub async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -383,7 +392,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .ensure_registered(database, target, observed_at, analysis)
             .await;
         if owner.is_err() {
-            hotpath::gauge!("daemon.native_integration.ensure.failed").inc(1.0);
+            metrics::gauge!("daemon.native_integration.ensure.failed").increment(1.0);
         }
         owner
     }
@@ -470,7 +479,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
-            hotpath::gauge!("daemon.native_integration.ensure.reused").inc(1.0);
+            metrics::gauge!("daemon.native_integration.ensure.reused").increment(1.0);
             return Ok(owner);
         }
 
@@ -482,7 +491,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
-            hotpath::gauge!("daemon.native_integration.ensure.reused").inc(1.0);
+            metrics::gauge!("daemon.native_integration.ensure.reused").increment(1.0);
             return Ok(owner);
         }
 
@@ -593,7 +602,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                 owner: owner.clone(),
             },
         );
-        hotpath::gauge!("daemon.native_integration.ensure.mounted").inc(1.0);
+        metrics::gauge!("daemon.native_integration.ensure.mounted").increment(1.0);
         Ok(owner)
     }
 

@@ -18,7 +18,7 @@ impl MarkdownView {
     }
 }
 
-#[hotpath::measure(label = "mcp.application_output.render")]
+#[tracing::instrument(name = "mcp.application_output.render", level = "trace", skip_all)]
 pub fn render(view: CanonicalHumanView) -> MarkdownView {
     let mut text = format!("## {}\n", escape_text(&view.heading));
     for field in view.fields {

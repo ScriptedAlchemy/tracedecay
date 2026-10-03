@@ -334,7 +334,11 @@ struct ClineFamilyPacketProviderV1 {
 /// Read one provider's admission straight from the root-composed checked-in
 /// evidence packet. Family resemblance, an adapter source file, or a shared
 /// configuration shape never substitutes for the supplied packet.
-#[hotpath::measure(label = "host_integration.evidence.cline_family")]
+#[tracing::instrument(
+    name = "host_integration.evidence.cline_family",
+    level = "trace",
+    skip_all
+)]
 pub fn cline_family_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     provider: ClineFamilyProviderV1,
@@ -384,7 +388,11 @@ pub fn cline_family_evidence_from_embedded_assets(
 /// Consume root-composed authentic native fixture bytes. A documented but
 /// uncaptured declaration remains unavailable rather than becoming capture
 /// evidence.
-#[hotpath::measure(label = "host_integration.evidence.native_fixture")]
+#[tracing::instrument(
+    name = "host_integration.evidence.native_fixture",
+    level = "trace",
+    skip_all
+)]
 pub fn stock_host_native_fixture_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     host: HostKindV1,
@@ -516,7 +524,11 @@ fn fixture_has_native_event(bytes: &[u8], identities: &[&str]) -> bool {
 /// Resolve edit and stop ingress independently. Explicit feedback reads remain
 /// described by [`stock_host_registration_evidence`]; they never upgrade an
 /// absent native boundary into an event the daemon can receive.
-#[hotpath::measure(label = "host_integration.evidence.edit_stop")]
+#[tracing::instrument(
+    name = "host_integration.evidence.edit_stop",
+    level = "trace",
+    skip_all
+)]
 pub fn host_edit_stop_conformance_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     host: HostKindV1,
@@ -559,7 +571,11 @@ pub fn host_edit_stop_conformance_evidence_from_embedded_assets(
     }
 }
 
-#[hotpath::measure(label = "host_integration.evidence.native_hosts")]
+#[tracing::instrument(
+    name = "host_integration.evidence.native_hosts",
+    level = "trace",
+    skip_all
+)]
 pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
 ) -> Vec<HostNativeFixtureEvidenceV1> {

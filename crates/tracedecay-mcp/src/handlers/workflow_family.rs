@@ -20,7 +20,7 @@ use tracedecay_tool_catalog::OperationId;
 use crate::ToolResult;
 use crate::handlers::support::{owner_envelope_result, unknown_tool_error};
 
-#[hotpath::measure(future = true, label = "mcp.workflow.total")]
+#[tracing::instrument(name = "mcp.workflow.total", level = "trace", skip_all)]
 pub async fn handle_workflow<Invoke, InvokeFuture>(
     tool_name: &str,
     mut body: Value,
@@ -33,8 +33,9 @@ where
     Invoke: FnOnce(WorkflowHttpRequest) -> InvokeFuture,
     InvokeFuture: Future<Output = Result<Value>>,
 {
-    let (operation, request_id, controls) =
-        hotpath::measure_block!("mcp.workflow.request_build", {
+    let (operation, request_id, controls) = {
+        let _span = tracing::trace_span!("mcp.workflow.request_build").entered();
+        {
             let operation = workflow_operation_for_tool(tool_name)
                 .ok_or_else(|| unknown_tool_error(tool_name))?;
             let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
@@ -51,21 +52,22 @@ where
                 object.remove("__mcp_request_id");
             }
             (operation, request_id, controls)
-        });
-    let payload = hotpath::future!(
+        }
+    };
+    let payload = tracing::Instrument::instrument(
         invoke(WorkflowHttpRequest {
             operation,
             request_id,
             controls,
             body,
         }),
-        label = "mcp.workflow.invoke"
+        tracing::trace_span!("mcp.workflow.invoke"),
     )
     .await?;
-    hotpath::measure_block!(
-        "mcp.workflow.result_assemble",
+    {
+        let _span = tracing::trace_span!("mcp.workflow.result_assemble").entered();
         owner_envelope_result(&payload)
-    )
+    }
 }
 
 pub fn workflow_operation_for_tool(tool_name: &str) -> Option<WorkflowOperation> {

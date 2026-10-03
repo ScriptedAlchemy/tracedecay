@@ -124,7 +124,11 @@ impl RegisteredGlobalDb {
     /// Rescans every persisted LCM raw-message body under the current
     /// detector revision, remediating hits through the canonical ingest path.
     /// Runs at most once per store per detector revision.
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.privacy_rescan")]
+    #[tracing::instrument(
+        name = "global_db.registered.lcm.privacy_rescan",
+        level = "trace",
+        skip_all
+    )]
     pub async fn lcm_privacy_rescan_raw_messages(
         &self,
     ) -> Result<LcmPrivacyRescanOutcomeV1, LcmError> {
@@ -205,7 +209,6 @@ impl RegisteredGlobalDb {
 
     /// Binds receipts to every unreceipted row through the one existing
     /// protect pass, per owning session.
-    #[hotpath::skip]
     async fn protect_unreceipted_sessions(&self) -> Result<u64, LcmError> {
         let sessions = {
             let snapshot = self.lcm_read_snapshot().await?;
@@ -236,7 +239,6 @@ impl RegisteredGlobalDb {
         Ok(protected_rows)
     }
 
-    #[hotpath::skip]
     async fn load_rescan_page(&self, after_store_id: i64) -> Result<Vec<RescanRow>, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
         let mut rows = snapshot
@@ -281,7 +283,6 @@ impl RegisteredGlobalDb {
 
     /// Recovers the at-rest body this row actually serves: inline content, or
     /// the verified external payload bytes.
-    #[hotpath::skip]
     async fn rescan_input(
         &self,
         storage_root: &Path,
@@ -339,7 +340,6 @@ impl RegisteredGlobalDb {
     /// Re-ingests one dirty row through the canonical staging and commit
     /// path and tombstones a replaced
     /// external payload so the superseded bytes leave the disk.
-    #[hotpath::skip]
     async fn remediate_row(
         &self,
         storage_root: &Path,

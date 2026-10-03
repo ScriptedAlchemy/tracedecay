@@ -78,13 +78,16 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    hotpath::measure_block!("rusqlite.exact_sql.write_lock", {
-        retry_busy_begin(
-            || Transaction::new_unchecked(connection, behavior),
-            shutdown_requested,
-            cancelled,
-        )
-    })
+    {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.write_lock").entered();
+        {
+            retry_busy_begin(
+                || Transaction::new_unchecked(connection, behavior),
+                shutdown_requested,
+                cancelled,
+            )
+        }
+    }
 }
 
 pub(super) fn retry_busy_begin<T>(
@@ -234,7 +237,11 @@ pub(crate) enum TransactionCommand {
     },
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.writer_command")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.writer_command",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
@@ -254,17 +261,20 @@ pub(crate) fn run_writer_command(
             // `rusqlite.exact_sql.transaction` and `rusqlite.exact_sql.vacuum`
             // split the pooled `rusqlite.writer.exact_sql` population, so a
             // slow exact-SQL lane is attributable to a specific command shape.
-            let (mut result, inserted) = hotpath::measure_block!("rusqlite.exact_sql.execute", {
-                execute_request(
-                    connection,
-                    request,
-                    false,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    None,
-                )
-            });
+            let (mut result, inserted) = {
+                let _span = tracing::trace_span!("rusqlite.exact_sql.execute").entered();
+                {
+                    execute_request(
+                        connection,
+                        request,
+                        false,
+                        Some(Arc::clone(shutdown_requested)),
+                        None,
+                        true,
+                        None,
+                    )
+                }
+            };
             publish_last_insert_rowid(
                 &mut result,
                 inserted,
@@ -310,30 +320,29 @@ pub(crate) fn run_writer_command(
                     // write and command behind it waits inside this span, so
                     // it, not SQLite execution, is what explains begin
                     // latency elsewhere while an interactive lease is open.
-                    Ok(transaction) if reply.try_send(Ok(())).is_ok() => {
-                        Some(hotpath::measure_block!(
-                            "rusqlite.exact_sql.transaction",
-                            run_transaction(
-                                transaction,
-                                receiver,
-                                before,
-                                shutdown_requested,
-                                &last_insert_rowid,
-                                &lease,
-                                authority,
-                                policy,
-                            )
-                        ))
-                    }
+                    Ok(transaction) if reply.try_send(Ok(())).is_ok() => Some({
+                        let _span =
+                            tracing::trace_span!("rusqlite.exact_sql.transaction").entered();
+                        run_transaction(
+                            transaction,
+                            receiver,
+                            before,
+                            shutdown_requested,
+                            &last_insert_rowid,
+                            &lease,
+                            authority,
+                            policy,
+                        )
+                    }),
                     Ok(_) => {
-                        crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                            crate::hotpath_observe::ExactSqlTransactionOutcome::Abandoned,
+                        crate::observe::record_exact_sql_transaction_outcome(
+                            crate::observe::ExactSqlTransactionOutcome::Abandoned,
                         );
                         None
                     }
                     Err(error) => {
-                        crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                            crate::hotpath_observe::ExactSqlTransactionOutcome::BeginFailed,
+                        crate::observe::record_exact_sql_transaction_outcome(
+                            crate::observe::ExactSqlTransactionOutcome::BeginFailed,
                         );
                         return DeferredReply::new(
                             reply,
@@ -345,7 +354,7 @@ pub(crate) fn run_writer_command(
             let Some(completion) = completion else {
                 return DeferredReply::none();
             };
-            crate::hotpath_observe::record_exact_sql_transaction_outcome(
+            crate::observe::record_exact_sql_transaction_outcome(
                 completion.outcome(lease.is_expired()),
             );
             let (cleanup, terminal) = completion.finish(connection);
@@ -367,22 +376,25 @@ pub(crate) fn run_writer_command(
                 Ok(statement) => statement,
                 Err(error) => return DeferredReply::new(reply, Err(error)),
             };
-            let result = hotpath::measure_block!("rusqlite.wal_checkpoint", {
-                with_exact_sql_guard(
-                    connection,
-                    false,
-                    false,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    None,
-                    crate::connection::authorize_writer,
-                    false,
-                    None,
-                    None,
-                    || execute_query_unchecked(connection, statement),
-                )
-            });
+            let result = {
+                let _span = tracing::trace_span!("rusqlite.wal_checkpoint").entered();
+                {
+                    with_exact_sql_guard(
+                        connection,
+                        false,
+                        false,
+                        Some(Arc::clone(shutdown_requested)),
+                        None,
+                        true,
+                        None,
+                        crate::connection::authorize_writer,
+                        false,
+                        None,
+                        None,
+                        || execute_query_unchecked(connection, statement),
+                    )
+                }
+            };
             DeferredReply::new(reply, result)
         }
     }
@@ -747,12 +759,15 @@ fn run_transaction(
                     );
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = hotpath::measure_block!("rusqlite.commit", {
-                    transaction
-                        .commit()
-                        .map(|()| ExactSqlCommitReceipt { changed_rows })
-                        .map_err(|error| sqlite_error("commit immediate transaction", error))
-                });
+                let result = {
+                    let _span = tracing::trace_span!("rusqlite.commit").entered();
+                    {
+                        transaction
+                            .commit()
+                            .map(|()| ExactSqlCommitReceipt { changed_rows })
+                            .map_err(|error| sqlite_error("commit immediate transaction", error))
+                    }
+                };
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,
@@ -804,19 +819,19 @@ impl TransactionCompletion {
     /// `rusqlite.exact_sql.transaction.*` outcome counters. A missing
     /// terminal with the lease flag raised is an expiry; without it, the
     /// caller disconnected or shutdown/authority loss rolled the work back.
-    fn outcome(&self, expired: bool) -> crate::hotpath_observe::ExactSqlTransactionOutcome {
+    fn outcome(&self, expired: bool) -> crate::observe::ExactSqlTransactionOutcome {
         match &self.terminal {
             Some(TransactionTerminal::Commit { result: Ok(_), .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::Committed
+                crate::observe::ExactSqlTransactionOutcome::Committed
             }
             Some(TransactionTerminal::Commit { result: Err(_), .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::CommitFailed
+                crate::observe::ExactSqlTransactionOutcome::CommitFailed
             }
             Some(TransactionTerminal::Rollback { .. }) => {
-                crate::hotpath_observe::ExactSqlTransactionOutcome::RolledBack
+                crate::observe::ExactSqlTransactionOutcome::RolledBack
             }
-            None if expired => crate::hotpath_observe::ExactSqlTransactionOutcome::Expired,
-            None => crate::hotpath_observe::ExactSqlTransactionOutcome::Abandoned,
+            None if expired => crate::observe::ExactSqlTransactionOutcome::Expired,
+            None => crate::observe::ExactSqlTransactionOutcome::Abandoned,
         }
     }
 

@@ -14,7 +14,7 @@ test-helpers = []
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-hotpath.workspace = true
+metrics.workspace = true
 tracing = "0.1"
 
 [dev-dependencies]

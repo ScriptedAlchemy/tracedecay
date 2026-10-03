@@ -188,7 +188,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.code_index.branch_generations.revisions")]
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_generations.revisions",
+        level = "trace",
+        skip_all
+    )]
     fn revisions(
         &self,
         base_reference: &RefId,
@@ -409,9 +413,10 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
-    #[hotpath::measure(
-        label = "daemon.code_index.branch_generations.generations",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_generations.generations",
+        level = "trace",
+        skip_all
     )]
     async fn generations_for_revisions_with_bounds(
         &self,
@@ -499,20 +504,25 @@ impl CodeIndexSchedulerRegistryV1 {
                 // of a read the index could have answered.
                 ExactGenerationPairV1::Missing(missing) => {
                     let mut scheduler = lock_scheduler_for_exact_read(&scheduler, &control)?;
-                    hotpath::measure_block!("daemon.code_index.branch_generations.mint", {
-                        if missing.base {
-                            scheduler.publish_exact_git_tree_generation(
-                                &exact_source(&base_reference, &base_revision, &base_tree)?,
-                                &control,
-                            )?;
+                    {
+                        let _span =
+                            tracing::trace_span!("daemon.code_index.branch_generations.mint")
+                                .entered();
+                        {
+                            if missing.base {
+                                scheduler.publish_exact_git_tree_generation(
+                                    &exact_source(&base_reference, &base_revision, &base_tree)?,
+                                    &control,
+                                )?;
+                            }
+                            if missing.head && !same_revision {
+                                scheduler.publish_exact_git_tree_generation(
+                                    &exact_source(&head_reference, &head_revision, &head_tree)?,
+                                    &control,
+                                )?;
+                            }
                         }
-                        if missing.head && !same_revision {
-                            scheduler.publish_exact_git_tree_generation(
-                                &exact_source(&head_reference, &head_revision, &head_tree)?,
-                                &control,
-                            )?;
-                        }
-                    });
+                    };
                     drop(scheduler);
                     match historical_generation_owner.publication.revisions(
                         &base_reference,

@@ -120,7 +120,6 @@ pub enum DoctorEvidenceStateV1 {
 impl DoctorEvidenceStateV1 {
     /// True only for the single state that asserts complete healthy coverage.
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_healthy_complete(self) -> bool {
         matches!(self, Self::HealthyCompleteCoverage)
     }
@@ -142,7 +141,6 @@ pub enum DoctorCoverageCompletenessV1 {
 
 impl DoctorCoverageCompletenessV1 {
     #[must_use]
-    #[hotpath::skip]
     const fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }
@@ -246,7 +244,6 @@ impl DoctorCoverageStatementV1 {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         self.completeness.is_complete()
     }

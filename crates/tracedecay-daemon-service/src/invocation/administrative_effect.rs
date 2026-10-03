@@ -61,7 +61,11 @@ pub(super) fn administrative_authority(
 /// key, and a durable effect receipt asserting the committed state change,
 /// with every digest domain namespaced under the `family` token.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.administrative.effect")]
+#[tracing::instrument(
+    name = "daemon.service.administrative.effect",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn administrative_command_effect<T>(
     family: &'static str,
     registered: &RegisteredWorkRuntime,

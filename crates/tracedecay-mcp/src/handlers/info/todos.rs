@@ -51,7 +51,7 @@ fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
     None
 }
 
-#[hotpath::measure(label = "mcp.info.todos.total")]
+#[tracing::instrument(name = "mcp.info.todos.total", level = "trace", skip_all)]
 pub async fn compute_todos(
     graph: &VerifiedGraphQuery,
     args: Value,
@@ -81,8 +81,10 @@ pub async fn compute_todos(
         .or_else(|| scope_prefix.map(str::to_owned));
     let limit = request.limit.map_or(200, |value| value.min(2000) as usize);
 
-    let mut file_counts =
-        hotpath::measure_block!("mcp.info.todos.files", indexed_file_counts(graph)?);
+    let mut file_counts = {
+        let _span = tracing::trace_span!("mcp.info.todos.files").entered();
+        indexed_file_counts(graph)?
+    };
     if let Some(prefix) = path.as_deref() {
         file_counts
             .retain(|file| tracedecay_domain::path_matches_scope(&file.logical_path, Some(prefix)));
@@ -99,9 +101,9 @@ pub async fn compute_todos(
         mut markers,
         touched,
         by_kind,
-    } = hotpath::future!(
+    } = tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || scan_markers(&project_root, &files, &kinds, limit)),
-        label = "mcp.info.todos.scan"
+        tracing::trace_span!("mcp.info.todos.scan"),
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {
@@ -111,10 +113,10 @@ pub async fn compute_todos(
     // Only files that carry a marker need their symbols, to name the
     // innermost symbol enclosing each marker.
     file_counts.retain(|file| touched.contains(&file.logical_path));
-    let symbols = hotpath::measure_block!(
-        "mcp.info.todos.symbols",
+    let symbols = {
+        let _span = tracing::trace_span!("mcp.info.todos.symbols").entered();
         symbols_in_files(graph, &file_counts)?
-    );
+    };
     name_enclosing_symbols(&mut markers, &symbols)?;
 
     let result = TodosResultV1 {

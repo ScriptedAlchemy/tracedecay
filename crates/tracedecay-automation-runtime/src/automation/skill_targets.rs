@@ -68,7 +68,11 @@ pub fn install_managed_skills(
     }
 }
 
-#[hotpath::measure(label = "automation.host_io.export_native_overlay")]
+#[tracing::instrument(
+    name = "automation.host_io.export_native_overlay",
+    level = "trace",
+    skip_all
+)]
 pub fn export_native_skill_overlay(
     profile_root: &Path,
     target: SkillInstallTarget,
@@ -196,7 +200,11 @@ fn render_native_skill_overlay(
     Ok(RenderedNativeSkillOverlay { files, exported })
 }
 
-#[hotpath::measure(label = "automation.host_io.export_prompt_index")]
+#[tracing::instrument(
+    name = "automation.host_io.export_prompt_index",
+    level = "trace",
+    skip_all
+)]
 pub fn export_prompt_skill_index(
     host_io: &HostIo,
     profile_root: &Path,

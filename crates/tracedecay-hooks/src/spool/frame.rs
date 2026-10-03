@@ -49,19 +49,20 @@ pub(super) fn encode_spool_payload(
 /// Writes one frame without syncing it, even into a new records file;
 /// [`super::HookSpoolV1::commit`] makes it and the file's name durable.
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
-    hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
+    metrics::gauge!("hooks.spool.append.frame_bytes").set((frame.len()) as f64);
     append_unsynced(path, frame)
         .map(|_| ())
         .map_err(|_| HookSpoolError::Io)
 }
 
 pub(super) fn truncate_records(root: &Path, length: u64) -> Result<(), HookSpoolError> {
-    hotpath::measure_block!("hooks.spool.fsync.truncate", {
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.truncate").entered();
         shared_truncate_file(&records_path(root), length).map_err(|_| HookSpoolError::Io)
-    })
+    }
 }
 
-#[hotpath::measure(label = "hooks.spool.scan_records")]
+#[tracing::instrument(name = "hooks.spool.scan_records", level = "trace", skip_all)]
 pub(super) fn scan_records(
     root: &Path,
     config: HookSpoolConfigV1,
@@ -69,7 +70,7 @@ pub(super) fn scan_records(
     scan_records_from(root, config, Vec::new(), 0)
 }
 
-#[hotpath::measure(label = "hooks.spool.scan_records_suffix")]
+#[tracing::instrument(name = "hooks.spool.scan_records_suffix", level = "trace", skip_all)]
 pub(super) fn scan_records_from(
     root: &Path,
     config: HookSpoolConfigV1,
@@ -94,10 +95,7 @@ pub(super) fn scan_records_from(
     if physical_len > config.limits.max_host_bytes {
         return Err(HookSpoolError::SpoolFull);
     }
-    let mut file = hotpath::io!(
-        File::open(&path).map_err(|_| HookSpoolError::Io)?,
-        label = "hooks.spool.scan"
-    );
+    let mut file = File::open(&path).map_err(|_| HookSpoolError::Io)?;
     if validated_end > physical_len {
         return Err(HookSpoolError::MetadataCorrupted);
     }
@@ -155,8 +153,9 @@ pub(super) fn scan_records_from(
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-    hotpath::gauge!("hooks.spool.scan.frame_count").set(scanned_records);
-    hotpath::gauge!("hooks.spool.scan.bytes").set(physical_len.saturating_sub(validated_end));
+    metrics::gauge!("hooks.spool.scan.frame_count").set(scanned_records);
+    metrics::gauge!("hooks.spool.scan.bytes")
+        .set((physical_len.saturating_sub(validated_end)) as f64);
     Ok(ScanResult {
         records,
         valid_end: offset,
@@ -203,7 +202,7 @@ pub(super) fn corrupt_scan(
     }
 }
 
-#[hotpath::measure(label = "hooks.spool.encode_frame")]
+#[tracing::instrument(name = "hooks.spool.encode_frame", level = "trace", skip_all)]
 pub(super) fn encode_frame(
     sequence: u64,
     queued_at: UtcMicros,
@@ -229,11 +228,11 @@ pub(super) fn encode_frame(
     frame.extend_from_slice(payload);
     let checksum = frame_checksum(&frame);
     frame.extend_from_slice(&checksum);
-    hotpath::gauge!("hooks.spool.encode.frame_bytes").set(frame.len());
+    metrics::gauge!("hooks.spool.encode.frame_bytes").set((frame.len()) as f64);
     Ok(frame)
 }
 
-#[hotpath::measure(label = "hooks.spool.decode_frame")]
+#[tracing::instrument(name = "hooks.spool.decode_frame", level = "trace", skip_all)]
 pub(super) fn decode_complete_frame(
     frame: &[u8],
     file_offset: u64,

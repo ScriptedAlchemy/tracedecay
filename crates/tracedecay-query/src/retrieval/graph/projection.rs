@@ -30,7 +30,7 @@ impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
     }
 }
 
-#[hotpath::measure(label = "query.lane.graph.read")]
+#[tracing::instrument(name = "query.lane.graph.read", level = "trace", skip_all)]
 fn read_graph_evidence(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
@@ -57,34 +57,37 @@ fn read_graph_evidence(
         .collect::<Result<Vec<_>, _>>()?;
     let cancellation =
         graph_read_cancellation(Arc::clone(&control), request.budget.deadline_micros);
-    let raw = hotpath::measure_block!("query.graph.traverse", {
-        reader
-            .traverse(
-                &request.generation,
-                &seed_symbols,
-                &request.edge_kinds,
-                request.max_depth,
-                cancellation,
-            )
-            .map_err(|error| {
-                if matches!(error, CodeGraphProjectionError::Cancelled) {
-                    check_request_control(request, control.as_ref())
-                        .err()
-                        .unwrap_or(RetrievalPortError::Cancelled)
-                } else {
-                    map_projection_error(error)
-                }
-            })
-    })?;
+    let raw = {
+        let _span = tracing::trace_span!("query.graph.traverse").entered();
+        {
+            reader
+                .traverse(
+                    &request.generation,
+                    &seed_symbols,
+                    &request.edge_kinds,
+                    request.max_depth,
+                    cancellation,
+                )
+                .map_err(|error| {
+                    if matches!(error, CodeGraphProjectionError::Cancelled) {
+                        check_request_control(request, control.as_ref())
+                            .err()
+                            .unwrap_or(RetrievalPortError::Cancelled)
+                    } else {
+                        map_projection_error(error)
+                    }
+                })
+        }
+    }?;
     check_request_control(request, control.as_ref())?;
     let batch = project_graph_batch(reader, request, control.as_ref(), raw)?;
     check_request_control(request, control.as_ref())?;
-    hotpath::gauge!("query.graph.project.candidates").set(batch.candidates.len());
-    hotpath::gauge!("query.graph.project.examined").set(batch.coverage.examined);
+    metrics::gauge!("query.graph.project.candidates").set((batch.candidates.len()) as f64);
+    metrics::gauge!("query.graph.project.examined").set(batch.coverage.examined as f64);
     Ok(RetrieverOutcome::Complete(batch))
 }
 
-#[hotpath::measure(label = "query.graph.project")]
+#[tracing::instrument(name = "query.graph.project", level = "trace", skip_all)]
 fn project_graph_batch(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,

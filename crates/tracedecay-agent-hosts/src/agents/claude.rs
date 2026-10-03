@@ -47,7 +47,7 @@ impl AgentIntegration for ClaudeIntegration {
     // deferral arms in `host_component_registration::preflight` and block the
     // very lifecycle this integration can complete on its own.
 
-    #[hotpath::measure(label = "hosts.agent.claude.project_install")]
+    #[tracing::instrument(name = "hosts.agent.claude.project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -602,7 +602,7 @@ fn require_claude_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "hosts.agent.claude.plugin_activate")]
+#[tracing::instrument(name = "hosts.agent.claude.plugin_activate", level = "trace", skip_all)]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
     if claude_plugin_needs_reinstall(home)? {
         run_claude_plugin_step(
@@ -627,7 +627,11 @@ fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
 /// The plugin is addressed by its selection name (`tracedecay`) while the
 /// install side addresses `<plugin>@<marketplace>`; that asymmetry is Claude
 /// Code's own CLI contract, not a TraceDecay convention.
-#[hotpath::measure(label = "hosts.agent.claude.plugin_deactivate")]
+#[tracing::instrument(
+    name = "hosts.agent.claude.plugin_deactivate",
+    level = "trace",
+    skip_all
+)]
 fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
     run_claude_plugin_step(
         claude,

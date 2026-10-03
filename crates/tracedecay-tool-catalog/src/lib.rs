@@ -8,10 +8,10 @@
 
 mod binding;
 mod executable;
-mod hotpath_observe;
 mod id;
 mod manifest;
 mod mcp;
+mod observe;
 mod operation;
 mod owner_side_effect;
 mod owner_stores;

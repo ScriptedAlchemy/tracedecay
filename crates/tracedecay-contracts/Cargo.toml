@@ -7,15 +7,8 @@ license = "MIT"
 description = "Transport-neutral application contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
-
 [dependencies]
-hotpath.workspace = true
+metrics.workspace = true
 schemars.workspace = true
 getrandom = "0.2"
 hex = "0.4"
@@ -26,6 +19,7 @@ thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-policy = { path = "../tracedecay-policy" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

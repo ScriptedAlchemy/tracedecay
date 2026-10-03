@@ -1506,7 +1506,11 @@ impl SourceAuthorityPublicationApplyOutcomeV1 {
 ///
 /// This function is pure. Publishing the returned transition is a separate
 /// compare-and-set operation through [`apply_source_projection`].
-#[hotpath::measure(label = "store.external_source.build_projection")]
+#[tracing::instrument(
+    name = "store.external_source.build_projection",
+    level = "trace",
+    skip_all
+)]
 pub fn build_source_projection(
     pending: &SourcePendingProjectionV1,
     projector: ComponentVersion,
@@ -1562,14 +1566,18 @@ pub fn build_source_projection(
 
 /// Publishes one deterministic projection transition with exact source and
 /// prior-projection compare-and-set semantics.
-#[hotpath::measure(label = "store.external_source.apply_projection")]
+#[tracing::instrument(
+    name = "store.external_source.apply_projection",
+    level = "trace",
+    skip_all
+)]
 pub fn apply_source_projection(
     current: &SourceStoreStateV1,
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
     let outcome = reduce_source_projection(current.clone(), pending, projection);
-    crate::hotpath_observe::record_source_projection_outcome(&outcome);
+    crate::observe::record_source_projection_outcome(&outcome);
     outcome
 }
 
@@ -1577,18 +1585,26 @@ pub fn apply_source_projection(
 ///
 /// This is equivalent to [`apply_source_projection`] but avoids cloning every
 /// current-object map before applying one ordered successor.
-#[hotpath::measure(label = "store.external_source.apply_projection_owned")]
+#[tracing::instrument(
+    name = "store.external_source.apply_projection_owned",
+    level = "trace",
+    skip_all
+)]
 pub fn apply_source_projection_owned(
     current: SourceStoreStateV1,
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
     let outcome = reduce_source_projection(current, pending, projection);
-    crate::hotpath_observe::record_source_projection_outcome(&outcome);
+    crate::observe::record_source_projection_outcome(&outcome);
     outcome
 }
 
-#[hotpath::measure(label = "store.external_source.reduce_projection")]
+#[tracing::instrument(
+    name = "store.external_source.reduce_projection",
+    level = "trace",
+    skip_all
+)]
 fn reduce_source_projection(
     mut current: SourceStoreStateV1,
     pending: &SourcePendingProjectionV1,
@@ -1649,7 +1665,11 @@ fn reduce_source_projection(
     )))
 }
 
-#[hotpath::measure(label = "store.external_source.apply_authority")]
+#[tracing::instrument(
+    name = "store.external_source.apply_authority",
+    level = "trace",
+    skip_all
+)]
 pub fn apply_source_authority_publication(
     current: &SourceStoreStateV1,
     publication: SourceAuthorityPublicationV1,
@@ -1658,7 +1678,11 @@ pub fn apply_source_authority_publication(
 }
 
 /// Applies an authority revision while consuming verified writer state.
-#[hotpath::measure(label = "store.external_source.apply_authority_owned")]
+#[tracing::instrument(
+    name = "store.external_source.apply_authority_owned",
+    level = "trace",
+    skip_all
+)]
 pub fn apply_source_authority_publication_owned(
     mut current: SourceStoreStateV1,
     publication: SourceAuthorityPublicationV1,

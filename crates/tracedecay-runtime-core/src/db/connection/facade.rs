@@ -13,12 +13,10 @@ impl DatabaseWriterConnection<'_> {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -32,7 +30,6 @@ impl DatabaseWriterConnection<'_> {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -41,7 +38,6 @@ impl DatabaseWriterConnection<'_> {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn query_engine<P>(
         &self,
         sql: &str,
@@ -55,7 +51,6 @@ impl DatabaseWriterConnection<'_> {
 }
 
 impl DatabaseEngineWriteConnection {
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -67,7 +62,6 @@ impl DatabaseEngineWriteConnection {
         self.conn.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -75,12 +69,10 @@ impl DatabaseEngineWriteConnection {
         self.conn.execute(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn authorized_long_lease_transaction(
         &self,
     ) -> crate::db::engine::Result<DatabaseEngineLongLeaseTransaction> {
@@ -95,7 +87,6 @@ impl DatabaseEngineWriteConnection {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineWriteConnection {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -109,7 +100,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineWriteConnection {
 }
 
 impl crate::db::engine::Executor for DatabaseEngineWriteConnection {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -117,7 +107,6 @@ impl crate::db::engine::Executor for DatabaseEngineWriteConnection {
         DatabaseEngineWriteConnection::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         DatabaseEngineWriteConnection::execute_batch(self, sql).await
     }
@@ -144,7 +133,6 @@ impl DatabaseEngineReadConnection {
         }
     }
 
-    #[hotpath::skip]
     pub async fn read_snapshot(&self) -> crate::db::engine::Result<DatabaseEngineReadSnapshot> {
         self.conn
             .read_snapshot()
@@ -165,7 +153,6 @@ impl DatabaseEngineReadConnection {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -179,7 +166,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
 }
 
 impl DatabaseEngineReadSnapshot {
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -191,13 +177,11 @@ impl DatabaseEngineReadSnapshot {
         self.snapshot.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn commit(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn rollback(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())
@@ -205,7 +189,6 @@ impl DatabaseEngineReadSnapshot {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -219,7 +202,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
 }
 
 impl DatabaseEngineLongLeaseTransaction {
-    #[hotpath::skip]
     pub(crate) async fn execute_authority_revalidated_batch(
         &self,
         sql: &str,
@@ -229,19 +211,16 @@ impl DatabaseEngineLongLeaseTransaction {
             .await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
         self.transaction.commit().await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
         self.transaction.rollback().await
     }
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineLongLeaseTransaction {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -255,7 +234,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineLongLeaseTransaction {
 }
 
 impl crate::db::engine::Executor for DatabaseEngineLongLeaseTransaction {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -263,7 +241,6 @@ impl crate::db::engine::Executor for DatabaseEngineLongLeaseTransaction {
         self.transaction.execute(sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
@@ -278,7 +255,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         Self::Write(transaction)
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -293,7 +269,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -306,7 +281,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         match self {
             Self::Read(_) => Err(crate::db::engine::Error::Runtime(
@@ -316,7 +290,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
@@ -332,7 +305,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn rollback(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
@@ -350,7 +322,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseMemoryTransaction<'_> {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -364,7 +335,6 @@ impl crate::db::engine::QueryExecutor for DatabaseMemoryTransaction<'_> {
 }
 
 impl crate::db::engine::Executor for DatabaseMemoryTransaction<'_> {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -372,14 +342,12 @@ impl crate::db::engine::Executor for DatabaseMemoryTransaction<'_> {
         DatabaseMemoryTransaction::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         DatabaseMemoryTransaction::execute_batch(self, sql).await
     }
 }
 
 impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction<'_> {
-    #[hotpath::skip]
     async fn attach_database(
         &self,
         path: &Path,
@@ -400,7 +368,6 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
 }
 
 impl DatabaseWriteTransaction<'_> {
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -408,7 +375,6 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -420,17 +386,14 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -438,7 +401,6 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn query_engine<P>(
         &self,
         sql: &str,
@@ -450,7 +412,6 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
         let Self {
             transaction,
@@ -542,7 +503,6 @@ impl DatabaseWriteTransaction<'_> {
         })
     }
 
-    #[hotpath::skip]
     pub async fn rollback(self) -> Result<()> {
         let Self {
             transaction,
@@ -560,7 +520,6 @@ impl DatabaseWriteTransaction<'_> {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -574,7 +533,6 @@ impl crate::db::engine::QueryExecutor for DatabaseWriteTransaction<'_> {
 }
 
 impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -582,14 +540,12 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
         self.execute_engine(sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.execute_batch_engine(sql).await
     }
 }
 
 impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn attach_database(
         &self,
         path: &Path,

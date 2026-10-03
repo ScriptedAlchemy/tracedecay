@@ -31,7 +31,7 @@ pub(crate) struct AutomaticFactReceiptsPayloadV1 {
     limit: usize,
 }
 
-#[hotpath::measure(label = "dashboard_api.receipts.list", future = true)]
+#[tracing::instrument(name = "dashboard_api.receipts.list", level = "trace", skip_all)]
 pub async fn list(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -76,7 +76,7 @@ pub async fn list(
     }
 }
 
-#[hotpath::measure(label = "dashboard_api.receipts.view", future = true)]
+#[tracing::instrument(name = "dashboard_api.receipts.view", level = "trace", skip_all)]
 pub async fn view(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,

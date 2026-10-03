@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(feature = "hotpath")]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
@@ -45,7 +45,7 @@ pub enum MemoryTargetAccessV1 {
 pub struct RetainedMemoryTargetV1<'a> {
     database: ProjectMemoryDbHandle<'a>,
     owner: FactOwnerV1,
-    #[cfg(feature = "hotpath")]
+
     _observation: RetainedMemoryTargetObservationV1,
 }
 
@@ -54,7 +54,7 @@ impl<'a> RetainedMemoryTargetV1<'a> {
         Self {
             database,
             owner,
-            #[cfg(feature = "hotpath")]
+
             _observation: RetainedMemoryTargetObservationV1::enter(),
         }
     }
@@ -68,25 +68,21 @@ impl<'a> RetainedMemoryTargetV1<'a> {
     }
 }
 
-#[cfg(feature = "hotpath")]
 static RETAINED_MEMORY_TARGETS_OPEN: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(feature = "hotpath")]
 struct RetainedMemoryTargetObservationV1;
 
-#[cfg(feature = "hotpath")]
 impl RetainedMemoryTargetObservationV1 {
     fn enter() -> Self {
         let open = RETAINED_MEMORY_TARGETS_OPEN
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        hotpath::gauge!("daemon.retained.memory.target.opened_total").inc(1_u64);
-        hotpath::gauge!("daemon.retained.memory.target.open").set(open);
+        metrics::gauge!("daemon.retained.memory.target.opened_total").increment(1.0);
+        metrics::gauge!("daemon.retained.memory.target.open").set(open as f64);
         Self
     }
 }
 
-#[cfg(feature = "hotpath")]
 impl Drop for RetainedMemoryTargetObservationV1 {
     fn drop(&mut self) {
         let _ = RETAINED_MEMORY_TARGETS_OPEN.fetch_update(
@@ -94,12 +90,12 @@ impl Drop for RetainedMemoryTargetObservationV1 {
             Ordering::Relaxed,
             |open| open.checked_sub(1),
         );
-        hotpath::gauge!("daemon.retained.memory.target.open")
-            .set(RETAINED_MEMORY_TARGETS_OPEN.load(Ordering::Relaxed));
+        metrics::gauge!("daemon.retained.memory.target.open")
+            .set((RETAINED_MEMORY_TARGETS_OPEN.load(Ordering::Relaxed)) as f64);
     }
 }
 
-#[hotpath::measure(label = "daemon.retained.memory.open_target", future = true)]
+#[tracing::instrument(name = "daemon.retained.memory.open_target", level = "trace", skip_all)]
 pub async fn open_project_retained_memory_target(
     authority: &RetainedMemoryTargetAuthorityV1,
     registered_root: &Path,
@@ -169,7 +165,11 @@ pub async fn open_project_retained_memory_target(
     open_selected_project_read_only(authority, selected_project_id).await
 }
 
-#[hotpath::measure(label = "daemon.retained.memory.open_selected", future = true)]
+#[tracing::instrument(
+    name = "daemon.retained.memory.open_selected",
+    level = "trace",
+    skip_all
+)]
 async fn open_selected_project_read_only(
     authority: &RetainedMemoryTargetAuthorityV1,
     selected_project_id: &ProjectId,

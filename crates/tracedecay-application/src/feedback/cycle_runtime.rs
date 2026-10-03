@@ -271,7 +271,7 @@ pub struct FeedbackCycleRuntime {
 
 /// Opens one cycle owner from already-open graph, test, and feedback authorities.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "usecases.feedback.open_cycle")]
+#[tracing::instrument(name = "usecases.feedback.open_cycle", level = "trace", skip_all)]
 pub fn open_feedback_cycle_runtime(
     database: Database,
     feedback: Arc<FeedbackRuntime>,
@@ -383,7 +383,7 @@ impl FeedbackCycleRuntime {
 
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
-    #[hotpath::measure(label = "usecases.feedback.run_once", future = true)]
+    #[tracing::instrument(name = "usecases.feedback.run_once", level = "trace", skip_all)]
     pub async fn run_once(
         &self,
         invocation: FeedbackCycleInvocation,
@@ -397,14 +397,18 @@ impl FeedbackCycleRuntime {
         let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
-        crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
+        crate::observe::feedback_query(execution.cycle.findings.len());
         compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
     /// Runs one canonical feedback cycle with source-backed advisory findings.
     /// It reuses this runtime's authorization, diagnostics, impact, and single
     /// durable publication/dedupe path.
-    #[hotpath::measure(label = "usecases.feedback.run_once_advisory", future = true)]
+    #[tracing::instrument(
+        name = "usecases.feedback.run_once_advisory",
+        level = "trace",
+        skip_all
+    )]
     pub async fn run_once_with_advisory(
         &self,
         context: &RequestContext,
@@ -424,7 +428,7 @@ impl FeedbackCycleRuntime {
             .service
             .execute_with_advisory(context, request, advisory)
             .await?;
-        crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
+        crate::observe::feedback_query(execution.cycle.findings.len());
         compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
@@ -818,7 +822,7 @@ struct VerifiedImpactEvidenceV1 {
     complete: bool,
 }
 
-#[hotpath::measure(label = "usecases.feedback.impact_evidence")]
+#[tracing::instrument(name = "usecases.feedback.impact_evidence", level = "trace", skip_all)]
 fn read_verified_impact_evidence_v1(
     reader: &CodeGraphInteractiveReader,
     file: &FileOccurrenceId,
@@ -933,7 +937,7 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
         context: &'a RequestContext,
         request: &'a FeedbackImpactRequest,
     ) -> FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.validate().is_err() {
                     return FeedbackImpactPortOutcome::Unavailable;
@@ -1117,7 +1121,7 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                     }
                 }
             },
-            label = "usecases.feedback.impact"
+            tracing::trace_span!("usecases.feedback.impact"),
         ))
     }
 }

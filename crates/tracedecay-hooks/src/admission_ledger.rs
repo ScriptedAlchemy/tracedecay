@@ -256,7 +256,7 @@ pub struct HookAdmissionCommitV1 {
 }
 
 impl HookAdmissionCommitV1 {
-    #[hotpath::measure(label = "hooks.admission.commit")]
+    #[tracing::instrument(name = "hooks.admission.commit", level = "trace", skip_all)]
     pub fn wait(self) -> Result<(), HookAdmissionLedgerError> {
         let mut state = self
             .log
@@ -269,14 +269,16 @@ impl HookAdmissionCommitV1 {
         // A compaction republished every staged frame through a synced
         // replacement before it bumped the generation.
         if state.generation != self.generation || state.synced_through >= self.end {
-            hotpath::gauge!("hooks.admission.commit.shared").inc(1);
+            metrics::gauge!("hooks.admission.commit.shared").increment(1);
             return Ok(());
         }
         let through = self.log.written.load(Ordering::Acquire);
         #[cfg(test)]
         tests::COMMIT_SYNCS.with(|syncs| syncs.set(syncs.get() + 1));
-        let synced =
-            hotpath::measure_block!("hooks.admission.fsync.commit", state.file.sync_data());
+        let synced = {
+            let _span = tracing::trace_span!("hooks.admission.fsync.commit").entered();
+            state.file.sync_data()
+        };
         if synced.is_err() {
             self.log.failed.store(true, Ordering::Release);
             return Err(HookAdmissionLedgerError::Io);
@@ -330,7 +332,7 @@ impl HookAdmissionLedgerV1 {
     /// Open (and bounded-recover) the ledger for one host. A root still
     /// holding the pre-log shape is refused with
     /// [`HookAdmissionLedgerError::ResetRequired`] and left untouched.
-    #[hotpath::measure(label = "hooks.admission.open")]
+    #[tracing::instrument(name = "hooks.admission.open", level = "trace", skip_all)]
     pub fn open(
         root: impl Into<PathBuf>,
         host: NativeHostIdentityV1,
@@ -404,10 +406,10 @@ impl HookAdmissionLedgerV1 {
             dropped_overflow_records,
             truncated_tail_bytes,
         };
-        hotpath::gauge!("hooks.admission.live_records").set(report.live_records);
-        hotpath::gauge!("hooks.admission.pending_work").set(report.pending_work);
-        hotpath::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);
-        hotpath::gauge!("hooks.admission.open.dropped_overflow")
+        metrics::gauge!("hooks.admission.live_records").set(report.live_records);
+        metrics::gauge!("hooks.admission.pending_work").set(report.pending_work);
+        metrics::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);
+        metrics::gauge!("hooks.admission.open.dropped_overflow")
             .set(report.dropped_overflow_records);
         Ok((ledger, report))
     }
@@ -432,7 +434,7 @@ impl HookAdmissionLedgerV1 {
     /// complete. The decision is final now, but nothing may be acknowledged
     /// before the returned commit is awaited, and a duplicate of an admission
     /// still in flight waits for that admission's frames too.
-    #[hotpath::measure(label = "hooks.admission.stage")]
+    #[tracing::instrument(name = "hooks.admission.stage", level = "trace", skip_all)]
     pub fn stage_admission(
         &mut self,
         envelope: &HookEventEnvelopeV2,
@@ -454,7 +456,7 @@ impl HookAdmissionLedgerV1 {
             } else if existing.digest == digest {
                 return self.stage_duplicate(identity, existing.order, work);
             } else {
-                hotpath::gauge!("hooks.admission.decision.conflict").inc(1);
+                metrics::gauge!("hooks.admission.decision.conflict").increment(1);
                 let work_completed = self.completed_work.contains(&identity);
                 return Ok(self.staged(
                     HookAdmissionDecisionV1::Conflict,
@@ -481,7 +483,7 @@ impl HookAdmissionLedgerV1 {
             ),
             &mut frames,
         )?;
-        hotpath::gauge!("hooks.admission.append.bytes").set(frames.len());
+        metrics::gauge!("hooks.admission.append.bytes").set((frames.len()) as f64);
         self.append(&frames)?;
         let order = self.next_order;
         self.next_order = self.next_order.saturating_add(1);
@@ -496,7 +498,7 @@ impl HookAdmissionLedgerV1 {
         if let Some((work, _)) = work {
             self.insert_pending_work(identity, work.clone())?;
         }
-        hotpath::gauge!("hooks.admission.decision.admitted").inc(1);
+        metrics::gauge!("hooks.admission.decision.admitted").increment(1);
         self.compact_if_sparse()?;
         Ok(self.staged(HookAdmissionDecisionV1::Admitted, order, false))
     }
@@ -551,7 +553,7 @@ impl HookAdmissionLedgerV1 {
 
     /// Drop entries older than the age bound, with any work they still owed.
     /// Returns how many were removed.
-    #[hotpath::measure(label = "hooks.admission.expire")]
+    #[tracing::instrument(name = "hooks.admission.expire", level = "trace", skip_all)]
     pub fn expire(&mut self, now: UtcMicros) -> Result<u32, HookAdmissionLedgerError> {
         let max_age = self.limits.max_age_micros;
         let expired = self
@@ -567,8 +569,8 @@ impl HookAdmissionLedgerV1 {
         if removed > 0 {
             self.rewrite()?;
         }
-        hotpath::gauge!("hooks.admission.expired.removed").inc(removed);
-        hotpath::gauge!("hooks.admission.live_records").set(self.entries.len());
+        metrics::gauge!("hooks.admission.expired.removed").increment(removed);
+        metrics::gauge!("hooks.admission.live_records").set((self.entries.len()) as f64);
         Ok(removed)
     }
 
@@ -658,7 +660,7 @@ impl HookAdmissionLedgerV1 {
         order: u64,
         work: Option<(&HookEventEnvelopeV2, Vec<u8>)>,
     ) -> Result<HookAdmissionStagedV1, HookAdmissionLedgerError> {
-        hotpath::gauge!("hooks.admission.decision.exact_duplicate").inc(1);
+        metrics::gauge!("hooks.admission.decision.exact_duplicate").increment(1);
         let work_completed = self.completed_work.contains(&identity);
         if let Some((work, encoded)) = work
             && !work_completed
@@ -769,7 +771,7 @@ impl HookAdmissionLedgerV1 {
         self.entries.remove(identity);
         self.completed_work.remove(identity);
         if self.pending_work.contains_key(identity) {
-            hotpath::gauge!("hooks.admission.pending_work.dropped").inc(1);
+            metrics::gauge!("hooks.admission.pending_work.dropped").increment(1);
             tracing::debug!(
                 event = "hook_admission_pending_work_dropped",
                 host = self.host.hook_key(),
@@ -822,7 +824,7 @@ impl HookAdmissionLedgerV1 {
     /// Durably replace the log with exactly the live state, including frames
     /// staged but not yet committed, then retire the previous generation so
     /// its outstanding commits return without syncing.
-    #[hotpath::measure(label = "hooks.admission.rewrite")]
+    #[tracing::instrument(name = "hooks.admission.rewrite", level = "trace", skip_all)]
     fn rewrite(&mut self) -> Result<(), HookAdmissionLedgerError> {
         let mut ordered = self
             .entries
@@ -858,17 +860,20 @@ impl HookAdmissionLedgerV1 {
             }
         }
         self.next_order = ordered.len() as u64;
-        hotpath::gauge!("hooks.admission.rewrite.bytes").set(bytes.len());
+        metrics::gauge!("hooks.admission.rewrite.bytes").set((bytes.len()) as f64);
         let path = log_path(&self.root);
         let mut state = self
             .log
             .state
             .lock()
             .map_err(|_| HookAdmissionLedgerError::Io)?;
-        hotpath::measure_block!("hooks.admission.fsync.rewrite", {
-            shared_atomic_write(&path, "hook-admissions", &bytes, DIRECTORY_POLICY)
-                .map_err(|_| HookAdmissionLedgerError::Io)
-        })?;
+        {
+            let _span = tracing::trace_span!("hooks.admission.fsync.rewrite").entered();
+            {
+                shared_atomic_write(&path, "hook-admissions", &bytes, DIRECTORY_POLICY)
+                    .map_err(|_| HookAdmissionLedgerError::Io)
+            }
+        }?;
         let file = Arc::new(open_log_file(&path, true)?);
         let len = bytes.len() as u64;
         self.generation = self.generation.saturating_add(1);
@@ -1049,7 +1054,7 @@ fn acquire_writer_lock(root: &Path) -> Result<FileLease, HookAdmissionLedgerErro
     match file.try_lock() {
         Ok(()) => Ok(FileLease::held(file, "hooks.admission.writer")),
         Err(std::fs::TryLockError::WouldBlock) => {
-            hotpath::gauge!("hooks.admission.lock.contended").inc(1);
+            metrics::gauge!("hooks.admission.lock.contended").increment(1);
             Err(HookAdmissionLedgerError::Busy)
         }
         Err(std::fs::TryLockError::Error(_)) => Err(HookAdmissionLedgerError::Io),

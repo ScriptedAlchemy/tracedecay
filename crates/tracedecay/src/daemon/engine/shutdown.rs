@@ -32,13 +32,14 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store_runtime::ShutdownTaskReceipt;
 
 impl DaemonEngine {
-    #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
-        )
+    #[tracing::instrument(
+        name = "daemon.engine.shutdown_owner_phases",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
     )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
@@ -273,15 +274,15 @@ impl DaemonEngine {
             "memory_graph_reconciliation",
             || {},
             move |_| {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     async move { administration.close_stores_for_shutdown().await },
-                    label = "daemon.engine.memory_graph_reconciliation"
+                    tracing::trace_span!("daemon.engine.memory_graph_reconciliation"),
                 )
             },
         )
     }
 
-    #[hotpath::measure(label = "daemon.engine.shutdown.servers", future = true)]
+    #[tracing::instrument(name = "daemon.engine.shutdown.servers", level = "trace", skip_all)]
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
         deadline: tokio::time::Instant,
@@ -295,7 +296,6 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(in crate::daemon) async fn shutdown_all(&self) -> Arc<DaemonShutdownReceipt> {
         let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
         let lifecycle = self.lifecycle.clone();

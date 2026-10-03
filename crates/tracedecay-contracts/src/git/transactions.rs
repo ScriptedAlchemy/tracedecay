@@ -458,7 +458,7 @@ where
         Self { port }
     }
 
-    #[hotpath::measure(label = "application.git.index.preview")]
+    #[tracing::instrument(name = "application.git.index.preview", level = "trace", skip_all)]
     pub fn preview(
         &self,
         request: GitIndexPreviewRequestV1,
@@ -478,7 +478,7 @@ where
         )?)
     }
 
-    #[hotpath::measure(label = "application.git.index.apply")]
+    #[tracing::instrument(name = "application.git.index.apply", level = "trace", skip_all)]
     pub fn apply(
         &self,
         request: GitIndexApplyRequestV1,
@@ -526,7 +526,7 @@ where
         )?)
     }
 
-    #[hotpath::measure(label = "application.git.index.recover")]
+    #[tracing::instrument(name = "application.git.index.recover", level = "trace", skip_all)]
     pub fn recover(
         &self,
         request: GitIndexRecoveryRequestV1,

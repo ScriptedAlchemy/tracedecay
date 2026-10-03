@@ -555,7 +555,7 @@ enum DeliveryAckOutcomeV1 {
     Unavailable,
 }
 
-#[hotpath::measure(label = "dashboard_api.events.acknowledge", future = true)]
+#[tracing::instrument(name = "dashboard_api.events.acknowledge", level = "trace", skip_all)]
 pub(crate) async fn acknowledge(
     State(state): State<DashboardState>,
     Json(request): Json<DashboardDeliveryAckRequestV1>,

@@ -30,7 +30,6 @@ impl DaemonGitEffectClass {
         }
     }
 
-    #[hotpath::skip]
     const fn into_application(self) -> EffectClass {
         match self {
             Self::IndexStage => EffectClass::GitIndexStage,
@@ -52,7 +51,6 @@ pub struct DaemonGitPreviewResult {
 }
 
 impl DaemonGitPreviewResult {
-    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
@@ -171,7 +169,6 @@ pub struct DaemonGitEffectResult {
 }
 
 impl DaemonGitEffectResult {
-    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }

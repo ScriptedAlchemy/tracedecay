@@ -9,7 +9,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
-#[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
+#[tracing::instrument(name = "mcp.analysis.complexity.total", level = "trace", skip_all)]
 pub(super) async fn compute_complexity(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -25,30 +25,37 @@ pub(super) async fn compute_complexity(
     let limit = request.limit.map_or(10, |v| v.min(100) as usize);
     let path_prefix = request.path.as_deref().or(scope_prefix);
 
-    let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.complexity.graph", {
-        let symbols = verified_analysis_symbols(graph, path_prefix)?;
-        let edges = verified_analysis_edges(graph, &symbols, &[])?;
-        (symbols, edges)
-    });
-    let (symbols, fan_in, fan_out) = hotpath::measure_block!("mcp.analysis.complexity.compute", {
-        let mut fan_in = HashMap::<SymbolOccurrenceId, u64>::new();
-        let mut fan_out = HashMap::<SymbolOccurrenceId, u64>::new();
-        for edge in edges {
-            *fan_out.entry(edge.from_occurrence).or_default() += 1;
-            *fan_in.entry(edge.to_occurrence).or_default() += 1;
+    let (mut symbols, edges) = {
+        let _span = tracing::trace_span!("mcp.analysis.complexity.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, path_prefix)?;
+            let edges = verified_analysis_edges(graph, &symbols, &[])?;
+            (symbols, edges)
         }
-        if let Some(kind) = node_kind {
-            symbols
-                .retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
+    };
+    let (symbols, fan_in, fan_out) = {
+        let _span = tracing::trace_span!("mcp.analysis.complexity.compute").entered();
+        {
+            let mut fan_in = HashMap::<SymbolOccurrenceId, u64>::new();
+            let mut fan_out = HashMap::<SymbolOccurrenceId, u64>::new();
+            for edge in edges {
+                *fan_out.entry(edge.from_occurrence).or_default() += 1;
+                *fan_in.entry(edge.to_occurrence).or_default() += 1;
+            }
+            if let Some(kind) = node_kind {
+                symbols.retain(|symbol| {
+                    NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind)
+                });
+            }
+            symbols.sort_by(|left, right| {
+                analysis_score(right, &fan_in, &fan_out)
+                    .cmp(&analysis_score(left, &fan_in, &fan_out))
+                    .then_with(|| left.occurrence.cmp(&right.occurrence))
+            });
+            symbols.truncate(limit);
+            (symbols, fan_in, fan_out)
         }
-        symbols.sort_by(|left, right| {
-            analysis_score(right, &fan_in, &fan_out)
-                .cmp(&analysis_score(left, &fan_in, &fan_out))
-                .then_with(|| left.occurrence.cmp(&right.occurrence))
-        });
-        symbols.truncate(limit);
-        (symbols, fan_in, fan_out)
-    });
+    };
 
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
     let ranking: Vec<ComplexityReportEntryV1> = symbols
@@ -268,7 +275,7 @@ fn verify_doc_coverage_sources_current(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
+#[tracing::instrument(name = "mcp.analysis.doc_coverage.total", level = "trace", skip_all)]
 pub(super) async fn compute_doc_coverage(
     project_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -345,7 +352,7 @@ pub(super) async fn compute_doc_coverage(
     ))
 }
 
-#[hotpath::measure(future = true, label = "mcp.analysis.god_class.total")]
+#[tracing::instrument(name = "mcp.analysis.god_class.total", level = "trace", skip_all)]
 pub(super) async fn compute_god_class(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -356,44 +363,50 @@ pub(super) async fn compute_god_class(
     let limit = request.limit.map_or(10, |v| v.min(100) as usize);
     let path_prefix = request.path.as_deref().or(scope_prefix);
 
-    let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.god_class.graph", {
-        let symbols = verified_analysis_symbols(graph, path_prefix)?;
-        let edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Contains])?;
-        (symbols, edges)
-    });
-    let (symbols, counts) = hotpath::measure_block!("mcp.analysis.god_class.compute", {
-        let by_occurrence = symbols
-            .iter()
-            .map(|symbol| (symbol.occurrence.clone(), symbol))
-            .collect::<HashMap<_, _>>();
-        let mut counts = HashMap::<SymbolOccurrenceId, (u64, u64)>::new();
-        for edge in edges {
-            let Some(child) = by_occurrence.get(&edge.to_occurrence) else {
-                return Err(verified_analysis_unavailable(
-                    "god-class",
-                    "a containment edge endpoint is absent from the admitted symbol census",
-                ));
-            };
-            let count = counts.entry(edge.from_occurrence).or_default();
-            match child.metadata.kind.as_str() {
-                "function" | "method" | "arrow_function" => count.0 += 1,
-                "field" | "val_field" | "var_field" => count.1 += 1,
-                _ => {}
-            }
+    let (mut symbols, edges) = {
+        let _span = tracing::trace_span!("mcp.analysis.god_class.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, path_prefix)?;
+            let edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Contains])?;
+            (symbols, edges)
         }
-        symbols.retain(|symbol| matches!(symbol.metadata.kind.as_str(), "class" | "struct"));
-        symbols.sort_by(|left, right| {
-            let left_counts = counts.get(&left.occurrence).copied().unwrap_or_default();
-            let right_counts = counts.get(&right.occurrence).copied().unwrap_or_default();
-            right_counts
-                .0
-                .saturating_add(right_counts.1)
-                .cmp(&left_counts.0.saturating_add(left_counts.1))
-                .then_with(|| left.occurrence.cmp(&right.occurrence))
-        });
-        symbols.truncate(limit);
-        (symbols, counts)
-    });
+    };
+    let (symbols, counts) = {
+        let _span = tracing::trace_span!("mcp.analysis.god_class.compute").entered();
+        {
+            let by_occurrence = symbols
+                .iter()
+                .map(|symbol| (symbol.occurrence.clone(), symbol))
+                .collect::<HashMap<_, _>>();
+            let mut counts = HashMap::<SymbolOccurrenceId, (u64, u64)>::new();
+            for edge in edges {
+                let Some(child) = by_occurrence.get(&edge.to_occurrence) else {
+                    return Err(verified_analysis_unavailable(
+                        "god-class",
+                        "a containment edge endpoint is absent from the admitted symbol census",
+                    ));
+                };
+                let count = counts.entry(edge.from_occurrence).or_default();
+                match child.metadata.kind.as_str() {
+                    "function" | "method" | "arrow_function" => count.0 += 1,
+                    "field" | "val_field" | "var_field" => count.1 += 1,
+                    _ => {}
+                }
+            }
+            symbols.retain(|symbol| matches!(symbol.metadata.kind.as_str(), "class" | "struct"));
+            symbols.sort_by(|left, right| {
+                let left_counts = counts.get(&left.occurrence).copied().unwrap_or_default();
+                let right_counts = counts.get(&right.occurrence).copied().unwrap_or_default();
+                right_counts
+                    .0
+                    .saturating_add(right_counts.1)
+                    .cmp(&left_counts.0.saturating_add(left_counts.1))
+                    .then_with(|| left.occurrence.cmp(&right.occurrence))
+            });
+            symbols.truncate(limit);
+            (symbols, counts)
+        }
+    };
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
     let ranking: Vec<GodClassEntryV1> = symbols
         .into_iter()

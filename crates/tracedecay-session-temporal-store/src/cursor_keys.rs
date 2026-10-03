@@ -198,7 +198,6 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl SessionTemporalCursorKeyProvider {
-    #[hotpath::skip]
     pub async fn from_registered_active(
         read: &DatabaseEngineReadSnapshot,
     ) -> Result<Self, SessionTemporalCursorKeyProviderError> {
@@ -238,7 +237,6 @@ impl SessionTemporalCursorKeyProvider {
         &self.active_key
     }
 
-    #[hotpath::skip]
     pub async fn from_registered_key_ref(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
@@ -246,7 +244,6 @@ impl SessionTemporalCursorKeyProvider {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
-    #[hotpath::skip]
     pub async fn from_registered_snapshot(
         read: &DatabaseEngineReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
@@ -258,7 +255,6 @@ impl SessionTemporalCursorKeyProvider {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
-    #[hotpath::skip]
     async fn from_registered_key_ref_at(
         read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,

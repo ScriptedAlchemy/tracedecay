@@ -142,7 +142,6 @@ pub enum WorkSynthesisRefusalV1 {
 }
 
 impl WorkSynthesisRefusalV1 {
-    #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NoCitableSources => "no_citable_sources",
@@ -196,7 +195,7 @@ pub enum WorkSynthesisAttemptV1 {
 /// from the caller, and preserved verbatim in the admission record.
 /// Provider instructions are prepared only after replay and source validation;
 /// their hydrated content is not part of the caller's immutable request identity.
-#[hotpath::measure(label = "application.work.synthesis.admit")]
+#[tracing::instrument(name = "application.work.synthesis.admit", level = "trace", skip_all)]
 pub fn admit_work_synthesis_against_registered_topology<S, F>(
     attempts: &WorkProductSynthesisAttemptServiceV1<S>,
     context: &RequestContext,

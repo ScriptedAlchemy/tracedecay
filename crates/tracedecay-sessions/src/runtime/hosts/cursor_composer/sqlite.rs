@@ -131,7 +131,11 @@ pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb
 /// Passing `after = None` starts at the prefix lower bound; passing the last
 /// key of the previous page continues the primary-key-ordered scan. Never
 /// materializes envelope text, keys and byte lengths only.
-#[hotpath::measure(label = "sessions.hosts.cursor.composer_scan", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.cursor.composer_scan",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn scan_composer_keys_page(
     conn: &CursorConn,
     after: Option<&str>,
@@ -177,7 +181,7 @@ pub(super) async fn scan_composer_keys_page(
 /// One length-gated KV fetch. This runs once per bubble/envelope during a
 /// composer sweep, so the fixed statement goes through the connection's
 /// prepared-statement cache instead of re-parsing per call.
-#[hotpath::measure(label = "sessions.hosts.cursor.kv_fetch")]
+#[tracing::instrument(name = "sessions.hosts.cursor.kv_fetch", level = "trace", skip_all)]
 fn fetch_kv_text_bounded_sync(
     conn: &rusqlite::Connection,
     key: &str,

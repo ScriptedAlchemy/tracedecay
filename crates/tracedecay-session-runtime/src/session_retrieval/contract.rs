@@ -183,12 +183,10 @@ impl LcmDescribeServiceCommand {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
@@ -244,17 +242,14 @@ impl LcmExpandServiceCommand {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn content_slice(&self) -> LcmContentSlice {
         self.content_slice
     }
 
-    #[hotpath::skip]
     pub const fn source_limit(&self) -> Option<usize> {
         self.source_limit
     }
@@ -263,7 +258,6 @@ impl LcmExpandServiceCommand {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn store_scope(&self) -> SessionRetrievalStoreScope {
         self.store_scope
     }
@@ -387,7 +381,6 @@ pub struct SessionRetrievalUnavailable {
 }
 
 impl SessionRetrievalUnavailable {
-    #[hotpath::skip]
     pub const fn service_not_configured() -> Self {
         Self {
             reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
@@ -395,7 +388,6 @@ impl SessionRetrievalUnavailable {
         }
     }
 
-    #[hotpath::skip]
     pub const fn without_worker(reason: SessionRetrievalUnavailableReason) -> Self {
         Self {
             reason,

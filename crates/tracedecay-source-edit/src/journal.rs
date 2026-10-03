@@ -208,7 +208,7 @@ impl SourceEditDurability {
     /// in-process owner, and the lock file fences any other process. Both
     /// waits share one admission deadline, past which the edit fails with a
     /// typed, retryable lock-deadline error.
-    #[hotpath::measure(label = "usecases.edit.lock", future = true)]
+    #[tracing::instrument(name = "usecases.edit.lock", level = "trace", skip_all)]
     pub(super) async fn lock(&self) -> Result<SourceEditLease> {
         let deadline = Instant::now() + SOURCE_EDIT_ADMISSION_DEADLINE;
         let lock_path = self.root.join("source-edit.lock");

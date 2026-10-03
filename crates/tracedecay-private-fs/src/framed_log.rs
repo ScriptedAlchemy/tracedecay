@@ -30,7 +30,11 @@ pub enum DirectorySyncPolicy {
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
-#[hotpath::measure(label = "private_fs.framed_log.sync_directory")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.sync_directory",
+    level = "trace",
+    skip_all
+)]
 pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
     #[cfg(test)]
     DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
@@ -104,7 +108,11 @@ impl DurableFileBatch {
     }
 
     /// Make every member file's contents durable.
-    #[hotpath::measure(label = "private_fs.framed_log.sync_file_batch")]
+    #[tracing::instrument(
+        name = "private_fs.framed_log.sync_file_batch",
+        level = "trace",
+        skip_all
+    )]
     pub fn sync(&self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
@@ -126,7 +134,7 @@ impl DurableFileBatch {
 /// fails with `ERROR_ACCESS_DENIED` on a read-only handle, while Unix `fsync`
 /// accepts a read-only descriptor; opening for write is the one shape that is
 /// durable on both. Shared so no caller reintroduces the read-only open.
-#[hotpath::measure(label = "private_fs.framed_log.sync_file_at")]
+#[tracing::instrument(name = "private_fs.framed_log.sync_file_at", level = "trace", skip_all)]
 pub fn sync_file_at(path: &Path) -> io::Result<()> {
     OpenOptions::new()
         .read(true)
@@ -235,7 +243,7 @@ fn normalize_no_follow_error(error: io::Error) -> io::Error {
 /// in either its old or new state). Non-regular objects and symlinks fail
 /// with `InvalidInput`; an empty, oversized, or short-read file fails with
 /// `InvalidData`.
-#[hotpath::measure(label = "private_fs.framed_log.read_bounded")]
+#[tracing::instrument(name = "private_fs.framed_log.read_bounded", level = "trace", skip_all)]
 pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
     let file = match open_no_follow(path) {
         Ok(file) => file,
@@ -256,7 +264,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length is invalid",
         ));
     }
-    hotpath::gauge!("private_fs.framed_log.read_bytes").set(length);
+    metrics::gauge!("private_fs.framed_log.read_bytes").set(length as f64);
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {
@@ -420,13 +428,19 @@ fn before_sync(path: &Path) {
 
 fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
     before_sync(path);
-    hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
+    {
+        let _span = tracing::trace_span!("private_fs.framed_log.fsync").entered();
+        file.sync_all()
+    }
 }
 
 /// `File::sync_data` on a caller-held handle of `path`.
 pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
     before_sync(path);
-    hotpath::measure_block!("private_fs.framed_log.fdatasync", file.sync_data())
+    {
+        let _span = tracing::trace_span!("private_fs.framed_log.fdatasync").entered();
+        file.sync_data()
+    }
 }
 
 /// A synced replacement for `destination`, staged so its durability barrier
@@ -442,7 +456,11 @@ pub struct StagedReplacement {
 }
 
 impl StagedReplacement {
-    #[hotpath::measure(label = "private_fs.framed_log.stage_replacement")]
+    #[tracing::instrument(
+        name = "private_fs.framed_log.stage_replacement",
+        level = "trace",
+        skip_all
+    )]
     pub fn stage(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<Self> {
         validate_regular_or_missing(destination)?;
         let (temporary, mut output) = create_owned_temp(destination, kind)?;
@@ -493,7 +511,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
 
 /// Publish `destination` by staging into an owned temp file, syncing, then
 /// replacing through `publish`.
-#[hotpath::measure(label = "private_fs.framed_log.publish")]
+#[tracing::instrument(name = "private_fs.framed_log.publish", level = "trace", skip_all)]
 pub fn with_owned_temp_publish<T>(
     destination: &Path,
     kind: &str,
@@ -705,7 +723,11 @@ pub fn atomic_write(
 /// Readers must treat a missing or invalid file as a cache miss. The durable
 /// authority must live elsewhere, so a crash during this publication can only
 /// make the next read rebuild the accelerator.
-#[hotpath::measure(label = "private_fs.framed_log.write_accelerator")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_accelerator",
+    level = "trace",
+    skip_all
+)]
 pub fn atomic_write_accelerator(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<()> {
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
@@ -720,7 +742,11 @@ pub fn atomic_write_accelerator(destination: &Path, kind: &str, bytes: &[u8]) ->
     result
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.write_prepared")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn atomic_write_prepared(
     destination: &Path,
     kind: &str,
@@ -728,7 +754,7 @@ pub fn atomic_write_prepared(
     prepare: impl FnOnce(&Path) -> io::Result<()>,
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<()> {
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
+    metrics::gauge!("private_fs.framed_log.write_bytes").set((bytes.len()) as f64);
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
@@ -756,7 +782,11 @@ pub fn atomic_write_prepared(
 /// destination is atomically replaced while retaining the displaced object;
 /// the caller verifies that object against its exact snapshot. A mismatch is
 /// rolled back before this function returns an error.
-#[hotpath::measure(label = "private_fs.framed_log.write_prepared_conditionally")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.write_prepared_conditionally",
+    level = "trace",
+    skip_all
+)]
 pub fn atomic_write_prepared_conditionally<
     Prepare,
     BeforePublish,
@@ -791,7 +821,7 @@ where
         verify_displaced,
         verify_published,
     } = callbacks;
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(bytes.len());
+    metrics::gauge!("private_fs.framed_log.write_bytes").set((bytes.len()) as f64);
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let published_existing = std::cell::Cell::new(false);
@@ -886,7 +916,11 @@ where
 
 /// Remove an existing destination only after atomically retaining and
 /// verifying the exact object that occupied the path at publication time.
-#[hotpath::measure(label = "private_fs.framed_log.remove_conditionally")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.remove_conditionally",
+    level = "trace",
+    skip_all
+)]
 pub fn remove_conditionally(
     destination: &Path,
     before_publish: impl FnOnce(),
@@ -929,13 +963,13 @@ pub fn remove_conditionally(
     sync_parent_directory(destination, directory_policy)
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.append")]
+#[tracing::instrument(name = "private_fs.framed_log.append", level = "trace", skip_all)]
 pub fn append_durable(
     path: &Path,
     frame: &[u8],
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<u64> {
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
+    metrics::gauge!("private_fs.framed_log.write_bytes").set((frame.len()) as f64);
     tighten_existing_file(path)?;
     let (mut output, created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
@@ -950,9 +984,13 @@ pub fn append_durable(
 /// Appends `frame` without any durability barrier. The caller owns the
 /// frame's durability and, when this creates the file, its directory entry's:
 /// typically one group commit that syncs every frame appended before it.
-#[hotpath::measure(label = "private_fs.framed_log.append_unsynced")]
+#[tracing::instrument(
+    name = "private_fs.framed_log.append_unsynced",
+    level = "trace",
+    skip_all
+)]
 pub fn append_unsynced(path: &Path, frame: &[u8]) -> io::Result<u64> {
-    hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
+    metrics::gauge!("private_fs.framed_log.write_bytes").set((frame.len()) as f64);
     tighten_existing_file(path)?;
     let (mut output, _created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
@@ -982,7 +1020,7 @@ fn open_append_target(path: &Path) -> io::Result<(File, bool)> {
     }
 }
 
-#[hotpath::measure(label = "private_fs.framed_log.truncate")]
+#[tracing::instrument(name = "private_fs.framed_log.truncate", level = "trace", skip_all)]
 /// Truncation rewrites an existing inode's length; the directory entry is
 /// unchanged, so only the file itself needs a durability barrier.
 pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {

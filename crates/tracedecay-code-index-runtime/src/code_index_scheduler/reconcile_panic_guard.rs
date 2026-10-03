@@ -70,7 +70,6 @@ impl Default for ReconcilePanicGuardV1 {
 }
 
 impl ReconcilePanicGuardV1 {
-    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             consecutive_panics: 0,
@@ -95,13 +94,13 @@ impl ReconcilePanicGuardV1 {
     pub fn record_panic(&mut self, now: Instant, epoch: u64) -> ReconcilePanicDecisionV1 {
         self.consecutive_panics = self.consecutive_panics.saturating_add(1);
         if self.consecutive_panics >= MAX_CONSECUTIVE_RECONCILE_PANICS_V1 {
-            hotpath::gauge!("daemon.code_index.reconcile.panic.quarantined_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.reconcile.panic.quarantined_total").increment(1.0);
             self.quarantined = true;
             self.quarantined_at_epoch = epoch;
             self.next_attempt_at = None;
             return ReconcilePanicDecisionV1::Quarantine;
         }
-        hotpath::gauge!("daemon.code_index.reconcile.panic.retry_total").inc(1_u64);
+        metrics::gauge!("daemon.code_index.reconcile.panic.retry_total").increment(1.0);
         let delay = self.backoff;
         self.next_attempt_at = Some(now + delay);
         self.backoff = self
@@ -124,7 +123,6 @@ impl ReconcilePanicGuardV1 {
     /// Consecutive panics observed since the last progressing pass. Reported
     /// on the warn path so an operator sees a bounded counter rather than an
     /// undifferentiated repeating line.
-    #[hotpath::skip]
     pub const fn consecutive_panics(&self) -> u32 {
         self.consecutive_panics
     }
@@ -142,12 +140,13 @@ impl ReconcilePanicGuardV1 {
                 self.next_attempt_at = None;
                 return false;
             }
-            hotpath::gauge!("daemon.code_index.reconcile.panic.suppressed_wakes_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.reconcile.panic.suppressed_wakes_total")
+                .increment(1.0);
             return true;
         }
         let suppressed = self.next_attempt_at.is_some_and(|at| now < at);
         if suppressed {
-            hotpath::gauge!("daemon.code_index.reconcile.panic.backoff_wakes_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.reconcile.panic.backoff_wakes_total").increment(1.0);
         }
         suppressed
     }
@@ -313,7 +312,6 @@ impl Default for ReconcileCapacityRetryV1 {
 }
 
 impl ReconcileCapacityRetryV1 {
-    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
             consecutive: 0,
@@ -331,10 +329,10 @@ impl ReconcileCapacityRetryV1 {
     /// spent and this worker stops self-scheduling until real input arrives.
     pub fn record_capacity_failure(&mut self) -> Option<Duration> {
         if self.consecutive >= MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 {
-            hotpath::gauge!("daemon.code_index.reconcile.capacity.exhausted_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.reconcile.capacity.exhausted_total").increment(1.0);
             return None;
         }
-        hotpath::gauge!("daemon.code_index.reconcile.capacity.retry_total").inc(1_u64);
+        metrics::gauge!("daemon.code_index.reconcile.capacity.retry_total").increment(1.0);
         self.consecutive = self.consecutive.saturating_add(1);
         let delay = self.backoff;
         self.backoff = self
@@ -345,7 +343,6 @@ impl ReconcileCapacityRetryV1 {
     }
 
     /// Consecutive capacity refusals since the last non-capacity pass.
-    #[hotpath::skip]
     pub const fn consecutive(&self) -> u32 {
         self.consecutive
     }

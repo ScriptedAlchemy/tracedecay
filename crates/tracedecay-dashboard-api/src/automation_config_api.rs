@@ -44,7 +44,11 @@ pub struct AutomationConfigMutationRequest {
     pub patch: AutomationConfigPatch,
 }
 
-#[hotpath::measure(label = "dashboard_api.automation.get_config", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.automation.get_config",
+    level = "trace",
+    skip_all
+)]
 pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
     let (configuration_revision_id, effective, codex) = effective_automation_config(&state)
         .map_err(|_| configuration_authority_unavailable_error())?;
@@ -56,7 +60,11 @@ pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
     )?))
 }
 
-#[hotpath::measure(label = "dashboard_api.automation.patch_config", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.automation.patch_config",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_config(
     State(state): State<DashboardState>,
     request: std::result::Result<Json<AutomationConfigMutationRequest>, JsonRejection>,

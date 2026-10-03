@@ -80,7 +80,7 @@ pub async fn should_proxy_serve_to_daemon(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -91,7 +91,7 @@ pub async fn proxy_stdio_to_daemon(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure(label = "daemon.engine.proxy.stdio", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -157,7 +157,7 @@ pub async fn proxy_transport_to_daemon(
 /// `drain_bound` overrides the per-request bound derived by
 /// [`disconnect_drain_bound`]; production passes `None` and always derives it.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.transport", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.transport", level = "trace", skip_all)]
 pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -282,7 +282,7 @@ fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
 /// how a disconnected session turns into a long-lived orphan holding its fds
 /// and daemon connection.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.drain", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.drain", level = "trace", skip_all)]
 async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
@@ -301,7 +301,7 @@ async fn drain_daemon_request_after_disconnect(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.proxy.host_input", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.host_input", level = "trace", skip_all)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -464,7 +464,11 @@ fn reset_proxy_handshake_for_initialize_request(
     *handshake = base_handshake.clone();
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.initialize_route", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.proxy.initialize_route",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn resolve_daemon_initialize_route(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     params: Option<&serde_json::Value>,
@@ -572,7 +576,11 @@ pub(super) fn repository_discovery_parent_deadline()
     )
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.repository_identity", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.proxy.repository_identity",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn bounded_repository_identity(
     path: &Path,
     deadline: tracedecay_runtime_core::cancellation::MonotonicDeadline,
@@ -718,7 +726,7 @@ async fn send_daemon_request_line_with_project_open_retry(
     send_daemon_request_with_project_open_retry(socket_path, handshake, &request).await
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request_retry", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.request_retry", level = "trace", skip_all)]
 async fn send_daemon_request_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -773,7 +781,7 @@ async fn send_daemon_request(
     .await
 }
 
-#[hotpath::measure(label = "daemon.engine.proxy.request", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.request", level = "trace", skip_all)]
 async fn send_daemon_request_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -960,7 +968,7 @@ fn daemon_proxy_error_response(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure(label = "daemon.engine.proxy.one_request", future = true)]
+#[tracing::instrument(name = "daemon.engine.proxy.one_request", level = "trace", skip_all)]
 async fn proxy_one_request(
     socket_path: &Path,
     handshake: &DaemonHandshake,

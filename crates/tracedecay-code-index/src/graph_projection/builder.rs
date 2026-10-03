@@ -45,7 +45,7 @@ use super::{
 /// both the row spill and the independently readable base attachment. The
 /// spill sorts and merges rows into the canonical order used by serving and
 /// recovered-digest verification.
-#[hotpath::measure(label = "code_index.graph.build_rows")]
+#[tracing::instrument(name = "code_index.graph.build_rows", level = "trace", skip_all)]
 pub fn build_sealed_code_graph_rows(
     projection: GraphProjectionIdentity,
     source: &SealedGenerationFileWindowsV1,
@@ -78,17 +78,20 @@ pub fn build_sealed_code_graph_rows(
         projector_revision.as_str(),
         &descriptors,
     )?;
-    hotpath::measure_block!("code_index.graph.build_rows.emit", {
-        for descriptor in &descriptors {
-            check()?;
-            let page = pages.read_page(descriptor)?;
-            attachment.write_page(descriptor, &page)?;
-            let rows = emit_persisted_code_graph_page(&projection, &generation, &page, check)?;
-            spill.push_batch(rows.entities, rows.relations, check)?;
+    {
+        let _span = tracing::trace_span!("code_index.graph.build_rows.emit").entered();
+        {
+            for descriptor in &descriptors {
+                check()?;
+                let page = pages.read_page(descriptor)?;
+                attachment.write_page(descriptor, &page)?;
+                let rows = emit_persisted_code_graph_page(&projection, &generation, &page, check)?;
+                spill.push_batch(rows.entities, rows.relations, check)?;
+            }
+            attachment.finish()?;
+            Ok::<(), SealedCodeGraphRowsError>(())
         }
-        attachment.finish()?;
-        Ok::<(), SealedCodeGraphRowsError>(())
-    })?;
+    }?;
     // The generation marker counts every entity, itself included.
     let projection_node_count = spill.distinct_entities().checked_add(1).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
@@ -102,10 +105,10 @@ pub fn build_sealed_code_graph_rows(
         check,
     )?;
     let identity = code_graph_manifest_identity(projection, &generation, projector_revision)?;
-    hotpath::measure_block!(
-        "code_index.graph.build_rows.merge",
+    {
+        let _span = tracing::trace_span!("code_index.graph.build_rows.merge").entered();
         spill.finish(identity, check)
-    )
+    }
     .map_err(Into::into)
 }
 
@@ -620,8 +623,9 @@ pub(super) fn emit_code_graph_rows(
     let bindings = batch.bindings.or(owned_bindings.as_ref()).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph symbol bindings are unavailable".to_owned())
     })?;
-    let (symbol_metadata, retained_edges, occurrences) =
-        hotpath::measure_block!("code_index.seal.collect.bind", {
+    let (symbol_metadata, retained_edges, occurrences) = {
+        let _span = tracing::trace_span!("code_index.seal.collect.bind").entered();
+        {
             let symbol_metadata = batch
                 .symbols
                 .iter()
@@ -672,101 +676,107 @@ pub(super) fn emit_code_graph_rows(
             occurrences.sort();
             occurrences.dedup();
             Ok::<_, CodeGraphProjectionError>((symbol_metadata, retained_edges, occurrences))
-        })?;
+        }
+    }?;
     // Chunks bind symbols to files and spans above; they are not graph rows.
     // No reader addresses a chunk through the graph and a symbol's binding
     // already names its chunk, so projecting one entity plus one relation per
     // chunk only multiplied every graph artifact by the chunk count.
-    hotpath::measure_block!("code_index.seal.collect.emit", {
-        let mut entities = Vec::with_capacity(
-            batch
-                .files
-                .len()
-                .saturating_add(batch.imports.len())
-                .saturating_add(occurrences.len()),
-        );
-        let mut relations = Vec::with_capacity(
-            retained_edges
-                .len()
-                .saturating_add(bindings.len())
-                .saturating_add(batch.imports.len()),
-        );
+    {
+        let _span = tracing::trace_span!("code_index.seal.collect.emit").entered();
+        {
+            let mut entities = Vec::with_capacity(
+                batch
+                    .files
+                    .len()
+                    .saturating_add(batch.imports.len())
+                    .saturating_add(occurrences.len()),
+            );
+            let mut relations = Vec::with_capacity(
+                retained_edges
+                    .len()
+                    .saturating_add(bindings.len())
+                    .saturating_add(batch.imports.len()),
+            );
 
-        for file in batch.files {
-            check()?;
-            entities.push(file_entity(
-                file_entity_id(&file.file_occurrence_id)?,
-                file,
-            )?);
-        }
-        for import in batch.imports {
-            check()?;
-            let identity = import_entity_id(import)?;
-            let file_id = file_entity_id(&import.file_occurrence_id)?;
-            relations.push(file_import_relation(
-                projection, import, file_id, &identity,
-            )?);
-            entities.push(import_entity(identity, import)?);
-        }
-
-        // Every stable identity below is a serialize-and-hash; each symbol's
-        // is computed once and reused by its entity and every relation that
-        // names it. An edge target another batch owns is derived on use.
-        let mut symbol_ids = BTreeMap::<SymbolOccurrenceId, GraphEntityId>::new();
-        let row_window = crate::parallelism::indexing_workers()
-            .max(1)
-            .saturating_mul(512);
-        hotpath::gauge!("code_index.seal.collect.emit.effective_workers")
-            .set(crate::parallelism::indexing_workers());
-        for window in occurrences.chunks(row_window) {
-            check()?;
-            let identities = collect_graph_rows_ordered(window, symbol_entity_id)?;
-            symbol_ids.extend(window.iter().cloned().zip(identities));
-        }
-        for window in occurrences.chunks(row_window) {
-            check()?;
-            entities.extend(collect_graph_rows_ordered(window, |occurrence| {
-                let identity = require_symbol_id(&symbol_ids, occurrence)?.clone();
-                let record = SymbolRecordV1 {
-                    binding: bindings.get(occurrence).cloned(),
-                    metadata: symbol_metadata
-                        .get(occurrence)
-                        .map(|record| LineageSymbolRecordV1::clone(record)),
-                    occurrence: occurrence.clone(),
-                    unresolved_calls: context
-                        .unresolved_by_source
-                        .get(occurrence)
-                        .cloned()
-                        .unwrap_or_default(),
-                };
-                symbol_entity(identity, record)
-            })?);
-        }
-        if context.files.is_some() {
-            let binding_rows = bindings.iter().collect::<Vec<_>>();
-            for window in binding_rows.chunks(row_window) {
+            for file in batch.files {
                 check()?;
-                relations.extend(collect_graph_rows_ordered(
-                    window,
-                    |&(occurrence, binding)| {
-                        let file_id = file_entity_id(&binding.file)?;
-                        let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
-                        file_symbol_relation(projection, binding, file_id, occurrence, symbol_id)
-                    },
+                entities.push(file_entity(
+                    file_entity_id(&file.file_occurrence_id)?,
+                    file,
                 )?);
             }
+            for import in batch.imports {
+                check()?;
+                let identity = import_entity_id(import)?;
+                let file_id = file_entity_id(&import.file_occurrence_id)?;
+                relations.push(file_import_relation(
+                    projection, import, file_id, &identity,
+                )?);
+                entities.push(import_entity(identity, import)?);
+            }
+
+            // Every stable identity below is a serialize-and-hash; each symbol's
+            // is computed once and reused by its entity and every relation that
+            // names it. An edge target another batch owns is derived on use.
+            let mut symbol_ids = BTreeMap::<SymbolOccurrenceId, GraphEntityId>::new();
+            let row_window = crate::parallelism::indexing_workers()
+                .max(1)
+                .saturating_mul(512);
+            metrics::gauge!("code_index.seal.collect.emit.effective_workers")
+                .set((crate::parallelism::indexing_workers()) as f64);
+            for window in occurrences.chunks(row_window) {
+                check()?;
+                let identities = collect_graph_rows_ordered(window, symbol_entity_id)?;
+                symbol_ids.extend(window.iter().cloned().zip(identities));
+            }
+            for window in occurrences.chunks(row_window) {
+                check()?;
+                entities.extend(collect_graph_rows_ordered(window, |occurrence| {
+                    let identity = require_symbol_id(&symbol_ids, occurrence)?.clone();
+                    let record = SymbolRecordV1 {
+                        binding: bindings.get(occurrence).cloned(),
+                        metadata: symbol_metadata
+                            .get(occurrence)
+                            .map(|record| LineageSymbolRecordV1::clone(record)),
+                        occurrence: occurrence.clone(),
+                        unresolved_calls: context
+                            .unresolved_by_source
+                            .get(occurrence)
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    symbol_entity(identity, record)
+                })?);
+            }
+            if context.files.is_some() {
+                let binding_rows = bindings.iter().collect::<Vec<_>>();
+                for window in binding_rows.chunks(row_window) {
+                    check()?;
+                    relations.extend(collect_graph_rows_ordered(
+                        window,
+                        |&(occurrence, binding)| {
+                            let file_id = file_entity_id(&binding.file)?;
+                            let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
+                            file_symbol_relation(
+                                projection, binding, file_id, occurrence, symbol_id,
+                            )
+                        },
+                    )?);
+                }
+            }
+            for window in retained_edges.chunks(row_window) {
+                check()?;
+                relations.extend(collect_graph_rows_ordered(window, |edge| {
+                    edge_relation(projection, edge, &symbol_ids)
+                })?);
+            }
+            Ok(EmittedRows {
+                entities,
+                relations,
+            })
         }
-        for window in retained_edges.chunks(row_window) {
-            check()?;
-            relations.extend(collect_graph_rows_ordered(window, |edge| {
-                edge_relation(projection, edge, &symbol_ids)
-            })?);
-        }
-        Ok(EmittedRows {
-            entities,
-            relations,
-        })
-    })
+    }
 }
 
 pub(crate) fn code_graph_symbol_bindings(

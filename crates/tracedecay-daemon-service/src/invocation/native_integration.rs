@@ -107,7 +107,11 @@ const fn native_integration_operation(
 
 /// Executes one native-integration surface request.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.native_integration.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.native_integration.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_native_integration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -263,7 +267,6 @@ struct NativeIntegrationExecutionV1 {
 }
 
 impl NativeIntegrationExecutionV1 {
-    #[hotpath::skip]
     const fn without_preview(result: NativeIntegrationSurfaceResultV1) -> Self {
         Self {
             result,
@@ -271,7 +274,6 @@ impl NativeIntegrationExecutionV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn with_preview(
         result: NativeIntegrationSurfaceResultV1,
         owner_preview: tracedecay_domain::NativeIntegrationPreviewV1,
@@ -319,9 +321,10 @@ fn publish_current_transaction_status(
 /// coordinator's own cancellation map keeps a running apply cancellable
 /// through the separate cancel operation.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(
-    label = "daemon.service.native_integration.owner_execute",
-    future = true
+#[tracing::instrument(
+    name = "daemon.service.native_integration.owner_execute",
+    level = "trace",
+    skip_all
 )]
 async fn execute_with_owner(
     wire_request_id: &str,
@@ -335,7 +338,7 @@ async fn execute_with_owner(
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
-            let outcome = hotpath::future!(
+            let outcome = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     let sealed_snapshot = (*snapshot)
                         .seal()
@@ -346,7 +349,7 @@ async fn execute_with_owner(
                         .stack_snapshot(resolution, &signal)
                         .map(|outcome| (outcome, sealed_snapshot))
                 }),
-                label = "daemon.service.native_integration.stack_snapshot"
+                tracing::trace_span!("daemon.service.native_integration.stack_snapshot"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -375,7 +378,7 @@ async fn execute_with_owner(
             );
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            let outcome = hotpath::future!(
+            let outcome = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     let stack_runtime = owner.github_stack_runtime(context.scope())?;
                     let topology =
@@ -407,7 +410,7 @@ async fn execute_with_owner(
                     }
                     outcome
                 }),
-                label = "daemon.service.native_integration.preflight"
+                tracing::trace_span!("daemon.service.native_integration.preflight"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -452,7 +455,7 @@ async fn execute_with_owner(
                 apply_operation.capability_id().as_str().to_owned(),
             )
             .map_err(|_| invalid())?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     let store = owner.store();
                     let preview = match store.read_preview(&approve.preview_id) {
@@ -521,7 +524,7 @@ async fn execute_with_owner(
                         Err(_) => Err(unavailable_native_integration()),
                     }
                 }),
-                label = "daemon.service.native_integration.approve"
+                tracing::trace_span!("daemon.service.native_integration.approve"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?
@@ -533,7 +536,7 @@ async fn execute_with_owner(
                 .map_err(|_| unavailable_native_integration())?;
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     // The caller names its preview and one-use approval by exact
                     // identity and digest; both must already be durable. A
@@ -611,7 +614,7 @@ async fn execute_with_owner(
                             .map(NativeIntegrationExecutionV1::without_preview),
                     }
                 }),
-                label = "daemon.service.native_integration.apply"
+                tracing::trace_span!("daemon.service.native_integration.apply"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?
@@ -620,9 +623,9 @@ async fn execute_with_owner(
             let application_request = NativeIntegrationStatusRequestV1 {
                 transaction_id: status.transaction_id,
             };
-            let outcome = hotpath::future!(
+            let outcome = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || owner.service().status(application_request)),
-                label = "daemon.service.native_integration.status"
+                tracing::trace_span!("daemon.service.native_integration.status"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -650,7 +653,7 @@ async fn execute_with_owner(
                 transaction_id: cancel.transaction_id,
                 requested_at: observed_at,
             };
-            let outcome = hotpath::future!(
+            let outcome = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     let disposition = owner.service().cancel(application_request);
                     publish_current_transaction_status(
@@ -660,7 +663,7 @@ async fn execute_with_owner(
                     );
                     disposition
                 }),
-                label = "daemon.service.native_integration.cancel"
+                tracing::trace_span!("daemon.service.native_integration.cancel"),
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -693,7 +696,11 @@ enum WorktreeUnavailableReasonV1 {
     Unavailable,
 }
 
-#[hotpath::measure(label = "daemon.service.native_integration.worktree", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.native_integration.worktree",
+    level = "trace",
+    skip_all
+)]
 async fn execute_worktree_with_owner(
     owner: DaemonNativeIntegrationOwner,
     request: NativeWorktreeSurfaceRequest,

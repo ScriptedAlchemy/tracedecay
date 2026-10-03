@@ -143,7 +143,11 @@ pub(super) async fn validate_receipt_authority_rows(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.schema_contract.audit.receipt_rows")]
+#[tracing::instrument(
+    name = "global_db.schema_contract.audit.receipt_rows",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn validate_receipt_authority_page(
     conn: &impl QueryExecutor,
     after_rowid: i64,

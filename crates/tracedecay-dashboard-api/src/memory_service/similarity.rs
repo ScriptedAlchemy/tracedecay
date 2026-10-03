@@ -113,17 +113,25 @@ async fn similarity_computation(
             let blocking_control = read_control.clone();
             let computed = tokio::task::spawn_blocking(
                 move || -> Result<SimilarityComputation, MemoryAnalysisError> {
-                    hotpath::measure_block!("dashboard_api.memory.similarity_compute", {
-                        let dim = rows.iter().map(|(_, v)| v.len()).next().unwrap_or(0);
-                        let decoded = rows;
-                        let scored = if decoded.len() < 2 {
-                            Vec::new()
-                        } else {
-                            score_similar_pairs(&decoded, SIMILARITY_PAIR_FLOOR, &blocking_control)?
-                        };
-                        let facts = decoded.into_iter().map(|(meta, _)| meta).collect();
-                        build_similarity_computation(dim, facts, scored, &blocking_control)
-                    })
+                    {
+                        let _span = tracing::trace_span!("dashboard_api.memory.similarity_compute")
+                            .entered();
+                        {
+                            let dim = rows.iter().map(|(_, v)| v.len()).next().unwrap_or(0);
+                            let decoded = rows;
+                            let scored = if decoded.len() < 2 {
+                                Vec::new()
+                            } else {
+                                score_similar_pairs(
+                                    &decoded,
+                                    SIMILARITY_PAIR_FLOOR,
+                                    &blocking_control,
+                                )?
+                            };
+                            let facts = decoded.into_iter().map(|(meta, _)| meta).collect();
+                            build_similarity_computation(dim, facts, scored, &blocking_control)
+                        }
+                    }
                 },
             )
             .await

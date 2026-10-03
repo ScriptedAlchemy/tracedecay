@@ -170,7 +170,7 @@ impl MemoryCuratorStore<'_> {
 // The single funnel every curator entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
-#[hotpath::measure(future = true, label = "automation.run.memory_curator")]
+#[tracing::instrument(name = "automation.run.memory_curator", level = "trace", skip_all)]
 async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
     config: &AutomationConfig,

@@ -129,7 +129,7 @@ impl AgentIntegration for ZedIntegration {
         Ok(vec![zed_project_settings_path(project_path)])
     }
 
-    #[hotpath::measure(label = "zed_mcp_install")]
+    #[tracing::instrument(name = "zed_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[HostComponentV1],

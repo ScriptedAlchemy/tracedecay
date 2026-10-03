@@ -349,7 +349,7 @@ pub(super) fn feedback_scope_matches(
         .is_ok_and(|scope| &scope == expected)
 }
 
-#[hotpath::measure(label = "daemon.service.feedback.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.feedback.execute", level = "trace", skip_all)]
 pub(super) async fn execute_feedback(
     wire_request_id: String,
     owner: Option<DaemonFeedbackInvocationOwner>,
@@ -809,7 +809,11 @@ fn advisory_cycle_contract_problem() -> ApplicationProblem {
     })
 }
 
-#[hotpath::measure(label = "daemon.service.feedback.advisory_cycle", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.feedback.advisory_cycle",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_feedback_advisory_cycle(
     wire_request_id: String,
     owner: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -865,7 +869,7 @@ pub(super) async fn execute_feedback_advisory_cycle(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.feedback.proximity", future = true)]
+#[tracing::instrument(name = "daemon.service.feedback.proximity", level = "trace", skip_all)]
 pub(super) async fn execute_feedback_proximity(
     wire_request_id: String,
     owner: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -917,7 +921,6 @@ pub(super) async fn execute_feedback_proximity(
 }
 
 impl DaemonInvocationService {
-    #[hotpath::skip]
     pub async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
@@ -929,7 +932,6 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,
@@ -937,7 +939,6 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
-    #[hotpath::skip]
     pub async fn delivery_read_authority(
         &self,
         project_root: Option<&Path>,
@@ -950,7 +951,6 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn advisory_cycle_owner(
         &self,
         project_root: Option<&Path>,
@@ -969,7 +969,11 @@ impl DaemonInvocationService {
     /// answer, and re-read the placeholder whenever its mount state moves. A
     /// finished publication without an owner, or an owner that answers,
     /// returns at once.
-    #[hotpath::measure(label = "daemon.service.feedback.advisory_owner_wait", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.feedback.advisory_owner_wait",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn answering_advisory_cycle_owner(
         &self,
         project_root: Option<&Path>,
@@ -1007,7 +1011,6 @@ impl DaemonInvocationService {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn feedback_cycle_input(
         &self,
         project_root: Option<&Path>,

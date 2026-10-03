@@ -585,7 +585,11 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         CatalogHostComponentRegistrationAuthority::registration_paths(self, component_set)
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_preflight")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.registration_preflight",
+        level = "trace",
+        skip_all
+    )]
     fn preflight(
         &mut self,
         component_set: &crate::agents::host_bundle::HostComponentSetV1,
@@ -766,7 +770,11 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         Ok(())
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_stage")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.registration_stage",
+        level = "trace",
+        skip_all
+    )]
     fn stage(
         &mut self,
         component_set: &crate::agents::host_bundle::HostComponentSetV1,
@@ -801,7 +809,11 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         Ok(())
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.registration_apply")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.registration_apply",
+        level = "trace",
+        skip_all
+    )]
     fn apply(
         &mut self,
         component_set: &crate::agents::host_bundle::HostComponentSetV1,

@@ -11,7 +11,11 @@ use super::*;
 const PROJECTION_DRAIN_TXN_WINDOW: usize = 32;
 
 impl HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.drain_projection", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.drain_projection",
+        level = "trace",
+        skip_all
+    )]
     pub async fn drain_projection_queue(
         &self,
         provider: &str,

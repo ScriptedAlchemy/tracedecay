@@ -109,7 +109,11 @@ pub(crate) fn now_utc() -> UtcMicros {
     )
 }
 
-#[hotpath::measure(label = "agent_hosts.hook_ports.admission_decode")]
+#[tracing::instrument(
+    name = "agent_hosts.hook_ports.admission_decode",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonAdmissionResponseV1 {
     let unavailable = || DaemonAdmissionResponseV1 {
         immediate: HookImmediateAdmissionV1::Unavailable,
@@ -266,7 +270,11 @@ fn delivery_outcome(response: &serde_json::Value) -> HookFeedbackDeliveryOutcome
     }
 }
 
-#[hotpath::measure(future = true, label = "agent_hosts.hook_ports.timed_daemon_action")]
+#[tracing::instrument(
+    name = "agent_hosts.hook_ports.timed_daemon_action",
+    level = "trace",
+    skip_all
+)]
 async fn timed_daemon_hook_action(
     runtime: &HookRuntimeV1,
     project_root: &Path,
@@ -346,7 +354,11 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
         }
     }
 
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.post_receipt")]
+    #[tracing::instrument(
+        name = "agent_hosts.hook_ports.post_receipt",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn post_receipt(
         &self,
         receipt: &ContextScoutDeliveryReceiptV1,

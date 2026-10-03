@@ -46,7 +46,7 @@ pub fn normalize_cursor_observation_with_message_id(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Cursor transcript records order by file bytes, so the range length is
     // the source record's byte length. Failures are counted, never hidden.
-    hotpath::gauge!("capture.cursor.record_bytes").inc(range.end() - range.start());
+    metrics::gauge!("capture.cursor.record_bytes").increment((range.end() - range.start()) as f64);
     let envelope = normalize_cursor_record(
         native,
         session_id,
@@ -57,13 +57,13 @@ pub fn normalize_cursor_observation_with_message_id(
         parent_agent_id,
     );
     if envelope.is_err() {
-        hotpath::gauge!("capture.cursor.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.cursor.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// Cursor host composition for one source record, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor.normalize")]
+#[tracing::instrument(name = "capture.cursor.normalize", level = "trace", skip_all)]
 fn normalize_cursor_record(
     native: &Value,
     session_id: &str,

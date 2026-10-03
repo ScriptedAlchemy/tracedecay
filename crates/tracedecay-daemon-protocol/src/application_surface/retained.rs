@@ -20,7 +20,11 @@ use tracedecay_contracts::retained_surfaces::{
 /// the exact serde diagnostic (unknown field, unknown enum variant with the
 /// admitted values, wrong type) so every dispatch surface can hand the caller
 /// a corrective message instead of a blank "invalid request".
-#[hotpath::measure(label = "application_surface.retained.decode")]
+#[tracing::instrument(
+    name = "application_surface.retained.decode",
+    level = "trace",
+    skip_all
+)]
 pub fn decode_retained_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,

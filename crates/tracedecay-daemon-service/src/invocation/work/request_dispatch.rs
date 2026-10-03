@@ -24,7 +24,7 @@ use super::{
 };
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.dispatch", future = true)]
+#[tracing::instrument(name = "daemon.service.work.dispatch", level = "trace", skip_all)]
 pub(super) async fn dispatch_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
@@ -112,7 +112,8 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::Create(command) => {
-            hotpath::measure_block!("daemon.service.work.create", {
+            let _span = tracing::trace_span!("daemon.service.work.create").entered();
+            {
                 let Ok(capability_id) = CapabilityId::new(*capability) else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -160,10 +161,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::Create,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::ReviewProposal(request) => {
-            hotpath::measure_block!("daemon.service.work.review_proposal", {
+            let _span = tracing::trace_span!("daemon.service.work.review_proposal").entered();
+            {
                 let proposal_ref = request.proposal.proposal_id().as_str().to_owned();
                 let command_ref = request.mutation.command_id.as_str().to_owned();
                 let disposition = request.disposition;
@@ -197,10 +199,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::ReviewProposal,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::AcceptProposal(command) => {
-            hotpath::measure_block!("daemon.service.work.accept_proposal", {
+            let _span = tracing::trace_span!("daemon.service.work.accept_proposal").entered();
+            {
                 let proposal_ref = command.proposal.proposal_id().as_str().to_owned();
                 let command_ref = command.mutation.command_id.as_str().to_owned();
                 let occurred_at = command.mutation.occurred_at;
@@ -233,10 +236,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::AcceptProposal,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::AdmitExecution(command) => {
-            hotpath::measure_block!("daemon.service.work.admit_execution", {
+            let _span = tracing::trace_span!("daemon.service.work.admit_execution").entered();
+            {
                 let result = CapabilityId::new(*capability)
                 .map_err(|_| {
                     work_product_problem(
@@ -294,7 +298,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::AdmitExecution,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::StartAttempt(command) => {
             let Ok(capability) = CapabilityId::new(*capability) else {
@@ -405,7 +409,8 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::ListAttempts(request) => {
-            hotpath::measure_block!("daemon.service.work.list_attempts", {
+            let _span = tracing::trace_span!("daemon.service.work.list_attempts").entered();
+            {
                 complete_work_read(
                     &registered,
                     request_id,
@@ -432,7 +437,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::ListAttempts,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::ExecutionHistory(request) => intelligence::execution_history(
             &registered,
@@ -449,7 +454,8 @@ pub(super) async fn dispatch_work_application(
             request,
         ),
         WorkApplicationInvocationV1::HydrateArtifacts(request) => {
-            hotpath::measure_block!("daemon.service.work.hydrate_artifacts", {
+            let _span = tracing::trace_span!("daemon.service.work.hydrate_artifacts").entered();
+            {
                 complete_work_read(
                     &registered,
                     request_id,
@@ -473,7 +479,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::HydrateArtifacts,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::RetrieveEvidence(request) => complete_work_read(
             &registered,
@@ -490,7 +496,8 @@ pub(super) async fn dispatch_work_application(
             WorkApplicationOutcomeV1::RetrieveEvidence,
         ),
         WorkApplicationInvocationV1::Topology(request) => {
-            hotpath::measure_block!("daemon.service.work.topology", {
+            let _span = tracing::trace_span!("daemon.service.work.topology").entered();
+            {
                 complete_work_read(
                     &registered,
                     request_id,
@@ -519,21 +526,21 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::Topology,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::TopologyMetrics(request) => {
             let observations =
                 tracedecay_application::observability::RegisteredObservabilityPortV1::new(
                     &registered.database,
                 );
-            let metrics = hotpath::future!(
+            let metrics = tracing::Instrument::instrument(
                 tracedecay_contracts::execution_topology_rollup_metrics(
                     &observations,
                     &observations,
                     &context,
-                    &request
+                    &request,
                 ),
-                label = "daemon.service.work.topology_metrics"
+                tracing::trace_span!("daemon.service.work.topology_metrics"),
             )
             .await;
             complete_work_read(
@@ -551,7 +558,8 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::PrepareDuplicateAdjudication(request) => {
-            hotpath::measure_block!("daemon.service.work.prepare_duplicate", {
+            let _span = tracing::trace_span!("daemon.service.work.prepare_duplicate").entered();
+            {
                 let prepared = preparation::prepare_duplicate_adjudication(
                     &registered,
                     &services,
@@ -575,10 +583,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::PrepareDuplicateAdjudication,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::AdjudicateDuplicate(command) => {
-            hotpath::measure_block!("daemon.service.work.adjudicate_duplicate", {
+            let _span = tracing::trace_span!("daemon.service.work.adjudicate_duplicate").entered();
+            {
                 let authority = match tracedecay_domain::WorkAuthority::new(
                     context.scope().project_id.clone(),
                     context.scope().repository_id.clone(),
@@ -628,7 +637,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::AdjudicateDuplicate,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::AdjudicateLeak(command) => {
             let adjudicated = adjudicate_leak(
@@ -681,7 +690,8 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::Views(request) => {
-            hotpath::measure_block!("daemon.service.work.views", {
+            let _span = tracing::trace_span!("daemon.service.work.views").entered();
+            {
                 let Ok(capability) = CapabilityId::new(*capability) else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -720,7 +730,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::Views,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::Experience(request) => {
             intelligence::experience(
@@ -752,7 +762,9 @@ pub(super) async fn dispatch_work_application(
             request,
         ),
         WorkApplicationInvocationV1::PrepareGraphMutation(request) => {
-            hotpath::measure_block!("daemon.service.work.prepare_graph_mutation", {
+            let _span =
+                tracing::trace_span!("daemon.service.work.prepare_graph_mutation").entered();
+            {
                 let prepared = preparation::prepare_graph_mutation(
                     &registered,
                     &context,
@@ -775,10 +787,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::PrepareGraphMutation,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::MutateGraph(request) => {
-            hotpath::measure_block!("daemon.service.work.mutate_graph", {
+            let _span = tracing::trace_span!("daemon.service.work.mutate_graph").entered();
+            {
                 let Ok(capability) = CapabilityId::new(*capability) else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -820,10 +833,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::MutateGraph,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::PauseRun(command) => {
-            hotpath::measure_block!("daemon.service.work.pause_run", {
+            let _span = tracing::trace_span!("daemon.service.work.pause_run").entered();
+            {
                 let transition = services.run_control().pause_with_receipt(&context, command);
                 let open_receipts = transition
                     .as_ref()
@@ -849,10 +863,11 @@ pub(super) async fn dispatch_work_application(
                     &open_receipts,
                 );
                 response
-            })
+            }
         }
         WorkApplicationInvocationV1::ResumeRun(command) => {
-            hotpath::measure_block!("daemon.service.work.resume_run", {
+            let _span = tracing::trace_span!("daemon.service.work.resume_run").entered();
+            {
                 let transition = services
                     .run_control()
                     .resume_with_receipt(&context, command);
@@ -880,10 +895,11 @@ pub(super) async fn dispatch_work_application(
                     &settled_receipts,
                 );
                 response
-            })
+            }
         }
         WorkApplicationInvocationV1::RunControl(request) => {
-            hotpath::measure_block!("daemon.service.work.run_control", {
+            let _span = tracing::trace_span!("daemon.service.work.run_control").entered();
+            {
                 complete_work_read(
                     &registered,
                     request_id,
@@ -897,10 +913,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::RunControl,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::PlacementPreflight(request) => {
-            hotpath::measure_block!("daemon.service.work.placement_preflight", {
+            let _span = tracing::trace_span!("daemon.service.work.placement_preflight").entered();
+            {
                 let placement_root = project_root.clone();
                 complete_work_read(
                     &registered,
@@ -917,10 +934,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::PlacementPreflight,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::AdmitPlacement(command) => {
-            hotpath::measure_block!("daemon.service.work.admit_placement", {
+            let _span = tracing::trace_span!("daemon.service.work.admit_placement").entered();
+            {
                 let placement_root = project_root.clone();
                 complete_work_effect(
                     &registered,
@@ -939,10 +957,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::AdmitPlacement,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::PlacementStatus(request) => {
-            hotpath::measure_block!("daemon.service.work.placement_status", {
+            let _span = tracing::trace_span!("daemon.service.work.placement_status").entered();
+            {
                 complete_work_read(
                     &registered,
                     request_id,
@@ -956,10 +975,11 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::PlacementStatus,
                 )
-            })
+            }
         }
         WorkApplicationInvocationV1::ReleasePlacement(command) => {
-            hotpath::measure_block!("daemon.service.work.release_placement", {
+            let _span = tracing::trace_span!("daemon.service.work.release_placement").entered();
+            {
                 let placement_root = project_root.clone();
                 complete_work_effect(
                     &registered,
@@ -976,7 +996,7 @@ pub(super) async fn dispatch_work_application(
                     deadline,
                     WorkApplicationOutcomeV1::ReleasePlacement,
                 )
-            })
+            }
         }
     }
 }

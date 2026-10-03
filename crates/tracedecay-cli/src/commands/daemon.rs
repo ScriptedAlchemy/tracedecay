@@ -12,7 +12,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity
 /// resolution separately from the daemon round-trip itself.
-#[hotpath::measure(label = "cli.daemon.handshake")]
+#[tracing::instrument(name = "cli.daemon.handshake", level = "trace", skip_all)]
 pub(crate) fn client_handshake(
     profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
@@ -37,7 +37,7 @@ pub(crate) fn client_handshake(
 /// consumer of a retained result payload unwraps through here so a problem
 /// envelope surfaces as its typed code and message and envelope drift
 /// surfaces as a decode error naming the tool.
-#[hotpath::measure(label = "cli.daemon.retained_payload")]
+#[tracing::instrument(name = "cli.daemon.retained_payload", level = "trace", skip_all)]
 pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
@@ -58,7 +58,7 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
 /// Typed payload of a retained effect terminal (`begin`/`cancel`-class
 /// operations), or the typed refusal. Evidence and preview outcomes are not
 /// effects and surface as envelope drift naming the tool.
-#[hotpath::measure(label = "cli.daemon.retained_effect_payload")]
+#[tracing::instrument(name = "cli.daemon.retained_effect_payload", level = "trace", skip_all)]
 pub(crate) fn retained_effect_payload<T: DeserializeOwned>(
     tool_name: &str,
     reply: Value,
@@ -177,12 +177,11 @@ pub(crate) async fn daemon_tool_json(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.daemon.tool").set(&tool_name);
+    tracing::trace!(name: "cli.daemon.tool", value = ?tool_name);
     let handshake = client_handshake(profile, project_path)?;
-    let result = hotpath::future!(
+    let result = tracing::Instrument::instrument(
         tracedecay::daemon::call_default_tool(profile, &handshake, tool_name, arguments),
-        label = "cli.daemon.request"
+        tracing::trace_span!("cli.daemon.request"),
     )
     .await?;
     tracedecay::daemon::recover_truncated_tool_payload(profile, &handshake, tool_name, result, None)
@@ -201,17 +200,16 @@ pub(crate) async fn daemon_tool_json_until(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.daemon.tool").set(&tool_name);
+    tracing::trace!(name: "cli.daemon.tool", value = ?tool_name);
     let handshake = client_handshake(profile, project_path)?;
     // Distinct from `cli.daemon.request`: this lifetime includes waiting out a
     // cold project open, so aggregating the two would conflate daemon latency
     // with deliberate open waits.
-    let result = hotpath::future!(
+    let result = tracing::Instrument::instrument(
         tracedecay::daemon::call_default_tool_awaiting_project_open(
             profile, &handshake, tool_name, arguments, deadline,
         ),
-        label = "cli.daemon.request_open_wait"
+        tracing::trace_span!("cli.daemon.request_open_wait"),
     )
     .await?;
     tracedecay::daemon::recover_truncated_tool_payload(

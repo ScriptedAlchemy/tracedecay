@@ -45,7 +45,7 @@ fn has_grammar_bundle() -> bool {
 
 /// Cached map of language key -> `Language` built once from the enabled grammar tiers.
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> =
-    LazyLock::new(|| crate::hotpath_observe::measure_grammar_table_init(build_language_table));
+    LazyLock::new(|| crate::observe::measure_grammar_table_init(build_language_table));
 
 /// Grammars served by another registration: Rust by the patched fork below,
 /// Markdown by `markdown_grammar` (the large bundle's copy is never used).
@@ -180,10 +180,10 @@ fn parse_extractor_source_inner(
     source: &str,
     label_lookup_error: bool,
 ) -> Result<Tree, String> {
-    let mut parser = crate::hotpath_observe::measure_language(|| {
+    let mut parser = crate::observe::measure_language(|| {
         let mut parser = Parser::new();
         let language = try_language(language_key).map_err(|error| {
-            crate::hotpath_observe::record_grammar_lookup_miss();
+            crate::observe::record_grammar_lookup_miss();
             if label_lookup_error {
                 format!("failed to load {grammar_label} grammar: {error}")
             } else {
@@ -191,12 +191,12 @@ fn parse_extractor_source_inner(
             }
         })?;
         parser.set_language(&language).map_err(|e| {
-            crate::hotpath_observe::record_grammar_rejected();
+            crate::observe::record_grammar_rejected();
             format!("failed to load {grammar_label} grammar: {e}")
         })?;
         Ok::<_, String>(parser)
     })?;
-    crate::hotpath_observe::measure_parse_file(
+    crate::observe::measure_parse_file(
         grammar_label,
         source.len(),
         || {
@@ -205,10 +205,8 @@ fn parse_extractor_source_inner(
                 .ok_or_else(|| "tree-sitter parse returned None".to_string())
         },
         |result| match result {
-            Ok(tree) => {
-                crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
-            }
-            Err(_) => crate::hotpath_observe::ParseFileOutcome::NoTree,
+            Ok(tree) => crate::observe::ParseFileOutcome::from_parsed_root(tree.root_node()),
+            Err(_) => crate::observe::ParseFileOutcome::NoTree,
         },
     )
 }

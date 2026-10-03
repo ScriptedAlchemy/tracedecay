@@ -13,13 +13,14 @@ use super::{
 use crate::handlers::graph::graph_tool_completion;
 use crate::{TestRunFailure, TestRunOutput};
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Terminal test-failure mapping is one runner-output classify into a typed problem."
-    )
+#[tracing::instrument(
+    name = "mcp.workflow.affected_tests.failure",
+    level = "trace",
+    skip_all
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Terminal test-failure mapping is one runner-output classify into a typed problem."
 )]
 pub(super) async fn terminal_failure(
     managed: &ManagedTestRun,
@@ -108,10 +109,8 @@ pub(super) async fn terminal_failure(
         ),
     };
     let report = partial.as_ref().map_or_else(Default::default, |output| {
-        hotpath::measure_block!(
-            "mcp.workflow.affected_tests.parse",
-            parse_libtest_output(&output.stdout)
-        )
+        let _span = tracing::trace_span!("mcp.workflow.affected_tests.parse").entered();
+        parse_libtest_output(&output.stdout)
     });
     emit_observed_test_results(&managed.emitter, &report, test_names.len()).await?;
     let exit_code = partial
@@ -126,22 +125,25 @@ pub(super) async fn terminal_failure(
         stderr: String::new(),
         output_bytes,
     });
-    let run = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
-        let mut run = run_affected_tests_body(
-            &partial,
-            &report,
-            test_names,
-            truncated,
-            selected_targets,
-            managed.terminal(receipt),
-        );
-        run.error = Some(AffectedTestErrorV1 {
-            kind: kind.to_owned(),
-            operation: operation.to_owned(),
-            message,
-        });
-        run
-    });
+    let run = {
+        let _span = tracing::trace_span!("mcp.workflow.affected_tests.assemble").entered();
+        {
+            let mut run = run_affected_tests_body(
+                &partial,
+                &report,
+                test_names,
+                truncated,
+                selected_targets,
+                managed.terminal(receipt),
+            );
+            run.error = Some(AffectedTestErrorV1 {
+                kind: kind.to_owned(),
+                operation: operation.to_owned(),
+                message,
+            });
+            run
+        }
+    };
     Ok(graph_tool_completion(
         GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::Ran(Box::new(run))),
         Vec::new(),

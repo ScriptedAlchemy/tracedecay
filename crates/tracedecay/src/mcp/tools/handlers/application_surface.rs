@@ -90,7 +90,7 @@ fn complete_protocol_controls_with_ceiling(
 
 /// Run one application-surface tool through `executor` and render its result,
 /// spilling oversized payloads under `response_handle_root` when one is given.
-#[hotpath::measure(future = true, label = "mcp.application.surface.total")]
+#[tracing::instrument(name = "mcp.application.surface.total", level = "trace", skip_all)]
 pub async fn handle_application_surface(
     response_handle_root: Option<&std::path::Path>,
     operation: ApplicationSurfaceOperation,
@@ -127,7 +127,7 @@ pub async fn handle_application_surface(
     )?;
     let result = match controls {
         Some((deadline, cancellation)) => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 resolve_mcp_application_surface_with_controls_for_target(
                     operation,
                     request_id,
@@ -138,12 +138,12 @@ pub async fn handle_application_surface(
                     target,
                     executor,
                 ),
-                label = "mcp.application.surface.resolve"
+                tracing::trace_span!("mcp.application.surface.resolve"),
             )
             .await
         }
         None => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 resolve_mcp_application_surface_for_target(
                     operation,
                     request_id,
@@ -152,7 +152,7 @@ pub async fn handle_application_surface(
                     target,
                     executor,
                 ),
-                label = "mcp.application.surface.resolve"
+                tracing::trace_span!("mcp.application.surface.resolve"),
             )
             .await
         }
@@ -187,7 +187,7 @@ pub struct RetainedSurfaceExecution {
 /// Run one retained memory, session, or workflow tool on `surface` and render
 /// its tool result exactly as the retained tools always have.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(future = true, label = "mcp.retained.total")]
+#[tracing::instrument(name = "mcp.retained.total", level = "trace", skip_all)]
 pub async fn run_retained_surface_tool(
     response_handle_root: Option<&std::path::Path>,
     surface: tracedecay_tool_catalog::BindingSurface,
@@ -216,8 +216,8 @@ pub fn render_retained_execution(
     response_handle_root: Option<&std::path::Path>,
     execution: &RetainedSurfaceExecution,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    hotpath::measure_block!(
-        "mcp.retained.render",
+    {
+        let _span = tracing::trace_span!("mcp.retained.render").entered();
         render_application_result(
             response_handle_root,
             execution.operation.as_str(),
@@ -225,7 +225,7 @@ pub fn render_retained_execution(
             &execution.result,
             execution.requested_format,
         )
-    )
+    }
 }
 
 /// Which store a retained tool call addresses.
@@ -323,10 +323,10 @@ pub async fn execute_retained_surface_tool(
     let normalized = tracedecay_daemon_protocol::separate_application_tool_request(args)
         .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     let requested_format = normalized.requested_format;
-    let request = hotpath::measure_block!(
-        "mcp.retained.decode",
+    let request = {
+        let _span = tracing::trace_span!("mcp.retained.decode").entered();
         tracedecay_daemon_protocol::decode_retained_request(retained, normalized.request)
-    )
+    }
     .map_err(|error| {
         ApplicationSurfaceAdapterError::invalid_request(error).into_trace_decay_error()
     })?;
@@ -380,13 +380,13 @@ pub async fn execute_retained_surface_tool(
             "application.transport.unavailable".to_owned(),
             "The daemon retained application transport is unavailable".to_owned(),
         )?),
-        Some(executor) => match hotpath::future!(
+        Some(executor) => match tracing::Instrument::instrument(
             tracedecay_daemon_service::application_surface::execute_application_surface(
                 operation,
                 dispatched,
                 Some(executor),
             ),
-            label = "mcp.retained.invoke"
+            tracing::trace_span!("mcp.retained.invoke"),
         )
         .await
         {
@@ -417,7 +417,7 @@ pub type GraphToolOutcome = std::result::Result<
 /// its typed result. Every refusal keeps the owner's whole problem record for
 /// the surface to render.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(future = true, label = "mcp.graph_tool.total")]
+#[tracing::instrument(name = "mcp.graph_tool.total", level = "trace", skip_all)]
 pub async fn execute_graph_tool_surface(
     surface: tracedecay_tool_catalog::BindingSurface,
     operation: ApplicationSurfaceOperation,

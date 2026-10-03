@@ -88,7 +88,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Produced => "produced",
@@ -97,7 +96,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     const fn matches(self, relation: CommitRelation) -> bool {
         matches!(
             (self, relation),
@@ -168,7 +166,11 @@ pub struct GitEvidenceProjectionV1 {
 
 #[cfg(test)]
 impl GitEvidenceProjectionV1 {
-    #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.projection_new",
+        level = "trace",
+        skip_all
+    )]
     pub fn new(
         source_watermark: impl Into<String>,
         mut spans: Vec<SessionGitSpan>,
@@ -243,7 +245,11 @@ impl GitEvidenceProjectionV1 {
     /// Evaluates the query over every row. Bounded production reads go
     /// through [`rows::GitEvidenceView`], which feeds the same aggregation
     /// helpers only the rows that can contribute to the result.
-    #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.sessions_for",
+        level = "trace",
+        skip_all
+    )]
     pub fn sessions_for(
         &self,
         query: &SessionsForQuery,
@@ -266,7 +272,11 @@ impl GitEvidenceProjectionV1 {
         }
     }
 
-    #[hotpath::measure(label = "sessions.git_correlation.session_ids_for_scope")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.session_ids_for_scope",
+        level = "trace",
+        skip_all
+    )]
     pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         if filter.is_empty() {
             return None;
@@ -480,7 +490,6 @@ impl GitRefFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Branch(_) => "branch",
@@ -552,12 +561,10 @@ pub struct CorrelationIndexHealth {
 }
 
 impl CorrelationIndexHealth {
-    #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
         self.span_count == 0
     }
 
-    #[hotpath::skip]
     pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
         match git_ref {
             GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => self.span_count == 0,
@@ -582,7 +589,6 @@ pub struct CorrelationIndexPresence {
 }
 
 impl CorrelationIndexPresence {
-    #[hotpath::skip]
     pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
         match git_ref {
             GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => !self.spans_present,
@@ -658,7 +664,11 @@ pub fn span_debounce_key(
 /// Worktree identity comes exclusively from the daemon-admitted repository
 /// root. Commit facts become relations only when the referenced object resolves
 /// independently to a commit in that admitted repository.
-#[hotpath::measure(label = "sessions.git_correlation.canonical_observation_evidence")]
+#[tracing::instrument(
+    name = "sessions.git_correlation.canonical_observation_evidence",
+    level = "trace",
+    skip_all
+)]
 pub fn canonical_observation_git_evidence(
     sanitized_payload: &serde_json::Value,
     admitted_project_root: &std::path::Path,
@@ -786,7 +796,11 @@ pub fn canonical_observation_git_evidence(
 }
 
 /// Installs the Git evidence rows, convergence receipts and watermarks.
-#[hotpath::measure(label = "sessions.git_correlation.ensure_schema", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.ensure_schema",
+    level = "trace",
+    skip_all
+)]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
@@ -904,7 +918,7 @@ pub async fn recorded_git_correlation_schema_version(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.read_meta", future = true)]
+#[tracing::instrument(name = "sessions.git_correlation.read_meta", level = "trace", skip_all)]
 pub async fn read_meta_value(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
@@ -921,7 +935,11 @@ pub async fn read_meta_value(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.write_meta", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.write_meta",
+    level = "trace",
+    skip_all
+)]
 pub async fn write_meta_value(
     conn: &(impl Executor + ?Sized),
     key: &str,

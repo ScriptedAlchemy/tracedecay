@@ -110,39 +110,44 @@ pub fn build_application_binding_snapshot() -> Result<CatalogSnapshotV1, Catalog
         .map(|(snapshot, _handlers)| snapshot)
 }
 
-#[hotpath::measure(label = "catalog_composition.assemble")]
+#[tracing::instrument(name = "catalog_composition.assemble", level = "trace", skip_all)]
 fn assemble_application_catalog_with(
     materialize: SchemaBodyMaterialization,
 ) -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
-    let (mut contributions, handlers) =
-        hotpath::measure_block!("catalog_composition.contributions", {
+    let (mut contributions, handlers) = {
+        let _span = tracing::trace_span!("catalog_composition.contributions").entered();
+        {
             (
                 application_catalog_contributions_with(materialize)?,
                 application_handler_descriptors()?,
             )
-        });
+        }
+    };
     contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
-    hotpath::measure_block!(
-        "catalog_composition.validate",
+    {
+        let _span = tracing::trace_span!("catalog_composition.validate").entered();
         validate_application_catalog(&contributions, &handlers)?
-    );
-    let profiles = hotpath::measure_block!(
-        "catalog_composition.profiles",
+    };
+    let profiles = {
+        let _span = tracing::trace_span!("catalog_composition.profiles").entered();
         application_profiles(&contributions)?
-    );
-    let snapshot = hotpath::measure_block!("catalog_composition.snapshot", {
-        let mut builder = CatalogSnapshotBuilderV1::new();
-        for contribution in contributions {
-            builder.add_contribution(contribution);
+    };
+    let snapshot = {
+        let _span = tracing::trace_span!("catalog_composition.snapshot").entered();
+        {
+            let mut builder = CatalogSnapshotBuilderV1::new();
+            for contribution in contributions {
+                builder.add_contribution(contribution);
+            }
+            for handler in handlers.catalog_descriptors()? {
+                builder.add_handler(handler);
+            }
+            for profile in profiles {
+                builder.add_profile(profile);
+            }
+            builder.build()?
         }
-        for handler in handlers.catalog_descriptors()? {
-            builder.add_handler(handler);
-        }
-        for profile in profiles {
-            builder.add_profile(profile);
-        }
-        builder.build()?
-    });
+    };
     Ok((snapshot, handlers))
 }
 

@@ -89,7 +89,7 @@ impl std::fmt::Display for GrepSearchError {
 
 impl std::error::Error for GrepSearchError {}
 
-#[hotpath::measure(label = "code_index.search.grep")]
+#[tracing::instrument(name = "code_index.search.grep", level = "trace", skip_all)]
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
@@ -106,7 +106,7 @@ pub fn search_tree_with_cancel(
         })?;
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
-    #[cfg(feature = "hotpath")]
+
     let mut source_bytes = 0_u64;
 
     for entry in walker {
@@ -145,15 +145,15 @@ pub fn search_tree_with_cancel(
             result.omissions.unavailable_sources += 1;
             continue;
         };
-        #[cfg(feature = "hotpath")]
+
         {
             source_bytes = source_bytes.saturating_add(content.len() as u64);
         }
         // Defer path materialization until the file yields a hit so zero-hit
         // files never pay normalize+alloc on the grep hot path.
-        let stop = if crate::hotpath_observe::sample_hot_loop() {
-            hotpath::measure_block!(
-                "code_index_grep_file",
+        let stop = if crate::observe::sample_hot_loop() {
+            {
+                let _span = tracing::trace_span!("code_index_grep_file").entered();
                 examine_grep_file(
                     &matcher,
                     query,
@@ -163,7 +163,7 @@ pub fn search_tree_with_cancel(
                     max_results,
                     &is_cancelled,
                 )
-            )
+            }
         } else {
             examine_grep_file(
                 &matcher,
@@ -176,15 +176,15 @@ pub fn search_tree_with_cancel(
             )
         };
         if stop {
-            crate::hotpath_observe::record_files(result.files_scanned);
-            #[cfg(feature = "hotpath")]
-            crate::hotpath_observe::record_source_bytes(source_bytes);
+            crate::observe::record_files(result.files_scanned);
+
+            crate::observe::record_source_bytes(source_bytes);
             return Ok(result);
         }
     }
-    crate::hotpath_observe::record_files(result.files_scanned);
-    #[cfg(feature = "hotpath")]
-    crate::hotpath_observe::record_source_bytes(source_bytes);
+    crate::observe::record_files(result.files_scanned);
+
+    crate::observe::record_source_bytes(source_bytes);
     Ok(result)
 }
 

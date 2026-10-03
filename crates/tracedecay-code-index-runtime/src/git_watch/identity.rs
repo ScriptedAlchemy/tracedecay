@@ -39,7 +39,7 @@ pub fn identity_discovery_disposition(
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.identity", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.identity", level = "trace", skip_all)]
 pub async fn resolve_watch_identity(
     project_root: PathBuf,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
@@ -55,16 +55,16 @@ pub async fn resolve_watch_identity(
 fn record_identity_resolution(resolution: &WatchIdentityResolution) {
     match resolution {
         WatchIdentityResolution::Ready(_) => {
-            hotpath::gauge!("daemon.git.watch.identity.resolved_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.identity.resolved_total").increment(1.0);
         }
         WatchIdentityResolution::Cancelled => {
-            hotpath::gauge!("daemon.git.watch.identity.cancelled_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.identity.cancelled_total").increment(1.0);
         }
         WatchIdentityResolution::NotRepository => {
-            hotpath::gauge!("daemon.git.watch.identity.not_repository_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.identity.not_repository_total").increment(1.0);
         }
         WatchIdentityResolution::Unknown => {
-            hotpath::gauge!("daemon.git.watch.identity.unknown_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.identity.unknown_total").increment(1.0);
         }
     }
 }

@@ -9,8 +9,6 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -80,8 +78,8 @@ enum StoreCommand {
 /// actor exit. It intentionally has no `Clone` implementation: one daemon
 /// service owns one bounded queue and actor for its transaction authority.
 pub struct DaemonGitIndexTransactionStore {
-    commands: ProfiledStdMutex<Option<SyncSender<StoreCommand>>>,
-    worker: ProfiledStdMutex<Option<std::thread::JoinHandle<()>>>,
+    commands: std::sync::Mutex<Option<SyncSender<StoreCommand>>>,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 enum ActorDatabase {
@@ -144,7 +142,7 @@ struct PreviewGcTestObserver {
 }
 
 impl DaemonGitIndexTransactionStore {
-    #[hotpath::measure(label = "daemon.git.tx.store_open")]
+    #[tracing::instrument(name = "daemon.git.tx.store_open", level = "trace", skip_all)]
     pub fn open(database: RegisteredGlobalDbLeaseV1) -> GitIndexTransactionStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered {
             database,
@@ -202,14 +200,8 @@ impl DaemonGitIndexTransactionStore {
             return Err(error);
         }
         Ok(Self {
-            commands: hotpath::mutex!(
-                std::sync::Mutex::new(Some(commands)),
-                label = "daemon.git.tx.store.commands"
-            ),
-            worker: hotpath::mutex!(
-                std::sync::Mutex::new(Some(worker)),
-                label = "daemon.git.tx.store.worker"
-            ),
+            commands: std::sync::Mutex::new(Some(commands)),
+            worker: std::sync::Mutex::new(Some(worker)),
         })
     }
 

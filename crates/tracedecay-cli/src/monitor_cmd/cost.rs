@@ -201,7 +201,7 @@ fn map_cost_payloads(
     }))
 }
 
-#[hotpath::measure(label = "cli.monitor.cost_fetch", future = true)]
+#[tracing::instrument(name = "cli.monitor.cost_fetch", level = "trace", skip_all)]
 async fn fetch_cost_snapshot(profile: &ProfileRoot) -> Result<Option<CostSnapshot>> {
     let cwd = std::env::current_dir()?;
     let project_root = profile.discover_project_root(&cwd);

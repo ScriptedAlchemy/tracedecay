@@ -504,7 +504,11 @@ fn package_lock_path(package_dir: &Path) -> PathBuf {
 /// the tracked skills tree (OS temp dir, keyed by the package path) so it never
 /// pollutes a repo; flock semantics only need to hold within one machine, which
 /// is exactly where the race occurs.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.lock")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.lock",
+    level = "trace",
+    skip_all
+)]
 fn lock_package(package_dir: &Path) -> Result<FileLease> {
     let path = package_lock_path(package_dir);
     let file = fs::OpenOptions::new()
@@ -909,7 +913,11 @@ fn apply_pending_materialization(
     Ok(MaterializeAction::Written)
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_materialization.commit")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.commit",
+    level = "trace",
+    skip_all
+)]
 fn commit_materialization_transaction(
     host_io: &HostIo,
     dir: &Path,
@@ -1050,7 +1058,11 @@ pub fn materialize_skill(
 /// Materializes one skill into an explicit host slug. `reconcile_scope` passes a
 /// collision-disambiguated slug here; the public entry point uses the skill's
 /// own base slug.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.materialize")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.materialize",
+    level = "trace",
+    skip_all
+)]
 fn materialize_skill_into(
     host_io: &HostIo,
     scope: &MaterializationScope,
@@ -1198,7 +1210,11 @@ fn package_is_foreign_to_installation(
 /// user-edited managed file is preserved; a foreign file is never touched; a
 /// committed project-scope package authored by a different installation is
 /// left in place.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.remove")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.remove",
+    level = "trace",
+    skip_all
+)]
 pub fn remove_materialized_skill(
     host_io: &HostIo,
     scope: &MaterializationScope,
@@ -1312,7 +1328,11 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
 /// every active skill and removes managed files whose skill is no longer
 /// active. Fork- and foreign-safe throughout. A single failing package is
 /// recorded in `report.errors` and never aborts the rest of the sweep.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.reconcile",
+    level = "trace",
+    skip_all
+)]
 pub fn reconcile_scope(
     host_io: &HostIo,
     scope: &MaterializationScope,
@@ -1458,7 +1478,11 @@ pub struct ScopeReconcileResult {
 /// Reconciles every detected scope against the profile's active managed skills.
 /// Returns one result per scope. Errors from a single scope are surfaced in
 /// `errors` rather than aborting the whole sweep.
-#[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile_detected")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_materialization.reconcile_detected",
+    level = "trace",
+    skip_all
+)]
 pub fn reconcile_detected_scopes(
     host_io: &HostIo,
     profile_root: &Path,

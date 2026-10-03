@@ -34,7 +34,7 @@ fn decode_canonical_envelope(
     CanonicalObservationEnvelopeV1::deserialize(payload)
 }
 
-#[hotpath::measure(label = "global_db.observation_apply.derive")]
+#[tracing::instrument(name = "global_db.observation_apply.derive", level = "trace", skip_all)]
 pub(in super::super) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -199,7 +199,11 @@ pub(super) async fn derive_projection_for_rebuild(
     derive_projection_with_alias_from_generation(conn, observation, Some(generation)).await
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.alias")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.derive.alias",
+    level = "trace",
+    skip_all
+)]
 async fn derive_projection_with_alias_from_generation(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -380,7 +384,11 @@ async fn read_latest_goal_dedupe_key(
 
 /// Drop Codex Goal rows that only advance tokens/time while retaining the raw
 /// observation. Meaningful objective or status transitions still project.
-#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.collapse")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.derive.collapse",
+    level = "trace",
+    skip_all
+)]
 async fn collapse_consecutive_goal_ticks(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -457,7 +465,11 @@ async fn collapse_consecutive_goal_ticks(
     })
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.session")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.session",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn apply_session(
     conn: &impl Executor,
     session: &SessionRecord,
@@ -941,7 +953,11 @@ async fn retire_quarantined_projection(
     .await
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.rows",
+    level = "trace",
+    skip_all
+)]
 async fn apply_rows(
     conn: &impl Executor,
     sequence: u64,
@@ -1021,7 +1037,11 @@ struct StoredWorkflowFact {
     output_digest: String,
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.workflow")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.query.workflow",
+    level = "trace",
+    skip_all
+)]
 async fn verify_workflow_fact(
     conn: &impl QueryExecutor,
     projection: &WorkflowFactProjection,
@@ -1139,7 +1159,11 @@ async fn verify_workflow_fact(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.workflow")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.workflow",
+    level = "trace",
+    skip_all
+)]
 async fn apply_workflow_fact(
     conn: &impl Executor,
     sequence: u64,
@@ -1165,7 +1189,11 @@ async fn apply_workflow_fact(
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query.provenance")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.query.provenance",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn verify_provenance(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
@@ -1265,9 +1293,10 @@ async fn read_provenance_output_binding(
     )))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_apply.persist.provenance"
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.provenance",
+    level = "trace",
+    skip_all
 )]
 async fn apply_provenance(
     conn: &impl Executor,
@@ -1435,7 +1464,11 @@ pub(super) async fn apply_skip_disposition(
     .await
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.skip")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.skip",
+    level = "trace",
+    skip_all
+)]
 async fn apply_skip_disposition_for_receipt(
     conn: &impl Executor,
     observation_id: &str,
@@ -1722,7 +1755,11 @@ fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&st
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.usage")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.usage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn apply_provider_usage_effects(
     conn: &impl Executor,
     sequence: u64,
@@ -1796,9 +1833,10 @@ pub(crate) async fn apply_provider_usage_effects(
     Ok(())
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_apply.persist.stage_usage"
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist.stage_usage",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn stage_provider_usage_effects(
     conn: &impl Executor,
@@ -2010,7 +2048,7 @@ pub(super) async fn verify_observation_provider_usage(
     verify_provider_usage_effects(conn, sequence, observation).await
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.query")]
+#[tracing::instrument(name = "global_db.observation_apply.query", level = "trace", skip_all)]
 pub async fn verify_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
@@ -2058,7 +2096,11 @@ pub async fn verify_workflow_effects(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation_apply.persist")]
+#[tracing::instrument(
+    name = "global_db.observation_apply.persist",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn apply_effect(
     conn: &impl Executor,
     sequence: u64,

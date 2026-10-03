@@ -13,7 +13,7 @@ use super::{Result, TraceDecay, TraceDecayError};
 /// Queues the reconcile the first-party CLI asks for (`tracedecay init` /
 /// `tracedecay sync`). It is never advertised: external agents rely on the
 /// daemon watcher.
-#[hotpath::measure(label = "mcp.info.admin_sync.total")]
+#[tracing::instrument(name = "mcp.info.admin_sync.total", level = "trace", skip_all)]
 pub(crate) async fn admin_sync(
     cg: &TraceDecay,
     reconcile_sink: Option<&crate::mcp::server::CodeIndexReconcileSink>,
@@ -28,9 +28,9 @@ pub(crate) async fn admin_sync(
     })?;
     // The operator named this route: the one demand that may index a route
     // the watcher policy keeps quiet.
-    let admission = hotpath::future!(
+    let admission = tracing::Instrument::instrument(
         reconcile_sink(project_root.clone(), CodeIndexDemandV1::OperatorReconcile),
-        label = "mcp.info.admin_sync.reconcile"
+        tracing::trace_span!("mcp.info.admin_sync.reconcile"),
     )
     .await;
     let status = match admission {

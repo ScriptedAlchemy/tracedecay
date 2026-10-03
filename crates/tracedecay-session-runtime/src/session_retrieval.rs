@@ -146,7 +146,6 @@ pub struct SessionRetrievalServingIdentityV1 {
 }
 
 impl SessionRetrievalServingIdentityV1 {
-    #[hotpath::skip]
     pub async fn resolve_project(
         project_id: &str,
         serving_db: &Path,
@@ -277,7 +276,6 @@ impl DaemonSessionRetrievalRoot {
         }
     }
 
-    #[hotpath::skip]
     pub async fn project(
         serving: SessionRetrievalServingIdentityV1,
         registry: &RegisteredGlobalDb,
@@ -585,7 +583,7 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.search")]
+    #[tracing::instrument(name = "daemon.session_retrieval.search", level = "trace", skip_all)]
     async fn execute_temporal_query_with_context(
         &self,
         context: &RequestContext,
@@ -618,7 +616,6 @@ impl DaemonSessionRetrievalService {
         .await
     }
 
-    #[hotpath::skip]
     async fn public_outcome(
         &self,
         outcome: SessionRetrievalOutcome<TemporalKernelResult>,
@@ -756,7 +753,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.hydrate")]
+    #[tracing::instrument(name = "daemon.session_retrieval.hydrate", level = "trace", skip_all)]
     async fn page(
         &self,
         items: Vec<TemporalKernelResult>,

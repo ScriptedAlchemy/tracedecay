@@ -415,7 +415,7 @@ pub async fn payload_metadata_refs_for_scope(
 
 /// Read-only payload GC preview. Mutation runs through
 /// [`run_payload_gc_in_transaction`]; this entry point never writes.
-#[hotpath::measure(label = "sessions.lcm.gc.preview", future = true)]
+#[tracing::instrument(name = "sessions.lcm.gc.preview", level = "trace", skip_all)]
 pub async fn run_payload_gc(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -860,7 +860,7 @@ pub struct PayloadGcSnapshot {
     dangling: DanglingPlan,
 }
 
-#[hotpath::measure(label = "sessions.lcm.gc.snapshot", future = true)]
+#[tracing::instrument(name = "sessions.lcm.gc.snapshot", level = "trace", skip_all)]
 pub async fn read_payload_gc_snapshot(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -882,7 +882,7 @@ pub async fn read_payload_gc_snapshot(
     })
 }
 
-#[hotpath::measure(label = "sessions.lcm.gc.apply", future = true)]
+#[tracing::instrument(name = "sessions.lcm.gc.apply", level = "trace", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),

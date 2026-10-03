@@ -419,7 +419,7 @@ fn git_staleness(
 /// `waited` is the readiness wait the owner held the read for, when the
 /// request asked for one, with the reading that satisfied it, which the
 /// payload reports instead of a later reading.
-#[hotpath::measure(label = "mcp.info.status.total")]
+#[tracing::instrument(name = "mcp.info.status.total", level = "trace", skip_all)]
 pub async fn compute_status(
     ctx: &McpToolContext<'_>,
     request: &StatusSurfaceRequestV1,
@@ -454,10 +454,7 @@ pub async fn compute_status(
             ),
         ),
         None => {
-            hotpath::future!(
-                ctx.freshness(),
-                label = "mcp.info.status.code_index_freshness"
-            )
+            tracing::Instrument::instrument(ctx.freshness(), tracing::trace_span!("mcp.info.status.code_index_freshness"))
             .await
         }
     };
@@ -472,9 +469,9 @@ pub async fn compute_status(
     };
     let storage_health = if request.include_storage_health {
         let mut storage_health = serde_json::to_value(
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 crate::handlers::health::collect_database_snapshot(ctx, false, None),
-                label = "mcp.info.status.storage_health"
+                tracing::trace_span!("mcp.info.status.storage_health"),
             )
             .await?,
         )?;
@@ -516,9 +513,9 @@ pub async fn compute_status(
         session_ingest: None,
         session_history_catch_up: None,
         session_projection: lcm_doctor_projection(session_projection),
-        session_git_evidence: hotpath::future!(
+        session_git_evidence: tracing::Instrument::instrument(
             session_git_evidence(ctx),
-            label = "mcp.info.status.session_git_evidence"
+            tracing::trace_span!("mcp.info.status.session_git_evidence"),
         )
         .await,
         hook_replay,
@@ -570,9 +567,9 @@ pub async fn compute_status(
             }
             Some((lease, _)) => {
                 let db = lease.as_ref();
-                match hotpath::future!(
+                match tracing::Instrument::instrument(
                     db.cursor_session_ingest_health(),
-                    label = "mcp.info.status.session_ingest"
+                    tracing::trace_span!("mcp.info.status.session_ingest"),
                 )
                 .await
                 {
@@ -583,9 +580,9 @@ pub async fn compute_status(
                         // providers and remains explicitly partial while the retained
                         // daemon authority drains its bounded backlog.
                         status.session_history_catch_up = Some(
-                            hotpath::future!(
+                            tracing::Instrument::instrument(
                                 historical_session_catch_up(db),
-                                label = "mcp.info.status.session_history"
+                                tracing::trace_span!("mcp.info.status.session_history"),
                             )
                             .await,
                         );
@@ -941,7 +938,7 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
 }
 
 /// Computes `tracedecay_active_project` for the admitted project.
-#[hotpath::measure(label = "mcp.info.active_project.total")]
+#[tracing::instrument(name = "mcp.info.active_project.total", level = "trace", skip_all)]
 pub async fn compute_active_project(
     ctx: &McpToolContext<'_>,
     scope_prefix: Option<&str>,

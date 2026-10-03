@@ -276,21 +276,21 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<ValidatedCodeSnapshotV1, IntakeRejectionV1> {
-        hotpath::measure_block!(
-            "code_index.intake.validation",
+        {
+            let _span = tracing::trace_span!("code_index.intake.validation").entered();
             self.validate_snapshot(snapshot)
-        )
+        }
     }
 
     fn admit(
         &self,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<SanitizedSnapshotCapabilityV1, IntakeRejectionV1> {
-        hotpath::measure_block!(
-            "code_index.intake.admission",
+        {
+            let _span = tracing::trace_span!("code_index.intake.admission").entered();
             self.validate_snapshot(snapshot)
                 .map(SanitizedSnapshotCapabilityV1::new)
-        )
+        }
     }
 
     fn bind_file(
@@ -299,7 +299,7 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         project_id: &ProjectId,
         file: ValidatedCodeFileV1,
     ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.intake.bind_file", {
+        crate::observe::measure_hot_loop!("code_index.intake.bind_file", {
             if project_id.validate().is_err() {
                 return Err(IntakeRejectionV1::UnsanitizedInput);
             }

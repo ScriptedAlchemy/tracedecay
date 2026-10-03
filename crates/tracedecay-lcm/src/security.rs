@@ -140,14 +140,14 @@ fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPattern
     compiled
 }
 
-#[hotpath::measure(label = "sessions.lcm.compile_session")]
+#[tracing::instrument(name = "sessions.lcm.compile_session", level = "trace", skip_all)]
 pub fn compile_session_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatternSet {
     compile_patterns(patterns, |pattern| {
         Regex::new(&session_pattern_regex(pattern)).ok()
     })
 }
 
-#[hotpath::measure(label = "sessions.lcm.compile_message")]
+#[tracing::instrument(name = "sessions.lcm.compile_message", level = "trace", skip_all)]
 pub fn compile_message_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatternSet {
     compile_patterns(patterns, |pattern| Regex::new(pattern).ok())
 }
@@ -201,7 +201,7 @@ pub fn contains_data_uri(content: &str) -> bool {
 
 /// Byte spans of data-URI base64 payloads eligible for substring
 /// externalization (Hermes `_protect_payload_substrings` pass 1).
-#[hotpath::measure(label = "sessions.lcm.scan_data_uri")]
+#[tracing::instrument(name = "sessions.lcm.scan_data_uri", level = "trace", skip_all)]
 pub fn data_uri_spans(content: &str) -> Vec<(usize, usize)> {
     DATA_URI_BASE64_RE.as_ref().map_or_else(Vec::new, |regex| {
         regex
@@ -224,7 +224,7 @@ fn is_data_uri_base64_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=')
 }
 
-#[hotpath::measure(label = "sessions.lcm.scan_repetition")]
+#[tracing::instrument(name = "sessions.lcm.scan_repetition", level = "trace", skip_all)]
 fn assistant_output_is_high_repetition(content: &str) -> bool {
     if !char_count_at_least(content, QUARANTINED_ASSISTANT_MIN_CHARS) {
         return false;
@@ -341,7 +341,7 @@ fn is_base64_run_byte(byte: u8) -> bool {
 
 /// Byte spans of maximal base64-alphabet runs that qualify as long base64
 /// payloads (Hermes `_BASE64_RUN_RE` + `looks_like_long_base64`).
-#[hotpath::measure(label = "sessions.lcm.scan_base64")]
+#[tracing::instrument(name = "sessions.lcm.scan_base64", level = "trace", skip_all)]
 pub fn long_base64_run_spans(content: &str) -> Vec<(usize, usize)> {
     if content.len() < GENERIC_BASE64_MIN_CHARS {
         return Vec::new();

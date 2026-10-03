@@ -78,7 +78,7 @@ where
     D: SessionTemporalRegisteredDb,
     E: VersionedTokenEstimator + Sync,
 {
-    #[hotpath::measure(label = "usecases.session.admit")]
+    #[tracing::instrument(name = "usecases.session.admit", level = "trace", skip_all)]
     pub(crate) fn admit_execution(
         &self,
         context: &RequestContext,
@@ -221,7 +221,7 @@ where
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "usecases.session.task_session")]
+    #[tracing::instrument(name = "usecases.session.task_session", level = "trace", skip_all)]
     pub async fn execute_task_session(
         &self,
         context: &RequestContext,
@@ -252,17 +252,17 @@ where
             Ok(request) => request,
             Err(error) => return map_task_session_callback_error(error),
         };
-        let result = match hotpath::future!(
+        let result = match tracing::Instrument::instrument(
             run_application_request_interruptible(
                 context,
                 session_binding.cancellation(),
                 Box::pin(
                     self.execution
-                        .execute_task_session(request, selector, &self.estimator)
+                        .execute_task_session(request, selector, &self.estimator),
                 ),
                 || admitted.cancellation_control.cancel(),
             ),
-            label = "usecases.session.task_session.execute"
+            tracing::trace_span!("usecases.session.task_session.execute"),
         )
         .await
         {

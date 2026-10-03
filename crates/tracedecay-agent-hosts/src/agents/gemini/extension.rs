@@ -341,7 +341,11 @@ pub(super) fn require_gemini_cli() -> Result<PathBuf> {
 /// over an existing extension, and removing it through the host, rather than
 /// deleting the host-owned directory ourselves, keeps every write to that
 /// state on Gemini's side of the boundary.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_activate")]
+#[tracing::instrument(
+    name = "hosts.agent.gemini.extension_activate",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn gemini_extension_activate_with(gemini: &Path, home: &Path) -> Result<()> {
     let stage_dir = extension_stage_dir(home);
     if !staged_manifest_path(home).exists() {
@@ -364,7 +368,11 @@ pub(super) fn gemini_extension_activate_with(gemini: &Path, home: &Path) -> Resu
 /// The staged source is left in place: it is TraceDecay-owned input to the
 /// host lifecycle, not host registration state, and the deployed-asset
 /// lifecycle, not this registration boundary, owns removing it.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_deactivate")]
+#[tracing::instrument(
+    name = "hosts.agent.gemini.extension_deactivate",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn gemini_extension_deactivate_with(gemini: &Path, home: &Path) -> Result<()> {
     run_gemini_extension_step(gemini, &["extensions", "uninstall", EXTENSION_NAME], home)
 }
@@ -389,7 +397,7 @@ pub(super) fn host_reported_extensions(home: &Path) -> Result<host_cli::HostCliO
 /// document if the command fails or a later verification rejects its effect.
 /// Reading again after recording would let a foreign writer be absorbed into
 /// the transaction's intended state.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_step")]
+#[tracing::instrument(name = "hosts.agent.gemini.extension_step", level = "trace", skip_all)]
 fn run_gemini_extension_step(gemini: &Path, args: &[&str], home: &Path) -> Result<()> {
     let settings = settings_path(home);
     let outcome = host_cli::run_host_cli(gemini, args, home)?;

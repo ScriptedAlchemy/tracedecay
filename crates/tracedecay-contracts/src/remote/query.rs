@@ -447,7 +447,7 @@ impl RemoteExactObservationQueryServiceV1 {
         }
     }
 
-    #[hotpath::measure(label = "application.remote.query")]
+    #[tracing::instrument(name = "application.remote.query", level = "trace", skip_all)]
     pub fn query(
         &self,
         request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,

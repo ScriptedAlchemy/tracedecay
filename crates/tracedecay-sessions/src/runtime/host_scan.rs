@@ -15,7 +15,6 @@ pub(super) struct HostScanEvidence {
 }
 
 impl HostScanEvidence {
-    #[hotpath::skip]
     pub(super) const fn is_deferred(self) -> bool {
         self.cancelled
             || self.deadline_elapsed
@@ -37,7 +36,6 @@ pub(super) struct HostScanBudget {
 }
 
 impl HostScanBudget {
-    #[hotpath::skip]
     pub(super) const fn new(
         max_input_bytes: u64,
         max_units: usize,
@@ -98,7 +96,6 @@ impl HostScanBudget {
         true
     }
 
-    #[hotpath::skip]
     pub(super) const fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -107,7 +104,6 @@ impl HostScanBudget {
         self.cancellation.clone()
     }
 
-    #[hotpath::skip]
     pub(super) const fn consumed_input_bytes(&self) -> u64 {
         self.consumed_input_bytes
     }
@@ -120,7 +116,6 @@ impl HostScanBudget {
         self.evidence.unavailable_units = self.evidence.unavailable_units.saturating_add(1);
     }
 
-    #[hotpath::skip]
     pub(super) const fn evidence(&self) -> HostScanEvidence {
         self.evidence
     }

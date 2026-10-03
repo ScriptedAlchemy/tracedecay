@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(feature = "hotpath")]
+
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -163,46 +163,41 @@ pub(super) fn representable_logical_path(git_path: &[u8]) -> Option<&str> {
 /// Publish capture progress at a coarse cadence so a large tree does not
 /// turn one file into one profiler event. The final values are always flushed
 /// by `Drop`, including cancellation and other early-return paths.
-#[cfg(feature = "hotpath")]
 const CAPTURE_PROGRESS_UPDATE_PERIOD: u64 = 32;
 
 pub struct CaptureProgressV1 {
-    #[cfg(feature = "hotpath")]
     candidate_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
+
     candidate_bytes: AtomicU64,
-    #[cfg(feature = "hotpath")]
+
     processed_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
+
     processed_bytes: AtomicU64,
-    #[cfg(feature = "hotpath")]
+
     captured_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
+
     captured_bytes: AtomicU64,
 }
 
 impl CaptureProgressV1 {
-    #[hotpath::skip]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "hotpath")]
             candidate_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
+
             candidate_bytes: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
+
             processed_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
+
             processed_bytes: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
+
             captured_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
+
             captured_bytes: AtomicU64::new(0),
         }
     }
 
     #[inline]
     pub fn observe_candidate(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
         {
             let candidate_files = self
                 .candidate_files
@@ -212,13 +207,10 @@ impl CaptureProgressV1 {
                 .fetch_add(bytes as u64, Ordering::Relaxed);
             self.publish_at_cadence(candidate_files, false);
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
     }
 
     #[inline]
     pub fn observe_processed(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
         {
             let processed_files = self
                 .processed_files
@@ -228,13 +220,10 @@ impl CaptureProgressV1 {
                 .fetch_add(bytes as u64, Ordering::Relaxed);
             self.publish_at_cadence(processed_files, false);
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
     }
 
     #[inline]
     pub fn observe_captured(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
         {
             let captured_files = self
                 .captured_files
@@ -244,15 +233,8 @@ impl CaptureProgressV1 {
                 .fetch_add(bytes as u64, Ordering::Relaxed);
             self.publish_at_cadence(captured_files, false);
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
     }
 
-    #[cfg(feature = "hotpath")]
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     fn publish_at_cadence(&self, observation_count: u64, force: bool) {
         if !force && !Self::cadence_is_due(observation_count) {
             return;
@@ -260,22 +242,17 @@ impl CaptureProgressV1 {
         let candidate_files = self.candidate_files.load(Ordering::Relaxed);
         let processed_files = self.processed_files.load(Ordering::Relaxed);
         let captured_files = self.captured_files.load(Ordering::Relaxed);
-        hotpath::gauge!("daemon.code_index.capture.candidate_files").set(candidate_files);
-        hotpath::gauge!("daemon.code_index.capture.candidate_bytes")
-            .set(self.candidate_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("daemon.code_index.capture.processed_files").set(processed_files);
-        hotpath::gauge!("daemon.code_index.capture.processed_bytes")
-            .set(self.processed_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("daemon.code_index.capture.captured_files").set(captured_files);
-        hotpath::gauge!("daemon.code_index.capture.captured_bytes")
-            .set(self.captured_bytes.load(Ordering::Relaxed));
+        metrics::gauge!("daemon.code_index.capture.candidate_files").set(candidate_files as f64);
+        metrics::gauge!("daemon.code_index.capture.candidate_bytes")
+            .set((self.candidate_bytes.load(Ordering::Relaxed)) as f64);
+        metrics::gauge!("daemon.code_index.capture.processed_files").set(processed_files as f64);
+        metrics::gauge!("daemon.code_index.capture.processed_bytes")
+            .set((self.processed_bytes.load(Ordering::Relaxed)) as f64);
+        metrics::gauge!("daemon.code_index.capture.captured_files").set(captured_files as f64);
+        metrics::gauge!("daemon.code_index.capture.captured_bytes")
+            .set((self.captured_bytes.load(Ordering::Relaxed)) as f64);
     }
 
-    #[cfg(feature = "hotpath")]
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     fn cadence_is_due(observation_count: u64) -> bool {
         observation_count != 0 && observation_count.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
     }
@@ -283,7 +260,6 @@ impl CaptureProgressV1 {
 
 impl Drop for CaptureProgressV1 {
     fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
         self.publish_at_cadence(0, true);
     }
 }
@@ -514,7 +490,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         result
     }
 
-    #[hotpath::measure(label = "daemon.code_index.capture.exact_git_tree")]
+    #[tracing::instrument(
+        name = "daemon.code_index.capture.exact_git_tree",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn capture_exact_git_tree_snapshot(
         &self,
         source: &ExactGitTreeSourceV1,
@@ -571,7 +551,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
-    #[hotpath::measure(label = "daemon.code_index.capture.native_candidate_tree")]
+    #[tracing::instrument(
+        name = "daemon.code_index.capture.native_candidate_tree",
+        level = "trace",
+        skip_all
+    )]
     fn capture_native_candidate_tree_snapshot(
         &self,
         reference: tracedecay_domain::RefId,
@@ -998,10 +982,8 @@ mod tests {
     };
     use crate::code_index_scheduler::SharedCodeIndexBytePoolV1;
 
-    #[cfg(feature = "hotpath")]
     use super::{CAPTURE_PROGRESS_UPDATE_PERIOD, CaptureProgressV1};
 
-    #[cfg(feature = "hotpath")]
     #[test]
     fn zero_captured_large_tree_uses_bounded_candidate_cadence() {
         let candidate_count = CAPTURE_PROGRESS_UPDATE_PERIOD * 64;

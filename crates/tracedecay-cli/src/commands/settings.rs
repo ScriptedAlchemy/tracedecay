@@ -343,7 +343,7 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     }
 }
 
-#[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
+#[tracing::instrument(name = "cli.settings.upload_counter", level = "trace", skip_all)]
 pub(crate) async fn handle_upload_counter(
     profile: &ProfileRoot,
     enable: bool,

@@ -203,7 +203,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
         context: &'a RequestContext,
         input: &'a FeedbackEvaluationInputV1,
     ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let current = self
                     .document_identity
@@ -282,7 +282,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                 }
             }
             },
-            label = "usecases.feedback.proximity_advisory"
+            tracing::trace_span!("usecases.feedback.proximity_advisory"),
         ))
     }
 }
@@ -363,7 +363,11 @@ pub fn production_proximity_feedback_cycle_input(
 /// the project diagnostics broker. An empty provider set remains a valid
 /// cycle: provider-backed diagnostics are typed unavailable while the retained
 /// project feedback/LSP owner continues to serve its other projections.
-#[hotpath::measure(label = "usecases.feedback.resolve_cycle_parts", future = true)]
+#[tracing::instrument(
+    name = "usecases.feedback.resolve_cycle_parts",
+    level = "trace",
+    skip_all
+)]
 pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {
@@ -622,7 +626,7 @@ fn project_open_policy_context(
 /// Resolves branch and head commit from one bounded native read of the exact
 /// admitted checkout. Project-open consumers must reuse this authority rather
 /// than independently reconstructing feedback identity.
-#[hotpath::measure(label = "usecases.feedback.resolve_scope")]
+#[tracing::instrument(name = "usecases.feedback.resolve_scope", level = "trace", skip_all)]
 pub fn resolve_project_feedback_scope_v1(
     project_root: &Path,
     scope: &ResolvedScope,
@@ -904,7 +908,7 @@ fn production_lsp_input(
         let project_root = project_root.clone();
         let root_path = root_path.clone();
         let document_identity = Arc::clone(&document_identity);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if url::Url::parse(&request.root_uri)
                     .ok()
@@ -994,7 +998,7 @@ fn production_lsp_input(
                 FeedbackCycleInvocation::new(context, execution)
                     .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
             },
-            label = "usecases.feedback.lsp_cycle_input"
+            tracing::trace_span!("usecases.feedback.lsp_cycle_input"),
         ))
     }))
 }

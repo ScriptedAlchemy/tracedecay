@@ -1318,7 +1318,6 @@ impl ScoringPrefaceIndexV1 {
         &EMPTY
     }
 
-    #[cfg(feature = "hotpath")]
     pub(super) fn retained_bytes(&self) -> usize {
         self.bytes.capacity() + self.blocks.capacity() * std::mem::size_of::<(u32, u32)>()
     }

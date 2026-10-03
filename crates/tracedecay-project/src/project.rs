@@ -70,7 +70,6 @@ impl TraceDecay {
         self.db.storage_telemetry_handle()
     }
 
-    #[hotpath::skip]
     pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.db.storage_page_counts().await
     }
@@ -146,7 +145,6 @@ impl TraceDecay {
     /// authority becomes claimable; a stale pin or a foreign address never
     /// mounts.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub async fn mount_current_context_scout_claim_authority(
         &self,
         registry: Arc<tracedecay_agent_hosts::agents::context_scout::address_registry::ProjectContextScoutAddressRegistryV1>,
@@ -185,7 +183,6 @@ impl TraceDecay {
     /// `None` when nothing was mounted, the Plan 20 configuration moved past
     /// the mounted pin, or the durable address registry no longer resolves
     /// the mounted address for this hook.
-    #[hotpath::skip]
     pub async fn resolve_current_context_scout_claim_authority(
         &self,
         hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
@@ -226,7 +223,6 @@ impl TraceDecay {
     /// Resolves a unique mounted producer from an earlier event in the same
     /// routed session. The owner reuses and revalidates that producer's exact
     /// lifecycle authority; the later event supplies no replacement identity.
-    #[hotpath::skip]
     pub async fn resolve_current_context_scout_session_claim_authority(
         &self,
         hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
@@ -252,7 +248,6 @@ impl TraceDecay {
         }
     }
 
-    #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
         pin: &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAuthorityPinV1,

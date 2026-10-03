@@ -258,7 +258,7 @@ impl<P> GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
-    #[hotpath::measure(label = "query.graph.enforce")]
+    #[tracing::instrument(name = "query.graph.enforce", level = "trace", skip_all)]
     fn enforce_batch(
         &self,
         request: &GraphLaneRequest,
@@ -337,7 +337,7 @@ impl<P> GraphLaneRetriever for GraphLane<P>
 where
     P: GraphEvidenceReadPort,
 {
-    #[hotpath::measure(label = "query.lane.graph")]
+    #[tracing::instrument(name = "query.lane.graph", level = "trace", skip_all)]
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
@@ -355,7 +355,7 @@ where
                 ));
             }
             Err(RetrievalPortError::Cancelled) => {
-                hotpath::gauge!("query.cancel.count").inc(1u32);
+                metrics::gauge!("query.cancel.count").increment(1u32);
                 return Ok(RetrieverOutcome::Cancelled);
             }
             Err(error) => return Err(error),
@@ -370,7 +370,7 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
+        crate::observe::record_lane(
             "query.lane.graph.candidates",
             "query.lane.graph.examined",
             "query.lane.graph.results",

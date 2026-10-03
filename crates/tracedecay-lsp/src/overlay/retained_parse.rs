@@ -103,7 +103,7 @@ pub(super) struct RetainedOverlayParse {
 }
 
 impl RetainedOverlayParse {
-    #[hotpath::measure(label = "lsp_overlay_parse_open", impl_type = "RetainedOverlayParse")]
+    #[tracing::instrument(name = "lsp_overlay_parse_open", level = "trace", skip_all)]
     pub(super) fn open(identity: ParseDocumentIdentity, language_id: &str, source: &str) -> Self {
         let Some(extractor) = extractor_for(identity.logical_path()) else {
             return Self::unavailable(OverlayParseUnavailable::UnsupportedLanguage);
@@ -134,7 +134,7 @@ impl RetainedOverlayParse {
         }
     }
 
-    #[hotpath::measure(label = "lsp_overlay_parse_update", impl_type = "RetainedOverlayParse")]
+    #[tracing::instrument(name = "lsp_overlay_parse_update", level = "trace", skip_all)]
     pub(super) fn update(
         &mut self,
         next_identity: ParseDocumentIdentity,
@@ -150,13 +150,15 @@ impl RetainedOverlayParse {
         let prepared_source = extractor.prepare_parse_source(source);
         let result = if let Some(document) = self.document.as_mut() {
             let report = if full_replacement {
-                hotpath::measure_block!("lsp_overlay_parse_replace", {
+                {
+                    let _span = tracing::trace_span!("lsp_overlay_parse_replace").entered();
                     document.replace_prepared(next_identity, source, prepared_source)
-                })
+                }
             } else {
-                hotpath::measure_block!("lsp_overlay_parse_reuse", {
+                {
+                    let _span = tracing::trace_span!("lsp_overlay_parse_reuse").entered();
                     document.apply_edits_prepared(next_identity, edits, source, prepared_source)
-                })
+                }
             };
             report.map(|report| (None, report))
         } else {
@@ -193,7 +195,7 @@ impl RetainedOverlayParse {
         &self.extraction_state
     }
 
-    #[hotpath::measure(label = "lsp_overlay_extract", impl_type = "RetainedOverlayParse")]
+    #[tracing::instrument(name = "lsp_overlay_extract", level = "trace", skip_all)]
     fn extract(&mut self, extractor: &dyn LanguageExtractor, report: &ParseReport) {
         let Some(document) = self.document.as_ref() else {
             self.prior_artifact = None;

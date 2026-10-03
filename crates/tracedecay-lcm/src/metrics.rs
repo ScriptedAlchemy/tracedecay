@@ -1,28 +1,22 @@
-//! Bounded LCM metrics backed by Hotpath.
+//! Bounded LCM metrics on the `metrics` facade.
 //!
-//! Labels are static enumerated names only. Gauges compile to no-ops when the
-//! `hotpath` feature is off. Counts stay exact; do not put paths, session IDs,
-//! or query text in names or values.
+//! Labels are static enumerated names only. Gauges drop when no recorder is
+//! installed. Counts stay exact; do not put paths, session IDs, or query text
+//! in names or values.
 
 #[inline]
 pub(crate) fn add(name: &'static str, delta: u64) {
-    #[cfg(feature = "hotpath")]
     {
         if delta == 0 {
             return;
         }
-        hotpath::gauge!(name).inc(delta);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
+        metrics::gauge!(name).increment(delta as f64);
+    };
 }
 
 #[inline(always)]
 fn add_usize(name: &'static str, delta: usize) {
-    #[cfg(feature = "hotpath")]
     add(name, u64::try_from(delta).unwrap_or(u64::MAX));
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
 }
 
 /// One raw-message row decode + integrity verification.

@@ -432,7 +432,6 @@ where
     G: WorkGraphReadPortV1,
     A: WorkProductOwnerAuthorizationPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(graph: G, owner_authority: A, binding: WorkProductBindingV1) -> Self {
         Self {
             graph,
@@ -441,7 +440,11 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.work.intelligence.generate_proposal")]
+    #[tracing::instrument(
+        name = "application.work.intelligence.generate_proposal",
+        level = "trace",
+        skip_all
+    )]
     pub fn generate_proposal(
         &self,
         context: &RequestContext,
@@ -543,7 +546,11 @@ where
         })
     }
 
-    #[hotpath::measure(label = "application.work.intelligence.experience")]
+    #[tracing::instrument(
+        name = "application.work.intelligence.experience",
+        level = "trace",
+        skip_all
+    )]
     pub fn experience(
         &self,
         context: &RequestContext,
@@ -700,7 +707,11 @@ where
         })
     }
 
-    #[hotpath::measure(label = "application.work.intelligence.compare_proposal")]
+    #[tracing::instrument(
+        name = "application.work.intelligence.compare_proposal",
+        level = "trace",
+        skip_all
+    )]
     pub fn compare_proposal(
         &self,
         context: &RequestContext,

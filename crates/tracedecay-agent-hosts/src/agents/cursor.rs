@@ -34,7 +34,6 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "managing-session-context",
     "managing-work",
     "managing-workflows",
-    "profiling-tracedecay-performance",
     "project-memory",
     "reviewing-changes",
     "tracing-functions",

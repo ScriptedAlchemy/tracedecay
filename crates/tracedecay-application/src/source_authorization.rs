@@ -71,7 +71,7 @@ impl ProjectSourceAccessSnapshot {
 /// bindings/rules, expired route grants, and denied capabilities all collapse
 /// to the public non-disclosing denial. This adapter creates no grant, policy,
 /// default, or persistence authority.
-#[hotpath::measure(label = "usecases.edit.authorize", future = true)]
+#[tracing::instrument(name = "usecases.edit.authorize", level = "trace", skip_all)]
 pub async fn project_source_access_snapshot_for_request(
     configuration: &dyn ConfigurationControlStore,
     request: &AuthorizationRequest<'_>,
@@ -87,8 +87,11 @@ pub async fn project_source_access_snapshot_for_request(
         return denied();
     }
 
-    let Ok(current) =
-        hotpath::future!(configuration.current(), label = "usecases.edit.config").await
+    let Ok(current) = tracing::Instrument::instrument(
+        configuration.current(),
+        tracing::trace_span!("usecases.edit.config"),
+    )
+    .await
     else {
         return denied();
     };
@@ -140,10 +143,10 @@ pub async fn project_source_access_snapshot_for_request(
     else {
         return denied();
     };
-    let Ok(resolution) = hotpath::measure_block!(
-        "usecases.edit.resolve",
+    let Ok(resolution) = ({
+        let _span = tracing::trace_span!("usecases.edit.resolve").entered();
         resolve_restrictive_capabilities(granted_capabilities, access_rules, &resolution_context)
-    ) else {
+    }) else {
         return denied();
     };
     let Ok(requested_capability) =

@@ -505,7 +505,7 @@ pub(crate) fn task_skip_reason(
     None
 }
 
-#[hotpath::measure(label = "automation.scheduler.gate", future = true)]
+#[tracing::instrument(name = "automation.scheduler.gate", level = "trace", skip_all)]
 async fn scheduler_gate_with_lock_retention(
     config: &AutomationConfig,
     executable: Option<&Path>,
@@ -957,10 +957,13 @@ impl<'a> AgentRunFinalizer<'a> {
         let _startup = super::scheduler_metrics::DurationGuard::backend_startup();
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
         let mut retry_report = AgentTaskRetryReport::default();
-        match hotpath::measure_block!("automation.backend.startup", {
+        let startup_result = {
+            use tracing::Instrument as _;
             run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
+                .instrument(tracing::trace_span!("automation.backend.startup"))
                 .await
-        }) {
+        };
+        match startup_result {
             Ok(response) => Ok(BackendTaskRun::Response {
                 response,
                 retry_report,

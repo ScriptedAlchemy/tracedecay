@@ -45,7 +45,6 @@ impl RegisteredGlobalDb {
     /// fixed-size fingerprint, so an unknown disposition stays visible
     /// without letting corrupt durable text escape through Doctor. A row
     /// whose source or coverage no longer decodes makes the census unknown.
-    #[hotpath::skip]
     pub async fn observation_refusal_census(&self) -> IngestRefusalCensusReadV1 {
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,

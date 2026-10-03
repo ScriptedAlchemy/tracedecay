@@ -152,7 +152,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 /// query spans (span minus this ≈ SQLite evaluation and row transport).
 /// Substantive per call, SHA-256 over the full content, and bounded by the
 /// caller's page/session row count, so it is not an inner-loop micro-probe.
-#[hotpath::measure(label = "sessions.lcm.raw.verify_row")]
+#[tracing::instrument(name = "sessions.lcm.raw.verify_row", level = "trace", skip_all)]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let verified = decode_verified_raw_message(row);
     crate::metrics::record_lcm_raw_row_verified(
@@ -191,7 +191,7 @@ pub async fn load_raw_message_by_identity(
          ORDER BY store_id
          LIMIT 2"
     );
-    let fetched = hotpath::future!(
+    let fetched = tracing::Instrument::instrument(
         async {
             let mut rows = conn
                 .query(&sql, params![provider, session_id, message_id])
@@ -202,7 +202,7 @@ pub async fn load_raw_message_by_identity(
             let duplicate = rows.next().await?.is_some();
             Ok(Some((row, duplicate)))
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
     let Some((row, duplicate)) = fetched else {
@@ -213,9 +213,10 @@ pub async fn load_raw_message_by_identity(
             "duplicate raw messages for exact provider/session/message identity".to_string(),
         ));
     }
-    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+    {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
         verified_raw_message_from_row(&row).map(Some)
-    })
+    }
 }
 
 pub async fn load_raw_message_store_ids_by_identity(
@@ -255,9 +256,9 @@ pub async fn load_raw_message_store_ids_by_identity(
          FROM lcm_raw_messages
          WHERE {predicate}"
     );
-    let mut rows = hotpath::future!(
+    let mut rows = tracing::Instrument::instrument(
         conn.query(&sql, values),
-        label = "sessions.lcm.grep.store_ids"
+        tracing::trace_span!("sessions.lcm.grep.store_ids"),
     )
     .await?;
     let mut store_ids = BTreeMap::new();
@@ -291,16 +292,17 @@ pub(crate) async fn load_raw_messages_by_identity(
              FROM lcm_raw_messages
              WHERE {predicate}"
         );
-        let rows = hotpath::future!(
+        let rows = tracing::Instrument::instrument(
             conn.query(&sql, values),
-            label = "sessions.lcm.hydrate.fetch"
+            tracing::trace_span!("sessions.lcm.hydrate.fetch"),
         )
         .await?;
         let mut rows = rows;
         while let Some(row) = rows.next().await? {
-            let raw = hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+            let raw = {
+                let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
                 verified_raw_message_from_row(&row)
-            })?;
+            }?;
             let identity = (raw.provider.clone(), raw.message_id.clone());
             if loaded.insert(identity, raw).is_some() {
                 return Err(LcmError::Db(
@@ -328,19 +330,20 @@ pub async fn load_raw_message_by_store_id(
          FROM lcm_raw_messages
          WHERE store_id = ?1"
     );
-    let row = hotpath::future!(
+    let row = tracing::Instrument::instrument(
         async {
             let mut rows = conn.query(&sql, params![store_id]).await?;
             rows.next()
                 .await?
                 .ok_or(LcmError::SummarySourceNotOwnedBySession)
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
-    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
+    {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
         verified_raw_message_from_row(&row)
-    })
+    }
 }
 
 pub struct RawMessageUpsert {

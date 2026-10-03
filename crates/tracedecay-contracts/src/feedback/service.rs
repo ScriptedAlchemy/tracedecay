@@ -365,7 +365,7 @@ where
     /// Runs one Plan 09 cycle with source-backed advisory evidence. The
     /// supplied evidence becomes part of the canonical result and its durable
     /// dedupe identity; it never creates a second publication path.
-    #[hotpath::measure(label = "application.feedback.execute", future = true)]
+    #[tracing::instrument(name = "application.feedback.execute", level = "trace", skip_all)]
     pub async fn execute_with_advisory(
         &self,
         context: &RequestContext,
@@ -447,7 +447,11 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.feedback.validate_and_scope")]
+    #[tracing::instrument(
+        name = "application.feedback.validate_and_scope",
+        level = "trace",
+        skip_all
+    )]
     fn handle_validate_and_scope(
         &self,
         context: &RequestContext,
@@ -468,7 +472,7 @@ where
         Ok(FeedbackCycleStep::continue_with(FeedbackCycleStage::Admit))
     }
 
-    #[hotpath::measure(label = "application.feedback.admit")]
+    #[tracing::instrument(name = "application.feedback.admit", level = "trace", skip_all)]
     fn handle_admit(
         &self,
         context: &RequestContext,
@@ -514,7 +518,11 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.feedback.check_interruption")]
+    #[tracing::instrument(
+        name = "application.feedback.check_interruption",
+        level = "trace",
+        skip_all
+    )]
     fn handle_check_interruption(
         &self,
         context: &RequestContext,
@@ -540,7 +548,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.resolve_runtime", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.resolve_runtime",
+        level = "trace",
+        skip_all
+    )]
     async fn handle_resolve_runtime(
         &self,
         context: &RequestContext,
@@ -571,7 +583,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.validate_runtime")]
+    #[tracing::instrument(
+        name = "application.feedback.validate_runtime",
+        level = "trace",
+        skip_all
+    )]
     fn handle_validate_runtime(
         &self,
         progress: &mut Option<FeedbackCycleProgress>,
@@ -608,7 +624,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.check_user_stop")]
+    #[tracing::instrument(
+        name = "application.feedback.check_user_stop",
+        level = "trace",
+        skip_all
+    )]
     fn handle_check_user_stop(
         &self,
         progress: &mut Option<FeedbackCycleProgress>,
@@ -628,7 +648,7 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.check_budget")]
+    #[tracing::instrument(name = "application.feedback.check_budget", level = "trace", skip_all)]
     fn handle_check_budget_and_providers(
         &self,
         progress: &mut Option<FeedbackCycleProgress>,
@@ -660,7 +680,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.load_baselines", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.load_baselines",
+        level = "trace",
+        skip_all
+    )]
     async fn handle_load_baselines(
         &self,
         context: &RequestContext,
@@ -706,7 +730,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.load_diagnostics", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.load_diagnostics",
+        level = "trace",
+        skip_all
+    )]
     async fn handle_load_diagnostics(
         &self,
         context: &RequestContext,
@@ -741,7 +769,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.classify_diagnostics")]
+    #[tracing::instrument(
+        name = "application.feedback.classify_diagnostics",
+        level = "trace",
+        skip_all
+    )]
     fn handle_classify_diagnostics(
         &self,
         progress: &mut Option<FeedbackCycleProgress>,
@@ -795,7 +827,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.resolve_impact", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.resolve_impact",
+        level = "trace",
+        skip_all
+    )]
     async fn handle_resolve_impact(
         &self,
         context: &RequestContext,
@@ -856,7 +892,7 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.lookup_dedupe", future = true)]
+    #[tracing::instrument(name = "application.feedback.lookup_dedupe", level = "trace", skip_all)]
     async fn handle_lookup_dedupe(
         &self,
         context: &RequestContext,
@@ -950,7 +986,11 @@ where
         ))
     }
 
-    #[hotpath::measure(label = "application.feedback.assemble_result", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.assemble_result",
+        level = "trace",
+        skip_all
+    )]
     async fn handle_assemble_result(
         &self,
         context: &RequestContext,
@@ -992,7 +1032,11 @@ where
         Ok(FeedbackCycleStep::Complete(Box::new(result)))
     }
 
-    #[hotpath::measure(label = "application.feedback.finish_terminal", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.finish_terminal",
+        level = "trace",
+        skip_all
+    )]
     async fn finish_terminal(
         &self,
         context: &RequestContext,
@@ -1118,7 +1162,11 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.feedback.runtime_override", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.runtime_override",
+        level = "trace",
+        skip_all
+    )]
     async fn runtime_override(
         &self,
         context: &RequestContext,
@@ -1154,7 +1202,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.feedback.finish", future = true)]
+    #[tracing::instrument(name = "application.feedback.finish", level = "trace", skip_all)]
     async fn finish_after_runtime(
         &self,
         context: &RequestContext,
@@ -1242,7 +1290,11 @@ where
         Ok(result)
     }
 
-    #[hotpath::measure(label = "application.feedback.record_publication", future = true)]
+    #[tracing::instrument(
+        name = "application.feedback.record_publication",
+        level = "trace",
+        skip_all
+    )]
     async fn record_publication(
         &self,
         context: &RequestContext,
@@ -1329,7 +1381,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.feedback.assemble")]
+    #[tracing::instrument(name = "application.feedback.assemble", level = "trace", skip_all)]
     fn assemble(
         &self,
         request: &FeedbackCycleExecutionRequest,
@@ -1381,7 +1433,11 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.feedback.finish_immediate")]
+    #[tracing::instrument(
+        name = "application.feedback.finish_immediate",
+        level = "trace",
+        skip_all
+    )]
     fn finish(
         &self,
         request: &FeedbackCycleExecutionRequest,

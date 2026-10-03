@@ -32,8 +32,6 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::store::SharedDaemonNativeIntegrationStore;
 
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-
 #[derive(Clone)]
 pub struct DaemonAuthorizedScopeSetReader {
     storage: AuthorizedScopeSetSqliteStorage,
@@ -82,22 +80,19 @@ impl Default for HolderFenceRootV1 {
 /// requests and daemon-owned runtime mounts until reconciliation is terminal.
 #[derive(Clone)]
 pub struct WorktreeHolderAdmissionFenceV1 {
-    state: Arc<ProfiledStdMutex<HolderFenceStateV1>>,
+    state: Arc<std::sync::Mutex<HolderFenceStateV1>>,
 }
 
 impl Default for WorktreeHolderAdmissionFenceV1 {
     fn default() -> Self {
         Self {
-            state: Arc::new(hotpath::mutex!(
-                std::sync::Mutex::new(HolderFenceStateV1::default()),
-                label = "daemon.git.worktree.holder_fence"
-            )),
+            state: Arc::new(std::sync::Mutex::new(HolderFenceStateV1::default())),
         }
     }
 }
 
 impl WorktreeHolderAdmissionFenceV1 {
-    #[hotpath::measure(label = "daemon.git.worktree.admit", future = true)]
+    #[tracing::instrument(name = "daemon.git.worktree.admit", level = "trace", skip_all)]
     pub async fn admit_holders(
         &self,
         roots: impl IntoIterator<Item = PathBuf>,
@@ -129,7 +124,7 @@ impl WorktreeHolderAdmissionFenceV1 {
         Some(admissions)
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.mark_recovery", future = true)]
+    #[tracing::instrument(name = "daemon.git.worktree.mark_recovery", level = "trace", skip_all)]
     pub async fn mark_recovery_required(&self, roots: impl IntoIterator<Item = PathBuf>) {
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
@@ -272,7 +267,7 @@ pub struct DaemonNativeWorktreeAuthority {
 }
 
 impl DaemonNativeWorktreeAuthority {
-    #[hotpath::measure(label = "daemon.git.worktree.open")]
+    #[tracing::instrument(name = "daemon.git.worktree.open", level = "trace", skip_all)]
     pub fn open(
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -543,7 +538,7 @@ fn cleanup_observations(
 }
 
 impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
-    #[hotpath::measure(label = "daemon.git.worktree.inventory")]
+    #[tracing::instrument(name = "daemon.git.worktree.inventory", level = "trace", skip_all)]
     fn inventory(
         &self,
         request: &WorktreeInventoryRequestV1,
@@ -621,7 +616,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         )))
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.inspect")]
+    #[tracing::instrument(name = "daemon.git.worktree.inspect", level = "trace", skip_all)]
     fn inspect(
         &self,
         request: &WorktreeCleanupInspectRequestV1,
@@ -644,7 +639,7 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         })
     }
 
-    #[hotpath::measure(label = "daemon.git.worktree.confirm")]
+    #[tracing::instrument(name = "daemon.git.worktree.confirm", level = "trace", skip_all)]
     fn confirm(
         &self,
         request: &WorktreeCleanupConfirmRequestV1,

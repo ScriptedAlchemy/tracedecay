@@ -201,7 +201,11 @@ pub(crate) async fn ensure_fresh_authority_invariants(
     .await
 }
 
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_step")]
+#[tracing::instrument(
+    name = "global_db.schema.persist.converge_step",
+    level = "trace",
+    skip_all
+)]
 async fn authority_invariant_step<P, F, T>(
     provider: &P,
     operation: &'static str,
@@ -238,7 +242,7 @@ where
 /// transaction, and each step descends through the projection derivation
 /// chain. Callers embed only the pointer, so rustc lays out the audit as its
 /// own root instead of nesting it inside the admission futures that await it
-/// (with the `hotpath` feature every measured `async fn` on that path adds
+/// (with instrumentation every measured `async fn` on that path adds
 /// three more wrapper layers, and the nested layout overflowed the query depth
 /// limit).
 pub(crate) async fn ensure_authority_invariants(

@@ -358,7 +358,7 @@ impl VerifiedGraphSnapshot {
         &self.head.head
     }
 
-    #[hotpath::measure(label = "graph_db.lease.entity", impl_type = "VerifiedGraphSnapshot")]
+    #[tracing::instrument(name = "graph_db.lease.entity", level = "trace", skip_all)]
     pub fn entity(
         &self,
         reference: &GraphEntityRef,
@@ -499,10 +499,7 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.read_projection",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    #[tracing::instrument(name = "graph_db.lease.read_projection", level = "trace", skip_all)]
     pub fn read_projection(
         &self,
         mut request: GraphProjectionReadRequest,
@@ -520,9 +517,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.projection_telemetry",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.projection_telemetry",
+        level = "trace",
+        skip_all
     )]
     pub fn projection_telemetry(
         &self,
@@ -568,9 +566,10 @@ impl VerifiedGraphSnapshot {
         Ok(result)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_ids",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_ids",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_ids(
         &self,
@@ -608,9 +607,10 @@ impl VerifiedGraphSnapshot {
     /// reachability) previously had no bulk form here, only
     /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
     /// SQL `edges` joins without dropping their budgets.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relation_ids",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relation_ids",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relation_ids(
         &self,
@@ -641,9 +641,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_ids_page",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_ids_page",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_ids_page(
         &self,
@@ -677,9 +678,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relation_ids_page",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relation_ids_page",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relation_ids_page(
         &self,
@@ -717,10 +719,7 @@ impl VerifiedGraphSnapshot {
     /// the traversal's already-decoded rows in hand for callers that need the
     /// relation payload, instead of reducing them to identities and issuing a
     /// point read for every edge.
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relations",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    #[tracing::instrument(name = "graph_db.lease.outgoing_relations", level = "trace", skip_all)]
     pub fn outgoing_relations(
         &self,
         starts: &[GraphEntityId],
@@ -753,9 +752,10 @@ impl VerifiedGraphSnapshot {
 
     /// Page-shaped outgoing fan-out: stops at `max_relations` instead of
     /// refusing the batch.
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relations_truncated",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relations_truncated",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relations_truncated(
         &self,
@@ -787,9 +787,10 @@ impl VerifiedGraphSnapshot {
         })
     }
 
-    #[hotpath::measure(
-        label = "graph_db.lease.outgoing_relation_targets",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.outgoing_relation_targets",
+        level = "trace",
+        skip_all
     )]
     pub fn outgoing_relation_targets(
         &self,
@@ -862,10 +863,7 @@ impl VerifiedGraphSnapshot {
     }
 
     /// Bulk incoming relation rows over this verified generation.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relations",
-        impl_type = "VerifiedGraphSnapshot"
-    )]
+    #[tracing::instrument(name = "graph_db.lease.incoming_relations", level = "trace", skip_all)]
     pub fn incoming_relations(
         &self,
         starts: &[GraphEntityId],
@@ -898,9 +896,10 @@ impl VerifiedGraphSnapshot {
 
     /// Page-shaped incoming fan-out: stops at `max_relations` instead of
     /// refusing the batch.
-    #[hotpath::measure(
-        label = "graph_db.lease.incoming_relations_truncated",
-        impl_type = "VerifiedGraphSnapshot"
+    #[tracing::instrument(
+        name = "graph_db.lease.incoming_relations_truncated",
+        level = "trace",
+        skip_all
     )]
     pub fn incoming_relations_truncated(
         &self,
@@ -986,10 +985,10 @@ impl VerifiedGraphSnapshot {
         &self,
         operation: impl FnOnce() -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        let _lease: ArcRwLockReadGuard<RawRwLock, ()> = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_SNAPSHOT_GATE_READ,
-            || self.database.inner.snapshot_gate.read_arc(),
-        );
+        let _lease: ArcRwLockReadGuard<RawRwLock, ()> =
+            crate::observe::wait_lock(crate::observe::LOCK_WAIT_SNAPSHOT_GATE_READ, || {
+                self.database.inner.snapshot_gate.read_arc()
+            });
         operation()
     }
 

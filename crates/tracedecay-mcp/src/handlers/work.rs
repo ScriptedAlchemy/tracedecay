@@ -20,7 +20,7 @@ use tracedecay_tool_catalog::OperationId;
 use crate::ToolResult;
 use crate::handlers::support::{owner_envelope_result, unknown_tool_error};
 
-#[hotpath::measure(future = true, label = "mcp.work.total")]
+#[tracing::instrument(name = "mcp.work.total", level = "trace", skip_all)]
 pub async fn handle_work<Invoke, InvokeFuture>(
     tool_name: &str,
     mut body: Value,
@@ -33,24 +33,27 @@ where
     Invoke: FnOnce(WorkHttpRequest) -> InvokeFuture,
     InvokeFuture: Future<Output = Result<Value>>,
 {
-    let (operation, request_id, controls) = hotpath::measure_block!("mcp.work.request_build", {
-        let operation =
-            work_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
-        let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
-        let controls = work_controls(
-            operation,
-            &request_id,
-            protocol_deadline,
-            protocol_cancellation,
-        )?;
-        if let Some(object) = body.as_object_mut() {
-            // MCP presentation and request-correlation fields never belong to a
-            // typed Work request body.
-            object.remove("format");
-            object.remove("__mcp_request_id");
+    let (operation, request_id, controls) = {
+        let _span = tracing::trace_span!("mcp.work.request_build").entered();
+        {
+            let operation =
+                work_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
+            let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
+            let controls = work_controls(
+                operation,
+                &request_id,
+                protocol_deadline,
+                protocol_cancellation,
+            )?;
+            if let Some(object) = body.as_object_mut() {
+                // MCP presentation and request-correlation fields never belong to a
+                // typed Work request body.
+                object.remove("format");
+                object.remove("__mcp_request_id");
+            }
+            (operation, request_id, controls)
         }
-        (operation, request_id, controls)
-    });
+    };
     let Some(invoke) = invoke else {
         return Err(TraceDecayError::project_route(
             "work.daemon_unavailable",
@@ -58,17 +61,20 @@ where
             "The Work daemon invocation owner is unavailable",
         ));
     };
-    let payload = hotpath::future!(
+    let payload = tracing::Instrument::instrument(
         invoke(WorkHttpRequest {
             operation,
             request_id,
             controls,
             body,
         }),
-        label = "mcp.work.invoke"
+        tracing::trace_span!("mcp.work.invoke"),
     )
     .await?;
-    hotpath::measure_block!("mcp.work.result_assemble", owner_envelope_result(&payload))
+    {
+        let _span = tracing::trace_span!("mcp.work.result_assemble").entered();
+        owner_envelope_result(&payload)
+    }
 }
 
 pub fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> {

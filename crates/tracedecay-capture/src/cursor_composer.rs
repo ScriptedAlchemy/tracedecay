@@ -55,13 +55,13 @@ pub fn normalize_cursor_composer_observation_with_message_id(
         position,
     );
     if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.cursor_composer.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// Cursor composer composition for one source bubble, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize")]
+#[tracing::instrument(name = "capture.cursor_composer.normalize", level = "trace", skip_all)]
 fn normalize_composer_bubble_record(
     native: &Value,
     composer_id: &str,
@@ -406,13 +406,17 @@ pub fn normalize_cursor_composer_envelope_observation(
         position,
     );
     if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.cursor_composer.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// Cursor composer composition for one source envelope, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize_envelope")]
+#[tracing::instrument(
+    name = "capture.cursor_composer.normalize_envelope",
+    level = "trace",
+    skip_all
+)]
 fn normalize_composer_envelope_record(
     native: &Value,
     composer_id: &str,

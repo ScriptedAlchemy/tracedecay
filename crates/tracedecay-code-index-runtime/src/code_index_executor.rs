@@ -680,7 +680,7 @@ where
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
         let execution_admission = Arc::clone(&execution_admission);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
@@ -989,13 +989,13 @@ where
                         }
                     })
                     });
-                    match hotpath::future!(
+                    match tracing::Instrument::instrument(
                         code_index_task_support::settle_owned_blocking_task(
                             execution,
                             std::time::Duration::from_millis(10),
                             || search_terminated(&control, &admission_provider, None),
                         ),
-                        label = "daemon.code_index.search_execute"
+                        tracing::trace_span!("daemon.code_index.search_execute"),
                     )
                     .await
                     {
@@ -1308,15 +1308,21 @@ where
                 };
                 let mut source =
                     CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
-                let hydrated = match hotpath::measure_block!("daemon.code_index.search_hydrate", {
-                    tracedecay_query::retrieval::hydrate::CanonicalLateHydration::new(&mut source)
+                let match_result = {
+                    let _span = tracing::trace_span!("daemon.code_index.search_hydrate").entered();
+                    {
+                        tracedecay_query::retrieval::hydrate::CanonicalLateHydration::new(
+                            &mut source,
+                        )
                         .hydrate_with_control(
                             &hydration_request,
                             ordered_candidates.as_slice(),
                             &hydration_budget,
                             control.as_ref(),
                         )
-                }) {
+                    }
+                };
+                let hydrated = match match_result {
                     Ok(hydrated) => hydrated,
                     Err(error) => {
                         tracing::warn!(
@@ -1452,7 +1458,7 @@ where
                     },
                 )
             },
-            label = "daemon.code_index.search"
+            tracing::trace_span!("daemon.code_index.search"),
         ))
     })
 }

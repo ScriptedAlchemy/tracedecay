@@ -40,7 +40,7 @@ impl Driver for CargoDriver {
         project_root: &'a Path,
         scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let target_dir = target_dir_for(project_root);
 
@@ -111,7 +111,7 @@ impl Driver for CargoDriver {
 
                 Ok(diagnostics)
             },
-            label = "compile_diagnostics.rust.cargo_check"
+            tracing::trace_span!("compile_diagnostics.rust.cargo_check"),
         ))
     }
 }

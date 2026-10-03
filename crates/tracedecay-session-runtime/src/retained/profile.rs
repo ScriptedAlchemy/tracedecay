@@ -100,7 +100,7 @@ impl ProfileRetainedConnectionAuthorityV1 {
 }
 
 impl ProfileRetainedConnectionAuthorityV1 {
-    #[hotpath::measure(label = "daemon.retained.profile.admit")]
+    #[tracing::instrument(name = "daemon.retained.profile.admit", level = "trace", skip_all)]
     fn admit_request(
         &self,
         operation: &ApplicationOperation,
@@ -256,7 +256,7 @@ pub struct ProfileRetainedTerminalV1 {
 }
 
 /// Execute one profile-scoped retained request through canonical admission.
-#[hotpath::measure(label = "daemon.retained.profile.execute", future = true)]
+#[tracing::instrument(name = "daemon.retained.profile.execute", level = "trace", skip_all)]
 pub async fn execute_profile_retained_application(
     authorities: ProfileRetainedAuthoritiesV1<'_>,
     connection: &ProfileRetainedConnectionAuthorityV1,
@@ -305,9 +305,9 @@ pub async fn execute_profile_retained_application(
         connection.admit_request(&operation, request_id, deadline, &cancellation, observed_at)?;
     let ports = profile_retained_surface_ports(&authorities)?;
     let service = RetainedSurfaceServiceV1::new(ports);
-    let outcome = hotpath::future!(
+    let outcome = tracing::Instrument::instrument(
         service.execute(&context, &cancellation, observed_at, &request),
-        label = "daemon.retained.profile.serve"
+        tracing::trace_span!("daemon.retained.profile.serve"),
     )
     .await;
     Ok(ProfileRetainedTerminalV1 { scope, outcome })

@@ -87,7 +87,11 @@ struct DaemonStackDeliveryStoreV1 {
 }
 
 impl DaemonStackDeliveryStoreV1 {
-    #[hotpath::measure(label = "daemon.native_integration.stack_open")]
+    #[tracing::instrument(
+        name = "daemon.native_integration.stack_open",
+        level = "trace",
+        skip_all
+    )]
     fn open(database: RegisteredGlobalDbLeaseV1, project_id: &ProjectId) -> Result<Self, String> {
         let project_id = project_id.as_str().to_owned();
         let (commands, receiver) = sync_channel(STACK_DELIVERY_STORE_ACTOR_CAPACITY);
@@ -710,7 +714,11 @@ impl StackDeliveryAuthorizationPort for StackRuntimePortsV1 {
 }
 
 impl StackDeliveryPort for StackRuntimePortsV1 {
-    #[hotpath::measure(label = "daemon.native_integration.stack_deliver")]
+    #[tracing::instrument(
+        name = "daemon.native_integration.stack_deliver",
+        level = "trace",
+        skip_all
+    )]
     fn deliver(&self, batch: &StackDeliveryBatchV1) -> Result<(), StackCoordinatorErrorV1> {
         if batch.deliveries.is_empty()
             || batch.deliveries.len() > MAX_GITHUB_STACK_DELIVERY_BATCH_V1
@@ -791,7 +799,11 @@ pub struct DaemonGitHubStackRuntimeV1 {
 
 impl DaemonGitHubStackRuntimeV1 {
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.native_integration.stack_mount")]
+    #[tracing::instrument(
+        name = "daemon.native_integration.stack_mount",
+        level = "trace",
+        skip_all
+    )]
     pub fn mount(
         project_id: ProjectId,
         scope: ResolvedScope,
@@ -1188,32 +1200,34 @@ fn record_stack_preflight_outcome(
 ) {
     match outcome {
         Ok(NativeIntegrationPreflightOutcomeV1::Preview(_)) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.preview").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.preview").increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::Partial) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.partial").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.partial").increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::Stale) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.stale").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.stale").increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::Denied) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.denied").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.denied").increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::Unavailable) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.unavailable").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.unavailable").increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::ResetRequired) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.reset_required").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.reset_required")
+                .increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::DurabilityUncertain) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.durability_uncertain")
-                .inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.durability_uncertain")
+                .increment(1.0);
         }
         Ok(NativeIntegrationPreflightOutcomeV1::Cancelled) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.cancelled").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.cancelled").increment(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("daemon.native_integration.stack_preflight.coordinator_error").inc(1.0);
+            metrics::gauge!("daemon.native_integration.stack_preflight.coordinator_error")
+                .increment(1.0);
         }
     }
 }

@@ -196,7 +196,6 @@ impl HandoffOpenContextV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn kind(&self) -> HandoffOpenKindV1 {
         self.kind
     }
@@ -275,7 +274,6 @@ pub enum HandoffOpenTargetV1 {
 }
 
 impl HandoffOpenTargetV1 {
-    #[hotpath::skip]
     pub const fn kind(&self) -> HandoffOpenKindV1 {
         match self {
             Self::Investigation { .. } => HandoffOpenKindV1::Investigation,
@@ -453,12 +451,10 @@ impl HandoffOpenGrantV1 {
             && self.issued_request_id == other.issued_request_id
     }
 
-    #[hotpath::skip]
     pub const fn issued_at(&self) -> &UtcMicros {
         &self.issued_at
     }
 
-    #[hotpath::skip]
     pub const fn expires_at(&self) -> &UtcMicros {
         &self.expires_at
     }
@@ -533,7 +529,6 @@ impl HandoffOpenConsumptionV1 {
 
     /// When the single use was spent. Read by enumeration to tell a redeemed
     /// token apart from one that merely lapsed.
-    #[hotpath::skip]
     pub const fn consumed_at(&self) -> &UtcMicros {
         &self.consumed_at
     }
@@ -1035,7 +1030,6 @@ where
     A: HandoffOpenAuthorityPort,
     T: HandoffOpenTargetPort,
 {
-    #[hotpath::skip]
     pub const fn new(authority: A, targets: T) -> Self {
         Self { authority, targets }
     }

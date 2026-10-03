@@ -98,14 +98,19 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
                  ORDER BY timestamp, ordinal, message_id \
                  LIMIT ?4";
 
+type WorkflowFactRow = (String, Option<String>, Option<String>);
+
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
-    #[hotpath::skip]
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.ingest_health")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.ingest_health",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
@@ -328,10 +333,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             for (path, byte_offset, mtime) in &checkpoints {
                 // Opaque non-Unicode locations cannot be resolved from this
                 // display field; like missing files, they remain untracked.
-                let Ok(metadata) = hotpath::measure_block!(
-                    "global_db.registered_sessions.ingest_stat",
+                let Ok(metadata) = ({
+                    let _span =
+                        tracing::trace_span!("global_db.registered_sessions.ingest_stat").entered();
                     std::fs::metadata(path)
-                ) else {
+                }) else {
                     continue;
                 };
                 health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
@@ -362,7 +368,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(health)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.exists",
+        level = "trace",
+        skip_all
+    )]
     pub async fn has_session_message(
         &self,
         provider: &str,
@@ -392,7 +402,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode session message existence: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.exists_batch")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.exists_batch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn existing_session_message_ids(
         &self,
         provider: &str,
@@ -430,7 +444,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(existing)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.count",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         let mut rows = self
             .read_connection()
@@ -446,7 +464,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode session message count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.count_project")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.count_project",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
@@ -472,7 +494,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("failed to decode project session message count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.after")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.after",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_messages_after(
         &self,
         provider: &str,
@@ -534,7 +560,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// `Ok(None)` is the truthful "this store holds no timestamped messages";
     /// a failed query or an unreadable timestamp stays an error rather than
     /// masquerading as an idle store.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.activity")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.activity",
+        level = "trace",
+        skip_all
+    )]
     pub async fn latest_session_activity_secs(
         &self,
     ) -> tracedecay_domain::errors::Result<Option<i64>> {
@@ -583,7 +613,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     /// Reads one message by provider and id. `Ok(None)` is truthful absence;
     /// snapshot, query, and row-decode failures stay typed errors.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.get")]
+    #[tracing::instrument(name = "global_db.registered_sessions.get", level = "trace", skip_all)]
     pub async fn get_session_message(
         &self,
         provider: &str,
@@ -619,7 +649,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     ///
     /// `Ok(vec![])` is the truthful "nothing matched"; snapshot, query, and
     /// row-decode failures are typed errors instead of an empty result page.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.search")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.search",
+        level = "trace",
+        skip_all
+    )]
     pub async fn search_session_messages(
         &self,
         provider: &str,
@@ -771,7 +805,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Lists each session's latest canonical goal state, newest first.
     /// Goals with no native timestamp rank after all timestamped goals
     /// instead of being assigned a fabricated epoch-zero time.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.goals")]
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.goals",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
@@ -849,10 +887,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
-    #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_facts")]
+    /// Each row is (kind, status, state).
+    #[tracing::instrument(
+        name = "global_db.registered_sessions.workflow_facts",
+        level = "trace",
+        skip_all
+    )]
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_domain::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
+    ) -> tracedecay_domain::errors::Result<Vec<WorkflowFactRow>> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),
@@ -915,7 +958,11 @@ fn append_observation_text(text: &mut String, fact_text: &str) {
     text.push_str(fact_text);
 }
 
-#[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
+#[tracing::instrument(
+    name = "global_db.registered_sessions.workflow_search",
+    level = "trace",
+    skip_all
+)]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
     provider: &str,

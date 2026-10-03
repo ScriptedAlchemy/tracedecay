@@ -115,7 +115,11 @@ fn staged_identity_matches(
 
 /// Move a replay seal out of the content-addressed namespace while the caller
 /// holds the replay-pool lock. Digest verification happens after releasing it.
-#[hotpath::measure(label = "daemon.session_registry.replay_unlink_stage")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_unlink_stage",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn stage_project_graph_replay_unlink(
     replay_root: &Path,
     sealed_digest: &SealedGraphStateDigest,
@@ -178,7 +182,11 @@ pub(super) fn stage_project_graph_replay_unlink(
 /// Verify outside the replay-pool lock, then reacquire it only to prove and
 /// remove the exact staged inode. A concurrent install at the canonical path
 /// is independent and remains untouched.
-#[hotpath::measure(label = "daemon.session_registry.replay_unlink_finalize")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_unlink_finalize",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn finalize_project_graph_replay_unlink(
     staged: StagedReplayUnlink,
     replay_root: &Path,
@@ -201,7 +209,11 @@ pub(super) fn finalize_project_graph_replay_unlink(
     verified
 }
 
-#[hotpath::measure(label = "daemon.session_registry.replay_pool_lock")]
+#[tracing::instrument(
+    name = "daemon.session_registry.replay_pool_lock",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn lock_project_graph_replay_pool(
     replay_root: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -333,7 +345,11 @@ fn sync_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
         .map_err(|error| GraphDbError::unavailable(error.to_string()))
 }
 
-#[hotpath::measure(label = "daemon.session_registry.verify_seal_digest")]
+#[tracing::instrument(
+    name = "daemon.session_registry.verify_seal_digest",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn verify_seal_digest(
     path: &Path,
     expected: &str,

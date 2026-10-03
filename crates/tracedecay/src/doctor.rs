@@ -43,7 +43,6 @@ pub(crate) struct DoctorTestRuntime {
 
 #[cfg(test)]
 impl DoctorTestRuntime {
-    #[hotpath::skip]
     pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -112,7 +111,7 @@ pub enum DoctorCompletion {
 /// The human report goes to stderr. With `emit_json`, stdout carries one JSON
 /// document with the same check lines and the daemon's canonical findings in
 /// the `/api/doctor/findings` payload shape instead, and no human report.
-#[hotpath::measure(label = "doctor.run", future = true)]
+#[tracing::instrument(name = "doctor.run", level = "trace", skip_all)]
 pub async fn run_doctor(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     network: AdmittedDoctorNetworkProbes,
@@ -556,7 +555,7 @@ fn doctor_result(dc: &DoctorCounters, pending_reset: bool) -> DoctorCompletion {
     }
 }
 
-#[hotpath::measure(label = "doctor.daemon_status", future = true)]
+#[tracing::instrument(name = "doctor.daemon_status", level = "trace", skip_all)]
 async fn daemon_project_status(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
@@ -900,7 +899,7 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// reports whether an explicitly enabled project watcher is active or using
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
 /// a failure, activation comes from each project's pinned configuration.
-#[hotpath::measure(label = "doctor.check.watcher")]
+#[tracing::instrument(name = "doctor.check.watcher", level = "trace", skip_all)]
 fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::config::ProfileRoot) {
     dc.section("Watcher");
 
@@ -1062,7 +1061,7 @@ fn check_automation_effect_resets(
     }
 }
 
-#[hotpath::measure(label = "doctor.config.upload", future = true)]
+#[tracing::instrument(name = "doctor.config.upload", level = "trace", skip_all)]
 async fn configured_upload_enabled(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -1291,7 +1290,7 @@ fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
 }
 
 /// Check optional external tools that gate optional MCP capabilities.
-#[hotpath::measure(label = "doctor.check.external_tools")]
+#[tracing::instrument(name = "doctor.check.external_tools", level = "trace", skip_all)]
 fn check_external_tools(dc: &mut DoctorCounters) {
     dc.section("External tools");
     let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
@@ -1330,7 +1329,7 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 }
 
 /// Check network connectivity.
-#[hotpath::measure(label = "doctor.check.network")]
+#[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
 fn check_network(
     dc: &mut DoctorCounters,
     upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,

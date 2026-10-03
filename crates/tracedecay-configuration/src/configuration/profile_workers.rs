@@ -28,7 +28,11 @@ pub fn profile_code_index_worker_mutation(
 }
 
 /// Open the exact registered profile-sessions store and commit the worker selection.
-#[hotpath::measure(label = "daemon.config.profile_workers.commit", future = true)]
+#[tracing::instrument(
+    name = "daemon.config.profile_workers.commit",
+    level = "trace",
+    skip_all
+)]
 pub async fn commit_profile_code_index_worker_selection(
     database: &RegisteredGlobalDb,
     profile_id: &UserProfileId,
