@@ -796,6 +796,105 @@ async fn sustained_stream_with_concurrent_readers_keeps_the_wal_bounded() {
     );
 }
 
+/// The writer's position in the log: the checkpoint sequence of the log
+/// generation and the last valid frame (`mxFrame` of the `-shm` wal-index
+/// header).
+#[derive(Clone, Copy)]
+struct WalMark {
+    sequence: u32,
+    max_frame: u32,
+}
+
+fn wal_mark(store: &Path) -> WalMark {
+    let shm = std::fs::read(store.with_extension("db-shm")).unwrap();
+    WalMark {
+        sequence: wal_checkpoint_sequence(&store.with_extension("db-wal")),
+        max_frame: u32::from_ne_bytes(shm[16..20].try_into().unwrap()),
+    }
+}
+
+/// Commit frames the writer appended between two marks, or `None` when the log
+/// restarted between them. A commit frame's header carries the database size
+/// after the commit; every other frame carries zero there.
+fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
+    use std::os::unix::fs::FileExt;
+    if from.sequence != to.sequence || to.max_frame < from.max_frame {
+        return None;
+    }
+    let wal = std::fs::File::open(store.with_extension("db-wal")).unwrap();
+    let mut header = [0; 32];
+    wal.read_exact_at(&mut header, 0).unwrap();
+    let frame_size = 24 + u64::from(u32::from_be_bytes(header[8..12].try_into().unwrap()));
+    Some(
+        (from.max_frame..to.max_frame)
+            .filter(|frame| {
+                let mut database_size = [0; 4];
+                wal.read_exact_at(&mut database_size, 32 + u64::from(*frame) * frame_size + 4)
+                    .unwrap();
+                database_size != [0; 4]
+            })
+            .count(),
+    )
+}
+
+/// One streamed message commits once per durability boundary.
+///
+/// Capture commits source presence, the observation, and its external-source
+/// receipt before the host is acknowledged. The drain commits the
+/// external-source replay and the observation projection. The temporal
+/// refresh commits its operation, the projected batch, the pending relation
+/// receipt the native graph write recovers from, and the activation that
+/// settles that receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_message_commits_once_per_durability_boundary() {
+    const MESSAGES: u64 = 8;
+    let _measured = MEASURED.lock().await;
+    let fixture = DrainFixture::open().await;
+    let facade = fixture.facade();
+    let database = fixture
+        .runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .unwrap();
+    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
+    let (project, scope) = (fixture.project.as_path(), fixture.scope());
+    let store = session_store_path(&fixture);
+
+    let mut live = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
+    refresh_until_idle(&database, &refresh).await;
+    let mut measured = Vec::new();
+    for _ in 0..MESSAGES {
+        let timestamp = SEED_TIMESTAMP + i64::try_from(live.next_ordinal).unwrap();
+        let start = wal_mark(&store);
+        capture(
+            &facade,
+            message_requests(project, &scope, &mut live, 1, timestamp, PROMPT_TITLE_WORDS),
+        )
+        .await;
+        let captured = wal_mark(&store);
+        assert_eq!(drain(&facade, &scope).await, 1);
+        let drained = wal_mark(&store);
+        assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
+        let refreshed = wal_mark(&store);
+        if let (Some(capture), Some(drain), Some(refresh)) = (
+            wal_commits(&store, start, captured),
+            wal_commits(&store, captured, drained),
+            wal_commits(&store, drained, refreshed),
+        ) {
+            measured.push((capture, drain, refresh));
+        }
+    }
+
+    eprintln!("streamed message commits (capture, drain, refresh): {measured:?}");
+    assert!(
+        measured.len() >= 4,
+        "most messages must land within one log generation: {measured:?}"
+    );
+    assert!(
+        measured.iter().all(|commits| *commits == (3, 2, 4)),
+        "one streamed message must commit once per durability boundary: {measured:?}"
+    );
+}
+
 /// Levels of every B-tree in the fixture's project session store: the pages
 /// one point lookup in that tree reads on a cold reader.
 fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
