@@ -310,16 +310,8 @@ where
             RetrieverOutcome::TimedOut(usage) => Ok(NativeLaneOutcomeV1::TimedOut(usage)),
             RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
         };
-        if let Ok(ref outcome) = translated {
-            match outcome {
-                NativeLaneOutcomeV1::Complete(page) | NativeLaneOutcomeV1::Partial { page, .. } => {
-                }
-                NativeLaneOutcomeV1::Cancelled => {}
-                NativeLaneOutcomeV1::Stale(_) => {
-                    crate::observe::Residency::Rebuilding.record("query.stream.residency");
-                }
-                _ => {}
-            }
+        if let Ok(NativeLaneOutcomeV1::Stale(_)) = &translated {
+            crate::observe::Residency::Rebuilding.record("query.stream.residency");
         }
         translated
     }

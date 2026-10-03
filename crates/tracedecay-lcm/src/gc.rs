@@ -458,7 +458,7 @@ pub async fn run_payload_gc(
     preview_missing_reaps(conn, &missing, &cfg, now, &mut remaining, &mut report).await?;
     snapshot.dangling.preview(&mut report);
     report.ended_at = now;
-    crate::metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
+
     Ok(report)
 }
 
@@ -990,7 +990,7 @@ pub async fn run_payload_gc_in_transaction(
             schema::set_gc_meta(conn, "last_error", "partial").await?;
         }
     }
-    crate::metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
+
     Ok(report)
 }
 

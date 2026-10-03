@@ -841,13 +841,7 @@ where
         return Ok(terminal);
     }
     validate_lane_outcome(lane, request, &outcome, evidence_binding_matches)?;
-    crate::observe::record_lane(
-        "query.lane.evidence.candidates",
-        "query.lane.evidence.examined",
-        "query.lane.evidence.results",
-        "query.lane.evidence.residency",
-        &outcome,
-    );
+    crate::observe::record_lane("query.lane.evidence.residency", &outcome);
     Ok(outcome)
 }
 

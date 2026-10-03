@@ -1494,13 +1494,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             prefaces.as_ref(),
         )?
         .lexical_batch(request)?;
-        crate::observe::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }
@@ -1549,13 +1543,7 @@ where
             ScoringPrefaceIndexV1::empty(),
         )?
         .exact_batch(request, &self.authority)?;
-        crate::observe::record_lane(
-            "query.lane.exact.candidates",
-            "query.lane.exact.examined",
-            "query.lane.exact.results",
-            "query.lane.exact.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.exact.residency", &outcome);
         Ok(outcome)
     }
 }
@@ -1592,14 +1580,11 @@ impl ArtifactQueryMetricsV1 {
     }
 
     #[inline(always)]
-    fn rows(&self, rows: u64) {}
-
-    #[inline(always)]
     fn observe_statement(
         &self,
         statement: &rusqlite::Statement<'_>,
     ) -> Result<(), RetrievalPortError> {
-        if !(cfg!(test) || crate::observe::observing()) {
+        if !cfg!(test) {
             return Ok(());
         }
         let steps = u64::try_from(statement.get_status(StatementStatus::FullscanStep))
@@ -1710,7 +1695,7 @@ fn visit_lexical_rows(
                     .map_err(map_query_sql_error)?;
                 metrics.observe_statement(&statement)?;
             }
-            metrics.rows(visited);
+
             Ok(())
         }
     }
@@ -2495,7 +2480,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     );
                 }
                 retrieval_checkpoint(control)?;
-                self.metrics.rows(documents.len());
+
                 Ok((
                     ranked
                         .into_sorted_vec()
@@ -2799,7 +2784,7 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         let mut by_query = BTreeMap::<String, BTreeSet<String>>::new();
-        let expansion_count = selected.len();
+
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -2838,8 +2823,6 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-        self.metrics
-            .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
 
         Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
@@ -2876,8 +2859,7 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-        self.metrics
-            .rows(u64::try_from(field_totals.len()).map_err(contract_error)?);
+
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut postings = RequestTermPostingsV1::default();
         if !terms.is_empty() {
@@ -2930,7 +2912,6 @@ impl<'a> ArtifactQueryV1<'a> {
             }
             drop(rows);
             self.metrics.observe_statement(&statement)?;
-            self.metrics.rows(observed_rows);
         }
         Ok(LexicalStatsCacheV1 {
             field_totals,
@@ -3359,7 +3340,6 @@ const ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1: usize = 4 * 1024 * 1024;
 fn hash_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
-    mut record_bytes: impl FnMut(u64),
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1];
@@ -3375,7 +3355,6 @@ fn hash_artifact_file(
         if read == 0 {
             break;
         }
-        record_bytes(read as u64);
         {
             let _span = tracing::trace_span!("query.artifact.digest.sha256_update").entered();
             {
@@ -3393,7 +3372,7 @@ fn digest_content_addressed_file(
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     {
         let _span = tracing::trace_span!("query.artifact.digest.content_address_preopen").entered();
-        { hash_artifact_file(file, control, |bytes| {}) }
+        hash_artifact_file(file, control)
     }
 }
 
@@ -3404,7 +3383,7 @@ fn digest_retained_artifact_file(
     {
         let _span =
             tracing::trace_span!("query.artifact.digest.retained_post_validation").entered();
-        { hash_artifact_file(file, control, |bytes| {}) }
+        hash_artifact_file(file, control)
     }
 }
 

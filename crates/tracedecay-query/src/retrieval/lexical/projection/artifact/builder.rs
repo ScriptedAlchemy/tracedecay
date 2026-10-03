@@ -885,12 +885,6 @@ impl FinalizationWakeMetricsV1 {
     }
 
     #[inline(always)]
-    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {}
-
-    #[inline(always)]
-    fn phase(&self, phase: FinalizationSectionV1) {}
-
-    #[inline(always)]
     fn probe(&self) {}
 
     #[inline(always)]
@@ -1374,7 +1368,7 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             &prepared,
         )?;
-        record_prepared_batch_metrics(&prepared);
+
         Ok(prepared)
     }
 
@@ -1436,7 +1430,6 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         })?;
 
-        record_prepared_batch_metrics(&prepared);
         Ok(PreparedCodeLexicalArtifactBatchV1 {
             accepted_prefix,
             prepared_pages: prepared,
@@ -1620,7 +1613,7 @@ impl CodeLexicalArtifactBuilderV1 {
                         let _span = tracing::trace_span!("query.artifact.batch.rows").entered();
                         append_prepared_rows(&transaction, pages, control)
                     }?;
-                    record_batch_row_metrics(pages);
+
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.postings").entered();
                         append_prepared_postings(
@@ -1631,7 +1624,7 @@ impl CodeLexicalArtifactBuilderV1 {
                             control,
                         )
                     }?;
-                    record_batch_posting_metrics(pages);
+
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.receipts").entered();
                         {
@@ -1811,7 +1804,7 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         })?;
         validate_finalization_state(&state)?;
-        wake_metrics.digest_pass(state.phase);
+
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if source.is_some_and(|source| &state.source_state_digest != source.source_state_digest()) {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1852,7 +1845,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
-            wake_metrics.phase(section);
+
             wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
@@ -6726,57 +6719,15 @@ fn verify_source_receipt(
 }
 
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
-    {
-        match step {
-            CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
-                crate::observe::Residency::Rebuilding.record("query.artifact.residency");
-            }
-            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
-                crate::observe::Residency::Warm.record("query.artifact.residency");
-            }
+    match step {
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {
+            crate::observe::Residency::Rebuilding.record("query.artifact.residency");
+        }
+        CodeLexicalArtifactFinalizationStepV1::Ready(_) => {
+            crate::observe::Residency::Warm.record("query.artifact.residency");
         }
     }
 }
-
-fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    if crate::observe::observing() {
-        let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        let source_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::source_retained_bytes)
-            .sum::<usize>();
-        let prepared_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes)
-            .sum::<usize>();
-        let effective_workers =
-            tracedecay_code_index::parallelism::indexing_workers().min(pages.len());
-        let mut scratch = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::preparation_scratch_bytes)
-            .collect::<Vec<_>>();
-        scratch.sort_unstable_by(|left, right| right.cmp(left));
-        let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
-    }
-}
-
-fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    if crate::observe::observing() {
-        let relational_postings = pages
-            .iter()
-            .flat_map(|page| &page.documents)
-            .map(|document| document.term_postings.len() + document.exact_postings.len())
-            .sum::<usize>();
-
-        let ngram_bytes = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.documents.len())
-            .sum::<usize>();
-    }
-}
-
-fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {}
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,

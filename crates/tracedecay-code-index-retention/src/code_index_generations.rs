@@ -1254,13 +1254,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
             }
         }
     };
-    let planned_bytes = total_bytes(&collectable_generations).saturating_add(
-        text_artifact_inventory
-            .candidates
-            .iter()
-            .map(|candidate| candidate.size_bytes)
-            .sum::<u64>(),
-    );
 
     Ok(CodeGenerationRetentionPlanV1 {
         active_generation_id,
@@ -1838,18 +1831,6 @@ pub fn execute_code_generation_retention_cancellable(
                 is_cancelled,
             )?
         };
-
-    let reclaimed_bytes = receipt
-        .as_ref()
-        .map(|receipt| receipt.reclaimed_bytes)
-        .unwrap_or(0)
-        .saturating_add(
-            text_artifact_receipt
-                .as_ref()
-                .map(|receipt| receipt.reclaimed_bytes)
-                .unwrap_or(0),
-        )
-        .saturating_add(reclaimed_segment_bytes);
 
     Ok(CodeGenerationRetentionReportV1 {
         plan,

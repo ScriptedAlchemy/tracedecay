@@ -389,9 +389,7 @@ pub async fn compress(
     .map(|bounded| bounded.response);
     // A failed compression discarded its ingest writes, assembled backlog,
     // and summary drafts; success-only gauges would hide exactly that waste.
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
+    if response.is_err() {}
     response
 }
 
@@ -419,9 +417,7 @@ pub async fn compress_retained_page(
         Some(guard),
     )
     .await;
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
+    if response.is_err() {}
     response
 }
 
@@ -524,11 +520,6 @@ async fn compress_inner(
 }
 
 fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
-    crate::metrics::record_lcm_compression(
-        response.summary_nodes_created,
-        response.compression_attempts,
-        response.replay_token_estimate,
-    );
     response
 }
 

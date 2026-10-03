@@ -269,7 +269,6 @@ pub async fn expand_query(
         used_chars,
     };
 
-    crate::metrics::record_lcm_retrieval(matches.len());
     Ok(LcmExpandQueryResponse {
         prompt: request.prompt,
         query: request.query,

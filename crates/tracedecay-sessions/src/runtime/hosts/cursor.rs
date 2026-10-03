@@ -42,7 +42,6 @@ const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 mod parent_dispatch_index;
 pub(in crate::runtime) mod projection;
 mod sweep_page;
-use parent_dispatch_index::record_dispatch_scan_gauges;
 pub use parent_dispatch_index::{
     DispatchScanReceipt, parent_dispatch_model_for_subagent,
     parent_dispatch_model_for_subagent_with_receipt,
@@ -233,13 +232,7 @@ fn admit_cursor_jsonl_observations<'a>(
                 tracing::trace_span!("sessions.hosts.cursor.dispatch_model_blocking").entered();
             run_blocking_transcript_section(|| {
                 subagent.as_ref().and_then(|(_, agent_id)| {
-                    let (model, receipt) = parent_dispatch_model_for_subagent_with_receipt(
-                        path,
-                        parent_session_id,
-                        agent_id,
-                    );
-
-                    model
+                    parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
                 })
             })
         };

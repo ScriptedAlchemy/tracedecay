@@ -684,13 +684,7 @@ where
             },
             outcome => outcome,
         };
-        crate::observe::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }

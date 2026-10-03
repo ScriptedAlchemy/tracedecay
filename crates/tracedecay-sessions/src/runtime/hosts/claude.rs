@@ -332,7 +332,7 @@ fn discover_claude_session_scoped_paths(
         .skipped_oversized_entries
         .saturating_add(skipped_oversized_entries);
     report.bytes_charged = report.bytes_charged.max(bytes_charged);
-    crate::runtime::pipeline_metrics::record_sweep_outcome(!report.is_truncated());
+
     report
 }
 

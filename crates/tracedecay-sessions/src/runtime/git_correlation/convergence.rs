@@ -113,10 +113,7 @@ where
     };
     GitCorrelationWriteTxn::commit(transaction).await?;
     stats.frontier_advanced = frontier != backfill.start;
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
+
     Ok(GitEvidencePassOutcome {
         pass: GitEvidencePass {
             backfill: stats,

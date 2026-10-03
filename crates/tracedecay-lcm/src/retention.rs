@@ -449,7 +449,7 @@ async fn run_session_retention_inner(
     let read = store.read_connection();
     report.freelist_after = pragma_u64(&read, "freelist_count").await;
     report.page_count_after = pragma_u64(&read, "page_count").await;
-    crate::metrics::record_lcm_retention(report.bytes_reclaimed());
+
     Ok(report)
 }
 

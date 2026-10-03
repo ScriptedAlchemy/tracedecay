@@ -708,7 +708,6 @@ impl CodexDiscoveryHub {
                         .replay_indexes
                         .get(&source_key)
                         .is_some_and(|index| index.complete && !index.rebuilding);
-                    let mut start_probe = false;
                     if ready {
                         let (consumer_generation, consumer_position, observed_probe_revision) =
                             inner
@@ -746,7 +745,7 @@ impl CodexDiscoveryHub {
                             .range((lower, Bound::Unbounded))
                             .next()
                             .is_some();
-                        start_probe = !has_remaining
+                        let start_probe = !has_remaining
                             && frontier.is_complete()
                             && observed_probe_revision == index.probe_revision;
                         if !start_probe {

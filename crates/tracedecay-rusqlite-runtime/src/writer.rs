@@ -737,7 +737,6 @@ impl PersistentWriter {
             return Ok(self.unavailable());
         }
 
-        let priority = request.envelope().metadata.priority;
         self.telemetry.offered();
 
         let permit = match self.admission.reserve(&request.envelope().metadata) {

@@ -874,7 +874,7 @@ impl StoreRuntimeRetirementReservation {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
-        let count = self.pending.len();
+
         let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
 
@@ -1000,7 +1000,6 @@ impl StoreRuntimeRetirementReservation {
 impl Drop for StoreRuntimeRetirementReservation {
     fn drop(&mut self) {
         if self.armed {
-            let count = self.pending.len();
             let _ = self.registry.restore_retiring_batch(&mut self.pending);
             self.armed = false;
         }

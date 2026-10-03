@@ -543,8 +543,6 @@ struct SharedJsonlPage {
     prefix_diverged: bool,
     io: JsonlIoAccounting,
     retained_bytes: u64,
-    _prepared_bytes: Option<SharedJsonlPreparedBytesGuard>,
-    lazy_prepared_bytes: Mutex<Vec<SharedJsonlPreparedBytesGuard>>,
     lazy_memory: Mutex<Vec<ProcessSharedMemoryReservationV1>>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
 }
@@ -636,10 +634,6 @@ fn reserve_shared_jsonl_speculative_slot(
 static SHARED_JSONL_PAGE_CACHE: OnceLock<tokio::sync::Mutex<SharedJsonlPageCache>> =
     OnceLock::new();
 static SHARED_JSONL_PATH_PINS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
-static SHARED_JSONL_PREPARED_BYTES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static SHARED_JSONL_PEAK_PREPARED_BYTES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static SHARED_JSONL_BUILD_OBSERVERS: OnceLock<
     Mutex<HashMap<PathBuf, std::sync::Weak<SharedJsonlBuildObservation>>>,
@@ -895,59 +889,6 @@ fn shared_jsonl_frame_preparations_for_test(file_identity: u64) -> usize {
         .unwrap_or_default()
 }
 
-struct SharedJsonlPreparationWaitGuard;
-
-impl SharedJsonlPreparationWaitGuard {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Drop for SharedJsonlPreparationWaitGuard {
-    fn drop(&mut self) {}
-}
-
-struct SharedJsonlPreparationActiveGuard;
-
-impl Drop for SharedJsonlPreparationActiveGuard {
-    fn drop(&mut self) {}
-}
-
-struct SharedJsonlQueuedPathGuard;
-
-impl SharedJsonlQueuedPathGuard {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Drop for SharedJsonlQueuedPathGuard {
-    fn drop(&mut self) {}
-}
-
-struct SharedJsonlPreparedBytesGuard {
-    bytes: u64,
-}
-
-impl SharedJsonlPreparedBytesGuard {
-    fn new(bytes: u64) -> Self {
-        use std::sync::atomic::Ordering;
-
-        let current = SHARED_JSONL_PREPARED_BYTES
-            .fetch_add(bytes, Ordering::AcqRel)
-            .saturating_add(bytes);
-        let previous_peak = SHARED_JSONL_PEAK_PREPARED_BYTES.fetch_max(current, Ordering::AcqRel);
-
-        Self { bytes }
-    }
-}
-
-impl Drop for SharedJsonlPreparedBytesGuard {
-    fn drop(&mut self) {
-        SHARED_JSONL_PREPARED_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct SharedJsonlPathPin {
     paths: Vec<PathBuf>,
@@ -1120,13 +1061,8 @@ fn build_shared_jsonl_page_with_frame_limit(
         let _permit = if let Some(permit) = background_cpu.try_acquire() {
             permit
         } else {
-            let waiting = SharedJsonlPreparationWaitGuard::new();
-            let permit = background_cpu.acquire();
-            drop(waiting);
-            permit
+            background_cpu.acquire()
         };
-
-        let _active = SharedJsonlPreparationActiveGuard;
         try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
             &path,
             previous,
@@ -1185,13 +1121,8 @@ fn build_shared_jsonl_page_with_frame_limit(
         let _permit = if let Some(permit) = background_cpu.try_acquire() {
             permit
         } else {
-            let waiting = SharedJsonlPreparationWaitGuard::new();
-            let permit = background_cpu.acquire();
-            drop(waiting);
-            permit
+            background_cpu.acquire()
         };
-
-        let _active = SharedJsonlPreparationActiveGuard;
         prepare_frame()
     };
     let frames = if prepare_frames {
@@ -1247,7 +1178,6 @@ fn build_shared_jsonl_page_with_frame_limit(
             .shrink_to(retained_bytes)
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
     }
-    let prepared_bytes = prepare_frames.then(|| SharedJsonlPreparedBytesGuard::new(retained_bytes));
 
     Ok(Arc::new(SharedJsonlPage {
         frames,
@@ -1262,8 +1192,6 @@ fn build_shared_jsonl_page_with_frame_limit(
         prefix_diverged: raw.prefix_diverged,
         io: raw.io,
         retained_bytes,
-        _prepared_bytes: prepared_bytes,
-        lazy_prepared_bytes: Mutex::new(Vec::new()),
         lazy_memory: Mutex::new(Vec::new()),
         _memory: memory,
     }))
@@ -1349,18 +1277,14 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 let _permit = if let Some(permit) = background_cpu.try_acquire() {
                     permit
                 } else {
-                    let waiting = SharedJsonlPreparationWaitGuard::new();
-                    let permit = background_cpu
+                    background_cpu
                         .acquire_cancellable(task_cancellation.cancellation_flag())
-                        .ok_or(TranscriptIngestError::Cancelled { provider })?;
-                    drop(waiting);
-                    permit
+                        .ok_or(TranscriptIngestError::Cancelled { provider })?
                 };
                 if task_cancellation.is_cancelled() {
                     return Err(TranscriptIngestError::Cancelled { provider });
                 }
 
-                let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
                 enter_shared_jsonl_frame_preparation(
                     preparation_file_identity,
@@ -1409,21 +1333,6 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
             .unwrap_or_else(PoisonError::into_inner)
             .push(reservation);
     }
-    let mut lazy_prepared_bytes = page
-        .lazy_prepared_bytes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let retained_bytes = newly_prepared_bytes.saturating_add(
-        if lazy_prepared_bytes.is_empty() && page._prepared_bytes.is_none() {
-            page.retained_bytes
-        } else {
-            0
-        },
-    );
-    if retained_bytes != 0 {
-        lazy_prepared_bytes.push(SharedJsonlPreparedBytesGuard::new(retained_bytes));
-    }
-
     Ok(())
 }
 
@@ -1750,10 +1659,8 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
     let mut prefetches = Vec::with_capacity(workers.min(paths.len()));
     for path in paths.iter().take(workers) {
         let path = path.clone();
-        let queued = SharedJsonlQueuedPathGuard::new();
         let cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
-            let _queued = queued;
             if let Err(error) = shared_jsonl_page_with_cancellation(
                 &path,
                 StoredCursor::default(),
@@ -2119,8 +2026,6 @@ impl ActiveAdmission<'_> {
         frame: DurableJsonlFrame,
         retention_class: &RetentionClass,
     ) -> TranscriptIngestResult<Result<CaptureObservationOutcome, HostAdmissionOutcome>> {
-        crate::runtime::pipeline_metrics::record_capture_single();
-
         let request = self.capture_request(expected_cursor, frame, retention_class)?;
         Ok(self.admission.capture_observation(request).await)
     }
@@ -2136,14 +2041,6 @@ impl ActiveAdmission<'_> {
         if frames.is_empty() {
             return Ok(());
         }
-        crate::runtime::pipeline_metrics::record_capture_window(frames.len());
-        let batch_bytes = frames.iter().try_fold(0_u64, |total, frame| {
-            let bytes = u64::try_from(frame.bytes.len())
-                .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
-            total
-                .checked_add(bytes)
-                .ok_or(TranscriptIngestError::InvalidFrameState { provider: "codex" })
-        })?;
 
         let mut batch_expected = expected_cursor.clone();
         let mut requests = Vec::with_capacity(frames.len());
@@ -2603,7 +2500,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
-                            crate::runtime::pipeline_metrics::record_frame_skipped(reason);
+
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                             if before_decode {
                                 progress.frames_rejected_before_decode =
@@ -2677,7 +2574,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                     None,
                 )
                 .await?;
-            crate::runtime::pipeline_metrics::record_frame_skipped(skipped_reason(skipped.reason));
+
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
@@ -2762,7 +2659,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 active
                     .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                     .await?;
-                crate::runtime::pipeline_metrics::record_frame_skipped(reason);
+
                 progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                 if before_decode {
                     progress.frames_rejected_before_decode =
@@ -2869,7 +2766,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                     None,
                 )
                 .await?;
-            crate::runtime::pipeline_metrics::record_frame_skipped(skipped_reason(skipped.reason));
+
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
     } else {
@@ -2903,14 +2800,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         records_retired,
         "transcript admission batch finished"
     );
-    crate::runtime::pipeline_metrics::record_admission_progress(
-        progress.frames_decoded,
-        progress.frames_accepted,
-        progress.frames_skipped,
-        progress.frames_rejected_before_decode,
-        progress.frames_refused,
-        progress.frames_persisted,
-    );
+
     progress.covered_through = expected_cursor
         .as_ref()
         .map_or(0, ObservationSourceCursorV1::position);

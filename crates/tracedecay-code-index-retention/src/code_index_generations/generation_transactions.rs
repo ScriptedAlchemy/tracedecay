@@ -618,7 +618,6 @@ pub(super) fn open_file_sha256_hex_cancellable(
         if read == 0 {
             return Ok(encode_lowercase_hex(&hasher.finalize()));
         }
-        let hashed = read as u64;
 
         hasher.update(&buffer[..read]);
     }

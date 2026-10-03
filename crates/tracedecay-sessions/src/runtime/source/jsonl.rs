@@ -1192,7 +1192,7 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
     };
-    crate::runtime::pipeline_metrics::record_file_opened();
+
     try_stream_new_jsonl_raw_from_file(
         path,
         file,
@@ -1486,7 +1486,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != expected.change
             {
-                crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
                     path: path.to_path_buf(),
                 });
@@ -1503,7 +1502,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != self.generation.change
             {
-                crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
                     path: path.to_path_buf(),
                 });
@@ -1516,7 +1514,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
                 io.snapshot_hash_bytes = io.snapshot_hash_bytes.saturating_add(snapshot_hashed);
                 if final_snapshot != expected_snapshot {
-                    crate::runtime::pipeline_metrics::record_scan_generation_changed();
                     return Err(TranscriptIngestError::ScanGenerationChanged {
                         path: path.to_path_buf(),
                     });
@@ -1941,7 +1938,6 @@ impl<'a> RawJsonlBatchScanner<'a> {
             || changed_consumed_prefix
             || final_metadata.len() < self.read_through
         {
-            crate::runtime::pipeline_metrics::record_scan_generation_changed();
             return Err(TranscriptIngestError::ScanGenerationChanged {
                 path: path.to_path_buf(),
             });
@@ -2045,7 +2041,7 @@ fn try_stream_new_jsonl_raw_from_file(
         }
     })();
     io.scan_payload_read_bytes = scan_payload_reads.get();
-    crate::runtime::pipeline_metrics::record_jsonl_io(&io, classified.then_some(io.change));
+
     result.map(|mut raw| {
         raw.io = io;
         raw

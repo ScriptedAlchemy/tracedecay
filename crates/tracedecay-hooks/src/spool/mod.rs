@@ -127,49 +127,6 @@ pub struct HookSpoolV1 {
     recovery_required: bool,
     /// Frames this handle wrote or deduplicated against, not yet committed.
     uncommitted: Option<UncommittedExtentV1>,
-    /// Held for its `Drop` only: closes the writer-lease hold observation.
-    _lease_hold: Option<SpoolLeaseHoldObservationV1>,
-}
-
-static SPOOL_LEASES_HELD: AtomicU64 = AtomicU64::new(0);
-
-/// No metrics recorder is installed outside profiling sessions, so spool
-/// gauges that cost an atomic, a clock read, or a walk run only under TRACE.
-#[inline(always)]
-fn observing() -> bool {
-    tracing::level_enabled!(tracing::Level::TRACE)
-}
-
-/// Writer-lease hold observation. Acquisition wait is the
-/// `hooks.spool.acquire_lease` span; this records how long the sole writer
-/// lease is then *held* (open handle lifetime), which is what other writers
-/// contend against. Drop-based so panic or early return cannot leak the gauge.
-#[derive(Debug)]
-struct SpoolLeaseHoldObservationV1 {
-    acquired: std::time::Instant,
-}
-
-impl SpoolLeaseHoldObservationV1 {
-    fn enter() -> Option<Self> {
-        if !observing() {
-            return None;
-        }
-        let held = SPOOL_LEASES_HELD
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-
-        Some(Self {
-            acquired: std::time::Instant::now(),
-        })
-    }
-}
-
-impl Drop for SpoolLeaseHoldObservationV1 {
-    fn drop(&mut self) {
-        let _ = SPOOL_LEASES_HELD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-            held.checked_sub(1)
-        });
-    }
 }
 
 /// The prefix of one records file a handle must make durable before its
@@ -474,8 +431,6 @@ impl HookSpoolV1 {
             replay_claims: BTreeMap::new(),
             recovery_required: false,
             uncommitted: None,
-
-            _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
 
         Ok((spool, report))
@@ -830,24 +785,8 @@ impl HookSpoolV1 {
             return Ok(outcomes);
         }
         normalize_acknowledgements(&mut next_meta)?;
-
-        let settled = observing().then(|| {
-            acknowledged_indices
-                .iter()
-                .map(|(index, disposition)| {
-                    let record = &self.pending[*index];
-                    (record.framed_len, record.queued_at, *disposition)
-                })
-                .collect::<Vec<_>>()
-        });
         self.publish_meta(&next_meta, now)?;
 
-        if let Some(settled) = settled {
-            for (framed_len, queued_at, disposition) in settled {
-                // A tombstone is a delivery that expired or was refused, not a
-                // success; the disposition mix keeps those failures visible.
-            }
-        }
         // Reclaim rewrites every remaining frame, so draining N records must
         // not rewrite the file once per acknowledgement (O(N^2) bytes).
         // Reclaim only when acknowledged frames occupy at least as much of

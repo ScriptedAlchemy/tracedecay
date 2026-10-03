@@ -282,9 +282,6 @@ fn open_builder_connection(
         )));
     }
 
-    let modeled_reservation_bytes = tracedecay_code_index::parallelism::worker_reservation_bytes(
-        effective_sorter_workers.saturating_add(1),
-    );
     // SQLite disables sorter helpers when temporary b-trees are memory-only.
     // FILE still uses the admitted page cache while allowing parallel PMA
     // generation and merge for corpus-wide CREATE INDEX statements.

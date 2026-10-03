@@ -369,13 +369,7 @@ where
             },
             outcome => outcome,
         };
-        crate::observe::record_lane(
-            "query.lane.graph.candidates",
-            "query.lane.graph.examined",
-            "query.lane.graph.results",
-            "query.lane.graph.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.graph.residency", &outcome);
         Ok(outcome)
     }
 }

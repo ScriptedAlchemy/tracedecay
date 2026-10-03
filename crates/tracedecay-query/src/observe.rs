@@ -1,4 +1,4 @@
-//! Query-kernel span labels and sampled gauges.
+//! Query-kernel span labels, residency trace events, and span sampling.
 //!
 //! Keys are static product-capability names. Never pass query text, user
 //! text, paths, or identifiers.
@@ -30,8 +30,7 @@ impl Residency {
     }
 }
 
-/// No metrics recorder is installed outside profiling sessions, so samplers
-/// and metric-only walks share TRACE as their measurement switch.
+/// Samplers touch thread-local state, so they run only while TRACE is enabled.
 #[inline(always)]
 pub(crate) fn observing() -> bool {
     tracing::level_enabled!(tracing::Level::TRACE)
@@ -56,31 +55,23 @@ pub(crate) fn sample_frequent() -> bool {
 /// Time a frequent inner scope only when sampled. The body always runs.
 #[inline]
 pub(crate) fn measure_frequent<T>(label: &'static str, body: impl FnOnce() -> T) -> T {
-    {
-        if sample_frequent() {
-            {
-                let _span = tracing::trace_span!("query.measure_frequent", label = label).entered();
-                body()
-            }
-        } else {
-            body()
-        }
+    if sample_frequent() {
+        let _span = tracing::trace_span!("query.measure_frequent", label = label).entered();
+        body()
+    } else {
+        body()
     }
 }
 
 pub(crate) fn record_lane<E>(
-    candidates: &'static str,
-    examined: &'static str,
-    results: &'static str,
     residency: &'static str,
     outcome: &RetrieverOutcome<RetrieverBatch<E>>,
 ) {
     match outcome {
-        RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
+        RetrieverOutcome::Complete(_) | RetrieverOutcome::Partial { .. } => {
             Residency::Warm.record(residency);
         }
         RetrieverOutcome::Stale(_) => Residency::Rebuilding.record(residency),
-        RetrieverOutcome::Cancelled => {}
         _ => {}
     }
 }

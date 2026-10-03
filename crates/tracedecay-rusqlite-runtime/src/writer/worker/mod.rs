@@ -1052,7 +1052,6 @@ pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
     let dequeued_at = Instant::now();
     let queue_wait_micros =
         queue_wait_micros(batch.items.iter().map(|item| item.enqueued_at), dequeued_at);
-    if let Some(first) = batch.items.first() {}
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.
