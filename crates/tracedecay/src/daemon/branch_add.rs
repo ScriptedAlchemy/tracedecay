@@ -12,8 +12,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::branch::{
-    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
+    BranchAddOutcome, BranchTrackingPreparation, prepare_branch_tracking_in_layout,
+    rollback_prepared_branch_tracking,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
