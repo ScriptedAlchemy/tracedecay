@@ -232,6 +232,10 @@ fn run_primes(
             coverage::substitute_tokens(&mut value, &tokens);
             tokens.insert(name, value);
         }
+        // Every step observes the state its predecessors committed: rebind
+        // `{{now}}` so an observation instant inside a step's args postdates
+        // the prior step's publish, not the chain's start.
+        tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, &tokens);
         let payload = rt
@@ -239,6 +243,10 @@ fn run_primes(
             .map_err(|error| format!("{} prime step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, &mut tokens, q)?;
     }
+    // The timed call observes state after its primes: verified-snapshot reads
+    // filter on the caller's observation instant, so `{{now}}` in timed args
+    // must postdate the primes, not share their start instant.
+    tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
     let mut args = q.args.clone();
     coverage::substitute_tokens(&mut args, &tokens);
     Ok((args, tokens))

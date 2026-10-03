@@ -386,21 +386,33 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         });
     }
     // Scout lifecycle tools need an address minted by a hook-dispatched
-    // scout run — unreachable in the bench composition, so each group is a
-    // prime-less effect that either measures the miss path or degrades to a
-    // named skip.
+    // scout run — unreachable in the bench composition. A schema-valid zeroed
+    // ContextScoutAddressV1 reaches the miss path so each prime-less effect
+    // either measures it or degrades to a named skip.
+    let scout_addr = || {
+        json!({
+            "profile_id": vec![0u8; 16],
+            "provider_id": vec![0u8; 16],
+            "protected_session_id": vec![0u8; 32],
+            "thread_id": vec![0u8; 16],
+            "turn_id": vec![0u8; 16],
+            "agent_id": vec![0u8; 16],
+            "logical_message_id": vec![0u8; 16],
+            "project_id": vec![0u8; 16],
+        })
+    };
     for (tool, label, args) in [
-        ("tracedecay_context_scout_status", "scout_status", json!({"address": "scout.bench.missing"})),
-        ("tracedecay_context_scout_recent", "scout_recent", json!({"address": "scout.bench.missing", "limit": 5})),
-        ("tracedecay_context_scout_explain", "scout_explain", json!({"address": "scout.bench.missing", "limit": 5})),
-        ("tracedecay_context_scout_capability", "scout_capability", json!({"address": "scout.bench.missing"})),
-        ("tracedecay_context_scout_budget", "scout_budget", json!({"address": "scout.bench.missing"})),
-        ("tracedecay_context_scout_claim", "scout_claim", json!({"address": "scout.bench.missing", "window": "observation", "idempotency_key": "bench-scout-claim-{{iter}}"})),
-        ("tracedecay_context_scout_pause", "scout_pause", json!({"address": "scout.bench.missing", "expected_revision": 0, "idempotency_key": "bench-scout-pause-{{iter}}"})),
-        ("tracedecay_context_scout_resume", "scout_resume", json!({"address": "scout.bench.missing", "expected_revision": 0, "idempotency_key": "bench-scout-resume-{{iter}}"})),
-        ("tracedecay_context_scout_cancel", "scout_cancel", json!({"address": "scout.bench.missing", "work": "scout.bench.work", "idempotency_key": "bench-scout-cancel-{{iter}}"})),
-        ("tracedecay_context_scout_delivery", "scout_delivery", json!({"address": "scout.bench.missing", "claim": "scout.bench.claim", "delivered_at": "{{now}}", "outcome": "delivered", "idempotency_key": "bench-scout-delivery-{{iter}}"})),
-        ("tracedecay_context_scout_feedback", "scout_feedback", json!({"address": "scout.bench.missing", "receipt": "scout.bench.receipt", "feedback": {"signal": "useful"}, "idempotency_key": "bench-scout-feedback-{{iter}}"})),
+        ("tracedecay_context_scout_status", "scout_status", json!({"address": scout_addr()})),
+        ("tracedecay_context_scout_recent", "scout_recent", json!({"address": scout_addr(), "limit": 5})),
+        ("tracedecay_context_scout_explain", "scout_explain", json!({"address": scout_addr(), "limit": 5})),
+        ("tracedecay_context_scout_capability", "scout_capability", json!({"address": scout_addr()})),
+        ("tracedecay_context_scout_budget", "scout_budget", json!({"address": scout_addr()})),
+        ("tracedecay_context_scout_claim", "scout_claim", json!({"address": scout_addr(), "window": "observation", "idempotency_key": "bench-scout-claim-{{iter}}"})),
+        ("tracedecay_context_scout_pause", "scout_pause", json!({"address": scout_addr(), "expected_revision": 0, "idempotency_key": "bench-scout-pause-{{iter}}"})),
+        ("tracedecay_context_scout_resume", "scout_resume", json!({"address": scout_addr(), "expected_revision": 0, "idempotency_key": "bench-scout-resume-{{iter}}"})),
+        ("tracedecay_context_scout_cancel", "scout_cancel", json!({"address": scout_addr(), "work": "scout.bench.work", "idempotency_key": "bench-scout-cancel-{{iter}}"})),
+        ("tracedecay_context_scout_delivery", "scout_delivery", json!({"address": scout_addr(), "claim": "scout.bench.claim", "delivered_at": "{{now}}", "outcome": "delivered", "idempotency_key": "bench-scout-delivery-{{iter}}"})),
+        ("tracedecay_context_scout_feedback", "scout_feedback", json!({"address": scout_addr(), "receipt": "scout.bench.receipt", "feedback": {"signal": "useful"}, "idempotency_key": "bench-scout-feedback-{{iter}}"})),
         ("tracedecay_github_stack_signal_expand", "stack_signal_expand", json!({"signal_id": "td-bench-missing", "format": "json"})),
         (
             "tracedecay_source_edit_reconcile",

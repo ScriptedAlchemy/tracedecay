@@ -196,15 +196,44 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_configuration_rollback_preview",
                 "rollback_preview",
                 json!({
-                    "target_revision_id": "{{rollback_target}}",
+                    "target_revision_id": "{{revision}}",
                     "mode": "all_or_nothing",
                 }),
-                |_ctx, _iter| vec![PrimeStep {
+                |_ctx, _iter| {
+                    // Rolling back to the current head is a stale no-op —
+                    // commit a real change first so the pre-change revision
+                    // is a valid rollback target.
+                    vec![
+                        revision_prime(TOPOLOGY_KEY),
+                        changed_policy_step(),
+                        PrimeStep {
     inject: Vec::new(),
-                    tool: "tracedecay_configuration_get",
-                    args: json!({"key": TOPOLOGY_KEY, "format": "json"}),
-                    capture: &[("dig:revision_id", "rollback_target")],
-                }],
+                            tool: "tracedecay_configuration_protected_preview",
+                            args: json!({
+                                "change": {"kind": "replace_work_topology_policy", "value": "{{changed_policy}}"},
+                                "expected_revision": "{{revision}}",
+                                "format": "json",
+                            }),
+                            capture: &[
+                                ("dig:plan_id", "plan_id"),
+                                ("dig:base_revision_id", "base_revision_id"),
+                                ("dig:operation_digest", "operation_digest"),
+                            ],
+                        },
+                        PrimeStep {
+    inject: Vec::new(),
+                            tool: "tracedecay_configuration_protected_apply",
+                            args: json!({
+                                "plan_id": "{{plan_id}}",
+                                "expected_base_revision_id": "{{base_revision_id}}",
+                                "operation_digest": "{{operation_digest}}",
+                                "idempotency_key": "bench-cfg-rpreview-prime-{{iter}}",
+                                "format": "json",
+                            }),
+                            capture: &[],
+                        },
+                    ]
+                },
             )
         }),
     });

@@ -177,35 +177,12 @@ fn p_prepare(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
     vec![step_prepare_create(ctx)]
 }
 
-// Verified snapshots lag the just-committed task event by a beat; a verified
-// read between create and the dependent call drives the projection forward so
-// `graph.item(task.bench.<iter>)` resolves instead of not_found.
-fn step_views(ctx: &QueryContext) -> PrimeStep {
-    PrimeStep {
-    inject: Vec::new(),
-        tool: "tracedecay_work_views",
-        args: json!({
-            "selection": w(ctx).selection,
-            "mode": {"mode": "current"},
-            "continuation": null,
-            "observed_at": "{{now}}",
-            "format": "json",
-        }),
-        capture: &[],
-    }
-}
-
 fn p_create(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![step_prepare_create(ctx), step_create(), step_views(ctx)]
+    vec![step_prepare_create(ctx), step_create()]
 }
 
 fn p_generate(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![
-        step_prepare_create(ctx),
-        step_create(),
-        step_views(ctx),
-        step_generate(ctx),
-    ]
+    vec![step_prepare_create(ctx), step_create(), step_generate(ctx)]
 }
 
 fn p_decide(ctx: &QueryContext, _i: u64, disposition: &str) -> Vec<PrimeStep> {
@@ -541,7 +518,12 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         }), no_primes)
     })));
     out.push(tg("tracedecay_work_mutate_graph", fiveq(&|_| {
-        eqn("tracedecay_work_mutate_graph", "commit", json!("{{request}}"), p_prepare)
+        eqn(
+            "tracedecay_work_mutate_graph",
+            "commit",
+            json!({"mutation": "create", "request": "{{request}}"}),
+            p_prepare,
+        )
     })));
     out.push(tg("tracedecay_work_create", fiveq(&|_| {
         eqn("tracedecay_work_create", "commit", json!("{{request}}"), p_prepare)

@@ -211,25 +211,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     feedback_read!("tracedecay_feedback_get", "get", "digany:get_handle");
     feedback_read!("tracedecay_feedback_expand", "expand", "digany:expansion_handle");
     feedback_read!("tracedecay_feedback_diagnostics", "diagnostics", "digany:diagnostics_handle");
-    // affected_tests computes the affected set directly; test_results reads
-    // the results a primed run_affected_tests execution retained.
-    out.push(ToolGroup {
-        tool: "tracedecay_affected_tests",
-        queries: five(|i| {
-            rq(
-                "tracedecay_affected_tests",
-                "affected_tests",
-                json!({
-                    "changed_paths": [ctx
-                        .seeds
-                        .test_results_path
-                        .clone()
-                        .unwrap_or_else(|| file_at(ctx, i as usize))],
-                    "max_tests": 5,
-                }),
-            )
-        }),
-    });
+    // affected_tests reads the affected set the advisory cycle retained under
+    // its minted handle; test_results reads the managed run a primed
+    // run_affected_tests execution retained.
+    feedback_read!("tracedecay_affected_tests", "affected", "digany:request_handle");
     out.push(ToolGroup {
         tool: "tracedecay_test_results",
         queries: five(|_i| {
