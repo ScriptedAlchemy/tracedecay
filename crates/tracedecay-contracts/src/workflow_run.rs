@@ -4,7 +4,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use tracedecay_domain::WorkflowRunStatus;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,

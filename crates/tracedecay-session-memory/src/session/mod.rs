@@ -1,5 +1,4 @@
 pub mod lcm;
-mod observe;
 mod refresh;
 mod refresh_service;
 mod retrieval;

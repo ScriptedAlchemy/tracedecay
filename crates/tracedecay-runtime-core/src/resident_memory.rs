@@ -148,14 +148,6 @@ fn cgroup_v2_memory_ceiling_v1(
     })
 }
 
-fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>) -> u64 {
-    match cgroup_limit {
-        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
-        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
-        None => total_memory_bytes,
-    }
-}
-
 struct ResidentMemoryAuthorityV1 {
     limit_bytes: NonZeroU64,
     /// `memory.high` when it sits strictly below the hard admission ceiling.
@@ -237,8 +229,6 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
     let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
-    let service_ceiling = cgroup.and_then(cgroup_service_ceiling_bytes);
-
     let authority = resident_memory_authority_v1(
         total_memory_bytes,
         cgroup,

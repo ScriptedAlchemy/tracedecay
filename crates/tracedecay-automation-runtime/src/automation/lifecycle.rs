@@ -954,7 +954,6 @@ impl<'a> AgentRunFinalizer<'a> {
         request: &AgentTaskRequest,
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
-        let _startup = super::scheduler_metrics::DurationGuard::backend_startup();
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
         let mut retry_report = AgentTaskRetryReport::default();
         let startup_result = {

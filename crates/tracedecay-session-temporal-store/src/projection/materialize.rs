@@ -175,8 +175,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         return Ok(None);
     }
 
-    let (all_occurrences, occurrence_work) =
-        materialize_effect_occurrences(conn, &effects, item_count).await?;
+    let all_occurrences = materialize_effect_occurrences(conn, &effects, item_count).await?;
 
     let mut parents = candidate_parent_message_resolver(
         conn,
@@ -201,14 +200,13 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
                         "observation effect output count does not match canonical projection",
                     )
                 })?;
-        let (effect_copies, effect_assertions, relation_work) =
-            derive_retained_projection_relations(
-                conn,
-                recovery.session_id(),
-                effect_occurrences,
-                &parents,
-            )
-            .await?;
+        let (effect_copies, effect_assertions) = derive_retained_projection_relations(
+            conn,
+            recovery.session_id(),
+            effect_occurrences,
+            &parents,
+        )
+        .await?;
 
         let effect_items = effect_occurrences
             .len()
@@ -312,12 +310,8 @@ pub(super) async fn materialize_effect_occurrences(
     conn: &impl crate::handle::SessionTemporalQuery,
     effects: &[(tracedecay_domain::CanonicalObservationIdV1, u64, usize)],
     item_count: usize,
-) -> SessionStoreResult<(
-    Vec<MessageOccurrenceRecordV1>,
-    OccurrenceMaterializationWork,
-)> {
+) -> SessionStoreResult<Vec<MessageOccurrenceRecordV1>> {
     let mut occurrences = Vec::with_capacity(item_count);
-    let mut work = OccurrenceMaterializationWork::default();
     // One chunked prefetch for the whole effect set instead of one probe per
     // effect. The loop below still walks `effects` in order, so both the emitted
     // occurrence order and the first error raised are unchanged.
@@ -343,7 +337,6 @@ pub(super) async fn materialize_effect_occurrences(
         let envelope: CanonicalObservationEnvelopeV1 =
             observation_envelope_from_payload(observation.payload())
                 .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        work.envelope_parses = work.envelope_parses.saturating_add(1);
         for output in outputs {
             occurrences.push(
                 canonical_occurrence(conn, observation, &envelope, output)
@@ -352,12 +345,7 @@ pub(super) async fn materialize_effect_occurrences(
             );
         }
     }
-    Ok((occurrences, work))
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct OccurrenceMaterializationWork {
-    pub(super) envelope_parses: u64,
+    Ok(occurrences)
 }
 
 pub(super) fn derived_temporal_assertion_id(
@@ -472,11 +460,7 @@ pub(super) async fn derive_retained_projection_relations(
     session_id: &SessionId,
     occurrences: &[MessageOccurrenceRecordV1],
     parents: &ParentMessageResolver,
-) -> SessionStoreResult<(
-    Vec<LogicalCopyRecordV1>,
-    Vec<TemporalAssertionRecordV1>,
-    RelationDerivationWork,
-)> {
+) -> SessionStoreResult<(Vec<LogicalCopyRecordV1>, Vec<TemporalAssertionRecordV1>)> {
     let mut copies = BTreeMap::<(String, String), LogicalCopyRecordV1>::new();
     let mut assertions = BTreeMap::<String, TemporalAssertionRecordV1>::new();
     let mut seen_copy_keys = BTreeSet::new();
@@ -491,7 +475,6 @@ pub(super) async fn derive_retained_projection_relations(
         .collect::<Vec<_>>();
     let observations = read_observations(conn, &observation_ids).await?;
     let mut envelopes = HashMap::with_capacity(observations.len());
-    let mut work = RelationDerivationWork::default();
 
     for occurrence in occurrences {
         let envelope = match envelopes.entry(occurrence.source_observation_id.as_str().to_owned()) {
@@ -503,7 +486,6 @@ pub(super) async fn derive_retained_projection_relations(
                 let envelope: CanonicalObservationEnvelopeV1 =
                     observation_envelope_from_payload(observation.payload())
                         .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                work.envelope_parses = work.envelope_parses.saturating_add(1);
                 entry.insert(envelope)
             }
         };
@@ -616,13 +598,7 @@ pub(super) async fn derive_retained_projection_relations(
     Ok((
         copies.into_values().collect(),
         assertions.into_values().collect(),
-        work,
     ))
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct RelationDerivationWork {
-    pub(super) envelope_parses: u64,
 }
 
 #[tracing::instrument(

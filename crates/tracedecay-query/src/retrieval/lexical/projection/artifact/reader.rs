@@ -23,7 +23,6 @@ use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use roaring::RoaringBitmap;
 
-use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::clones::{
@@ -1582,17 +1581,16 @@ impl ArtifactQueryMetricsV1 {
     #[inline(always)]
     fn observe_statement(
         &self,
-        statement: &rusqlite::Statement<'_>,
+        #[cfg_attr(not(test), expect(unused_variables))] statement: &rusqlite::Statement<'_>,
     ) -> Result<(), RetrievalPortError> {
-        if !cfg!(test) {
-            return Ok(());
-        }
-        let steps = u64::try_from(statement.get_status(StatementStatus::FullscanStep))
-            .map_err(contract_error)?;
         #[cfg(test)]
-        self.fullscan_steps
-            .set(self.fullscan_steps.get().saturating_add(steps));
-
+        {
+            let steps =
+                u64::try_from(statement.get_status(rusqlite::StatementStatus::FullscanStep))
+                    .map_err(contract_error)?;
+            self.fullscan_steps
+                .set(self.fullscan_steps.get().saturating_add(steps));
+        }
         Ok(())
     }
 

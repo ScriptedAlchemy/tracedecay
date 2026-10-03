@@ -17,7 +17,7 @@ use super::{
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
-    effective_memory_bytes_v1, resident_memory_authority_v1,
+    resident_memory_authority_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -52,11 +52,13 @@ fn effective_memory_bytes(
     proc_self_cgroup: &std::path::Path,
     cgroup_root: &std::path::Path,
 ) -> u64 {
-    effective_memory_bytes_v1(
-        total_memory_bytes,
-        cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
-            .and_then(cgroup_service_ceiling_bytes),
-    )
+    match cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
+        .and_then(cgroup_service_ceiling_bytes)
+    {
+        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
+        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
+        None => total_memory_bytes,
+    }
 }
 
 #[test]

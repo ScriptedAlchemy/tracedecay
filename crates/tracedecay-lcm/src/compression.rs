@@ -389,7 +389,7 @@ pub async fn compress(
     .map(|bounded| bounded.response);
     // A failed compression discarded its ingest writes, assembled backlog,
     // and summary drafts; success-only gauges would hide exactly that waste.
-    if response.is_err() {}
+
     response
 }
 
@@ -417,7 +417,7 @@ pub async fn compress_retained_page(
         Some(guard),
     )
     .await;
-    if response.is_err() {}
+
     response
 }
 

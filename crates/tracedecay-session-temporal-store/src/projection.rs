@@ -10,7 +10,6 @@ use tracedecay_store::{
 use super::query::{storage, storage_message};
 use super::refresh::SessionRefreshRecoveryV1;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use crate::support as observe;
 
 mod derived;
 mod materialize;

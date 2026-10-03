@@ -18,8 +18,7 @@ use tracedecay_store::observation::{
 };
 
 use crate::admission::{
-    HostAdmission, HostAdmissionOutcome, HostAdmissionRecovery, HostAdmissionStatus,
-    is_admission_cancellation,
+    HostAdmission, HostAdmissionOutcome, HostAdmissionRecovery, is_admission_cancellation,
 };
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
