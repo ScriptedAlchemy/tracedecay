@@ -206,8 +206,16 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
             .unwrap();
     assert_eq!(
         mcp,
-        serde_json::json!({"mcpServers": {"graph": {"type": "stdio", "command": "tracedecay-bin",
-            "args": ["serve"], "startup_timeout_sec": 120, "tool_timeout_sec": 900}}})
+        serde_json::json!({
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "graph": {"type": "stdio", "command": "tracedecay-bin",
+                    "args": ["serve"], "startup_timeout_sec": 120, "tool_timeout_sec": 900},
+                "tracedecay-explorer": {"type": "stdio", "command": "node",
+                    "args": ["chatgpt-extension/embedded/server.mjs", "--binary", "tracedecay-bin"],
+                    "cwd": "./"}
+            }
+        })
     );
 }
 
