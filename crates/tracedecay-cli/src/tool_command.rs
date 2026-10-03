@@ -57,7 +57,9 @@ use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_r
 use tracedecay_contracts::retrieval::{
     AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
 };
-use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
+use tracedecay_contracts::{
+    CancellationSignal, Deadline, RetainedSurfaceOperation, retained_surface_operation_is_effect,
+};
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
     adapt_application_tool_request, parse_application_surface_request,
@@ -226,12 +228,13 @@ fn run_inner(
             let tool_name = operation.mcp_tool_name();
             if RetainedSurfaceOperation::from_application(operation).is_some() {
                 let mut tool_args = tool_args;
-                let dispatch = DaemonToolDispatch::for_tool(
+                let dispatch = DaemonToolDispatch::for_retained(
                     profile,
                     explicit_project,
                     tool_name,
                     &mut tool_args,
-                );
+                )
+                .await?;
                 return dispatch_cli_retained(
                     profile, operation, tool_args, dispatch, raw_json, deadline,
                 )
@@ -252,8 +255,7 @@ fn run_inner(
             }
             if operation.is_graph_tool() {
                 let project_path =
-                    graph_tool_project_path(profile, explicit_project, tool_name, &tool_args)
-                        .await?;
+                    selected_project_path(profile, explicit_project, tool_name, &tool_args).await?;
                 return dispatch_cli_graph_tool(
                     profile,
                     operation,
@@ -358,8 +360,13 @@ fn run_inner(
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && RetainedSurfaceOperation::from_application(operation).is_some()
         {
-            let dispatch =
-                DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
+            let dispatch = DaemonToolDispatch::for_retained(
+                profile,
+                explicit_project,
+                &def.name,
+                &mut tool_args,
+            )
+            .await?;
             return dispatch_cli_retained(
                 profile, operation, tool_args, dispatch, raw_json, deadline,
             )
@@ -379,7 +386,7 @@ fn run_inner(
             && operation.is_graph_tool()
         {
             let project_path =
-                graph_tool_project_path(profile, explicit_project, &def.name, &tool_args).await?;
+                selected_project_path(profile, explicit_project, &def.name, &tool_args).await?;
             return dispatch_cli_graph_tool(
                 profile,
                 operation,
@@ -811,11 +818,12 @@ async fn dispatch_cli_graph_tool(
     tool_result_process_outcome(&result.value, tool_name)
 }
 
-/// The project a graph-tool read answers for. The graph-tool owner answers
-/// for the handshake's project, so a registered-project reader's
-/// `project_selector` is resolved here, through the daemon's registry, to that
-/// exact registered project's root; it never falls back to the cwd project.
-async fn graph_tool_project_path(
+/// The project a graph-tool read or a selected retained effect answers for.
+/// Those owners answer for the handshake's project, so a registered-project
+/// reader's `project_selector` is resolved here, through the daemon's
+/// registry, to that exact registered project's root; it never falls back to
+/// the cwd project.
+async fn selected_project_path(
     profile: &ProfileRoot,
     explicit_project: Option<String>,
     tool_name: &str,
@@ -1049,6 +1057,35 @@ impl DaemonToolDispatch {
             return Self::registry_scoped(profile, explicit_project, tool_name, tool_args);
         }
         Self::project_scoped(profile, explicit_project, tool_name)
+    }
+
+    /// A retained effect with a `project_selector` connects to the selected
+    /// registered project, so the write lands in that project's store. Retained
+    /// reads keep the connected project and read the selected one read-only.
+    async fn for_retained(
+        profile: &ProfileRoot,
+        explicit_project: Option<String>,
+        tool_name: &str,
+        tool_args: &mut Value,
+    ) -> Result<Self> {
+        let selected_effect = tool_args.get("project_selector").is_some()
+            && !targets_profile(tool_name, tool_args)
+            && tool_dispatches_registered_project_reader(tool_name)
+            && RetainedSurfaceOperation::from_tool_name(tool_name)
+                .is_some_and(retained_surface_operation_is_effect);
+        if !selected_effect {
+            return Ok(Self::for_tool(
+                profile,
+                explicit_project,
+                tool_name,
+                tool_args,
+            ));
+        }
+        Ok(Self {
+            project_path: selected_project_path(profile, explicit_project, tool_name, tool_args)
+                .await?,
+            allow_init: false,
+        })
     }
 
     /// Registry reads never initialise anything, and follow the canonical

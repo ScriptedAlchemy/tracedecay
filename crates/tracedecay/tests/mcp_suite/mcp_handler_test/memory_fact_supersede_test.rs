@@ -1,9 +1,9 @@
 //! Production `tools/call` proof for `tracedecay_fact_store_supersede`.
 //!
 //! The tool retires one fact from the default list, search, and probe
-//! surfaces while leaving its payload and trust readable by id. A second
-//! successor, a missing successor, a self-target, and a stale generation are
-//! typed refusals that must not rewrite the current fact.
+//! surfaces while leaving its payload and trust readable by id. A missing
+//! fact, a second successor, a missing successor, a self-target, and a stale
+//! generation are typed refusals that must not rewrite the current fact.
 
 #![cfg(feature = "test-transport")]
 
@@ -471,7 +471,7 @@ async fn fact_store_supersede_refusals_leave_the_current_fact_unchanged() {
     .await;
     let (successor_fact_id, _) = added_fact(&successor);
 
-    let missing = call_tool(
+    let missing = handle_real_server_tool_call(
         &server,
         "tracedecay_fact_store_supersede",
         json!({
@@ -480,7 +480,14 @@ async fn fact_store_supersede_refusals_leave_the_current_fact_unchanged() {
         }),
     )
     .await;
-    assert_eq!(missing, json!({"outcome": "not_found"}), "{missing}");
+    assert_problem(
+        &missing,
+        "not_found_or_not_authorized",
+        "not_found_or_not_authorized",
+        "The requested resource was not found or is not authorized",
+        "never",
+        json!([]),
+    );
 
     let self_supersede = handle_real_server_tool_call(
         &server,

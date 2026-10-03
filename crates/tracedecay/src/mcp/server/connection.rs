@@ -923,6 +923,14 @@ mod cancellable_queue_tests {
 
         fixture.route_release.add_permits(1);
         assert_eq!(receive_response(&mut responses).await["id"], json!(10));
+        fixture.wait_for_routes(2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), responses.recv())
+                .await
+                .is_err(),
+            "the later read must wait while the selected effect resolves its route"
+        );
+        fixture.route_release.add_permits(1);
         assert_eq!(
             receive_response(&mut responses).await["id"],
             json!(11),

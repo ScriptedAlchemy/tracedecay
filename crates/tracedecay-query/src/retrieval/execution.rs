@@ -198,9 +198,7 @@ where
                             .iter()
                             .find(|literal| {
                                 literal.field == exact_field_for_kind(kind)
-                                    && requested_literals.iter().any(|requested| {
-                                        requested.original_bytes == literal.original_bytes
-                                    })
+                                    && requested_literals.contains(literal)
                             })
                             .map(|literal| (kind, literal))
                     })

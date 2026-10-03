@@ -69,7 +69,7 @@ jobs:
           subprocess.run([
               "docker", "run", "--rm", "--pull", "never", "--network", "none", "--user", "10001:10001",
               "--env", "HOME=/tmp", "--env", "CARGO_HOME=/tmp/cargo", reference, "sh", "-ec",
-              'node --version; hauler --version; test "$(hauler --version)" = "cargo-hauler 0.13.6"; '
+              'node --version; hauler --version; test "$(hauler --version)" = "cargo-hauler 0.14.0"; '
               'rustc --version; pnpm --version; cargo-nextest --version',
           ], check=True, timeout=60)
           (root / f"image-{arch}.json").write_text(json.dumps({
