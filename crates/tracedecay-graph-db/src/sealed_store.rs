@@ -2648,8 +2648,8 @@ mod build_tests {
 
     use super::{
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        build_sealed_container, sealed_artifact_database_options, sealed_generation_directory,
-        sealed_store_root,
+        build_sealed_container, sealed_artifact_database_options, sealed_copy_proof,
+        sealed_generation_directory, sealed_store_root,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -2819,16 +2819,7 @@ mod build_tests {
         database.close().unwrap();
         drop(database);
 
-        let mut bytes = std::fs::read(&path).unwrap();
-        let at: Vec<usize> = bytes
-            .windows(8)
-            .enumerate()
-            .filter(|(_, window)| *window == b"fn_12345")
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(at.len(), 1, "the name is stored once, in its dictionary");
-        bytes[at[0] + 3] ^= 0x01;
-        std::fs::write(&path, &bytes).unwrap();
+        corrupt_stored_name(&path);
 
         let database = open();
         let refused = database.entity(
@@ -2844,6 +2835,67 @@ mod build_tests {
         assert!(
             matches!(later, Err(GraphDbError::Corrupt { .. })),
             "once a page fails, the open serves no further reads: {later:?}"
+        );
+    }
+
+    fn corrupt_stored_name(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let at: Vec<usize> = bytes
+            .windows(8)
+            .enumerate()
+            .filter(|(_, window)| *window == b"fn_12345")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(at.len(), 1, "the name is stored once, in its dictionary");
+        bytes[at[0] + 3] ^= 0x01;
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    /// The read that first touches a corrupt sealed page is refused, not
+    /// answered without that page: a fresh open's target visit and its copy
+    /// proof each fail as corrupt on their first read.
+    #[test]
+    fn the_first_read_over_a_corrupt_sealed_page_is_refused() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let manifest = manifest(30_000, 45_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let namespace = identity.physical_namespace().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        build_sealed_container(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            staging.path(),
+            check,
+        )
+        .unwrap();
+        let path = staging.path().join(SEALED_STORE_DATABASE_FILE);
+        corrupt_stored_name(&path);
+        let open = || {
+            GraphDb::open_lazy_with_store_state(
+                sealed_artifact_database_options(path.clone()),
+                PersistentGraphStoreState::Existing,
+            )
+            .unwrap()
+        };
+        let calls = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+
+        let mut targets = Vec::new();
+        let visited = open().visit_outgoing_relation_targets(
+            &namespace,
+            &entity_identity(12_344),
+            &calls,
+            Arc::new(NeverCancelled),
+            &mut |target| targets.push(target),
+        );
+        let proof = sealed_copy_proof(&open(), &identity, &expected, check);
+        assert!(
+            matches!(visited, Err(GraphDbError::Corrupt { .. })),
+            "a target visit over a corrupt sealed page must be refused: {visited:?} {targets:?} (copy proof: {proof:?})"
+        );
+        assert!(
+            matches!(proof, Err(GraphDbError::Corrupt { .. })),
+            "a copy proof over a corrupt sealed page must be refused as corrupt: {proof:?}"
         );
     }
 
