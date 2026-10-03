@@ -246,10 +246,19 @@ pub async fn compute_diagnose(
 fn normalized_diagnostic_path(project_root: &Path, file: &str) -> String {
     let forward = file.replace('\\', "/");
     let path = Path::new(&forward);
-    if path.is_absolute()
-        && let Ok(relative) = path.strip_prefix(project_root)
-    {
-        return relative.to_string_lossy().into_owned();
+    if path.is_absolute() {
+        // Alias spellings (Windows 8.3 names, verbatim roots, symlinked
+        // parents) all resolve to the root the graph indexes, so compare
+        // through the canonical identities on both sides.
+        let canonical_file = tracedecay_runtime_core::path_safety::canonical_root_identity(path);
+        let canonical_root =
+            tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+        if let Ok(relative) = canonical_file.strip_prefix(&canonical_root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+        if let Ok(relative) = path.strip_prefix(project_root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
     }
     forward
 }

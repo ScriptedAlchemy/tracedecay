@@ -386,6 +386,15 @@ struct ColdMountFinalCommitGateV1 {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
+/// Test gates are armed with whatever path spelling the caller holds while the
+/// mount path looks them up by the root the scheduler canonicalized (plain
+/// `C:\` on Windows vs. the caller's verbatim `\\?\` form). Routing both sides
+/// through `canonical_existing_identity` makes either spelling find the gate.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(super) fn test_gate_root(path: &Path) -> PathBuf {
+    canonical_existing_identity(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Armed gates keyed by project root, so tests pausing distinct worktrees in
 /// one process do not contend for a single slot.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1962,7 +1971,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
-                project_root,
+                test_gate_root(&project_root),
                 ColdMountFinalCommitGateV1 { entered, release },
             );
         assert!(
@@ -1977,7 +1986,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = cold_mount_final_commit_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&test_gate_root(project_root));
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
@@ -2008,7 +2017,7 @@ impl CodeIndexSchedulerRegistryV1 {
         assert!(
             gates
                 .insert(
-                    (project_root.clone(), at),
+                    (test_gate_root(&project_root), at),
                     RetainedGraphRecoveryGateV1 { entered, release },
                 )
                 .is_none(),
@@ -2026,7 +2035,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = retained_graph_recovery_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(project_root.to_path_buf(), at));
+            .remove(&(test_gate_root(project_root), at));
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
@@ -2054,7 +2063,7 @@ impl CodeIndexSchedulerRegistryV1 {
         assert!(
             gates
                 .insert(
-                    project_root.clone(),
+                    test_gate_root(&project_root),
                     RetainedTextProjectionGateV1 { entered, release },
                 )
                 .is_none(),
@@ -2069,7 +2078,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = retained_text_projection_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&test_gate_root(project_root));
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;

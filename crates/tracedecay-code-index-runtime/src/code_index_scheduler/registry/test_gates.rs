@@ -19,6 +19,7 @@ use super::{
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
     cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
     graph_decode_gate, published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    test_gate_root,
     unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -39,7 +40,10 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             gates
-                .insert(project_root.clone(), WorkerStepGateV1 { entered, release })
+                .insert(
+                    test_gate_root(&project_root),
+                    WorkerStepGateV1 { entered, release },
+                )
                 .is_none(),
             "one published text projection gate per worktree: {}",
             project_root.display()
@@ -52,7 +56,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = published_text_projection_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&test_gate_root(project_root));
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -72,7 +76,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let replaced = serving_swap_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(project_root, WorkerStepGateV1 { entered, release });
+            .insert(
+                test_gate_root(&project_root),
+                WorkerStepGateV1 { entered, release },
+            );
         assert!(replaced.is_none(), "one serving swap gate per worktree");
         (entered_observed, released)
     }
@@ -82,7 +89,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = serving_swap_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&test_gate_root(project_root));
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -138,7 +145,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
-                project_root,
+                test_gate_root(&project_root),
                 [
                     WorkerStepGateV1 {
                         entered: before_entered,
@@ -163,7 +170,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let gate = graph_decode_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&test_gate_root(project_root));
         let [before, after] = gate?;
         Self::pass_worker_step_gate(Some(before)).await;
         Some(after)

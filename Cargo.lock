@@ -5408,6 +5408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shell-words",
  "socket2",
  "tempfile",
  "tokio",

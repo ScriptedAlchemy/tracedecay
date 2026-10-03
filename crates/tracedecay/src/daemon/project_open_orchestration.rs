@@ -7,7 +7,7 @@
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_runtime_core::path_safety::same_canonical_path;
+use tracedecay_runtime_core::path_safety::{plain_host_path, same_canonical_path};
 
 /// Bounds how long a foreground request waits for a route's background open.
 /// The open task itself is deliberately left running after the deadline.
@@ -324,7 +324,7 @@ fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
             "no TraceDecay index found at '{}': project is not enrolled in the authenticated \
              profile; run 'tracedecay init' in that directory, or start the MCP server with \
              'tracedecay serve --path <project>'",
-            project_path.display()
+            plain_host_path(project_path).display()
         ),
     )
 }

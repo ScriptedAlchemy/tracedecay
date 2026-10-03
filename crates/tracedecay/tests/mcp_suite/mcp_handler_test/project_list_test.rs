@@ -18,7 +18,9 @@ use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceU
 use tracedecay_mcp::McpTransport;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::{
+    canonical_existing_identity, plain_host_path, same_canonical_path,
+};
 
 use crate::support;
 
@@ -138,9 +140,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     );
     let active_git =
         canonical_existing_identity(&cg.project_root().join(".git")).expect("active .git");
-    assert_eq!(
-        cg.project_root().join(".git"),
-        active_git,
+    assert!(
+        same_canonical_path(&cg.project_root().join(".git"), &active_git),
         "the calling checkout must be a primary repository"
     );
     runtime
@@ -187,9 +188,10 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         1,
         false,
     );
+    let active_root = canonical_existing_identity(cg.project_root()).expect("active project root");
     let active = registered(
         &active_id,
-        cg.project_root(),
+        &active_root,
         Some(active_git),
         "main",
         Some(ACTIVE_HEAD),
@@ -217,7 +219,7 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     )
     .await
     .expect("mcp server");
-    let registry = registry_path.display().to_string();
+    let registry = plain_host_path(&registry_path).display().to_string();
 
     let default_text = tool_text(tools_call(&server, json!({"limit": 25})).await);
     assert_eq!(

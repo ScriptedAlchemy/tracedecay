@@ -165,6 +165,7 @@ impl SessionMetaParseGate {
     }
 
     /// Blocks until at least `count` parses have parked at this gate.
+    #[cfg(unix)]
     pub(crate) fn wait_parked(&self, count: usize) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         while state.parked < count {
@@ -175,6 +176,7 @@ impl SessionMetaParseGate {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn release(&self) {
         self.state
             .lock()
@@ -189,7 +191,7 @@ static SESSION_META_PARSE_GATES: OnceLock<
     Mutex<std::collections::HashMap<PathBuf, Arc<SessionMetaParseGate>>>,
 > = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn install_session_meta_parse_gate_for_test(path: &Path) -> Arc<SessionMetaParseGate> {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let gate = Arc::new(SessionMetaParseGate::default());

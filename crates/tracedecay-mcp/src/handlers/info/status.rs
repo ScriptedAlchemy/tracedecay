@@ -39,7 +39,9 @@ use crate::handlers::workflow::current_head_commit_id;
 use crate::tools::render::Md;
 
 fn display_path(path: &Path) -> String {
-    path.display().to_string()
+    tracedecay_runtime_core::path_safety::canonical_root_identity(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Project what a readiness wait observed onto the caller-facing outcome.
@@ -204,8 +206,13 @@ fn attach_full_branch_status(
 /// whether pressure may shed them. Other projects' owners belong to the
 /// daemon-wide Doctor inventory, never to a project read.
 fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
+    // Where the periodic daemon sampler does not run (non-Linux builds no-op
+    // it) nothing else publishes an observation, so the read takes its own
+    // checkpoint sample instead of reporting a cell that was never fed.
+    let pressure = process_resident_memory_pressure_v1();
+    pressure.sample_for_checkpoint();
     memory_value(
-        process_resident_memory_pressure_v1(),
+        pressure,
         process_resident_owners_v1(),
         sampled_memory_pressure_some_avg10_v1(),
         std::time::Instant::now(),

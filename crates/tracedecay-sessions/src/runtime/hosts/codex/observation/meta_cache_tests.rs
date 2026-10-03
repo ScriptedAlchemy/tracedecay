@@ -8,26 +8,33 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde_json::json;
 use tempfile::TempDir;
+#[cfg(unix)]
 use tracedecay_domain::ObservationScopeV1;
 
+#[cfg(unix)]
 use super::super::meta::{
     SessionMetaParseGate, install_session_meta_parse_gate_for_test,
     session_meta_read_count_for_test,
 };
 use super::*;
+#[cfg(unix)]
 use crate::admission::HostAdmission;
+#[cfg(unix)]
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+#[cfg(unix)]
 use crate::runtime::source::spin_until_jsonl_change_settled;
 
 const SESSION_ID: &str = "meta-cache-session";
 
 /// Every wait in this module is bounded so an orphaned claim fails the test
 /// instead of hanging the suite.
+#[cfg(unix)]
 const SETTLE_WITHIN: Duration = Duration::from_secs(20);
 
 fn write_rollout(dir: &Path, name: &str, with_meta: bool) -> PathBuf {
@@ -70,8 +77,10 @@ fn write_rollout(dir: &Path, name: &str, with_meta: bool) -> PathBuf {
 /// Releases the parse gate when dropped, so a failed assertion before the
 /// explicit release reports instead of leaving a parked blocking parse that the
 /// runtime's shutdown would wait on forever.
+#[cfg(unix)]
 struct GateGuard(Arc<SessionMetaParseGate>);
 
+#[cfg(unix)]
 impl std::ops::Deref for GateGuard {
     type Target = Arc<SessionMetaParseGate>;
 
@@ -80,12 +89,14 @@ impl std::ops::Deref for GateGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for GateGuard {
     fn drop(&mut self) {
         self.0.release();
     }
 }
 
+#[cfg(unix)]
 fn fixture(name: &str, with_meta: bool) -> (TempDir, PathBuf, GateGuard) {
     install_test_shared_jsonl_preparation_authority();
     let tmp = TempDir::new().unwrap();
@@ -104,6 +115,7 @@ fn cache_key(path: &Path) -> CodexMetaCacheKey {
     }
 }
 
+#[cfg(unix)]
 fn spawn_lookup(
     path: &Path,
     cancellation: ObservationCancellation,
@@ -113,6 +125,7 @@ fn spawn_lookup(
 }
 
 /// Blocks until `count` parses of the fixture are parked at its gate.
+#[cfg(unix)]
 async fn wait_parked(gate: &Arc<SessionMetaParseGate>, count: usize) {
     let gate = Arc::clone(gate);
     tokio::time::timeout(
@@ -126,6 +139,7 @@ async fn wait_parked(gate: &Arc<SessionMetaParseGate>, count: usize) {
 
 /// Waits until `count` lookups have registered as waiters behind the key's
 /// live fill, so the test observes the in-flight path rather than a cache hit.
+#[cfg(unix)]
 async fn wait_in_flight_waits(key: &CodexMetaCacheKey, count: usize) {
     tokio::time::timeout(SETTLE_WITHIN, async {
         while in_flight_waits_for_test(key) < count {
@@ -169,6 +183,10 @@ async fn a_same_size_in_place_rewrite_is_not_answered_from_the_cache() {
     }
 }
 
+// The fixture key and every lookup's key coalesce only once the file
+// identity's change stamp settles; without a stat witness each identity
+// is unique, so the shared-fill contract cannot be exercised at all.
+#[cfg(unix)]
 #[tokio::test]
 async fn cancelled_first_waiter_leaves_the_fill_owner_to_settle() {
     let (_tmp, path, gate) = fixture("cancelled-first-waiter.jsonl", true);
@@ -270,6 +288,7 @@ async fn cancelled_first_waiter_leaves_the_fill_owner_to_settle() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn waiter_cancellation_is_typed_and_leaves_the_fill_intact() {
     let (_tmp, path, gate) = fixture("waiter-cancellation.jsonl", true);
@@ -315,6 +334,7 @@ async fn waiter_cancellation_is_typed_and_leaves_the_fill_intact() {
     ));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn failed_fill_releases_its_claim_and_waiters_fail_typed() {
     let (_tmp, path, gate) = fixture("no-session-meta.jsonl", false);
@@ -376,6 +396,7 @@ fn late_claim_release_never_erases_a_replacement_owner() {
     assert!(Arc::ptr_eq(&retained, &replacement));
 }
 
+#[cfg(unix)]
 #[test]
 fn torn_down_fill_task_releases_its_claim_without_publishing() {
     let (_tmp, path, gate) = fixture("torn-down-fill.jsonl", true);

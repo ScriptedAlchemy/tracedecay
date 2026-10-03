@@ -1521,11 +1521,16 @@ mod tests {
             admitted,
             "a later pass must not open state.json once its agents are settled"
         );
+        // The first pass's read count varies with where the wire admission
+        // settles, so the honest contract is the two-pass total: without a
+        // stat witness both passes re-read state.json instead of skipping
+        // settled agents.
         #[cfg(not(unix))]
         assert_eq!(
             super::kimi_state_read_count_for_test(&state),
-            admitted + 1,
-            "no stat witness exists, so the pass must read state.json again"
+            4,
+            "no stat witness exists, so each pass reads state.json in the \
+             discovery scan and again resolving the wire's session identity"
         );
         assert_eq!(admission.observations().len(), 1);
     }
