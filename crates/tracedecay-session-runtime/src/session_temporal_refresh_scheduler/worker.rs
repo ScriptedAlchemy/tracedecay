@@ -712,6 +712,7 @@ pub async fn process_refresh_begin_requests(
             Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
+                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 break;
             }
             Err(_) => {
@@ -750,6 +751,7 @@ pub async fn begin_admitted_session_refreshes(
             if is_retryable_storage(&error) {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
+                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
                 report.terminal_errors += 1;
             }
@@ -807,6 +809,7 @@ async fn complete_ready_refresh(
         Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
         }
         Err(error) if is_deterministic_refusal(&error) => {
             // Activation reads the same durable rows on every attempt, so a
@@ -838,6 +841,7 @@ fn record_projector_error(
     match error.class {
         SessionTemporalRefreshProjectorErrorClass::Retryable => {
             report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Projector);
         }
         SessionTemporalRefreshProjectorErrorClass::Terminal => {
             report.terminal_errors += 1;
@@ -912,6 +916,7 @@ pub async fn apply_refresh_effect(
                 Err(error) if is_retryable_storage(&error) => {
                     report.last_error = Some(format!("{error:?}"));
                     report.retryable_errors += 1;
+                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
                 Err(error) if is_deterministic_refusal(&error) => {
                     // A refused progress row is not work the next pass can
@@ -972,6 +977,7 @@ async fn apply_fail_effect(
         Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
         }
         Err(error) => {
             attempt.retain();
@@ -1051,6 +1057,7 @@ async fn running_refreshes(
             report.last_error = Some(format!("{error:?}"));
             if is_retryable_storage(&error) {
                 report.retryable_errors += 1;
+                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
                 report.terminal_errors += 1;
             }
@@ -1166,6 +1173,7 @@ pub async fn run_session_temporal_refresh_pass(
                 {
                     report.last_error = Some("completion_deadline_exceeded".to_string());
                     report.deadline_errors += 1;
+                    report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
                 }
             }
             SessionRefreshRestartStateV1::BeginProjection
