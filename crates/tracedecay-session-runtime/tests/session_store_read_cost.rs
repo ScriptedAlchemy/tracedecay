@@ -814,8 +814,8 @@ fn wal_mark(store: &Path) -> WalMark {
 }
 
 /// Commit frames the writer appended between two marks, or `None` when the log
-/// restarted between them. A commit frame's header carries the database size
-/// after the commit; every other frame carries zero there.
+/// restarted since the first mark. A commit frame's header carries the
+/// database size after the commit; every other frame carries zero there.
 fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
     use std::os::unix::fs::FileExt;
     if from.sequence != to.sequence || to.max_frame < from.max_frame {
@@ -823,18 +823,23 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
     }
     let wal = std::fs::File::open(store.with_extension("db-wal")).unwrap();
     let mut header = [0; 32];
-    wal.read_exact_at(&mut header, 0).unwrap();
+    let sequence = |header: &[u8; 32]| u32::from_be_bytes(header[12..16].try_into().unwrap());
+    wal.read_exact_at(&mut header, 0).ok()?;
+    if sequence(&header) != from.sequence {
+        return None;
+    }
     let frame_size = 24 + u64::from(u32::from_be_bytes(header[8..12].try_into().unwrap()));
-    Some(
-        (from.max_frame..to.max_frame)
-            .filter(|frame| {
-                let mut database_size = [0; 4];
-                wal.read_exact_at(&mut database_size, 32 + u64::from(*frame) * frame_size + 4)
-                    .unwrap();
-                database_size != [0; 4]
-            })
-            .count(),
-    )
+    let mut commits = 0;
+    for frame in from.max_frame..to.max_frame {
+        let mut database_size = [0; 4];
+        wal.read_exact_at(&mut database_size, 32 + u64::from(frame) * frame_size + 4)
+            .ok()?;
+        commits += usize::from(database_size != [0; 4]);
+    }
+    // A restart after the marks rewrites the header first, so an unchanged
+    // sequence means every frame read still belongs to the marked log.
+    wal.read_exact_at(&mut header, 0).ok()?;
+    (sequence(&header) == from.sequence).then_some(commits)
 }
 
 /// One streamed message commits once per durability boundary.
