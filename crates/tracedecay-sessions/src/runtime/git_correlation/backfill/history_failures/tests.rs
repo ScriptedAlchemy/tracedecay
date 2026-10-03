@@ -139,7 +139,10 @@ async fn stale_failure_cannot_resurrect_after_newer_success_frontier() {
 }
 
 /// A store written by the activity-time pass converges to a full rescan on
-/// the change-sequence axis, and reopening it changes nothing further.
+/// the change-sequence axis, and reopening it changes nothing further. The
+/// rescan re-derives every failure it can still reach; a legacy failure for a
+/// session without raw messages is unreachable on the new axis, so no failure
+/// receipt survives the migration.
 #[tokio::test]
 async fn activity_time_positions_migrate_to_a_full_rescan_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -168,7 +171,8 @@ async fn activity_time_positions_migrate_to_a_full_rescan_once() {
         ensure_git_correlation_receipt_schema_in_transaction(&conn)
             .await
             .unwrap();
-        assert_eq!(stored_activity(&conn).await, Some(0));
+        assert_eq!(stored_activity(&conn).await, None);
+        assert_eq!(count_unresolved(&conn).await.unwrap(), 0);
         assert_eq!(
             crate::runtime::git_correlation::read_history_frontier(&conn)
                 .await

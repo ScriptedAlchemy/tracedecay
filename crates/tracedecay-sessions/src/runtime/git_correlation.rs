@@ -806,11 +806,22 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
 /// The history pass once walked sessions by activity time, so a session
 /// imported behind that cursor was never visited. Positions recorded on that
 /// axis mean nothing on the change-sequence axis; rescanning from the start
-/// is the only safe conversion.
+/// is the only safe conversion. That rescan re-derives every failure it can
+/// still reach, so legacy failure receipts are dropped rather than kept for
+/// sessions the change-sequence axis never revisits.
 async fn migrate_activity_frontier(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
-    for table in ["git_history_index_progress", "git_history_index_failures"] {
+    for (table, reset) in [
+        (
+            "git_history_index_progress",
+            "UPDATE git_history_index_progress SET change_sequence = 0;",
+        ),
+        (
+            "git_history_index_failures",
+            "DELETE FROM git_history_index_failures;",
+        ),
+    ] {
         let mut legacy = conn
             .query(
                 "SELECT 1 FROM pragma_table_info(?1) WHERE name = 'activity_timestamp'",
@@ -821,7 +832,7 @@ async fn migrate_activity_frontier(
             drop(legacy);
             conn.execute_batch(&format!(
                 "ALTER TABLE {table} RENAME COLUMN activity_timestamp TO change_sequence;
-                 UPDATE {table} SET change_sequence = 0;"
+                 {reset}"
             ))
             .await?;
         }
