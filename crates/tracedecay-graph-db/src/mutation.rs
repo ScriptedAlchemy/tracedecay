@@ -186,11 +186,10 @@ fn apply_in_transaction(
             GraphMutation::UpsertEntity(entity) => {
                 let key = stable_key(&namespace_id, entity.identity.as_str());
                 let node = if let Some(stored) = existing.entities.get(&key) {
-                    if stored.namespace == batch.namespace
+                    if !(stored.namespace == batch.namespace
                         && stored.projection == batch.projection
-                        && stored.entity == *entity
+                        && stored.entity == *entity)
                     {
-                    } else {
                         replace_entity(session, stored, entity, batch, check)?;
                     }
                     stored.node

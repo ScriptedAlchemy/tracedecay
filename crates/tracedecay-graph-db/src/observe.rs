@@ -95,7 +95,7 @@ pub(crate) fn record_counts(
 ///
 /// `canonical_bytes` is the size of the canonical row stream the full proof
 /// hashes. A marker hit reports the byte count the earlier proof recorded, so
-/// the two gauges are directly comparable: `marker_hit` bytes are the bytes
+/// the two outcomes are directly comparable: `marker_hit` bytes are the bytes
 /// *not* re-hashed on this open.
 #[inline(always)]
 pub(crate) fn record_generation_verification(

@@ -2002,9 +2002,8 @@ struct CheckedDigestWriter<'a> {
     digest: &'a mut Sha256,
     rows: GraphRowDigestSum,
     bytes_since_check: u64,
-    /// Every byte fed to the digest, for the verify byte gauge. Counted here
-    /// rather than derived from row counts so the gauge reports the work the
-    /// proof actually did.
+    /// Every byte fed to the digest. Counted here rather than derived from row
+    /// counts so the verify outcome reports the work the proof actually did.
     total_bytes: u64,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
     failure: Option<GraphDbError>,

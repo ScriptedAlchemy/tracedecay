@@ -1047,8 +1047,7 @@ impl GraphDbRegistry {
                             (&binding, &verified_locator, &path, expected_format),
                         )?;
                         // Same-identity attach against a mounted (or still
-                        // materializing) runtime: no native open runs, so a
-                        // profile can separate these hits from full opens.
+                        // materializing) runtime: no native open runs.
                         return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
