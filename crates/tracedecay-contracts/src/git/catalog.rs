@@ -25,7 +25,7 @@ struct GitIndexCatalogSpec {
     example: &'static str,
 }
 
-const GIT_INDEX_SPECS: [GitIndexCatalogSpec; 3] = [
+const GIT_INDEX_SPECS: [GitIndexCatalogSpec; 2] = [
     GitIndexCatalogSpec {
         operation: tracedecay_domain::GitIndexTransactionOperationV1::StageHunks,
         request_schema: "schema.application.git.stage-hunks.request",
@@ -41,14 +41,6 @@ const GIT_INDEX_SPECS: [GitIndexCatalogSpec; 3] = [
         summary: "Unstage selected hunks",
         description: "Unstage only exact preview-bound Git index hunks.",
         example: "Unstage these selected hunks",
-    },
-    GitIndexCatalogSpec {
-        operation: tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex,
-        request_schema: "schema.application.git.commit-index.request",
-        result_schema: "schema.application.git.commit-index.result",
-        summary: "Commit the index",
-        description: "Commit the exact previewed index tree with fixed safeguards.",
-        example: "Commit the previewed index",
     },
 ];
 

@@ -1,10 +1,10 @@
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
+    GitBlobExpectationV1, GitCoverageV1, GitHeadStateV1, GitIndexEntryExpectationV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,
     GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    GitObjectFormatV1, GitOidV1, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
+    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
+    HunkDirectionV1, HunkRefV1, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
@@ -70,24 +70,11 @@ fn preview() -> GitIndexPreviewV1 {
 
 fn preview_input() -> GitIndexPreviewInputV1 {
     let preview = preview();
-    GitIndexPreviewInputV1::new_commit(
-        preview.preview_id,
-        preview.repository_snapshot,
-        GitIndexCommitIntentV1::new(
-            "restart-stable private commit intent\n".to_owned(),
-            GitCommitIdentityV1 {
-                name: "Preview Author".to_owned(),
-                email: "preview-author@example.com".to_owned(),
-                at: UtcMicros(1_000_000),
-            },
-            GitCommitIdentityV1 {
-                name: "Preview Committer".to_owned(),
-                email: "preview-committer@example.com".to_owned(),
-                at: UtcMicros(1_000_000),
-            },
-            GitIndexSigningPolicyV1::UnsignedPermitted,
-        )
-        .expect("private commit intent"),
+    GitIndexPreviewInputV1::new_hunk_selection(
+        preview.preview_id.clone(),
+        preview.operation,
+        preview.repository_snapshot.clone(),
+        preview.selected_hunks.clone(),
         UtcMicros(10),
         UtcMicros(30_000_010),
     )
@@ -133,33 +120,39 @@ fn preview_for(repository_id: &str, preview_id: &str, expires_at: UtcMicros) -> 
         digest('5'),
     )
     .expect("native repository snapshot");
-    let intent = GitIndexCommitIntentV1::new(
-        "sensitive commit body must remain ephemeral\n".to_owned(),
-        GitCommitIdentityV1 {
-            name: "Sensitive Author".to_owned(),
-            email: "sensitive-author@example.com".to_owned(),
-            at: UtcMicros(1_000_000),
-        },
-        GitCommitIdentityV1 {
-            name: "Sensitive Committer".to_owned(),
-            email: "sensitive-committer@example.com".to_owned(),
-            at: UtcMicros(1_000_000),
-        },
-        GitIndexSigningPolicyV1::SignatureRequired {
-            key_reference: "sensitive-signing-key".to_owned(),
-        },
-    )
-    .expect("commit intent");
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    GitIndexPreviewV1::new_with_commit_intent(
-        GitIndexPreviewId::new(preview_id).expect("preview id"),
-        GitIndexTransactionOperationV1::CommitIndex,
+    let preview_id = GitIndexPreviewId::new(preview_id).expect("preview id");
+    let hunk = HunkRefV1 {
+        repository: id::<RepositoryId>(repository_id),
+        worktree: id::<WorktreeId>("worktree.git-transaction.fixture"),
+        direction: HunkDirectionV1::WorkingTreeToIndex,
+        path: "packet.txt".to_owned(),
+        original_path: None,
+        expected_base_blob: GitBlobExpectationV1::AbsentFile,
+        expected_index_entry: GitIndexEntryExpectationV1 {
+            blob: GitBlobExpectationV1::AbsentFile,
+            mode: None,
+            unmerged_stage: None,
+        },
+        expected_worktree_blob: Some(GitBlobExpectationV1::AbsentFile),
+        expected_worktree_mode: None,
+        hunk_header: "@@ -1 +1 @@".to_owned(),
+        context_digest: digest('b'),
+        patch_digest: digest('c'),
+        selected_line_bitmap: vec![1],
+        attributes_digest: None,
+        preview_id: preview_id.as_str().to_owned(),
+        schema_version: "tracedecay.git-hunk-ref.v1".to_owned(),
+        snapshot_digest: snapshot_digest.clone(),
+    };
+    GitIndexPreviewV1::new(
+        preview_id,
+        GitIndexTransactionOperationV1::StageHunks,
         snapshot.clone(),
         snapshot_digest,
-        Vec::new(),
+        vec![hunk],
         snapshot.index.tree_id.clone(),
-        Some(&intent),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(10),
         expires_at,
@@ -212,7 +205,6 @@ fn terminal_write(
         request.preview.repository_snapshot_digest.clone(),
         request.preview.repository_snapshot.index.tree_id.clone(),
         request.preview.repository_snapshot.head.commit().cloned(),
-        None,
         outcome,
         committed_at,
     )
@@ -309,7 +301,7 @@ async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
 }
 
 #[tokio::test]
-async fn canonical_schema_persists_only_commit_intent_digest() {
+async fn canonical_schema_exposes_only_transaction_tables() {
     let database = open_database().await;
     let preview = preview();
     let store = test_store(database.registered.as_ref());
@@ -349,7 +341,7 @@ async fn canonical_schema_persists_only_commit_intent_digest() {
     );
     let mut rows = snapshot
         .query(
-            "SELECT preview_json, commit_intent_digest
+            "SELECT preview_json
              FROM git_index_preview_commitments WHERE preview_id = ?1",
             params![preview.preview_id.as_str()],
         )
@@ -361,26 +353,8 @@ async fn canonical_schema_persists_only_commit_intent_digest() {
         .expect("read preview row")
         .expect("stored preview row");
     let encoded = row.get::<String>(0).expect("preview json");
-    assert_eq!(
-        row.get::<Option<String>>(1).expect("intent digest"),
-        preview
-            .commit_intent_digest
-            .as_ref()
-            .map(ToString::to_string)
-    );
-    for secret in [
-        "sensitive commit body",
-        "Sensitive Author",
-        "sensitive-author@example.com",
-        "Sensitive Committer",
-        "sensitive-committer@example.com",
-        "sensitive-signing-key",
-    ] {
-        assert!(
-            !encoded.contains(secret),
-            "persistent preview commitment leaked {secret:?}"
-        );
-    }
+    let stored: GitIndexPreviewV1 = serde_json::from_str(&encoded).expect("stored preview decodes");
+    assert_eq!(stored, preview);
 }
 
 #[tokio::test]
@@ -617,7 +591,6 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
         None,
         preview.repository_snapshot.index.tree_id.clone(),
         preview.repository_snapshot.head.commit().cloned(),
-        None,
         GitIndexReceiptOutcomeV1::AbortedNoChange,
         UtcMicros(13),
     )
@@ -640,7 +613,6 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
         preview.repository_snapshot_digest.clone(),
         preview.repository_snapshot.index.tree_id.clone(),
         preview.repository_snapshot.head.commit().cloned(),
-        None,
         GitIndexReceiptOutcomeV1::AbortedNoChange,
         UtcMicros(13),
     )
