@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
-    production_composition_fixture, retained_envelope_payload,
+    production_composition_fixture, refusal_summary, retained_envelope_payload,
 };
 
 const REMOVED_CONTENT: &str = "Cerulean ledger stores the quay invoice under dock 17.";
@@ -67,16 +67,20 @@ fn payload(answer: ToolAnswer) -> Value {
     }
 }
 
-fn assert_protocol_error(answer: ToolAnswer, detail: &str) {
+fn assert_schema_refusal(answer: ToolAnswer, detail: &str) {
     match answer {
-        ToolAnswer::Protocol(error) => {
-            assert_eq!(error, application_invalid_request_error(TOOL, detail));
+        ToolAnswer::Problem(envelope) => {
+            assert_eq!(
+                refusal_summary(&envelope["problem"]),
+                application_invalid_request_error(detail),
+                "{envelope}"
+            );
         }
         ToolAnswer::Payload(payload) => {
-            panic!("expected a protocol error, got a payload: {payload}")
+            panic!("expected a schema refusal, got a payload: {payload}")
         }
-        ToolAnswer::Problem(problem) => {
-            panic!("expected a protocol error, got a problem: {problem}")
+        ToolAnswer::Protocol(error) => {
+            panic!("expected a schema refusal, got a JSON-RPC error: {error}")
         }
     }
 }
@@ -302,15 +306,15 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
         .server(&production.project_root)
         .expect("production fact-store MCP server");
 
-    assert_protocol_error(
+    assert_schema_refusal(
         call_tool(&server, TOOL, json!({})).await,
         MISSING_FACT_ID_DETAIL,
     );
-    assert_protocol_error(
+    assert_schema_refusal(
         call_tool(&server, TOOL, json!({"fact_id": 41})).await,
         NUMERIC_FACT_ID_DETAIL,
     );
-    assert_protocol_error(
+    assert_schema_refusal(
         call_tool(
             &server,
             TOOL,

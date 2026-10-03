@@ -2,9 +2,9 @@
 //!
 //! Every case is one `tools/call` on the production server the daemon
 //! composition mounts. The test reads the file bytes and the JSON-RPC answer
-//! the host receives. A missing parameter is `-32602`; a config refusal is
-//! `-32603`. A span miss is a tool result with `isError`, not a protocol
-//! error. `format: json` is the public argument a host sends when it wants
+//! the host receives. A missing parameter is a typed `invalid_request` tool
+//! result; a config refusal is `-32603`. A span miss is a tool result with
+//! `isError`, not a protocol error. `format: json` is the public argument a host sends when it wants
 //! the structured payload; digest fields are used only as the preview token
 //! an apply must present, never as an expected result.
 
@@ -69,6 +69,12 @@ async fn call_replace(fixture: &ProductionSourceEditFixture, arguments: Value) -
         .expect("tools/call result for tracedecay_str_replace");
     let payload = extract_first_json_content(&result);
     ToolAnswer { result, payload }
+}
+
+async fn route_refusal(fixture: &ProductionSourceEditFixture, arguments: Value) -> Value {
+    crate::support::route_refusal(
+        &serde_json::to_value(tools_call(fixture, arguments).await).expect("response"),
+    )
 }
 
 async fn protocol_error(fixture: &ProductionSourceEditFixture, arguments: Value) -> JsonRpcError {
@@ -348,7 +354,7 @@ async fn str_replace_apply_without_preview_state_is_refused() {
     let initial = b"fn price() -> u32 { 12 }\n";
     let (fixture, _dir, file) = open_file(PRICE_FILE, initial).await;
 
-    let error = protocol_error(
+    let refusal = route_refusal(
         &fixture,
         json!({
             "path": PRICE_FILE,
@@ -358,21 +364,11 @@ async fn str_replace_apply_without_preview_state_is_refused() {
     )
     .await;
 
-    assert_eq!(error.code, -32602);
     assert_eq!(
-        error.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
-    );
-    assert_eq!(
-        error.data,
-        Some(json!({
-            "tool": "tracedecay_str_replace",
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
-        }))
+        refusal,
+        crate::support::application_surface_refusal_error(
+            "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        )
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
 }
@@ -665,7 +661,7 @@ async fn str_replace_missing_old_str_is_a_parameter_error() {
     let initial = b"fn price() -> u32 { 12 }\n";
     let (fixture, _dir, file) = open_file(PRICE_FILE, initial).await;
 
-    let error = protocol_error(
+    let refusal = route_refusal(
         &fixture,
         json!({
             "path": PRICE_FILE,
@@ -675,21 +671,9 @@ async fn str_replace_missing_old_str_is_a_parameter_error() {
     )
     .await;
 
-    assert_eq!(error.code, -32602);
     assert_eq!(
-        error.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: old_str"
-    );
-    assert_eq!(
-        error.data,
-        Some(json!({
-            "tool": "tracedecay_str_replace",
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": "missing required parameter: old_str"
-        }))
+        refusal,
+        crate::support::application_surface_refusal_error("missing required parameter: old_str")
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
 }

@@ -108,11 +108,11 @@ fn assert_invalid_entity_selection(problem: &Value) {
 }
 
 fn reason_refusal(detail: &str) -> Value {
-    application_invalid_request_error("tracedecay_fact_store_reason", detail)
+    application_invalid_request_error(detail)
 }
 
 fn decode_refusal(response: &Value) -> Value {
-    response["error"].clone()
+    crate::support::route_refusal(response)
 }
 
 fn observed_hit(hit: &Value) -> Value {

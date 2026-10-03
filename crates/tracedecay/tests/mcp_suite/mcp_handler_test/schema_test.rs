@@ -32,7 +32,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_callers",
         json!({}),
-        Refusal::JsonRpc,
+        Refusal::Route,
         "missing field `node_id`",
     )
     .await;
@@ -47,7 +47,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_insert_at",
         json!({ "path": "src/lib.rs" }),
-        Refusal::JsonRpc,
+        Refusal::Route,
         "missing required parameter: anchor",
     )
     .await;
@@ -62,49 +62,49 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         (
             "tracedecay_fact_store_add",
             &["content"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `content`",
         ),
         (
             "tracedecay_fact_store_search",
             &["query"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `query`",
         ),
         (
             "tracedecay_fact_store_probe",
             &["entity"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_related",
             &["entity"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `entity`",
         ),
         (
             "tracedecay_fact_store_get",
             &["fact_id"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_update",
             &["fact_id"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_remove",
             &["fact_id"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         (
             "tracedecay_fact_store_supersede",
             &["fact_id", "superseded_by"][..],
-            Refusal::JsonRpc,
+            Refusal::Route,
             "missing field `fact_id`",
         ),
         // Generated schemas, decoded straight into a typed request struct, so
@@ -179,7 +179,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         &server,
         "tracedecay_lcm_expand",
         json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
-        Refusal::JsonRpc,
+        Refusal::Route,
         "target: missing field `kind`",
     )
     .await;
@@ -666,9 +666,9 @@ enum Refusal {
     /// Graph-tool owner: an `isError` result carrying an `invalid_request`
     /// problem record.
     Problem,
-    /// Retained, source-edit, and other application-surface handlers: a
-    /// JSON-RPC error.
-    JsonRpc,
+    /// Application-surface schema admission: a settled route refusal whose
+    /// diagnostic is `application_surface_invalid_request`.
+    Route,
 }
 
 async fn expect_real_server_missing_argument_error(
@@ -696,7 +696,18 @@ async fn expect_real_server_missing_argument_error(
             );
             problem["message"].as_str()
         }
-        Refusal::JsonRpc => response["error"]["message"].as_str(),
+        Refusal::Route => {
+            let refusal = route_refusal(&response);
+            assert_eq!(
+                (&refusal["kind"], &refusal["diagnostic"]["code"]),
+                (
+                    &json!("invalid_request"),
+                    &json!("application_surface_invalid_request")
+                ),
+                "{tool_name}: {response}"
+            );
+            response["result"]["structuredContent"]["problem"]["diagnostic"]["message"].as_str()
+        }
     }
     .unwrap_or_else(|| panic!("{tool_name} should reject missing arguments: {response}"));
     assert!(

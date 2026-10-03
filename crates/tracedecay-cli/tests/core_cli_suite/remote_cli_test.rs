@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
     ResolvedScope,
@@ -19,7 +20,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, ManifestDigest,
     ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
-    RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId, canonical_sha256,
+    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 
 use crate::common::{
@@ -57,8 +59,19 @@ impl Drop for RemoteDaemon {
     }
 }
 
-#[test]
-fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
+struct RemoteCliFixture {
+    _home: TempDir,
+    _project: TempDir,
+    _cert_dir: TempDir,
+    _daemon: RemoteDaemon,
+    home_path: PathBuf,
+    project_path: PathBuf,
+    remote_endpoint: std::net::SocketAddr,
+    authority: Value,
+    trust_root_path: PathBuf,
+}
+
+fn remote_cli_fixture() -> RemoteCliFixture {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
@@ -115,13 +128,29 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
         .expect("parse remote endpoint");
 
     initialize_tracedecay_cli_project(&home_path, &project_path);
+    let trust_root_path =
+        write_bytes_fixture(&home_path, "root.crt.pem", REMOTE_TLS_ROOT_CERTIFICATE);
 
-    let context = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
+    RemoteCliFixture {
+        _home: home,
+        _project: project,
+        _cert_dir: cert_dir,
+        _daemon: daemon,
+        home_path,
+        project_path,
+        remote_endpoint,
+        authority,
+        trust_root_path,
+    }
+}
+
+fn fixture_project_context(fixture: &RemoteCliFixture) -> Value {
+    let context = tracedecay_command_with_home(&fixture.home_path)
+        .current_dir(&fixture.project_path)
         .args([
             "projects",
             "context",
-            &project_path.to_string_lossy(),
+            &fixture.project_path.to_string_lossy(),
             "--json",
         ])
         .output()
@@ -131,22 +160,18 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
         "projects context failed: {}",
         String::from_utf8_lossy(&context.stderr)
     );
-    let context: Value = serde_json::from_slice(&context.stdout).unwrap();
-    let project_id = context["project"]["project_id"]
-        .as_str()
-        .expect("project id");
-    let local_endpoint = authority["http_application_endpoint"]
+    serde_json::from_slice(&context.stdout).unwrap()
+}
+
+fn provision_remote_node(fixture: &RemoteCliFixture, grant: &EnrollmentGrantV1) {
+    let local_endpoint = fixture.authority["http_application_endpoint"]
         .as_str()
         .expect("local endpoint");
-    let local_token = authority["auth_token"].as_str().expect("auth token");
+    let local_token = fixture.authority["auth_token"]
+        .as_str()
+        .expect("auth token");
     let local_base = format!("http://{local_endpoint}");
-
-    let grant_credential = *b"0123456789abcdef0123456789abcdef";
-    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
-    let brain_id = BrainId::new(authority["brain_id"].as_str().expect("brain id")).unwrap();
-    let node_id = BrainNodeId::new("node.remote-cli-enroll").unwrap();
-    let grant = remote_grant(brain_id, node_id, project_id, &grant_credential);
-    let admission = remote_admission(&grant);
+    let admission = remote_admission(grant);
     let provisioned = reqwest::blocking::Client::new()
         .post(format!("{local_base}/remote-nodes/provision"))
         .bearer_auth(local_token)
@@ -160,23 +185,23 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
         "{}",
         provisioned.text().unwrap_or_default()
     );
+}
 
-    let request = enrollment_request(&grant);
-    let request_path = write_json_fixture(&home_path, "enroll-request.json", &request);
-    let grant_path = write_bytes_fixture(&home_path, "grant.bin", &grant_credential);
-    let enroll_path = write_bytes_fixture(&home_path, "enroll.bin", &enrollment_credential);
-    let trust_root_path =
-        write_bytes_fixture(&home_path, "root.crt.pem", REMOTE_TLS_ROOT_CERTIFICATE);
-
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
+fn run_remote_enroll(
+    fixture: &RemoteCliFixture,
+    grant_path: &Path,
+    enroll_path: &Path,
+    request_path: &Path,
+) -> std::process::Output {
+    tracedecay_command_with_home(&fixture.home_path)
+        .current_dir(&fixture.project_path)
         .args([
             "remote",
             "enroll",
             "--endpoint",
-            &format!("https://{remote_endpoint}/remote/"),
+            &format!("https://{}/remote/", fixture.remote_endpoint),
             "--trust-root-file",
-            &trust_root_path.to_string_lossy(),
+            &fixture.trust_root_path.to_string_lossy(),
             "--credential-file",
             &grant_path.to_string_lossy(),
             "--enrollment-credential-file",
@@ -186,7 +211,30 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
             "--json",
         ])
         .output()
-        .expect("tracedecay remote enroll");
+        .expect("tracedecay remote enroll")
+}
+
+#[test]
+fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
+    let fixture = remote_cli_fixture();
+    let context = fixture_project_context(&fixture);
+    let project_id = context["project"]["project_id"]
+        .as_str()
+        .expect("project id");
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
+    let node_id = BrainNodeId::new("node.remote-cli-enroll").unwrap();
+    let grant = remote_grant(brain_id, node_id, project_id, &grant_credential);
+    provision_remote_node(&fixture, &grant);
+
+    let request = enrollment_request(&grant);
+    let request_path = write_json_fixture(&fixture.home_path, "enroll-request.json", &request);
+    let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
+    let enroll_path = write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
+
+    let output = run_remote_enroll(&fixture, &grant_path, &enroll_path, &request_path);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -209,6 +257,112 @@ fn remote_enroll_runs_off_the_async_runtime_and_returns_a_protocol_response() {
     assert!(
         response.get("result").is_some(),
         "enrollment must return a canonical protocol response: {response}"
+    );
+}
+
+#[test]
+fn remote_failover_json_refusal_prints_exactly_one_protocol_document() {
+    let fixture = remote_cli_fixture();
+    let context = fixture_project_context(&fixture);
+    let project_id = context["project"]["project_id"]
+        .as_str()
+        .expect("project id");
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
+    let node_id = BrainNodeId::new("node.remote-cli-failover").unwrap();
+    let mut grant = remote_grant(
+        brain_id.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    provision_remote_node(&fixture, &grant);
+
+    let request = enrollment_request(&grant);
+    let request_path = write_json_fixture(&fixture.home_path, "enroll-request.json", &request);
+    let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
+    let enroll_path = write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
+
+    let enrolled = run_remote_enroll(&fixture, &grant_path, &enroll_path, &request_path);
+    assert_eq!(
+        enrolled.status.code(),
+        Some(0),
+        "remote enroll must succeed before failover refusal\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&enrolled.stdout),
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+
+    let sent_at = now_micros();
+    let failover_request = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-cli-failover").unwrap(),
+        brain_id,
+        node_id,
+        1,
+        Some(
+            serde_json::from_value::<RemoteWriterFenceV1>(json!({
+                "brain_id": fixture.authority["brain_id"].as_str().expect("brain id"),
+                "shard_id": "shard.remote-cli-failover",
+                "generation_id": "generation.remote-cli-failover",
+                "placement_revision": 1,
+                "authority_epoch": 1,
+                "authority_node_id": "node.remote-cli-previous-writer"
+            }))
+            .unwrap(),
+        ),
+        sent_at,
+        PromotionConfirmationV1 {
+            preview_id: "promotion.remote-cli-failover".to_owned(),
+            expected_authority_epoch: 1,
+            expected_placement_revision: 1,
+            expires_at_micros: sent_at.0.saturating_add(60_000_000),
+        },
+    )
+    .unwrap();
+    let failover_request_path = write_json_fixture(
+        &fixture.home_path,
+        "failover-request.json",
+        &failover_request,
+    );
+
+    let output = tracedecay_command_with_home(&fixture.home_path)
+        .current_dir(&fixture.project_path)
+        .args([
+            "remote",
+            "failover",
+            "--endpoint",
+            &format!("https://{}/remote/", fixture.remote_endpoint),
+            "--trust-root-file",
+            &fixture.trust_root_path.to_string_lossy(),
+            "--credential-file",
+            &enroll_path.to_string_lossy(),
+            "--request-file",
+            &failover_request_path.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("tracedecay remote failover");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "remote failover --json refusal must be one JSON document ({error}):\nstdout:\n{}\nstderr:\n{}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let problem = &document["result"]["Err"]["problem"];
+    assert_eq!(
+        problem["code"],
+        json!("remote.writer_authority_unpublished")
+    );
+    assert_eq!(problem["kind"], json!("unavailable"));
+    assert_eq!(
+        problem["message"],
+        json!("No writer authority has been published for this Remote Brain")
     );
 }
 

@@ -9,8 +9,8 @@
 use crate::support::{
     activate_test_temporal_generation, application_invalid_request_error, extract_real_server_text,
     handle_real_server_tool_call, handle_real_server_tool_call_raw, lcm_raw_store_id,
-    open_active_project_session_db, real_mcp_server, seed_temporal_lcm_session_message,
-    setup_empty_project,
+    open_active_project_session_db, real_mcp_server, route_refusal,
+    seed_temporal_lcm_session_message, setup_empty_project,
 };
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
@@ -251,8 +251,8 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     )
     .await;
     assert_eq!(
-        missing_target["error"],
-        application_invalid_request_error("tracedecay_lcm_expand", "missing field `target`"),
+        route_refusal(&missing_target),
+        application_invalid_request_error("missing field `target`"),
         "{missing_target}"
     );
 
@@ -268,9 +268,8 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     )
     .await;
     assert_eq!(
-        unknown_field["error"],
+        route_refusal(&unknown_field),
         application_invalid_request_error(
-            "tracedecay_lcm_expand",
             "not_a_field: unknown field `not_a_field`, expected one of `provider`, \
              `session_id`, `target`, `content_offset`, `content_limit`, `source_limit`, `cursor`"
         ),

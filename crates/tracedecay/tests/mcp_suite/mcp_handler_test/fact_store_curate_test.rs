@@ -16,6 +16,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+    route_refusal,
 };
 
 const UNKNOWN_FIELD_DETAIL: &str = "operations: unknown field `operations`, expected `fact_review_limit` or `min_confidence_millionths`";
@@ -167,11 +168,10 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
     )
     .await;
     assert_eq!(
-        forbidden["error"],
-        application_invalid_request_error("tracedecay_fact_store_curate", UNKNOWN_FIELD_DETAIL),
+        route_refusal(&forbidden),
+        application_invalid_request_error(UNKNOWN_FIELD_DETAIL),
         "{forbidden}"
     );
-    assert!(forbidden["result"].is_null(), "{forbidden}");
 
     assert_eq!(
         application_run_ids(&dashboard_root),

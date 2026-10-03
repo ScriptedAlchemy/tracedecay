@@ -452,37 +452,30 @@ mod tests {
             "RMCP success must preserve the real handler's text content",
         );
 
-        let handler_error = fixture
-            .client
-            .call_tool(
-                CallToolRequestParams::new("tracedecay_not_a_tool")
-                    .with_arguments(serde_json::Map::new()),
-            )
-            .await
-            .expect_err("unknown tool must be a JSON-RPC error");
-        fixture
-            .assert_last_response_matches_raw_dispatch(false)
-            .await;
-        assert_eq!(
-            fixture.last_response()["error"],
-            json!({
-                "code": -32602,
-                "message": "tool project route failed: reason_code=unknown_tool retryable=false: unknown tool: tracedecay_not_a_tool",
-                "data": {
-                    "tool": "tracedecay_not_a_tool",
-                    "code": "unknown_tool",
-                    "reason_code": "unknown_tool",
-                    "kind": "invalid_request",
-                    "retryable": false,
-                    "detail": "unknown tool: tracedecay_not_a_tool",
-                },
-            }),
-            "an unknown tool is a non-retryable invalid-params refusal on the wire",
-        );
-        assert!(
-            handler_error.to_string().contains("unknown tool"),
-            "typed rmcp client must receive the handler error",
-        );
+        for (tool, arguments, code) in [
+            ("tracedecay_not_a_tool", json!({}), "unknown_tool"),
+            (
+                "tracedecay_health_read",
+                json!({"surprise": true}),
+                "application_surface_invalid_request",
+            ),
+        ] {
+            fixture
+                .client
+                .call_tool(
+                    CallToolRequestParams::new(tool)
+                        .with_arguments(arguments.as_object().cloned().expect("object arguments")),
+                )
+                .await
+                .expect("a settled route refusal is a completed tool result");
+            let response = fixture.last_response();
+            assert_eq!(response.get("error"), None, "{response}");
+            assert_eq!(response["result"]["isError"], json!(true), "{response}");
+            let problem = &response["result"]["structuredContent"]["problem"];
+            assert_eq!(problem["kind"], json!("invalid_request"), "{response}");
+            assert_eq!(problem["retryable"], json!(false), "{response}");
+            assert_eq!(problem["diagnostic"]["code"], json!(code), "{response}");
+        }
 
         fixture
             .client
