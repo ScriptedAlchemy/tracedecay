@@ -1042,6 +1042,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 label = "query.artifact.preopened_historical_source"
             )),
             publication_binding: None,
+            graph_predecessor: Arc::default(),
         }
     }
 
@@ -2706,6 +2707,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation_file: pointer.generation_file,
                     state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
                 })),
+                graph_predecessor: Arc::default(),
             },
         ))
     }
@@ -3688,6 +3690,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     label = "query.artifact.preopened_published_source"
                 )),
                 publication_binding: None,
+                graph_predecessor: Arc::default(),
             });
         LatestCompleteCodeIndexV1 {
             generation,

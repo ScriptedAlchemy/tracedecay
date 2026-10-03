@@ -10,8 +10,9 @@ use tracedecay_runtime_core::db::engine::{
 
 use super::*;
 use crate::runtime::git_correlation::{
-    GitEvidenceBatch, GitEvidencePass, GitEvidenceWriter, converge_git_evidence_pass,
-    ensure_git_correlation_receipt_schema_in_transaction, open_git_evidence_view, read_meta_value,
+    GIT_HISTORY_SEQUENCE_FRONTIER_KEY, GitEvidenceBatch, GitEvidencePass, GitEvidenceWriter,
+    converge_git_evidence_pass, ensure_git_correlation_receipt_schema_in_transaction,
+    open_git_evidence_view, read_meta_value,
 };
 
 impl GitCorrelationWriteTxn for Transaction {
@@ -222,6 +223,7 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
                 PRIMARY KEY(provider, session_id)
             );
             CREATE TABLE lcm_raw_messages (
+                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -240,7 +242,23 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
         )
         .await
         .unwrap();
+    touch(&store, "session-1").await;
     store
+}
+
+/// Imports one more message for `session_id`, moving it past the history
+/// frontier; returns the session's new change sequence.
+async fn touch(store: &TestStore, session_id: &str) -> i64 {
+    store
+        .connection
+        .execute(
+            "INSERT INTO lcm_raw_messages(provider, message_id, session_id)
+             VALUES ('codex', lower(hex(randomblob(16))), ?1)",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    scalar(store, "SELECT MAX(store_id) FROM lcm_raw_messages").await
 }
 
 /// The evidence rows, the attribution mark, and the history frontier commit
@@ -253,12 +271,12 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
     let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
     store.fail_next_write();
 
-    let failed = converge_git_evidence_pass(&store, &SystemGit)
+    let failed = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap_err();
     assert!(matches!(failed, GitCorrelationError::Db(_)));
     assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
         None,
@@ -272,7 +290,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
         "a failed pass must not leave evidence rows"
     );
 
-    let retried = converge_git_evidence_pass(&store, &SystemGit)
+    let retried = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(retried.later_failure, None);
@@ -282,7 +300,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
     assert_eq!(
         retried.pass.frontier,
         GitHistoryIndexFrontier {
-            activity_timestamp: i64::MAX,
+            change_sequence: 1,
             source_rowid: 1,
         }
     );
@@ -292,7 +310,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
         .expect("new evidence installs a generation");
     assert_eq!(installed.sequence, 1);
 
-    let settled = converge_git_evidence_pass(&store, &SystemGit)
+    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(settled.pass.backfill.sessions_scanned, 0);
@@ -324,7 +342,7 @@ async fn never_recorded_evidence_converges_as_a_typed_no_op() {
         .await
         .unwrap();
 
-    let outcome = converge_git_evidence_pass(&store, &SystemGit)
+    let outcome = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(outcome.later_failure, None);
@@ -333,7 +351,7 @@ async fn never_recorded_evidence_converges_as_a_typed_no_op() {
         GitEvidencePass {
             backfill: BackfillStats::default(),
             frontier: GitHistoryIndexFrontier {
-                activity_timestamp: 0,
+                change_sequence: 0,
                 source_rowid: 0,
             },
             generation: None,
@@ -416,7 +434,7 @@ async fn convergence_permanent_exclusion_advances_frontier() {
     )
     .await;
 
-    let excluded = converge_git_evidence_pass(&store, &SystemGit)
+    let excluded = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap()
         .pass;
@@ -425,10 +443,10 @@ async fn convergence_permanent_exclusion_advances_frontier() {
     assert_eq!(excluded.backfill.skipped_not_worktree, 1);
     assert!(excluded.backfill.frontier_advanced);
     assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(i64::MAX)
+        Some(1)
     );
 }
 
@@ -449,6 +467,7 @@ fn options(dry_run: bool) -> BackfillOptions {
         merge_gap_secs: 0,
         max_commits_per_repo: 100,
         dry_run,
+        project_root: None,
     }
 }
 
@@ -468,7 +487,7 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     )
     .await
     .unwrap();
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         1
@@ -484,7 +503,7 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, i64::MAX);
+    assert_eq!(completed.frontier.change_sequence, 1);
     assert_eq!(
         scalar(&reopened, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -519,17 +538,19 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         calls: AtomicUsize::new(0),
         fail_on: usize::MAX,
     };
-    let failed = converge_git_evidence_pass(&store, &source).await.unwrap();
+    let failed = converge_git_evidence_pass(&store, &source, None)
+        .await
+        .unwrap();
     assert_eq!(failed.pass.backfill.skipped_git_error, 1);
     assert!(!failed.pass.backfill.frontier_advanced);
     assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
         None
     );
 
-    let settled = converge_git_evidence_pass(&store, &SystemGit)
+    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(settled.later_failure, None);
@@ -538,12 +559,12 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
     assert_eq!(settled.pass.backfill.spans_written, 0);
     assert_eq!(settled.pass.backfill.commits_attributed, 0);
     assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
         Some(1)
     );
-    let repeated = converge_git_evidence_pass(&store, &SystemGit)
+    let repeated = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(repeated.pass.backfill.sessions_scanned, 0);
@@ -584,7 +605,8 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         .execute("UPDATE sessions SET ended_at = ?1", params![timestamp])
         .await
         .unwrap();
-    let settled = converge_git_evidence_pass(&store, &SystemGit)
+    let sequence = touch(&store, "session-1").await;
+    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
         .unwrap();
     assert_eq!(settled.later_failure, None);
@@ -593,10 +615,10 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
     assert!(settled.pass.backfill.spans_written > 0);
     assert!(settled.pass.backfill.commits_attributed > 0);
     assert_eq!(
-        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+        read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(timestamp)
+        Some(sequence)
     );
 }
 
@@ -633,7 +655,7 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
         failed.interruption,
         Some(BoundedBackfillInterruption::SourceUnavailable)
     );
-    assert_eq!(failed.frontier.activity_timestamp, -1);
+    assert_eq!(failed.frontier.change_sequence, 0);
     let completed = run_bounded_history_index_page(
         &store,
         &options(false),
@@ -643,7 +665,7 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
     .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.remaining_sessions, 0);
-    assert_eq!(completed.frontier.activity_timestamp, 1);
+    assert_eq!(completed.frontier.change_sequence, 1);
     assert_eq!(completed.stats.spans_written, 0);
     assert_eq!(completed.stats.commits_attributed, 0);
     assert_eq!(
@@ -661,6 +683,7 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
         .execute("UPDATE sessions SET ended_at = ?1", params![committed_at])
         .await
         .unwrap();
+    let sequence = touch(&store, "session-1").await;
     let completed = run_bounded_history_index_page(
         &store,
         &options(false),
@@ -669,7 +692,7 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, committed_at);
+    assert_eq!(completed.frontier.change_sequence, sequence);
     assert_eq!(completed.stats.commits_attributed, 1);
     assert!(completed.stats.spans_written > 0);
 }
@@ -726,7 +749,7 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     )
     .await
     .unwrap();
-    assert_eq!(reset.frontier.activity_timestamp, -1);
+    assert_eq!(reset.frontier.change_sequence, 0);
     for table in [
         "git_history_index_progress",
         "git_history_index_staged_spans",
@@ -755,7 +778,7 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, i64::MAX);
+    assert_eq!(completed.frontier.change_sequence, 1);
     assert!(completed.stats.spans_written > 0);
 }
 
@@ -857,7 +880,7 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     .unwrap();
 
     assert_eq!(restarted.interruption, None);
-    assert_eq!(restarted.frontier.activity_timestamp, -1);
+    assert_eq!(restarted.frontier.change_sequence, 0);
     for table in [
         "git_history_index_progress",
         "git_history_index_staged_spans",
@@ -899,7 +922,7 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
         partial.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
     );
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_seen").await,
         i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES).unwrap()
@@ -912,7 +935,7 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.activity_timestamp, timestamp);
+    assert_eq!(completed.frontier.change_sequence, 1);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -1058,7 +1081,7 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
 }
 
 #[tokio::test]
-async fn activity_change_finishes_sealed_candidate_before_newer_row() {
+async fn new_messages_finish_sealed_candidate_before_newer_row() {
     let repository = repository_fixture();
     let old_activity = head_commit_time(repository.path());
     let new_activity = old_activity.checked_add(1).unwrap();
@@ -1083,14 +1106,14 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(partial.frontier.activity_timestamp, -1);
+    assert_eq!(partial.frontier.change_sequence, 0);
     assert_eq!(
         scalar(
             &store,
-            "SELECT activity_timestamp FROM git_history_index_progress"
+            "SELECT change_sequence FROM git_history_index_progress"
         )
         .await,
-        old_activity
+        1
     );
 
     store
@@ -1101,6 +1124,7 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
         )
         .await
         .unwrap();
+    let newer_sequence = touch(&store, "session-1").await;
     let resumed = run_bounded_history_index_page(
         &store,
         &options(false),
@@ -1108,7 +1132,7 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(resumed.frontier.activity_timestamp, old_activity);
+    assert_eq!(resumed.frontier.change_sequence, 1);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -1121,7 +1145,7 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(newer.frontier.activity_timestamp, new_activity);
+    assert_eq!(newer.frontier.change_sequence, newer_sequence);
 }
 
 #[tokio::test]
@@ -1152,6 +1176,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         )
         .await
         .unwrap();
+    let valid_sequence = touch(&store, "session-2").await;
     let reflog = malformed_repository.path().join(".git/logs/HEAD");
     let valid_reflog = std::fs::read(&reflog).unwrap();
     let mut truncated_reflog = valid_reflog.clone();
@@ -1168,7 +1193,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     .await
     .unwrap();
     assert_eq!(outcome.interruption, None);
-    assert_eq!(outcome.frontier.activity_timestamp, valid_activity);
+    assert_eq!(outcome.frontier.change_sequence, valid_sequence);
     assert_eq!(outcome.stats.skipped_git_error, 1);
     assert_eq!(outcome.unresolved_failures, 1);
     assert_eq!(outcome.remaining_sessions, 0);
@@ -1194,6 +1219,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         )
         .await
         .unwrap();
+    let recovered_sequence = touch(&store, "session-1").await;
     let recovered = run_bounded_history_index_page(
         &store,
         &page_options,
@@ -1201,7 +1227,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     )
     .await
     .unwrap();
-    assert_eq!(recovered.frontier.activity_timestamp, recovered_activity);
+    assert_eq!(recovered.frontier.change_sequence, recovered_sequence);
     assert_eq!(recovered.unresolved_failures, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_failures").await,
