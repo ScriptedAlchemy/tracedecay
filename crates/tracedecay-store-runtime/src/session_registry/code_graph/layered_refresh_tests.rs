@@ -849,7 +849,8 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
     );
 
     // The same child published cold in a fresh profile layers over nothing:
-    // a carry from the base declines, and the scan serves the same catalog.
+    // a carry from the base declines, and the scan serves the same lookups
+    // with no layer to carry the next refresh from.
     let (_cold_scope, cold_registry, cold_database) =
         fixture.open_profile("profile-cold", 53).await;
     let cold_runtime = source
@@ -872,7 +873,11 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
     );
     assert_eq!(
         cold_child_store.interactive_catalog_differences(&scanned_child),
-        Some(Vec::new())
+        Some(vec!["layer"])
+    );
+    assert_eq!(
+        catalog_reads(&cold_child_store, &child_generation),
+        catalog_reads(&scanned_child, &child_generation)
     );
     drop((
         base_runtime,
