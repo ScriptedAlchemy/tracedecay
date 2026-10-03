@@ -34,7 +34,6 @@ mod observability_rollup;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
-mod observe;
 mod registered_maintenance;
 mod workflow_adapter;
 pub use registered_maintenance::{
