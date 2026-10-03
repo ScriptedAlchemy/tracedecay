@@ -5,8 +5,6 @@
 //! typed set, never an unbounded message.
 
 use axum::http::StatusCode;
-
-use axum::http::header;
 use axum::response::Response;
 use tracedecay_api::read_model::DashboardFreshnessStateV1;
 
@@ -39,21 +37,17 @@ pub(crate) fn record_status_class(status: StatusCode) {
 
 #[inline(always)]
 pub(crate) fn observe_response(response: &Response) {
-    {
-        record_status_class(response.status());
-    }
+    record_status_class(response.status());
 }
 
 #[inline(always)]
 pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
-    {
-        let class = match state {
-            DashboardFreshnessStateV1::Fresh => "fresh",
-            DashboardFreshnessStateV1::Stale => "stale",
-            DashboardFreshnessStateV1::Unknown => "unknown",
-            DashboardFreshnessStateV1::Absent => "absent",
-            DashboardFreshnessStateV1::Unsupported => "unsupported",
-        };
-        tracing::trace!(name: "dashboard_api.freshness.state", value = ?class);
-    }
+    let class = match state {
+        DashboardFreshnessStateV1::Fresh => "fresh",
+        DashboardFreshnessStateV1::Stale => "stale",
+        DashboardFreshnessStateV1::Unknown => "unknown",
+        DashboardFreshnessStateV1::Absent => "absent",
+        DashboardFreshnessStateV1::Unsupported => "unsupported",
+    };
+    tracing::trace!(name: "dashboard_api.freshness.state", value = ?class);
 }
