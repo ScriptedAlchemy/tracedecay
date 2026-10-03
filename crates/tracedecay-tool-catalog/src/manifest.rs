@@ -132,7 +132,6 @@ pub enum EffectClass {
     SourceEdit,
     GitIndexStage,
     GitIndexUnstage,
-    GitIndexCommit,
     ConfigurationWrite,
     Administrative,
     /// Runs a child process in the project (e.g. the project's test runner).

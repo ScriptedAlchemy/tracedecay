@@ -36,7 +36,6 @@ pub async fn ensure_git_index_transaction_schema(
                 worktree_id TEXT,
                 operation TEXT NOT NULL,
                 repository_snapshot_digest TEXT NOT NULL,
-                commit_intent_digest TEXT,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 preview_json TEXT NOT NULL

@@ -62,7 +62,6 @@ pub fn project_owner_capabilities() -> Result<BTreeSet<CapabilityId>, Applicatio
         "capability.application.source-edit.str-replace",
         "capability.git.stage-hunks",
         "capability.git.unstage-hunks",
-        "capability.git.commit-index",
     ] {
         capabilities.insert(CapabilityId::new(capability.to_owned()).map_err(|_| {
             ApplicationContractError::Inconsistent {
