@@ -937,6 +937,108 @@ async fn appended_opencode_messages_are_admitted_without_repeating_earlier_ones(
 }
 
 #[tokio::test]
+async fn orphaned_session_rows_cannot_stall_message_or_part_frontiers() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let admission = MemoryHostAdmission::default();
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    // More than a full page of messages and parts whose session row is gone,
+    // followed by one new message and one late part on a live session.
+    let writer = Connection::open(&database).unwrap();
+    for index in 0..super::MAX_MESSAGES_PER_PAGE * 2 {
+        let id = format!("msg_orphan_{index:03}");
+        writer
+            .execute(
+                "INSERT INTO message(id, session_id, time_created, data)
+                 VALUES (?1, 'ses_deleted', 2, ?2)",
+                rusqlite::params![
+                    id,
+                    json!({"role": "user", "time": {"created": 2}}).to_string()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_deleted', ?3)",
+                rusqlite::params![
+                    format!("part_{id}"),
+                    id,
+                    json!({"type": "text", "text": "orphan"}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    writer
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_after_orphans', 'ses_project', 3, ?1)",
+            [json!({"role": "user", "time": {"created": 3}}).to_string()],
+        )
+        .unwrap();
+    for (id, message_id, text) in [
+        (
+            "part_after_orphans",
+            "msg_after_orphans",
+            "after-orphans-message",
+        ),
+        (
+            "part_late_after_orphans",
+            "msg_ses_project",
+            "after-orphans-part",
+        ),
+    ] {
+        writer
+            .execute(
+                "INSERT INTO part(id, message_id, session_id, data)
+                 VALUES (?1, ?2, 'ses_project', ?3)",
+                rusqlite::params![
+                    id,
+                    message_id,
+                    json!({"type": "text", "text": text}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(writer);
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let payloads = admission
+        .observations()
+        .iter()
+        .map(|stored| stored.observation().payload().to_string())
+        .collect::<Vec<_>>();
+    for expected in ["after-orphans-message", "after-orphans-part"] {
+        assert!(
+            payloads.iter().any(|payload| payload.contains(expected)),
+            "{expected} must be admitted past the orphaned rows"
+        );
+    }
+    assert!(
+        !payloads
+            .iter()
+            .any(|payload| payload.contains("msg_orphan_"))
+    );
+}
+
+#[tokio::test]
 async fn missing_opencode_database_names_its_coverage_reason() {
     let temp = tempfile::TempDir::new().unwrap();
     let source = OpenCodeSource::with_database_for_project(

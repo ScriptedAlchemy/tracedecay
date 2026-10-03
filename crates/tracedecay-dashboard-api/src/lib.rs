@@ -503,6 +503,9 @@ pub struct DashboardState {
     /// configuration inside HTTP adapters.
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     pub(crate) delivery_settlements: Arc<events_delivery::DashboardDeliverySettlementRegistryV1>,
+    /// Shared registry/storage source poll for `/api/events` streams. Clones
+    /// share one poller; the first stream starts it.
+    pub event_source_poll: events_api::SharedSourcePoll,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -979,6 +982,7 @@ async fn build_state_inner(
         remote_operational_status_reader: None,
         application_invocation_executor,
         delivery_settlements,
+        event_source_poll: events_api::SharedSourcePoll::default(),
     };
     state.retain_admitted_authorities(
         code_diagnostics_authority,
@@ -2794,6 +2798,7 @@ mod authority_tests {
                 delivery_settlements: Arc::new(
                     events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
                 ),
+                event_source_poll: events_api::SharedSourcePoll::default(),
             };
             Self {
                 state,

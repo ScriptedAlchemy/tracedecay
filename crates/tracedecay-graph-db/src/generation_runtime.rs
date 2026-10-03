@@ -285,7 +285,11 @@ enum GenerationRetirementPageKind {
 
 impl GraphDb {
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    #[hotpath::measure(label = "graph_db.generation.verify_in_place", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.generation.verify_in_place",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn verify_generation_in_place(
         &self,
         manifest: &GraphGenerationManifest,
@@ -322,7 +326,11 @@ impl GraphDb {
     /// which generation is served and it cannot make a wrong digest pass.
     /// Corruption remains a typed failure from the full proof: this returns
     /// `Err` exactly where the full proof would have.
-    #[hotpath::measure(label = "graph_db.generation.verify_activated", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.generation.verify_activated",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn verify_activated_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -337,7 +345,7 @@ impl GraphDb {
             // Carry the inherited proof into this open's published set, so a
             // daemon that only ever serves reads does not drop it at close.
             self.inner.markers.record_fresh(&locator);
-            crate::hotpath_observe::record_generation_verification(
+            crate::observe::record_generation_verification(
                 GenerationVerification::VerifiedFresh,
                 canonical_bytes,
             );
@@ -351,14 +359,18 @@ impl GraphDb {
         self.inner
             .markers
             .record_proven(&locator, verified.as_str(), canonical_bytes);
-        crate::hotpath_observe::record_generation_verification(
+        crate::observe::record_generation_verification(
             GenerationVerification::Reverified,
             canonical_bytes,
         );
         Ok(verified)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.verify_existing", impl_type = "GraphDb")]
+    #[tracing::instrument(
+        name = "graph_db.generation.verify_existing",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn verify_existing_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -403,7 +415,7 @@ impl GraphDb {
             verified.as_str(),
             canonical_bytes,
         );
-        crate::hotpath_observe::record_generation_verification(
+        crate::observe::record_generation_verification(
             GenerationVerification::Reverified,
             canonical_bytes,
         );
@@ -472,9 +484,10 @@ impl GraphDb {
     /// weakening the recovered-digest invariant. Dependency-bearing
     /// generations and configurations without an installed sealed artifact
     /// retain staging and the original proof path.
-    #[hotpath::measure(
-        label = "graph_db.generation.publish.verify_proof",
-        impl_type = "GraphDb"
+    #[tracing::instrument(
+        name = "graph_db.generation.publish.verify_proof",
+        level = "trace",
+        skip_all
     )]
     pub(crate) fn verify_generation_for_publication(
         &self,
@@ -506,7 +519,7 @@ impl GraphDb {
             // Carry the inherited proof into this open's published set, so a
             // daemon that only serves reads does not drop it at close.
             self.inner.markers.record_fresh(&locator);
-            crate::hotpath_observe::record_generation_verification(
+            crate::observe::record_generation_verification(
                 GenerationVerification::VerifiedFresh,
                 canonical_bytes,
             );
@@ -576,7 +589,7 @@ impl GraphDb {
     /// caller is about to close, reopen, and rebuild the in-RAM store -- the
     /// overlap that made publication the peak-RSS moment. Every later stage
     /// reads only the identity, which the caller keeps.
-    #[hotpath::measure(label = "graph_db.generation.stage", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.stage", level = "trace", skip_all)]
     pub(crate) fn apply_generation_unverified_with_digest_observed(
         &self,
         manifest: Arc<GraphGenerationManifest>,
@@ -613,15 +626,13 @@ impl GraphDb {
         let pages = generation_stage_pages(&manifest)?;
         context.replay_every_page = self
             .generation_stage_release_interrupted(&identity, expected, &context, &pages, check)?;
-        #[cfg(feature = "hotpath")]
+
         {
             let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
             let (entities, relations) = manifest.row_counts();
-            crate::hotpath_observe::record_counts(entities, relations, 0, generation_bytes);
+            crate::observe::record_counts(entities, relations, 0, generation_bytes);
         }
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Staged,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Staged);
         let plan = GenerationStagePlan {
             identity: &identity,
             expected,
@@ -745,7 +756,7 @@ impl GraphDb {
 
     /// Constructs page N+1 while page N holds the exclusive apply gate.
     /// Receipted pages skip construct so wedge-retry replay stays a peek.
-    #[hotpath::measure(label = "graph_db.generation.page_pipeline", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.page_pipeline", level = "trace", skip_all)]
     #[allow(clippy::too_many_arguments)]
     fn stage_generation_pages(
         &self,
@@ -828,9 +839,10 @@ impl GraphDb {
     /// of cloning them. Only the current prepared batch and one bounded
     /// lookahead batch own row payloads; all later rows remain in the source
     /// iterators and every committed page drops before its successor applies.
-    #[hotpath::measure(
-        label = "graph_db.generation.page_pipeline_owned",
-        impl_type = "GraphDb"
+    #[tracing::instrument(
+        name = "graph_db.generation.page_pipeline_owned",
+        level = "trace",
+        skip_all
     )]
     fn stage_owned_generation_pages(
         &self,
@@ -1038,9 +1050,10 @@ impl GraphDb {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(
-        label = "graph_db.generation.page_apply_prepared",
-        impl_type = "GraphDb"
+    #[tracing::instrument(
+        name = "graph_db.generation.page_apply_prepared",
+        level = "trace",
+        skip_all
     )]
     fn apply_prepared_generation_stage_page(
         &self,
@@ -1053,7 +1066,7 @@ impl GraphDb {
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
-        hotpath::gauge!("graph_db.generation.page_apply.bytes").set(page.live_bytes() as f64);
+        metrics::gauge!("graph_db.generation.page_apply.bytes").set(page.live_bytes() as f64);
         let (idempotency_key, input_digest) =
             generation_stage_page_receipt(identity, expected, page)?;
         self.run_gated_batch(
@@ -1168,7 +1181,7 @@ impl GraphDb {
     /// Binds the dependency metadata in one empty batch, after every page
     /// receipt is durable. Reads only the identity, so the staged rows are
     /// already released by the time this runs.
-    #[hotpath::measure(label = "graph_db.generation.finalize", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.finalize", level = "trace", skip_all)]
     fn finalize_staged_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -1262,7 +1275,7 @@ impl GraphDb {
     /// the reopen's file bytes, decoded snapshot, and rebuilt store.
     /// `row_counts` carries the manifest's `(entities, relations)` lengths for
     /// observability alone, so the rows themselves need not be kept alive.
-    #[hotpath::measure(label = "graph_db.generation.reopen", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.reopen", level = "trace", skip_all)]
     pub(crate) fn reopen_and_verify_existing_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -1286,11 +1299,11 @@ impl GraphDb {
         // reopened rows stable for the digest.
         let snapshot_gate = self.wait_snapshot_gate_write();
         {
-            let mut database_guard = crate::hotpath_observe::wait_lock(
-                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-                || self.inner.database.write(),
-            )
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            let mut database_guard =
+                crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                    self.inner.database.write()
+                })
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             self.inner.invalidate_store_epoch_caches();
             self.ensure_available()?;
             check()?;
@@ -1301,9 +1314,10 @@ impl GraphDb {
                 .write()
                 .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
             let database = database_guard.take().ok_or(GraphDbError::Closed)?;
-            if let Err(error) =
-                hotpath::measure_block!("graph_db.generation.reopen.close", database.close())
-            {
+            if let Err(error) = {
+                let _span = tracing::trace_span!("graph_db.generation.reopen.close").entered();
+                database.close()
+            } {
                 self.inner.poisoned.store(true, Ordering::Release);
                 return Err(GraphDbError::DurabilityUncertain {
                     message: format!(
@@ -1387,11 +1401,11 @@ impl GraphDb {
         // admitted while the repaired rows stream through the proof.
         let write_gate = self.wait_snapshot_gate_upgrade(snapshot_gate);
         {
-            let mut database_guard = crate::hotpath_observe::wait_lock(
-                crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-                || self.inner.database.write(),
-            )
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+            let mut database_guard =
+                crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                    self.inner.database.write()
+                })
+                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
             self.inner.invalidate_store_epoch_caches();
             let mut state_guard = self.state_write_guard()?;
             let mut quarantined_guard = self
@@ -1442,21 +1456,21 @@ impl GraphDb {
             Ok((verified, canonical_bytes)) => {
                 self.record_proven_generation(identity, &verified, canonical_bytes);
                 let (entities, relations) = row_counts;
-                crate::hotpath_observe::record_counts(entities, relations, 0, 0);
-                crate::hotpath_observe::record_hydration_source(
-                    crate::hotpath_observe::HydrationSource::Recovered,
-                );
+                crate::observe::record_counts(entities, relations, 0, 0);
+                crate::observe::record_hydration_source(crate::observe::HydrationSource::Recovered);
                 Ok((commit, verified))
             }
             Err(error) => {
                 // Restoring the durable quarantine marker rewrites the file,
                 // so the failure path re-takes the exclusive claim.
                 let _write_gate = self.wait_snapshot_gate_upgrade(snapshot_gate);
-                let mut database_guard = crate::hotpath_observe::wait_lock(
-                    crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-                    || self.inner.database.write(),
-                )
-                .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+                let mut database_guard =
+                    crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                        self.inner.database.write()
+                    })
+                    .map_err(|_| {
+                        GraphDbError::unavailable("graph database write lock is poisoned")
+                    })?;
                 self.inner.invalidate_store_epoch_caches();
                 let mut state_guard = self.state_write_guard()?;
                 let mut quarantined_guard =
@@ -1806,7 +1820,7 @@ impl GraphDb {
         ))
     }
 
-    #[hotpath::measure(label = "graph_db.generation.delete", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.delete", level = "trace", skip_all)]
     pub(crate) fn delete_generation_contents(
         &self,
         locator: &GenerationLocator,
@@ -1970,7 +1984,7 @@ impl GraphDb {
         )
     }
 
-    #[hotpath::measure(label = "graph_db.read.generation_relation", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.read.generation_relation", level = "trace", skip_all)]
     pub(crate) fn generation_relation(
         &self,
         snapshot: &VerifiedGraphSnapshot,
@@ -2015,7 +2029,7 @@ impl GraphDb {
         })
     }
 
-    #[hotpath::measure(label = "graph_db.traversal.verified", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.traversal.verified", level = "trace", skip_all)]
     pub(crate) fn traverse_generation(
         &self,
         snapshot: &VerifiedGraphSnapshot,
@@ -2155,7 +2169,7 @@ impl GraphDb {
         Ok(namespaces)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.quarantine", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.generation.quarantine", level = "trace", skip_all)]
     pub(crate) fn quarantine_generation(
         &self,
         identity: &GraphGenerationManifestIdentity,
@@ -2165,11 +2179,11 @@ impl GraphDb {
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         let physical_namespace = locator.physical_namespace()?;
         let _snapshot_gate = self.wait_snapshot_gate_write();
-        let mut database_guard = crate::hotpath_observe::wait_lock(
-            crate::hotpath_observe::LOCK_WAIT_DATABASE_WRITE,
-            || self.inner.database.write(),
-        )
-        .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        let mut database_guard =
+            crate::observe::wait_lock(crate::observe::LOCK_WAIT_DATABASE_WRITE, || {
+                self.inner.database.write()
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         self.inner.invalidate_store_epoch_caches();
         let mut format_state = self.state_write_guard()?;
         let mut projection_quarantine = self
@@ -2322,16 +2336,14 @@ fn traverse_in(
             }
         }
     }
-    #[cfg(feature = "hotpath")]
+
     {
         let edges = visits
             .iter()
             .filter(|visit| visit.via_relation.is_some())
             .count();
-        crate::hotpath_observe::record_counts(visits.len(), edges, 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_counts(visits.len(), edges, 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
     }
     Ok(VerifiedTraversalResult { visits })
 }
@@ -2590,7 +2602,7 @@ fn prepare_generation_stage_batch(
     Ok((batch, endpoint_namespaces))
 }
 
-#[hotpath::measure(label = "graph_db.generation.page_construct")]
+#[tracing::instrument(name = "graph_db.generation.page_construct", level = "trace", skip_all)]
 fn construct_generation_stage_page(
     manifest: &GraphGenerationManifest,
     identity: &GraphGenerationManifestIdentity,
@@ -2608,7 +2620,11 @@ fn construct_generation_stage_page(
     })
 }
 
-#[hotpath::measure(label = "graph_db.generation.page_construct_owned")]
+#[tracing::instrument(
+    name = "graph_db.generation.page_construct_owned",
+    level = "trace",
+    skip_all
+)]
 fn construct_owned_generation_stage_page(
     identity: &GraphGenerationManifestIdentity,
     context: &GenerationStageContext,
