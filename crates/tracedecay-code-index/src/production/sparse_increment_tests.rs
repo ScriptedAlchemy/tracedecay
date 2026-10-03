@@ -295,6 +295,35 @@ fn successive_edits_reseal_explicit_parent_lineage_as_identity() {
     );
 }
 
+/// The edit moves only a module's signature, so a caller of `Inner.bar` has
+/// no site the edit can move: the module's name moves a lookup only as its
+/// last segment. Its sealed edge still targets the edited file's old `bar`
+/// occurrence and must be re-pointed at the new one.
+#[test]
+fn a_module_signature_edit_repoints_calls_through_the_module() {
+    let inner = |signature: &str| format!("{signature}\n  def self.bar\n    3\n  end\nend\n");
+    fn tree(b: &str) -> Vec<(&str, &str, &str)> {
+        vec![
+            (
+                "lib/a.rb",
+                "ruby",
+                "require_relative \"b\"\ndef run\n  Inner.bar\nend\n",
+            ),
+            ("lib/b.rb", "ruby", b),
+            ("lib/c.rb", "ruby", "C = 1\n"),
+            ("lib/d.rb", "ruby", "D = 1\n"),
+            ("lib/e.rb", "ruby", "E = 1\n"),
+            ("lib/f.rb", "ruby", "F = 1\n"),
+            ("lib/g.rb", "ruby", "G = 1\n"),
+            ("lib/h.rb", "ruby", "H = 1\n"),
+            ("lib/i.rb", "ruby", "I = 1\n"),
+        ]
+    }
+    let before = inner("module Inner");
+    let after = inner("module Inner # moved");
+    assert_sparse_matches_cold(&tree(&before), &tree(&after));
+}
+
 #[test]
 fn typescript_imports_resolve_over_the_parent() {
     let a = "export function helper(): number { return 1; }\n";
