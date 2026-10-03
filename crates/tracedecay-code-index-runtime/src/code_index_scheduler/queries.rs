@@ -4210,10 +4210,77 @@ mod tests {
                         item.occurrence.span.start_byte,
                         item.matched_literal.as_str(),
                     ))
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from([("src/lib.rs", 0, "shared_probe_target")]),
-                "`{literal}` must return the definition: {page:?}"
+                    .collect::<Vec<_>>(),
+                vec![("src/lib.rs", 0, "shared_probe_target")],
+                "`{literal}` must return the definition once: {page:?}"
             );
+            assert_eq!(page.total, Some(1), "`{literal}`: {page:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_identifier_read_returns_each_definition_once() {
+        let outcome = exact_occurrences(
+            &[(
+                "src/lib.rs",
+                "pub fn shared_probe_target() {}\n\
+                 pub fn local_caller() { shared_probe_target(); }\n",
+            )],
+            "shared_probe_target",
+            None,
+        )
+        .await;
+        let RetrievalPortOutcome::Partial(evidence) = &outcome else {
+            panic!("a bare identifier reads only definitions: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| (
+                    item.occurrence.path.as_str(),
+                    item.occurrence.span.start_byte,
+                    item.matched_literal.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("src/lib.rs", 0, "shared_probe_target")],
+            "the definition must answer once: {page:?}"
+        );
+        assert_eq!(page.total, Some(1), "{page:?}");
+    }
+
+    #[tokio::test]
+    async fn exact_reads_answer_each_nested_occurrence_once() {
+        let source = "pub struct Probe;\n\
+                      impl Probe {\n    \
+                          pub fn probe_method(&self) {\n        \
+                              run(\"--probe-member-flag\");\n    \
+                          }\n\
+                      }\n\
+                      \n\
+                      pub fn multi_line_target(\n    value: u32,\n) -> u32 {\n    value\n}\n";
+        let start_of = |needle: &str| source.find(needle).expect("fixture needle") as u64;
+        for (literal, owner_start) in [
+            ("probe_method", start_of("pub fn probe_method")),
+            ("--probe-member-flag", start_of("pub fn probe_method")),
+            ("multi_line_target", start_of("pub fn multi_line_target")),
+        ] {
+            let outcome = exact_occurrences(&[("src/lib.rs", source)], literal, None).await;
+            let (RetrievalPortOutcome::Completed(evidence)
+            | RetrievalPortOutcome::Partial(evidence)) = &outcome
+            else {
+                panic!("`{literal}` must answer: {outcome:?}");
+            };
+            let page = evidence.payload.as_ref().expect("exact page");
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|item| item.occurrence.span.start_byte)
+                    .collect::<Vec<_>>(),
+                vec![owner_start],
+                "`{literal}` must answer from its owning chunk once: {page:?}"
+            );
+            assert_eq!(page.total, Some(1), "`{literal}`: {page:?}");
         }
     }
 
@@ -4236,8 +4303,8 @@ mod tests {
             page.items
                 .iter()
                 .map(|item| item.matched_literal.as_str())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["--probe-prefix-flag"]),
+                .collect::<Vec<_>>(),
+            vec!["--probe-prefix-flag"],
             "{page:?}"
         );
     }
