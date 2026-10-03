@@ -4307,7 +4307,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .expect("verified graph"),
     );
     graph_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("warm graph catalog");
     let graph_reader = graph_store
         .evidence_reader_with_cancellation(
