@@ -904,6 +904,7 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
 
 /// An installed file whose bytes moved is drift the daemon reports; the
 /// finding names the component and the command that converges it.
+#[cfg(unix)]
 #[test]
 fn doctor_names_the_drifted_host_component_and_its_remedy() {
     let cli = IsolatedCli::new();
