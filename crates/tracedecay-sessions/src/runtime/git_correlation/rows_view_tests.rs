@@ -427,6 +427,34 @@ async fn single_selector_scope_resolution_stops_after_the_caller_bound() {
     assert!(bounded.iter().all(|id| unbounded.contains(id)));
 }
 
+#[tokio::test]
+async fn scope_resolution_answers_past_the_exact_sql_row_cap() {
+    let projection = seeded_projection(10_500);
+    let store = seeded_store(&projection).await;
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    for (branch, worktree) in [
+        (Some("main"), None),
+        (None, Some("/repo")),
+        (Some("main"), Some("/repo")),
+    ] {
+        let filter = GitScopeFilter {
+            branch: branch.map(str::to_owned),
+            worktree: worktree.map(str::to_owned),
+            commit: None,
+        };
+        let observed = view.session_ids_for_scope(&filter).await.unwrap();
+        assert_eq!(
+            observed,
+            projection.session_ids_for_scope(&filter),
+            "scope {filter:?}"
+        );
+        assert_eq!(observed.unwrap().len(), 10_500);
+    }
+}
+
 fn observation(session_id: &str, provider: &str, ts: i64) -> SpanObservation {
     SpanObservation {
         provider: provider.to_owned(),

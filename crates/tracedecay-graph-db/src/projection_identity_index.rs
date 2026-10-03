@@ -166,6 +166,7 @@ impl IdentityIndexCache {
         let Some(index) = build_identity_index(database, scope, cancellation)? else {
             return Ok(None);
         };
+        crate::runtime::ensure_intact(database)?;
         let index = Arc::new(index);
 
         let mut entries = self

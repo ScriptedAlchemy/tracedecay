@@ -524,11 +524,18 @@ pub struct ImpactNodeV1 {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImpactResultV1 {
+pub struct ImpactRadiusV1 {
     pub node_count: usize,
     pub complete: bool,
     pub unavailable_fields: Vec<String>,
     pub nodes: Vec<ImpactNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ImpactResultV1 {
+    Found(ImpactRadiusV1),
+    NotFound(PrimitiveNotFoundV1),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

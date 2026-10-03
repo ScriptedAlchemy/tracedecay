@@ -300,6 +300,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         brain_id,
         profile_id,
         project_id: &canonical_project_id,
+        project_root,
         repository_provenance,
     });
     let facade = facade.as_ref();

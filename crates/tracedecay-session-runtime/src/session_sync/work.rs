@@ -457,9 +457,9 @@ impl SessionSyncProjectContext {
     ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
-        let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
+        let change_sequence = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
-            tracedecay_sessions::runtime::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+            tracedecay_sessions::runtime::git_correlation::GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
         )
         .await
         .map_err(store_error)?;
@@ -470,7 +470,7 @@ impl SessionSyncProjectContext {
         .await
         .map_err(store_error)?;
         Ok(
-            git_history_frontier_from_meta(activity_timestamp, source_rowid)
+            git_history_frontier_from_meta(change_sequence, source_rowid)
                 .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
                 .unwrap_or_default(),
         )
@@ -553,6 +553,7 @@ impl SessionSyncProjectContext {
                 tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: usize::MAX,
             dry_run: options.dry_run(),
+            project_root: Some(self.project_root.clone()),
         };
         let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
         tokio::pin!(backfill);
@@ -744,12 +745,12 @@ const fn git_history_interruption_reason(
 }
 
 pub fn git_history_frontier_from_meta(
-    activity_timestamp: Option<i64>,
+    change_sequence: Option<i64>,
     source_rowid: Option<i64>,
 ) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
-    activity_timestamp.map(|activity_timestamp| {
+    change_sequence.map(|change_sequence| {
         tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-            activity_timestamp,
+            change_sequence,
             source_rowid: source_rowid.unwrap_or(0),
         }
     })
@@ -770,7 +771,7 @@ pub fn git_history_source_frontier(
         })
         .to_string(),
         committed_cursor_json: serde_json::json!({
-            "activity_timestamp": frontier.activity_timestamp,
+            "change_sequence": frontier.change_sequence,
             "source_rowid": frontier.source_rowid,
         })
         .to_string(),

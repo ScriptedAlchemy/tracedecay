@@ -49,7 +49,7 @@ jobs:
       checks: read
       actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
@@ -66,12 +66,14 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@f87bc7a1e9d6efa3a0973ae108fa564cd2bcf940
+        uses: ScriptedAlchemy/cargo-hauler@9e47493557a6716c185b1bc3247cd22c3b6b5bae
         with:
           mode: route
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
           admission-workflow: ci.yml
+          # A saturated runner pool starts the enqueue run minutes late; waiting for it keeps the PR off the native matrix.
+          route-wait-minutes: '10'
 
       - name: Hauler route / ${{ steps.route.outputs.decision || 'native' }} / ${{ steps.route.outputs.policy || 'unavailable' }}
         run: ':'

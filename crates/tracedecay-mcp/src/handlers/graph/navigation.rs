@@ -4,8 +4,8 @@ use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ByQualifiedNameResultV1, ByQualifiedNameSurfaceRequestV1, DeriveAnnotationV1,
-    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, ImpactNodeV1, ImpactResultV1,
-    NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
+    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, ImpactNodeV1, ImpactRadiusV1,
+    ImpactResultV1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
     NodeSurfaceRequestV1, SignatureResultV1, SymbolSelectorSurfaceRequestV1, SymbolSignatureV1,
 };
 use tracedecay_domain::errors::Result;
@@ -31,6 +31,14 @@ pub async fn compute_impact(
     require_positive_depth(max_depth)?;
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
+    if graph.symbol_summary(&occurrence)?.is_none() {
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::Impact(ImpactResultV1::NotFound(node_not_found_result(
+                &request.node_id,
+            ))),
+            Vec::new(),
+        ));
+    }
     let impact = {
         let _span = tracing::trace_span!("mcp.graph.impact.graph").entered();
         graph.impact(
@@ -63,14 +71,14 @@ pub async fn compute_impact(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let result = ImpactResultV1 {
+    let result = ImpactRadiusV1 {
         node_count: nodes.len(),
         complete: impact.complete,
         unavailable_fields: vec!["edge_count".to_owned()],
         nodes,
     };
     Ok(graph_tool_completion(
-        GraphToolResultV1::Impact(result),
+        GraphToolResultV1::Impact(ImpactResultV1::Found(result)),
         touched_files,
     ))
 }

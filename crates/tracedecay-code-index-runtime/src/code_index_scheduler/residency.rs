@@ -420,6 +420,7 @@ impl ResidentOwnerV1 for GraphCatalogOwnerV1 {
         let Some(store) = self
             .0
             .serving_text()
+            .inspect(LatestCodeTextGenerationV1::release_graph_predecessor)
             .and_then(|text| text.interactive_graph_store().ok())
         else {
             return ResidentOwnerReleaseV1::Empty;
@@ -458,6 +459,7 @@ impl ResidentOwnerV1 for GraphEngineOwnerV1 {
         let Some(store) = self
             .0
             .serving_text()
+            .inspect(LatestCodeTextGenerationV1::release_graph_predecessor)
             .and_then(|text| text.interactive_graph_store().ok())
         else {
             return ResidentOwnerReleaseV1::Empty;

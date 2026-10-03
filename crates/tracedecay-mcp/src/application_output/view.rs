@@ -512,9 +512,6 @@ fn push_page_trailer(payload: &Value, rendered: &mut String) -> Option<()> {
         let reason = gap.get("reason").and_then(Value::as_str)?;
         writeln!(rendered, "support gap: {reason}").ok()?;
     }
-    if let Some(cursor) = payload.get("next_cursor").and_then(Value::as_str) {
-        writeln!(rendered, "next_cursor: {cursor}").ok()?;
-    }
     Some(())
 }
 
@@ -579,7 +576,8 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        CanonicalHumanView, HumanField, HumanFieldValue, evidence_status, payload_preview,
+        BindingId, CanonicalHumanView, HumanField, HumanFieldValue, evidence_status,
+        payload_preview,
     };
 
     fn code(label: &'static str, value: &str) -> HumanField {
@@ -737,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn implementation_preview_carries_each_body_and_the_continuation() {
+    fn implementation_preview_carries_each_body_and_its_support_gaps() {
         let preview = payload_preview(
             "code_implementations",
             Some(&json!({
@@ -756,7 +754,114 @@ mod tests {
         assert_eq!(
             preview,
             "src/lib.rs::area (method) src/lib.rs:3 node_id=m\n  | fn area() {\n  |     1\n  | }\n\
-             support gap: partial\nnext_cursor: cursor.next"
+             support gap: partial"
         );
+    }
+
+    /// A callers page carries its continuation twice in the typed result,
+    /// as `payload.next_cursor` and as the evidence page cursor. The human
+    /// view prints it once, so a long cursor does not double the answer.
+    #[test]
+    fn partial_callers_page_prints_its_continuation_once() {
+        let cursor = "cursor.callers-page-2";
+        let envelope: tracedecay_contracts::ApplicationEnvelope<serde_json::Value> =
+            serde_json::from_value(json!({
+                "contract": {
+                    "schema_id": "schema.application.primitive.code-callers.result",
+                    "schema_revision": 1
+                },
+                "request_id": "request.cli.callers.0",
+                "scope": {
+                    "project_id": "proj_a5b3d7e3ebe14ca7",
+                    "reference": "refs/heads/master",
+                    "repository_id": "repository.daemon.callers",
+                    "scope_digest": format!("sha256:{}", "8".repeat(64)),
+                    "worktree_id": "worktree.daemon.callers"
+                },
+                "outcome": {
+                    "outcome": "evidence",
+                    "value": {
+                        "authority": {
+                            "authorized_scope_digest": format!("sha256:{}", "8".repeat(64)),
+                            "disclosure": "evidence",
+                            "grant_digest": format!("sha256:{}", "5".repeat(64)),
+                            "grant_id": "grant.daemon.callable-code.callers",
+                            "grant_revision": 1,
+                            "policy": {
+                                "decision_id": "route.callable-code.binding.tracedecay-daemon.project-open",
+                                "digest": format!("sha256:{}", "a".repeat(64)),
+                                "evaluator_revision": "project-source-access.v1",
+                                "revision": 1
+                            },
+                            "revalidated_at": 100
+                        },
+                        "contributions": [],
+                        "coverage": {
+                            "completeness": "partial",
+                            "domains": [{"completeness": "partial", "domain": "graph"}],
+                            "eligible": 2,
+                            "requested_domains": ["graph"],
+                            "returned": 1,
+                            "visited": 2
+                        },
+                        "evidence_authorities": [],
+                        "execution": {
+                            "budget": {"bytes_consumed": 0, "elapsed_micros": 10, "units_consumed": 0},
+                            "cancellation": null,
+                            "effective_deadline": {"expires_at": 500},
+                            "ended_at": 110,
+                            "started_at": 100,
+                            "termination": "partial"
+                        },
+                        "omissions": [],
+                        "page": {
+                            "cursor": {"cursor": cursor, "kind": "opaque"},
+                            "expires_at": 400,
+                            "returned": 1,
+                            "sort_contract_id": "sort.application.retrieval.stable",
+                            "sort_revision": 1,
+                            "total": 2
+                        },
+                        "payload": {
+                            "items": [{
+                                "depth": 1,
+                                "edge_kind": "calls",
+                                "symbol": symbol("c", "caller", "function", 4),
+                            }],
+                            "support_gaps": [],
+                            "next_cursor": cursor,
+                            "total": 2,
+                            "truncated": true
+                        },
+                        "scores": [],
+                        "temporal": {
+                            "freshness": "current",
+                            "requested_at": 110,
+                            "requested_mode": {"kind": "current"},
+                            "resolved_at": 110,
+                            "source_generation": null,
+                            "watermark_digest": null
+                        }
+                    }
+                }
+            }))
+            .expect("callers envelope");
+        let view = CanonicalHumanView::from_application_result(
+            "code_callers",
+            &BindingId::new("binding.cli.code_callers.v1").unwrap(),
+            &Ok(envelope),
+        )
+        .unwrap();
+
+        let printed = view
+            .fields
+            .iter()
+            .map(|field| match &field.value {
+                HumanFieldValue::Block(text)
+                | HumanFieldValue::Code(text)
+                | HumanFieldValue::Text(text) => text.matches(cursor).count(),
+            })
+            .sum::<usize>();
+        assert_eq!(printed, 1, "the continuation prints once: {view:?}");
     }
 }

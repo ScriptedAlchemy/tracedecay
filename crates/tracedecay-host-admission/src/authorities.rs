@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
@@ -15,6 +16,10 @@ pub struct HostAdmissionAuthorities<'a> {
     profile_id: Option<UserProfileId>,
     profile_registered: Option<&'a RegisteredGlobalDb>,
     pub(crate) repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    /// Folder of the admitted project. Git evidence resolves sessions that
+    /// record a project id instead of a folder against it, with or without
+    /// repository provenance.
+    pub(crate) project_root: Option<PathBuf>,
     /// The process background CPU authority observation-capture preparation
     /// is admitted through. The composition root injects the one authority its
     /// worker plan installed; capture without it is refused as
@@ -36,6 +41,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -52,6 +58,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: Some(registered),
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -91,6 +98,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: None,
             profile_registered: None,
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -105,6 +113,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: None,
             profile_registered: None,
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -121,6 +130,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -133,6 +143,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            project_root: None,
             background_cpu: None,
         }
     }
@@ -142,7 +153,14 @@ impl<'a> HostAdmissionAuthorities<'a> {
         mut self,
         repository_provenance: RepositoryProvenanceAdmissionContext,
     ) -> Self {
+        self.project_root = Some(repository_provenance.admitted_project_root().to_path_buf());
         self.repository_provenance = Some(repository_provenance);
+        self
+    }
+
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
+        self.project_root = Some(project_root);
         self
     }
 

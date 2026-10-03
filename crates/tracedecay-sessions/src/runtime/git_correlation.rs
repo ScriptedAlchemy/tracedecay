@@ -30,8 +30,9 @@ pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
 // its grep filters and this correlation engine narrow by the same rules.
 pub use tracedecay_lcm::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
-pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+pub const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
+const LEGACY_ACTIVITY_FRONTIER_KEY: &str = "auto_backfill_activity_watermark";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -819,6 +820,7 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn.execute_batch(rows::GIT_EVIDENCE_ROWS_SCHEMA).await?;
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
+    migrate_activity_frontier(conn).await?;
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
@@ -827,6 +829,67 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     )
     .await?;
     Ok(())
+}
+
+/// The history pass once walked sessions by activity time, so a session
+/// imported behind that cursor was never visited. Positions recorded on that
+/// axis mean nothing on the change-sequence axis; rescanning from the start
+/// is the only safe conversion. That rescan re-derives every failure it can
+/// still reach, so legacy failure receipts are dropped rather than kept for
+/// sessions the change-sequence axis never revisits.
+async fn migrate_activity_frontier(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), GitCorrelationError> {
+    for (table, reset) in [
+        (
+            "git_history_index_progress",
+            "UPDATE git_history_index_progress SET change_sequence = 0;",
+        ),
+        (
+            "git_history_index_failures",
+            "DELETE FROM git_history_index_failures;",
+        ),
+    ] {
+        let mut legacy = conn
+            .query(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = 'activity_timestamp'",
+                params![table],
+            )
+            .await?;
+        if legacy.next().await?.is_some() {
+            drop(legacy);
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} RENAME COLUMN activity_timestamp TO change_sequence;
+                 {reset}"
+            ))
+            .await?;
+        }
+    }
+    if read_meta_value(conn, LEGACY_ACTIVITY_FRONTIER_KEY)
+        .await?
+        .is_some()
+    {
+        conn.execute(
+            "DELETE FROM git_correlation_meta WHERE key IN (?1, ?2)",
+            params![LEGACY_ACTIVITY_FRONTIER_KEY, GIT_HISTORY_ROWID_FRONTIER_KEY],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reads the durable `(change_sequence, rowid)` history frontier.
+pub async fn read_history_frontier(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
+    Ok(GitHistoryIndexFrontier {
+        change_sequence: read_meta_value(conn, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+        source_rowid: read_meta_value(conn, GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+    })
 }
 
 /// The Git correlation schema version an existing store recorded, `None` for
