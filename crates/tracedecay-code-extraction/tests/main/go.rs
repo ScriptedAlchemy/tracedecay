@@ -657,11 +657,14 @@ type Rows interface {
 type Box[T any] interface {
     Get() T
 }
+
+type Any interface{}
 "#,
     );
     assert_eq!(
         rows,
         [
+            ("Any".to_owned(), GoMethodSetRowV1::EmptyInterface),
             ("Box".to_owned(), GoMethodSetRowV1::GenericInterface),
             (
                 "Rows".to_owned(),
@@ -715,6 +718,14 @@ type Many = []Base
     );
     let promotes =
         |name: &str, embedded| (name.to_owned(), GoMethodSetRowV1::Promotes { embedded });
+    let field = |name: &str| {
+        (
+            "Wrapped".to_owned(),
+            GoMethodSetRowV1::Field {
+                name: name.to_owned(),
+            },
+        )
+    };
     let buffer = GoTypeTokenV1::Qualified {
         package: "bytes".to_owned(),
         name: "Buffer".to_owned(),
@@ -724,6 +735,7 @@ type Many = []Base
         [
             ("Base".to_owned(), GoMethodSetRowV1::NamedType),
             ("List".to_owned(), GoMethodSetRowV1::NamedType),
+            ("List".to_owned(), GoMethodSetRowV1::GenericType),
             ("Many".to_owned(), GoMethodSetRowV1::NamedType),
             ("Ptr".to_owned(), GoMethodSetRowV1::NamedType),
             ("Same".to_owned(), GoMethodSetRowV1::NamedType),
@@ -733,6 +745,11 @@ type Many = []Base
             promotes("Wrapped", vec![local("List")]),
             promotes("Wrapped", vec![local("Ptr")]),
             promotes("Wrapped", vec![buffer]),
+            field("Base"),
+            field("Buffer"),
+            field("List"),
+            field("Ptr"),
+            field("name"),
         ]
     );
 }

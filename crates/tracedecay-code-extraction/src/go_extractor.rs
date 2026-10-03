@@ -562,6 +562,7 @@ impl GoExtractor {
             |n| state.node_text(n).to_string(),
         );
 
+        let first = method_sets.len();
         // Check what type is being defined.
         if let Some(struct_type) = find_direct_child_by_kind(spec_node, "struct_type") {
             Self::visit_struct(state, method_sets, &name, struct_type, decl_node);
@@ -571,6 +572,17 @@ impl GoExtractor {
             // A plain type definition (e.g., `type Foo int`) that is not a type alias.
             // Treat it like a type alias for graph purposes.
             Self::visit_named_type(state, method_sets, &name, decl_node);
+        }
+        if spec_node.child_by_field_name("type_parameters").is_some()
+            && let Some(named) = method_sets
+                .get(first)
+                .filter(|named| named.row == GoMethodSetRowV1::NamedType)
+        {
+            let node_id = named.node_id.clone();
+            method_sets.push(ExtractedGoMethodSetRowV1 {
+                node_id,
+                row: GoMethodSetRowV1::GenericType,
+            });
         }
     }
 
@@ -678,15 +690,29 @@ impl GoExtractor {
         struct_id: &str,
     ) {
         let field_name = find_direct_child_by_kind(node, "field_identifier");
+        let mut row = |row| {
+            method_sets.push(ExtractedGoMethodSetRowV1 {
+                node_id: struct_id.to_owned(),
+                row,
+            });
+        };
+        let mut cursor = node.walk();
+        for name in node.children_by_field_name("name", &mut cursor) {
+            row(GoMethodSetRowV1::Field {
+                name: state.node_text(name).to_owned(),
+            });
+        }
         if field_name.is_none()
             && let Some(embedded) = node
                 .child_by_field_name("type")
                 .and_then(|ty| Self::promoted_type(state, ty))
         {
-            method_sets.push(ExtractedGoMethodSetRowV1 {
-                node_id: struct_id.to_owned(),
-                row: GoMethodSetRowV1::Promotes { embedded },
-            });
+            if let Some(GoTypeTokenV1::Local(name) | GoTypeTokenV1::Qualified { name, .. }) =
+                embedded.last()
+            {
+                row(GoMethodSetRowV1::Field { name: name.clone() });
+            }
+            row(GoMethodSetRowV1::Promotes { embedded });
         }
         let name = field_name.map_or_else(
             || "<anonymous>".to_string(),
@@ -900,6 +926,7 @@ impl GoExtractor {
             method_sets.push(row(GoMethodSetRowV1::GenericInterface));
             return;
         }
+        let before = method_sets.len();
         let mut cursor = iface_type.walk();
         for child in iface_type.named_children(&mut cursor) {
             match child.kind() {
@@ -911,6 +938,9 @@ impl GoExtractor {
                 })),
                 _ => {}
             }
+        }
+        if method_sets.len() == before {
+            method_sets.push(row(GoMethodSetRowV1::EmptyInterface));
         }
     }
 

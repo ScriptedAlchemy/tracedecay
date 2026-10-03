@@ -353,3 +353,107 @@ fn go_promotion_follows_selector_depth_and_ambiguity() {
     assert!(!undecided(&cold, "calc/adder.go::Adder"));
     assert_eq!(implements(&child), edges);
 }
+
+#[test]
+fn go_empty_interface_discloses_a_gap() {
+    let (child, cold) = increment(
+        "go-sat-empty",
+        &[("calc/any.go", "package calc\n\ntype Any interface{}\n")],
+    );
+    for generation in [&child, &cold] {
+        assert!(
+            undecided(generation, "calc/any.go::Any"),
+            "every type implements an empty interface, so its implementor list is partial"
+        );
+    }
+}
+
+#[test]
+fn go_external_test_package_shares_a_dir_but_not_unexported_methods() {
+    let (child, cold) = increment(
+        "go-sat-external-test",
+        &[(
+            "priv/priv_ext_test.go",
+            "package priv_test\n\ntype Fake struct{}\n\nfunc (Fake) mark() {}\n",
+        )],
+    );
+    for generation in [&child, &cold] {
+        let edges = implements(generation);
+        assert!(
+            !edges.contains(&edge("priv/priv_ext_test.go::Fake", "priv/priv.go::sealed")),
+            "package priv_test cannot satisfy priv's unexported mark(): {edges:?}"
+        );
+        assert!(edges.contains(&edge("priv/priv.go::Ok", "priv/priv.go::sealed")));
+    }
+}
+
+#[test]
+fn go_fields_hide_and_tie_promoted_methods() {
+    let (child, cold) = increment(
+        "go-sat-fields",
+        &[(
+            "calc/fielded.go",
+            "package calc\n\ntype Fielded struct {\n\tSimple\n\tAdd int\n}\n\ntype Inner struct {\n\tAdd int\n}\n\ntype FieldTie struct {\n\tInner\n\tSimple\n}\n\ntype Add struct{}\n\ntype ByEmbed struct {\n\tSimple\n\tAdd\n}\n\ntype Kept struct {\n\tSimple\n\tname string\n}\n",
+        )],
+    );
+    let edges = implements(&cold);
+    for implementor in ["Fielded", "FieldTie", "ByEmbed"] {
+        assert!(
+            !edges.contains(&edge(
+                &format!("calc/fielded.go::{implementor}"),
+                "calc/adder.go::Adder"
+            )),
+            "{implementor}'s field named Add hides or ties Simple's Add: {edges:?}"
+        );
+    }
+    assert!(
+        edges.contains(&edge("calc/fielded.go::Kept", "calc/adder.go::Adder")),
+        "a field with another name hides nothing: {edges:?}"
+    );
+    assert_eq!(implements(&child), edges);
+}
+
+#[test]
+fn go_external_embedding_makes_same_depth_promotions_uncertain() {
+    let (child, cold) = increment(
+        "go-sat-external-tie",
+        &[(
+            "shapes/mixed.go",
+            "package shapes\n\nimport (\n\t\"bytes\"\n\n\t\"example.com/sat/geom\"\n)\n\ntype Mixed struct {\n\tbytes.Buffer\n\tBox\n}\n\ntype Owned struct {\n\tbytes.Buffer\n}\n\nfunc (Owned) Bounds() geom.Rect { return geom.Rect{} }\n\nfunc (Owned) Name() string { return \"owned\" }\n",
+        )],
+    );
+    for generation in [&child, &cold] {
+        let edges = implements(generation);
+        assert!(
+            !edges.contains(&edge("shapes/mixed.go::Mixed", "shapes/shape.go::Shape")),
+            "bytes.Buffer may carry Bounds or Name at Box's depth and tie it: {edges:?}"
+        );
+        assert!(
+            edges.contains(&edge("shapes/mixed.go::Owned", "shapes/shape.go::Shape")),
+            "declared methods sit above every promotion: {edges:?}"
+        );
+        assert!(undecided(generation, "shapes/shape.go::Shape"));
+    }
+}
+
+#[test]
+fn go_instantiated_generic_embedding_is_undecided_not_matched() {
+    let (child, cold) = increment(
+        "go-sat-generic-embed",
+        &[(
+            "cells/cells.go",
+            "package cells\n\ntype T int\n\ntype Getter interface {\n\tGet() T\n}\n\ntype Cell[T any] struct{}\n\nfunc (Cell[T]) Get() T {\n\tvar v T\n\treturn v\n}\n\ntype Strings struct {\n\tCell[string]\n}\n",
+        )],
+    );
+    for generation in [&child, &cold] {
+        let edges = implements(generation);
+        assert!(
+            !edges.contains(&edge("cells/cells.go::Strings", "cells/cells.go::Getter")),
+            "Cell[string].Get returns string, not cells.T: {edges:?}"
+        );
+        assert!(
+            undecided(generation, "cells/cells.go::Getter"),
+            "the seal does not substitute type arguments, so Getter stays undecided"
+        );
+    }
+}

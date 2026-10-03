@@ -361,6 +361,8 @@ pub enum GoMethodSetRowV1 {
     Embeds { embedded: GoTypeV1 },
     /// An interface declared with a type parameter list.
     GenericInterface,
+    /// An interface with an empty body, which every type implements.
+    EmptyInterface,
     /// A named type that can own a method set: `type T struct`, `type T U`,
     /// `type T = U`. The row exists so chunking binds the declaration's
     /// occurrence and span.
@@ -369,14 +371,21 @@ pub enum GoMethodSetRowV1 {
     /// struct field (`T`, `*T`, `pkg.T`, `T[int]`, recorded without pointer
     /// or type arguments) or the target of `type A = T`.
     Promotes { embedded: GoTypeV1 },
+    /// A struct field's name, embedded or not. It hides deeper promoted
+    /// names.
+    Field { name: String },
+    /// A `NamedType` declared with a type parameter list. Its method
+    /// signatures need a type-argument substitution the seal does not make.
+    GenericType,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractedGoMethodSetRowV1 {
     /// The declaring node: the `StructMethod`, the `InterfaceType` (for
-    /// `InterfaceMethod`, `Embeds`, `GenericInterface`), or the `Struct` /
-    /// `TypeAlias` node (for `NamedType` and `Promotes`).
+    /// `InterfaceMethod`, `Embeds`, `GenericInterface`, `EmptyInterface`),
+    /// or the `Struct` / `TypeAlias` node (for `NamedType`, `GenericType`,
+    /// `Field`, and `Promotes`).
     pub node_id: String,
     pub row: GoMethodSetRowV1,
 }

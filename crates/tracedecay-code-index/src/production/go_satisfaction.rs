@@ -3,15 +3,18 @@
 //! a type implements an interface exactly when its method set (the union of
 //! its value and pointer receiver methods) covers the interface's.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tracedecay_code_extraction::{GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, EdgeAuthorityV1, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, EdgeAuthorityV1, NodeKind, RelationEdgeKindV1, SourceSpan,
+    SymbolOccurrenceId,
 };
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 
+use super::FileGenerationArtifactsV1;
 use super::helpers::edge_order;
 use super::module_resolution::ModuleImportIndexV1;
 use super::resolution_view::ResolutionFileV1;
@@ -43,9 +46,33 @@ struct MethodKeyV1 {
     results: Vec<QualifiedTypeV1>,
 }
 
+/// A selector name: a method or field name, with its declaring package when
+/// unexported.
+type NameV1<'a> = (&'a str, Option<&'a str>);
+
+fn name_of(method: &MethodKeyV1) -> NameV1<'_> {
+    (method.name.as_str(), method.package.as_deref())
+}
+
 struct GoFileV1<'a> {
-    dir: &'a str,
+    /// The file's package: its dir, or its dir and package name for an
+    /// external test package, which shares the dir but not its names.
+    scope: &'a str,
     aliases: HashMap<&'a str, TypeKeyV1<'a>>,
+}
+
+fn package_scope(file: &FileGenerationArtifactsV1) -> Cow<'_, str> {
+    let dir = split_parent(file.authority.logical_path.as_str()).0;
+    let package = file
+        .artifacts
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == NodeKind::GoPackage.as_str())
+        .map(|symbol| symbol.simple_name.as_str());
+    match package {
+        Some(package) if package.ends_with("_test") => Cow::Owned(format!("{dir}\u{1f}{package}")),
+        _ => Cow::Borrowed(dir),
+    }
 }
 
 impl GoFileV1<'_> {
@@ -63,7 +90,7 @@ impl GoFileV1<'_> {
             match token {
                 GoTypeTokenV1::Text(text) => qualified.push_str(text),
                 GoTypeTokenV1::Local(name) => {
-                    qualified.push_str(&format!("\u{1f}d:{}#{name}\u{1f}", self.dir));
+                    qualified.push_str(&format!("\u{1f}d:{}#{name}\u{1f}", self.scope));
                 }
                 GoTypeTokenV1::Qualified { package, name } => {
                     let key = self.package_key(package);
@@ -78,7 +105,7 @@ impl GoFileV1<'_> {
         let exported = method.name.chars().next().is_some_and(char::is_uppercase);
         MethodKeyV1 {
             name: method.name.clone(),
-            package: (!exported).then(|| self.dir.to_owned()),
+            package: (!exported).then(|| self.scope.to_owned()),
             params: method.params.iter().map(|ty| self.qualify(ty)).collect(),
             results: method.results.iter().map(|ty| self.qualify(ty)).collect(),
         }
@@ -88,7 +115,7 @@ impl GoFileV1<'_> {
     /// is a single project type name.
     fn embedded_name(&self, tokens: &[GoTypeTokenV1]) -> Option<(String, String)> {
         match tokens {
-            [GoTypeTokenV1::Local(name)] => Some((self.dir.to_owned(), name.clone())),
+            [GoTypeTokenV1::Local(name)] => Some((self.scope.to_owned(), name.clone())),
             [GoTypeTokenV1::Qualified { package, name }] => {
                 match self.aliases.get(package.as_str()) {
                     Some(TypeKeyV1::Dir(dir)) => Some((dir.clone(), name.clone())),
@@ -128,11 +155,16 @@ type OwnerV1<'a> = (&'a str, &'a str);
 
 /// A named type's methods, its own and those its embeddings and alias
 /// target promote to it.
-struct EffectiveV1 {
+struct EffectiveV1<'a> {
     methods: HashSet<MethodKeyV1>,
-    /// The first promoting type whose methods the project cannot see: the
-    /// type may carry more methods than `methods`.
-    open: Option<String>,
+    /// Names found where the walk cannot decide which method, if any, they
+    /// select: beside an embedding the project cannot see, or declared by a
+    /// generic type whose signatures depend on its type arguments.
+    loose: HashSet<NameV1<'a>>,
+    /// Whether an embedding the project cannot see may supply more methods.
+    open: bool,
+    /// What first kept the walk from deciding, when something did.
+    reason: Option<String>,
 }
 
 pub(super) fn go_satisfaction<T>(
@@ -142,18 +174,27 @@ pub(super) fn go_satisfaction<T>(
 where
     T: ResolutionFileV1,
 {
+    let scopes = files
+        .iter()
+        .map(|file| {
+            let file = file.as_ref();
+            (file.extraction.language.as_str() == "go" && !file.artifacts.go_method_sets.is_empty())
+                .then(|| package_scope(file))
+        })
+        .collect::<Vec<_>>();
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
     let mut method_sets = HashMap::<OwnerV1<'_>, HashSet<MethodKeyV1>>::new();
     let mut promotes = HashMap::<OwnerV1<'_>, Vec<PromotedV1>>::new();
+    let mut fields = HashMap::<OwnerV1<'_>, Vec<NameV1<'_>>>::new();
+    let mut generic = HashSet::<OwnerV1<'_>>::new();
     let mut interfaces = Vec::<InterfaceV1<'_>>::new();
     let mut interface_rows = HashMap::<&SymbolOccurrenceId, usize>::new();
     let mut interface_names = HashMap::<(&str, &str), Vec<usize>>::new();
-    for file in files {
-        let file = file.as_ref();
-        if file.extraction.language.as_str() != "go" || file.artifacts.go_method_sets.is_empty() {
+    for (file, scope) in files.iter().zip(&scopes) {
+        let Some(scope) = scope.as_deref() else {
             continue;
-        }
-        let dir = split_parent(file.authority.logical_path.as_str()).0;
+        };
+        let file = file.as_ref();
         let aliases = file
             .artifacts
             .imports
@@ -167,7 +208,7 @@ where
                 Some((row.local_name.as_deref()?, key))
             })
             .collect();
-        let go_file = GoFileV1 { dir, aliases };
+        let go_file = GoFileV1 { scope, aliases };
         let symbols = file
             .artifacts
             .symbols
@@ -178,17 +219,30 @@ where
             let Some(symbol) = symbols.get(&bound.occurrence) else {
                 continue;
             };
+            let owner = (scope, symbol.simple_name.as_str());
             let interface = match &bound.row {
                 GoMethodSetRowV1::NamedType => {
                     named_types
-                        .entry((dir, symbol.simple_name.as_str()))
+                        .entry(owner)
                         .or_default()
                         .push((&bound.occurrence, bound.span));
                     continue;
                 }
+                GoMethodSetRowV1::GenericType => {
+                    generic.insert(owner);
+                    continue;
+                }
+                GoMethodSetRowV1::Field { name } => {
+                    let exported = name.chars().next().is_some_and(char::is_uppercase);
+                    fields
+                        .entry(owner)
+                        .or_default()
+                        .push((name.as_str(), (!exported).then_some(scope)));
+                    continue;
+                }
                 GoMethodSetRowV1::Receiver { type_name, method } => {
                     method_sets
-                        .entry((dir, type_name.as_str()))
+                        .entry((scope, type_name.as_str()))
                         .or_default()
                         .insert(go_file.method_key(method));
                     continue;
@@ -200,16 +254,13 @@ where
                         [GoTypeTokenV1::Text(_)] => continue,
                         _ => PromotedV1::Embed(go_file.embedded_name(embedded), render(embedded)),
                     };
-                    promotes
-                        .entry((dir, symbol.simple_name.as_str()))
-                        .or_default()
-                        .push(promoted);
+                    promotes.entry(owner).or_default().push(promoted);
                     continue;
                 }
                 _ => {
                     let index = *interface_rows.entry(&bound.occurrence).or_insert_with(|| {
                         interface_names
-                            .entry((dir, symbol.simple_name.as_str()))
+                            .entry(owner)
                             .or_default()
                             .push(interfaces.len());
                         interfaces.push(InterfaceV1 {
@@ -233,7 +284,11 @@ where
                     .embeds
                     .push((go_file.embedded_name(embedded), render(embedded))),
                 GoMethodSetRowV1::GenericInterface => interface.generic = true,
-                GoMethodSetRowV1::NamedType
+                // `expand` reports an interface without methods as a gap.
+                GoMethodSetRowV1::EmptyInterface
+                | GoMethodSetRowV1::NamedType
+                | GoMethodSetRowV1::GenericType
+                | GoMethodSetRowV1::Field { .. }
                 | GoMethodSetRowV1::Receiver { .. }
                 | GoMethodSetRowV1::Promotes { .. } => {}
             }
@@ -259,18 +314,21 @@ where
         .collect::<Vec<_>>();
     owners.sort_unstable();
     owners.dedup();
+    let error = MethodKeyV1 {
+        name: "Error".to_owned(),
+        package: None,
+        params: Vec::new(),
+        results: vec!["string".to_owned()],
+    };
     let promotion = PromotionV1 {
         named_types: &named_types,
         interface_names: &interface_names,
         expansions: &expansions,
         promotes: &promotes,
         own: &method_sets,
-        error: MethodKeyV1 {
-            name: "Error".to_owned(),
-            package: None,
-            params: Vec::new(),
-            results: vec!["string".to_owned()],
-        },
+        fields: &fields,
+        generic: &generic,
+        error: &error,
     };
     let effective = owners
         .iter()
@@ -283,11 +341,27 @@ where
         }
     }
     let holders = |method| by_method.get(method).map_or(&[][..], Vec::as_slice);
-    let open_owners = owners
-        .iter()
-        .copied()
-        .filter(|owner| effective[owner].open.is_some())
-        .collect::<Vec<_>>();
+    // The owners that may hold a method the walk cannot decide, indexed by
+    // the names they may hold.
+    let mut by_name = HashMap::<NameV1<'_>, Vec<OwnerV1<'_>>>::new();
+    let mut open_owners = Vec::new();
+    for owner in &owners {
+        let owner_effective = &effective[owner];
+        if owner_effective.reason.is_none() {
+            continue;
+        }
+        if owner_effective.open {
+            open_owners.push(*owner);
+        }
+        for name in owner_effective
+            .methods
+            .iter()
+            .map(name_of)
+            .chain(owner_effective.loose.iter().copied())
+        {
+            by_name.entry(name).or_default().push(*owner);
+        }
+    }
     let mut edges = Vec::new();
     let mut gaps = Vec::new();
     for (interface, expansion) in interfaces.iter().zip(&expansions) {
@@ -334,24 +408,34 @@ where
                     .chain(&method.results)
                     .any(|ty| ty.contains("\u{1f}d:"))
         };
+        let could = |owner: &EffectiveV1<'_>, method: &MethodKeyV1| {
+            owner.methods.contains(method)
+                || owner.loose.contains(&name_of(method))
+                || (owner.open && suppliable(method))
+        };
         let suspects = methods
             .iter()
-            .filter(|method| !suppliable(method))
-            .map(holders)
-            .min_by_key(|holders| holders.len())
-            .unwrap_or(&open_owners[..]);
+            .map(|method| {
+                let named = by_name.get(&name_of(method)).map_or(&[][..], Vec::as_slice);
+                let open = if suppliable(method) {
+                    &open_owners[..]
+                } else {
+                    &[]
+                };
+                (named.len() + open.len(), named.iter().chain(open))
+            })
+            .min_by_key(|(len, _)| *len);
+        let Some((_, suspects)) = suspects else {
+            continue;
+        };
         let undecided = suspects
-            .iter()
             .filter(|owner| {
                 let owner = &effective[*owner];
-                owner.open.is_some()
-                    && !methods.is_subset(&owner.methods)
-                    && methods
-                        .iter()
-                        .all(|method| owner.methods.contains(method) || suppliable(method))
+                !methods.is_subset(&owner.methods)
+                    && methods.iter().all(|method| could(owner, method))
             })
             .min();
-        if let Some(reference_name) = undecided.and_then(|owner| effective[owner].open.as_ref()) {
+        if let Some(reference_name) = undecided.and_then(|owner| effective[owner].reason.as_ref()) {
             gaps.push(gap(reference_name));
         }
     }
@@ -383,69 +467,103 @@ struct PromotionV1<'a> {
     expansions: &'a [ExpandedV1],
     promotes: &'a HashMap<OwnerV1<'a>, Vec<PromotedV1>>,
     own: &'a HashMap<OwnerV1<'a>, HashSet<MethodKeyV1>>,
-    error: MethodKeyV1,
+    fields: &'a HashMap<OwnerV1<'a>, Vec<NameV1<'a>>>,
+    generic: &'a HashSet<OwnerV1<'a>>,
+    error: &'a MethodKeyV1,
 }
 
 impl<'a> PromotionV1<'a> {
     /// `owner`'s methods, walked one embedding depth at a time as Go
     /// selectors resolve: a name found at a shallower depth hides deeper
     /// ones, and a name reached by more than one path at its shallowest depth
-    /// is ambiguous and belongs to no method set.
-    fn effective(&self, owner: OwnerV1<'a>) -> EffectiveV1 {
-        let mut decided = HashMap::<(&str, Option<&str>), Option<&MethodKeyV1>>::new();
-        let mut open = None;
+    /// is ambiguous and belongs to no method set. Field names take part, so
+    /// a field hides or ties with a promoted method of its name.
+    fn effective(&self, owner: OwnerV1<'a>) -> EffectiveV1<'a> {
+        let mut decided = HashMap::<NameV1<'a>, Option<&'a MethodKeyV1>>::new();
+        let mut loose = HashSet::new();
+        // The shallowest depth an embedding the project cannot see promotes
+        // names to. It may hide or tie with any name found there or deeper.
+        let mut open_depth = usize::MAX;
+        let mut reason = None;
         let mut walked = HashSet::from([owner]);
         // Each reached type with the number of embedding paths reaching it.
         let mut level = BTreeMap::from([(ReachedV1::Named(owner), 1_usize)]);
+        let mut depth = 0_usize;
         while !level.is_empty() {
-            let mut found = HashMap::<(&str, Option<&str>), (&MethodKeyV1, usize)>::new();
+            // Each name with its method (none for a field), the paths
+            // reaching it, and whether a generic type declares it.
+            let mut found = HashMap::<NameV1<'a>, (Option<&'a MethodKeyV1>, usize, bool)>::new();
             let mut next = BTreeMap::new();
             for (reached, paths) in level {
-                let methods: Box<dyn Iterator<Item = &MethodKeyV1>> = match reached {
-                    ReachedV1::Named(named) => {
-                        for promoted in self.promotes.get(&named).into_iter().flatten() {
-                            match self.reach(promoted) {
-                                // Every name of a type reached at a shallower
-                                // depth is already decided.
-                                Ok(ReachedV1::Named(inner)) if walked.contains(&inner) => {}
-                                Ok(inner) => {
-                                    let count = next.entry(inner).or_default();
-                                    *count = paths.saturating_add(*count);
-                                }
-                                Err(text) => {
-                                    open.get_or_insert_with(|| text.to_owned());
+                let names: Box<dyn Iterator<Item = (NameV1<'a>, Option<&'a MethodKeyV1>, bool)>> =
+                    match reached {
+                        ReachedV1::Named(named) => {
+                            for promoted in self.promotes.get(&named).into_iter().flatten() {
+                                match self.reach(promoted) {
+                                    // Every name of a type reached at a
+                                    // shallower depth is already decided.
+                                    Ok(ReachedV1::Named(inner)) if walked.contains(&inner) => {}
+                                    Ok(inner) => {
+                                        let count = next.entry(inner).or_default();
+                                        *count = paths.saturating_add(*count);
+                                    }
+                                    Err(text) => {
+                                        open_depth = open_depth.min(depth + 1);
+                                        reason.get_or_insert_with(|| text.to_owned());
+                                    }
                                 }
                             }
+                            let generic = self.generic.contains(&named);
+                            if generic {
+                                reason.get_or_insert_with(|| named.1.to_owned());
+                            }
+                            let fields = self.fields.get(&named).into_iter().flatten();
+                            let own = self.own.get(&named).into_iter().flatten();
+                            Box::new(fields.map(|name| (*name, None, false)).chain(
+                                own.map(move |method| (name_of(method), Some(method), generic)),
+                            ))
                         }
-                        Box::new(self.own.get(&named).into_iter().flatten())
-                    }
-                    ReachedV1::Interface(index) => {
-                        Box::new(self.expansions[index].iter().flatten())
-                    }
-                    ReachedV1::Error => Box::new(std::iter::once(&self.error)),
-                };
-                for method in methods {
-                    let name = (method.name.as_str(), method.package.as_deref());
+                        ReachedV1::Interface(index) => Box::new(
+                            self.expansions[index]
+                                .iter()
+                                .flatten()
+                                .map(|method| (name_of(method), Some(method), false)),
+                        ),
+                        ReachedV1::Error => Box::new(std::iter::once((
+                            name_of(self.error),
+                            Some(self.error),
+                            false,
+                        ))),
+                    };
+                for (name, method, generic) in names {
                     if !decided.contains_key(&name) {
-                        let (_, count) = found.entry(name).or_insert((method, 0));
-                        *count = paths.saturating_add(*count);
+                        let entry = found.entry(name).or_insert((method, 0, false));
+                        entry.1 = paths.saturating_add(entry.1);
+                        entry.2 |= generic;
                     }
                 }
             }
-            decided.extend(
-                found
-                    .into_iter()
-                    .map(|(name, (method, count))| (name, (count == 1).then_some(method))),
-            );
+            for (name, (method, count, generic)) in found {
+                let selected = if depth >= open_depth || (generic && count == 1) {
+                    loose.insert(name);
+                    None
+                } else {
+                    method.filter(|_| count == 1)
+                };
+                decided.insert(name, selected);
+            }
             walked.extend(next.keys().filter_map(|reached| match reached {
                 ReachedV1::Named(named) => Some(*named),
                 _ => None,
             }));
             level = next;
+            depth += 1;
         }
         EffectiveV1 {
             methods: decided.into_values().flatten().cloned().collect(),
-            open,
+            loose,
+            open: open_depth != usize::MAX,
+            reason,
         }
     }
 
