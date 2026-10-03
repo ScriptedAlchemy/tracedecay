@@ -28,6 +28,7 @@ use tracedecay_code_index::{
         SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
         SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+        advance_import_dictionary_digest, initial_import_dictionary_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -1919,7 +1920,7 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
 }
 
 #[test]
-fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent() {
+fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
@@ -1954,6 +1955,7 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
             .lexical_source(maximum_page_chunks, 1024 * 1024)
             .expect("verified import page source opens");
         let mut imports = Vec::new();
+        let mut folded = initial_import_dictionary_digest().expect("initial import dictionary");
         let receipt = loop {
             match source
                 .next_page(&ActiveControl)
@@ -1969,15 +1971,17 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
                         assert!(page.import_payload_bytes() > 0);
                     }
                     imports.extend(page.imports().iter().cloned());
+                    folded = advance_import_dictionary_digest(&folded, page.import_digest())
+                        .expect("fold page import digest");
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
         };
-        (imports, receipt)
+        (imports, receipt, folded)
     };
 
-    let (split_imports, split_receipt) = read(1);
-    let (wide_imports, wide_receipt) = read(64);
+    let (split_imports, split_receipt, split_folded) = read(1);
+    let (wide_imports, wide_receipt, wide_folded) = read(64);
     assert_eq!(split_imports, generation.imports());
     assert_eq!(wide_imports, generation.imports());
     assert_eq!(
@@ -1985,11 +1989,11 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
         generation.imports().len() as u64
     );
     assert!(split_receipt.import_payload_bytes() > 0);
-    assert_eq!(
-        split_receipt.import_dictionary_digest(),
-        wide_receipt.import_dictionary_digest(),
-        "the exact import dictionary cannot depend on page boundaries"
-    );
+    // The dictionary is the page-order fold of the emitted pages' own
+    // import digests, which is what a lexical artifact re-derives from its
+    // stored pages.
+    assert_eq!(split_receipt.import_dictionary_digest(), &split_folded);
+    assert_eq!(wide_receipt.import_dictionary_digest(), &wide_folded);
     assert_eq!(
         split_receipt.import_payload_bytes(),
         wide_receipt.import_payload_bytes()

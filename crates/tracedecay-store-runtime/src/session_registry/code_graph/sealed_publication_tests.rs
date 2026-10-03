@@ -1305,7 +1305,10 @@ async fn sealing_keeps_symbol_records_only_in_the_graph_store() {
         .warm_serving_engine()
         .expect("warm the serving engine");
     store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("derive the catalog from the sealed projection");
     let resolved = store
         .interactive_reader_with_cancellation(
@@ -1376,7 +1379,10 @@ async fn a_symbol_record_over_64_kib_seals_and_serves_whole() {
         .warm_serving_engine()
         .expect("warm the serving engine");
     store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("derive the catalog from the sealed projection");
     let resolved = store
         .interactive_reader_with_cancellation(
@@ -1621,9 +1627,10 @@ async fn serving_graph_owners_charge_the_heap_they_hold() {
     let ((), warmed) = crate::thread_allocation::live_after(|| {
         store.warm_serving_engine().expect("cold warm");
         store
-            .warm_interactive_catalog_with_cancellation(Arc::new(
-                tracedecay_graph_db::NeverCancelled,
-            ))
+            .warm_interactive_catalog_with_cancellation(
+                None,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
             .expect("catalog warm");
     });
     let catalog_charge = store
@@ -2350,7 +2357,10 @@ async fn sealed_publication_samples_resident_memory_per_interval_not_per_row() {
         .warm_serving_engine()
         .expect("warm the serving engine");
     store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("derive the catalog from the published projection");
     let last = format!("src/lib.rs::chained_{:04}", CHAINED_FUNCTIONS - 1);
     let resolved = store
