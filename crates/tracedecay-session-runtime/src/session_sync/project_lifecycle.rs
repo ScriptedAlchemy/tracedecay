@@ -432,7 +432,7 @@ impl DaemonSessionSyncService {
         match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)
-            | SessionSyncOutcomeV1::Complete(_) => Ok(()),
+            | SessionSyncOutcomeV1::Complete { .. } => Ok(()),
             SessionSyncOutcomeV1::Unavailable { reason_code }
                 if reason_code == SESSION_INGEST_DISABLED_REASON_V1 =>
             {

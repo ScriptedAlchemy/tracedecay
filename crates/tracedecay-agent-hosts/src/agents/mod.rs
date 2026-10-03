@@ -790,6 +790,7 @@ pub struct DoctorCounters {
     /// installation is not converged until they are done.
     pub pending_actions: u32,
     pub checks: Vec<DoctorCheckV1>,
+    quiet: bool,
 }
 
 /// One reported doctor check line.
@@ -814,6 +815,21 @@ pub enum DoctorCheckLevelV1 {
 impl DoctorCounters {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Records checks without writing the human report, for `doctor --json`.
+    pub fn quiet() -> Self {
+        Self {
+            quiet: true,
+            ..Self::default()
+        }
+    }
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+    pub fn section(&self, title: &str) {
+        if !self.quiet {
+            eprintln!("\n\x1b[1m{title}\x1b[0m");
+        }
     }
     pub fn pass(&mut self, msg: &str) {
         self.report(DoctorCheckLevelV1::Pass, msg);
@@ -852,7 +868,9 @@ impl DoctorCounters {
             DoctorCheckLevelV1::Skipped => "  - ",
             DoctorCheckLevelV1::Info => "    ",
         };
-        eprintln!("{marker}{msg}");
+        if !self.quiet {
+            eprintln!("{marker}{msg}");
+        }
         self.checks.push(DoctorCheckV1 {
             level,
             message: msg.to_owned(),

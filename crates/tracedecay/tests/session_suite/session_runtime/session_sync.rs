@@ -819,7 +819,7 @@ fn completed_alias_replay_survives_its_original_deadline() {
         decode_matching_journal(&encoded, &request)
             .unwrap()
             .outcome(),
-        SessionSyncOutcomeV1::Complete(receipt)
+        SessionSyncOutcomeV1::Complete { receipt, .. }
             if receipt.admission.idempotency_key == *request.idempotency_key()
                 && receipt.coalesced_primary.is_some()
     ));
@@ -965,7 +965,7 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
 
     assert!(matches!(
         cancel.await.unwrap(),
-        SessionSyncOutcomeV1::Complete(receipt)
+        SessionSyncOutcomeV1::Complete { receipt, .. }
             if receipt.termination == OperationTermination::Completed
                 && receipt.admission.idempotency_key == *alias_request.idempotency_key()
                 && receipt.coalesced_primary

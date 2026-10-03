@@ -703,7 +703,7 @@ fn compose_graph_authority(
     // Production activation warms (or installs) the catalog before graph
     // serving; a fixture must not charge that one-time build to a request.
     store
-        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(None, Arc::new(NeverCancelled))
         .unwrap_or_else(|error| panic!("warm fixture graph catalog: {error}"));
     (
         Arc::new(
