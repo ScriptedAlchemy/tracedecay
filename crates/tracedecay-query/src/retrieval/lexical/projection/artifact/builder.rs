@@ -6621,7 +6621,7 @@ fn record_batch_outcome(
 }
 
 fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
+    if crate::observe::observing() {
         let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
         let source_bytes = pages
             .iter()
@@ -6653,7 +6653,7 @@ fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
 }
 
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
+    if crate::observe::observing() {
         let relational_postings = pages
             .iter()
             .flat_map(|page| &page.documents)
