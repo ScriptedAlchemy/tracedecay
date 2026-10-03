@@ -28,6 +28,7 @@ use super::ports::{
 mod projection;
 mod routes;
 
+pub(crate) use self::projection::exact_field_for_kind;
 pub use self::projection::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
     CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,

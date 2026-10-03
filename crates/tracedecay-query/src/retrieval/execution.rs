@@ -14,7 +14,7 @@ use tracedecay_domain::{
 
 use super::exact::{ExactLaneEvidence, ExactLiteralV1};
 use super::graph::GraphLaneEvidence;
-use super::lexical::LexicalLaneEvidence;
+use super::lexical::{LexicalLaneEvidence, exact_field_for_kind};
 use super::ports::CodeCandidateBindingV1;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -186,19 +186,24 @@ where
             for candidate in &batch.candidates {
                 let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
-                let Some(matched_literal) = evidence.matched_literals.iter().find(|literal| {
-                    requested_literals
-                        .iter()
-                        .any(|requested| requested.original_bytes == literal.original_bytes)
-                }) else {
-                    continue;
-                };
-                let Some(matched_kind) = evidence
+                let Some((matched_kind, matched_literal)) = evidence
                     .binding
                     .matched_term_kinds
                     .iter()
                     .copied()
-                    .find(|kind| expected_kind.is_none_or(|expected| expected == *kind))
+                    .filter(|kind| expected_kind.is_none_or(|expected| expected == *kind))
+                    .find_map(|kind| {
+                        evidence
+                            .matched_literals
+                            .iter()
+                            .find(|literal| {
+                                literal.field == exact_field_for_kind(kind)
+                                    && requested_literals.iter().any(|requested| {
+                                        requested.original_bytes == literal.original_bytes
+                                    })
+                            })
+                            .map(|literal| (kind, literal))
+                    })
                 else {
                     continue;
                 };

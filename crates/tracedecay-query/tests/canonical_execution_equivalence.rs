@@ -341,6 +341,52 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
 }
 
 #[test]
+fn a_kind_filtered_exact_hit_reports_the_literal_that_matched_that_kind() {
+    let records = FixtureRecords {
+        generation: generation(),
+    };
+    let literal = |field, bytes: &[u8]| ExactLiteralV1 {
+        field,
+        original_bytes: bytes.to_vec(),
+        canonical_bytes: bytes.to_vec(),
+    };
+    let requested = vec![
+        literal(ExactFieldV1::Identifier, b"foo"),
+        literal(ExactFieldV1::Path, b"src/foo.rs"),
+    ];
+    let mut evidence = exact_evidence();
+    evidence.binding.matched_term_kinds = vec![
+        ExactTechnicalTermKindV1::WholeSymbol,
+        ExactTechnicalTermKindV1::Path,
+    ];
+    evidence.matched_literals = requested.clone();
+    let mut exact_candidate = candidate(RetrieverKind::ExactLiteral, 1_000_000);
+    exact_candidate.exact_admission_proof = Some(exact_proof());
+
+    let exact = context(&records)
+        .exact(
+            RetrieverOutcome::Complete(batch(exact_candidate, evidence)),
+            &requested,
+            Some(ExactTechnicalTermKindV1::Path),
+            |_| true,
+        )
+        .expect("exact translation");
+
+    let NativeLaneOutcomeV1::Complete(page) = exact else {
+        panic!("complete page expected: {exact:?}");
+    };
+    let matched: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| (item.matched_kind, item.matched_literal.as_str()))
+        .collect();
+    assert_eq!(
+        matched,
+        vec![(ExactTechnicalTermKindV1::Path, "src/foo.rs")]
+    );
+}
+
+#[test]
 fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
     let records = FixtureRecords {
         generation: generation(),
