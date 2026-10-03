@@ -78,7 +78,7 @@ impl AgentIntegration for VibeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mMistral Vibe integration\x1b[0m");
+        dc.section("Mistral Vibe integration");
         doctor_check_registration(
             dc,
             &vibe_config_path(&ctx.home),

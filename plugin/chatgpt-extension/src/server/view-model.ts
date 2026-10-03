@@ -115,6 +115,12 @@ export async function symbolView(bridge: DaemonBridge, projectId: string, nodeId
     }),
     section<ImpactReport>(async () => {
       const result = await bridge.impact(projectId, nodeId, IMPACT_DEPTH, signal);
+      if (!("nodes" in result)) {
+        return {
+          state: "failed",
+          failure: { kind: "not_found", code: result.reason_code, message: result.message },
+        };
+      }
       const nodes = result.nodes.map(impactNode);
       if (nodes.length === 0 && result.complete) {
         return { state: "empty", message: "No dependents reach this symbol within the traversed depth." };
