@@ -197,14 +197,16 @@ fn validate_or_initialize_format_marker(
 }
 
 /// Records how much corpus the engine open just hydrated, so the phase spans
-/// around it can be correlated with store size in the tracing span.
+/// around it can be correlated with store size in the tracing span. Both
+/// counts walk every node and edge, so they run only while TRACE is enabled.
 #[inline(always)]
 pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
-    {
-        let store = database.graph_store();
-        metrics::gauge!("graph_db.generation.open.nodes").set((store.node_count()) as f64);
-        metrics::gauge!("graph_db.generation.open.edges").set((store.edge_count()) as f64);
+    if !tracing::level_enabled!(tracing::Level::TRACE) {
+        return;
     }
+    let store = database.graph_store();
+    metrics::gauge!("graph_db.generation.open.nodes").set((store.node_count()) as f64);
+    metrics::gauge!("graph_db.generation.open.edges").set((store.edge_count()) as f64);
 }
 
 /// Checkpoints sidecar-WAL history that a successful open replayed into the

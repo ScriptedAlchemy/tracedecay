@@ -1575,16 +1575,17 @@ impl GraphDb {
     /// trustworthy memory census to report.
     #[inline(always)]
     pub(crate) fn record_memory_checkpoint(&self, phase: crate::observe::GrafeoMemoryPhase) {
-        {
-            let Ok(guard) = self.read_guard() else {
-                return;
-            };
-            let Some(database) = guard.as_ref() else {
-                return;
-            };
-            let container = self.container_label();
-            crate::observe::record_grafeo_memory(database, phase, &container);
+        if !crate::observe::grafeo_memory_census_enabled() {
+            return;
         }
+        let Ok(guard) = self.read_guard() else {
+            return;
+        };
+        let Some(database) = guard.as_ref() else {
+            return;
+        };
+        let container = self.container_label();
+        crate::observe::record_grafeo_memory(database, phase, &container);
     }
 
     pub(crate) fn write_guard(

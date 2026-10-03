@@ -170,9 +170,15 @@ pub(crate) fn record_hydration_source(source: HydrationSource) {
     }
 }
 
-/// Records Grafeo's own memory census at coarse lifecycle boundaries. The
-/// census walks internal store structures, so it runs only at coarse
-/// lifecycle boundaries and never on graph query paths.
+/// Whether a memory census can be observed. The census walks Grafeo's
+/// internal stores, so callers skip it, and the guard it needs, otherwise.
+#[inline(always)]
+pub(crate) fn grafeo_memory_census_enabled() -> bool {
+    tracing::enabled!(tracing::Level::DEBUG)
+}
+
+/// Records Grafeo's own memory census at coarse lifecycle boundaries, never
+/// on graph query paths. Callers gate on [`grafeo_memory_census_enabled`].
 #[inline(always)]
 pub(crate) fn record_grafeo_memory(
     database: &grafeo_engine::GrafeoDB,
@@ -194,10 +200,9 @@ pub(crate) fn record_grafeo_memory(
         .set(usage.buffer_manager.budget_bytes as f64);
     metrics::gauge!("graph_db.memory.buffer_allocated_bytes")
         .set(usage.buffer_manager.allocated_bytes as f64);
-    // Measurement-build only: gauges keep the last census, so a daemon with
-    // several resident engines needs each census on the operator log to
-    // attribute retained bytes per container.
-    tracing::info!(
+    // Gauges keep the last census, so a daemon with several resident engines
+    // needs each census in the log to attribute retained bytes per container.
+    tracing::debug!(
         event = "graph_engine_memory_census",
         phase = phase.as_str(),
         container,
