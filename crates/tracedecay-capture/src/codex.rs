@@ -160,17 +160,14 @@ fn normalize_codex_observation_inner(
     range: tracedecay_domain::ObservationSourceRangeV1,
     location: Option<CodexObservationLocation<'_>>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Codex rollouts order by file bytes, so the range length is the source
-    // record's byte length. Failed normalizations are counted, never hidden.
-    let envelope = normalize_codex_record(
+    normalize_codex_record(
         native,
         session_id,
         native_thread_id,
         stable_record_id,
         range,
         location,
-    );
-    envelope
+    )
 }
 
 /// One source-record canonicalization, not a per-item walk.

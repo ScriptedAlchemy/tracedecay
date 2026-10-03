@@ -176,13 +176,12 @@ pub fn parse_observation_record_v1(
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
-    let parsed = parse_observation_record(
+    parse_observation_record(
         record,
         source_range,
         ordering_domain,
         ParseLimits::default_policy(),
-    );
-    parsed
+    )
 }
 
 /// Decodes one bounded native JSON record, consumes that decoded value in a
@@ -224,8 +223,7 @@ pub fn prepare_observation_record_v1(
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
-    let prepared = prepare_observation_record(record, source_range, ordering_domain);
-    prepared
+    prepare_observation_record(record, source_range, ordering_domain)
 }
 
 #[tracing::instrument(name = "capture.parse.prepare_record", level = "trace", skip_all)]
@@ -338,12 +336,8 @@ fn parse_observation_record(
 }
 
 fn record_digest(record: &[u8]) -> [u8; 32] {
-    // Cumulative decoded bytes across every host pipeline, not a last-record
-    // sample, corpus-scale throughput is the quantity being compared.
-    {
-        let _span = tracing::trace_span!("capture.parse.record_digest").entered();
-        Sha256::digest(record).into()
-    }
+    let _span = tracing::trace_span!("capture.parse.record_digest").entered();
+    Sha256::digest(record).into()
 }
 
 pub(crate) fn canonical_u64_i64(value: Option<&Value>) -> Option<u64> {

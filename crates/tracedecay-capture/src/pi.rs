@@ -72,8 +72,7 @@ pub fn normalize_observation(
     session_id: &str,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let envelope = normalize_pi_entry(native, session_id, range);
-    envelope
+    normalize_pi_entry(native, session_id, range)
 }
 
 #[tracing::instrument(name = "capture.pi.normalize", level = "trace", skip_all)]

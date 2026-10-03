@@ -44,9 +44,7 @@ pub fn normalize_cursor_observation_with_message_id(
     agent_id: Option<&str>,
     parent_agent_id: Option<&str>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Cursor transcript records order by file bytes, so the range length is
-    // the source record's byte length. Failures are counted, never hidden.
-    let envelope = normalize_cursor_record(
+    normalize_cursor_record(
         native,
         session_id,
         stable_record_id,
@@ -54,8 +52,7 @@ pub fn normalize_cursor_observation_with_message_id(
         range,
         agent_id,
         parent_agent_id,
-    );
-    envelope
+    )
 }
 
 /// Cursor host composition for one source record, not a per-token walk.
