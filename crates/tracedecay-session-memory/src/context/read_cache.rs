@@ -87,9 +87,9 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
-    // Hit/miss/stale are disjoint counters: `misses` is a cold lookup with no
-    // row, `stale` is a row evicted by an mtime mismatch. Both force the
-    // caller to recompute, but only stale implies the file changed.
+    // A missing row is a cold lookup; a row evicted by an mtime mismatch is
+    // stale. Both force the caller to recompute, but only stale implies the
+    // file changed.
     let Some(row) = row else {
         return Ok(None);
     };
