@@ -64,6 +64,16 @@ pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
 
 /// Hub fan-out page width for newest-first span index reads.
 const SPAN_INDEX_PAGE_ROWS: i64 = 256;
+/// Page width for complete scope scans; stays under the exact-SQL row cap.
+const SPAN_IDENTITY_PAGE_ROWS: i64 = 4_096;
+
+struct SpanIndexRow {
+    session_id: String,
+    provider: String,
+    first_ts: i64,
+    last_ts: i64,
+    span_id: String,
+}
 
 /// Evidence one write folds into the per-session rows.
 #[derive(Debug, Default)]
@@ -573,14 +583,13 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
         if let Some(branch) = &filter.branch {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities_where("branch = ?1", branch).await?,
+                self.span_identities_where("branch", branch).await?,
             ));
         }
         if let Some(worktree) = &filter.worktree {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities_where("worktree = ?1", worktree)
-                    .await?,
+                self.span_identities_where("worktree", worktree).await?,
             ));
         }
         if let Some(commit) = &filter.commit {
@@ -680,89 +689,108 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
             GitRefFilter::Worktree(worktree) => ("worktree", worktree),
             GitRefFilter::Commit(_) => return Ok(BTreeSet::new()),
         };
-        let first_page = format!(
-            "SELECT session_id, first_ts, last_ts, span_id FROM git_evidence_span
-             WHERE {column} = ?1
-             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
-        );
-        let next_page = format!(
-            "SELECT session_id, first_ts, last_ts, span_id FROM git_evidence_span
-             WHERE {column} = ?1 AND (last_ts < ?3 OR (last_ts = ?3 AND span_id < ?4))
-             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
-        );
         let mut selected = BTreeSet::new();
         let mut boundary: Option<i64> = None;
-        let mut after: Option<(i64, String)> = None;
+        let mut after = None;
         loop {
-            let mut rows = match &after {
-                None => {
-                    self.conn
-                        .query(&first_page, params![value.as_str(), SPAN_INDEX_PAGE_ROWS])
-                        .await?
-                }
-                Some((last_ts, span_id)) => {
-                    self.conn
-                        .query(
-                            &next_page,
-                            params![
-                                value.as_str(),
-                                SPAN_INDEX_PAGE_ROWS,
-                                *last_ts,
-                                span_id.as_str()
-                            ],
-                        )
-                        .await?
-                }
-            };
-            let mut page_rows = 0_i64;
-            while let Some(row) = rows.next().await? {
-                page_rows += 1;
-                let session_id = row.get::<String>(0)?;
-                let first_ts = row.get::<i64>(1)?;
-                let last_ts = row.get::<i64>(2)?;
-                after = Some((last_ts, row.get::<String>(3)?));
-                if query.since.is_some_and(|since| last_ts < since)
-                    || boundary.is_some_and(|boundary| last_ts < boundary)
+            let page = self
+                .span_index_page(column, value, after.take(), SPAN_INDEX_PAGE_ROWS)
+                .await?;
+            let full = page.len() as i64 == SPAN_INDEX_PAGE_ROWS;
+            for row in page {
+                if query.since.is_some_and(|since| row.last_ts < since)
+                    || boundary.is_some_and(|boundary| row.last_ts < boundary)
                 {
                     return Ok(selected);
                 }
-                if query.until.is_some_and(|until| first_ts > until) {
+                after = Some((row.last_ts, row.span_id));
+                if query.until.is_some_and(|until| row.first_ts > until) {
                     continue;
                 }
-                if selected.insert(session_id) && selected.len() == limit {
-                    boundary = Some(last_ts);
+                if selected.insert(row.session_id) && selected.len() == limit {
+                    boundary = Some(row.last_ts);
                 }
             }
-            if page_rows < SPAN_INDEX_PAGE_ROWS {
+            if !full {
                 return Ok(selected);
             }
         }
     }
 
-    /// The identity map only needs the dedicated columns; selecting `record`
-    /// paid one JSON decode per span and multiplied the materialized page.
+    /// Every `(session_id, provider)` identity on `column = value`, read in
+    /// index pages so a hub branch never materializes as one result.
     async fn span_identities_where(
         &self,
-        predicate: &str,
+        column: &str,
         value: &str,
     ) -> Result<BTreeMap<String, String>, GitCorrelationError> {
-        let mut rows = self
-            .conn
-            .query(
-                &format!(
-                    "SELECT DISTINCT session_id, provider
-                     FROM git_evidence_span WHERE {predicate}"
-                ),
-                params![value],
-            )
-            .await?;
         let mut pairs = Vec::new();
-        while let Some(row) = rows.next().await? {
-            pairs.push((row.get::<String>(0)?, row.get::<String>(1)?));
+        let mut after = None;
+        loop {
+            let page = self
+                .span_index_page(column, value, after.take(), SPAN_IDENTITY_PAGE_ROWS)
+                .await?;
+            let full = page.len() as i64 == SPAN_IDENTITY_PAGE_ROWS;
+            if let Some(last) = page.last() {
+                after = Some((last.last_ts, last.span_id.clone()));
+            }
+            pairs.extend(page.into_iter().map(|row| (row.session_id, row.provider)));
+            if !full {
+                break;
+            }
         }
         Ok(session_provider_identities(pairs.iter().map(
             |(session_id, provider)| (session_id.as_str(), provider.as_str()),
         )))
+    }
+
+    /// One newest-first keyset page of the `(column, last_ts, span_id)` index
+    /// strictly after `after`.
+    async fn span_index_page(
+        &self,
+        column: &str,
+        value: &str,
+        after: Option<(i64, String)>,
+        page_rows: i64,
+    ) -> Result<Vec<SpanIndexRow>, GitCorrelationError> {
+        let mut rows = match after {
+            None => {
+                self.conn
+                    .query(
+                        &format!(
+                            "SELECT session_id, provider, first_ts, last_ts, span_id
+                             FROM git_evidence_span WHERE {column} = ?1
+                             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
+                        ),
+                        params![value, page_rows],
+                    )
+                    .await?
+            }
+            Some((last_ts, span_id)) => {
+                self.conn
+                    .query(
+                        &format!(
+                            "SELECT session_id, provider, first_ts, last_ts, span_id
+                             FROM git_evidence_span WHERE {column} = ?1
+                             AND (last_ts < ?3 OR (last_ts = ?3 AND span_id < ?4))
+                             ORDER BY last_ts DESC, span_id DESC LIMIT ?2"
+                        ),
+                        params![value, page_rows, last_ts, span_id.as_str()],
+                    )
+                    .await?
+            }
+        };
+        let mut page = Vec::new();
+        while let Some(row) = rows.next().await? {
+            page.push(SpanIndexRow {
+                session_id: row.get::<String>(0)?,
+                provider: row.get::<String>(1)?,
+                first_ts: row.get::<i64>(2)?,
+                last_ts: row.get::<i64>(3)?,
+                span_id: row.get::<String>(4)?,
+            });
+        }
+        Ok(page)
     }
 
     /// Every commit/session record whose SHA starts with `sha`, in canonical
