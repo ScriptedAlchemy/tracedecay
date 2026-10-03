@@ -18,8 +18,8 @@ use super::{
     SessionsForQuery, SpanObservation, canonical_providers, commit_hits,
     commit_identities_with_producer_fallback, commit_record_matches_query, commit_record_order,
     digest_bytes, intersect_id_maps, normalize_worktree, parse_commit_sha, scope_session_ids,
-    sessions_for_limit, span_hits, span_identities, span_matches_query, validate_commit_record,
-    validate_span,
+    session_provider_identities, sessions_for_limit, span_hits, span_identities,
+    span_matches_query, validate_commit_record, validate_span,
 };
 
 pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
@@ -739,6 +739,8 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
         }
     }
 
+    /// The identity map only needs the dedicated columns; selecting `record`
+    /// paid one JSON decode per span and multiplied the materialized page.
     async fn span_identities_where(
         &self,
         predicate: &str,
@@ -747,15 +749,20 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
         let mut rows = self
             .conn
             .query(
-                &format!("SELECT record FROM git_evidence_span WHERE {predicate}"),
+                &format!(
+                    "SELECT DISTINCT session_id, provider
+                     FROM git_evidence_span WHERE {predicate}"
+                ),
                 params![value],
             )
             .await?;
-        let mut spans = Vec::new();
+        let mut pairs = Vec::new();
         while let Some(row) = rows.next().await? {
-            spans.push(decode_record::<SessionGitSpan>(&row)?);
+            pairs.push((row.get::<String>(0)?, row.get::<String>(1)?));
         }
-        Ok(span_identities(spans.iter()))
+        Ok(session_provider_identities(pairs.iter().map(
+            |(session_id, provider)| (session_id.as_str(), provider.as_str()),
+        )))
     }
 
     /// Every commit/session record whose SHA starts with `sha`, in canonical
