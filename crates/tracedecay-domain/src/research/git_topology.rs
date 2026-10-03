@@ -56,7 +56,6 @@ pub enum GitTopologyGenerationRefV1 {
     GitReceipt {
         receipt_id: GitIndexReceiptId,
         preview_id: GitIndexPreviewId,
-        commit_id: Option<GitOidV1>,
     },
     #[serde(rename = "github_stack_capability")]
     GitHubStackCapability {
@@ -115,11 +114,9 @@ impl GitTopologyGenerationRefV1 {
             Self::GitReceipt {
                 receipt_id,
                 preview_id,
-                commit_id,
             } => {
                 receipt_id.validate()?;
-                preview_id.validate()?;
-                commit_id.as_ref().map_or(Ok(()), GitOidV1::validate)
+                preview_id.validate()
             }
             Self::GitHubStackCapability {
                 generation_id,
@@ -1004,7 +1001,6 @@ pub struct PreflightPreviewAnchorRefV1 {
     pub preview_digest: ManifestDigest,
     pub operation: GitIndexTransactionOperationV1,
     pub candidate_index_tree: Option<GitOidV1>,
-    pub commit_intent_digest: Option<ManifestDigest>,
     pub expires_at: UtcMicros,
 }
 
@@ -1020,7 +1016,6 @@ impl PreflightPreviewAnchorRefV1 {
             preview_digest: preview.preview_digest.clone(),
             operation: preview.operation,
             candidate_index_tree: preview.candidate_index_tree.clone(),
-            commit_intent_digest: preview.commit_intent_digest.clone(),
             expires_at: preview.expires_at,
         };
         if value.repository.snapshot_id != preview.repository_snapshot.snapshot_id
@@ -1054,9 +1049,6 @@ impl PreflightPreviewAnchorRefV1 {
                 });
             }
         }
-        self.commit_intent_digest
-            .as_ref()
-            .map_or(Ok(()), ManifestDigest::validate)?;
         self.generation().validate()
     }
 }
@@ -1071,7 +1063,6 @@ pub struct ApplyReceiptAnchorRefV1 {
     pub outcome: GitIndexReceiptOutcomeV1,
     pub final_snapshot_digest: ManifestDigest,
     pub final_snapshot_captured: bool,
-    pub created_commit: Option<GitOidV1>,
     pub sources: Vec<OrderedGitTopologySourceV1>,
 }
 
@@ -1096,7 +1087,6 @@ impl ApplyReceiptAnchorRefV1 {
             outcome: receipt.outcome,
             final_snapshot_digest: receipt.final_snapshot_digest.clone(),
             final_snapshot_captured: receipt.final_snapshot_captured,
-            created_commit: receipt.created_commit.clone(),
             sources,
         };
         if value.preflight.preview_id != receipt.preview_id
@@ -1115,7 +1105,6 @@ impl ApplyReceiptAnchorRefV1 {
         GitTopologyGenerationRefV1::GitReceipt {
             receipt_id: self.receipt_id.clone(),
             preview_id: self.preflight.preview_id.clone(),
-            commit_id: self.created_commit.clone(),
         }
     }
 
@@ -1125,21 +1114,10 @@ impl ApplyReceiptAnchorRefV1 {
         self.transaction_id.validate()?;
         self.receipt_digest.validate()?;
         self.final_snapshot_digest.validate()?;
-        self.created_commit
-            .as_ref()
-            .map_or(Ok(()), GitOidV1::validate)?;
         validate_ordered_sources(&self.sources)?;
         if self.sources.len() != 1 || self.sources[0].role != GitTopologySourceRoleV1::Preflight {
             return Err(DomainError::NonCanonical {
                 field: "apply receipt preflight source",
-            });
-        }
-        if self.outcome == GitIndexReceiptOutcomeV1::Committed
-            && (!self.final_snapshot_captured || self.created_commit.is_none())
-            && self.preflight.operation == GitIndexTransactionOperationV1::CommitIndex
-        {
-            return Err(DomainError::NonCanonical {
-                field: "commit apply receipt",
             });
         }
         self.generation().validate()

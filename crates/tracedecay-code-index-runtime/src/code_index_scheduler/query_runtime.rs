@@ -710,6 +710,7 @@ where
                 query_view,
                 generation: generation.clone(),
                 literals: parser.parse_literals(query_view, request),
+                path_prefix: None,
                 budget: request.budget,
                 control: graph_control.as_ref(),
             })
@@ -730,6 +731,7 @@ where
                     phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                     proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
                     field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                    path_prefix: None,
                     fuzzy_budget: input.fuzzy_budget,
                     lexical_profile_revision: input.lexical_profile_revision.clone(),
                     score_domain: input.lexical_score_domain.clone(),

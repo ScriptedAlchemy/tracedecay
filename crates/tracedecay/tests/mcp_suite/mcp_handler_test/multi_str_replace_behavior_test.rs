@@ -77,13 +77,8 @@ async fn call_tool(fixture: &ProductionSourceEditFixture, args: Value) -> Value 
     payload
 }
 
-async fn protocol_error(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
-    let response = tools_call(&server(fixture), args).await;
-    assert!(
-        response["result"].is_null(),
-        "a protocol refusal must not return a tool result: {response}"
-    );
-    response["error"].clone()
+async fn route_refusal(fixture: &ProductionSourceEditFixture, args: Value) -> Value {
+    crate::support::route_refusal(&tools_call(&server(fixture), args).await)
 }
 
 #[tokio::test]
@@ -434,7 +429,7 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
     assert_eq!(fs::read_to_string(&outside).unwrap(), "secret\n");
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let malformed = protocol_error(
+    let malformed = route_refusal(
         &fixture,
         json!({
             "path": "src/untouched.rs",
@@ -443,27 +438,16 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
-    assert_eq!(malformed["code"], -32602, "{malformed}");
     assert_eq!(
-        malformed["message"],
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: each replacement must be an array of exactly 2 strings",
-        "{malformed}"
-    );
-    assert_eq!(
-        malformed["data"],
-        json!({
-            "tool": TOOL,
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": "each replacement must be an array of exactly 2 strings"
-        }),
+        malformed,
+        crate::support::application_surface_refusal_error(
+            "each replacement must be an array of exactly 2 strings"
+        ),
         "{malformed}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let missing_path = protocol_error(
+    let missing_path = route_refusal(
         &fixture,
         json!({
             "replacements": [["leave me", "changed"]],
@@ -471,27 +455,14 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
-    assert_eq!(missing_path["code"], -32602, "{missing_path}");
     assert_eq!(
-        missing_path["message"],
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: missing required parameter: path",
-        "{missing_path}"
-    );
-    assert_eq!(
-        missing_path["data"],
-        json!({
-            "tool": TOOL,
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": "missing required parameter: path"
-        }),
+        missing_path,
+        crate::support::application_surface_refusal_error("missing required parameter: path"),
         "{missing_path}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);
 
-    let missing_apply_keys = protocol_error(
+    let missing_apply_keys = route_refusal(
         &fixture,
         json!({
             "path": "src/untouched.rs",
@@ -499,22 +470,11 @@ async fn refused_batches_leave_every_file_byte_unchanged() {
         }),
     )
     .await;
-    assert_eq!(missing_apply_keys["code"], -32602, "{missing_apply_keys}");
     assert_eq!(
-        missing_apply_keys["message"],
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview",
-        "{missing_apply_keys}"
-    );
-    assert_eq!(
-        missing_apply_keys["data"],
-        json!({
-            "tool": TOOL,
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
-        }),
+        missing_apply_keys,
+        crate::support::application_surface_refusal_error(
+            "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        ),
         "{missing_apply_keys}"
     );
     assert_eq!(read_file(&dir, "src/untouched.rs"), untouched);

@@ -73,8 +73,9 @@ fn assert_problem(document: &Value, kind: &str) {
 
 fn assert_rejected_get(document: &Value, diagnostic: &str) {
     assert_eq!(
-        *document,
-        application_invalid_request_error("tracedecay_fact_store_get", diagnostic)
+        crate::support::refusal_summary(&document["problem"]),
+        application_invalid_request_error(diagnostic),
+        "{document}"
     );
 }
 
@@ -430,21 +431,7 @@ async fn fact_store_get_reads_only_the_selected_registered_project() {
         )
         .await,
     );
-    assert_eq!(missing_project["code"], -32602, "{missing_project}");
-    assert_eq!(missing_project["data"]["tool"], "tracedecay_fact_store_get");
-    assert_eq!(
-        missing_project["data"]["reason_code"],
-        "project_route_not_found"
-    );
-    assert_eq!(missing_project["data"]["retryable"], false);
-    assert_eq!(
-        missing_project["data"]["detail"],
-        "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
-    );
-    assert_eq!(
-        missing_project["message"],
-        "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
-    );
+    assert_problem(&missing_project, "not_found_or_not_authorized");
     assert!(
         !missing_project.to_string().contains(active_content),
         "an unresolved selector must not fall back to the active project: {missing_project}"

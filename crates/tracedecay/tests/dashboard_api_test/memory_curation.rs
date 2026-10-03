@@ -300,22 +300,19 @@ fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
         );
 
         assert_eq!(
-            status, 404,
-            "foreign-project retained mutation must fail closed: {denied}"
+            status, 422,
+            "foreign-project retained mutation must be refused as unsupported: {denied}"
         );
         assert_eq!(denied["kind"], "problem");
+        assert_eq!(denied["value"]["problem"]["kind"], "unsupported");
         assert_eq!(
-            denied["value"]["problem"]["kind"],
-            "not_found_or_not_authorized"
+            denied["value"]["problem"]["code"],
+            "memory.cross_project_write_unsupported"
         );
         assert_eq!(denied["value"]["problem"]["owning_layer"], "application");
         assert!(
             denied["value"]["problem"]["committed_receipt"].is_null(),
-            "denied mutation cannot report a committed effect: {denied}"
-        );
-        assert!(
-            denied["value"].get("binding_id").is_none(),
-            "concealed denial cannot expose the retained binding: {denied}"
+            "refused mutation cannot report a committed effect: {denied}"
         );
 
         for (store, url) in [

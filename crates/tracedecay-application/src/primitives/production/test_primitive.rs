@@ -2,13 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use tracedecay_contracts::OperationBudgetUsage;
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, RankedAffectedTestV1,
-    TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort,
-    TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1,
-    UncoveredSourceV1,
+    RetrievalPortOutcome, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
+    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
+    TestReferenceV1, UncoveredSourceV1,
 };
+use tracedecay_contracts::{EvidenceDomain, OperationBudgetUsage};
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_graph_query::queries::GraphQueryManager;
@@ -21,6 +21,7 @@ use super::super::support::{
 };
 use super::{
     files_for_occurrences, open_code_graph, test_annotation_evidence, test_primitive_failed,
+    unpublished_file_outcome,
 };
 
 pub struct TraceDecayTestPrimitivePortV1 {
@@ -62,6 +63,18 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                     return test_primitive_failed(context);
                 };
                 let source_nodes = if let Some(file) = request.file.as_deref() {
+                    match unpublished_file_outcome::<()>(
+                        &reader,
+                        file,
+                        EvidenceDomain::Test,
+                        Arc::clone(&cancellation),
+                    ) {
+                        None => {}
+                        Some(RetrievalPortOutcome::Refused(_, problem)) => {
+                            return TestPrimitivePortOutcome::Refused(problem);
+                        }
+                        Some(_) => return test_primitive_failed(context),
+                    }
                     let Ok(nodes) =
                         reader.symbols_in_logical_file(file, 100_000, Arc::clone(&cancellation))
                     else {

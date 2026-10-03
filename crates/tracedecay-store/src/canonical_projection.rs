@@ -146,6 +146,15 @@ fn derive_canonical_projection_for(
     // The edit rollup is a session-level fact: it lands on the session row
     // and stays out of the per-message metadata copy below.
     let mut session_row_metadata = session_metadata.clone();
+    // A Claude row keeps its project id as its path, so the cwd its records
+    // carry survives only as a row annotation: Git history evidence for the
+    // session belongs to the worktree it ran in.
+    if provider == "claude" {
+        session_row_metadata.extend(canonical_session_metadata_map(
+            &provider,
+            canonical_session_fields(&envelope).as_ref(),
+        ));
+    }
     let edited_files = canonical_edited_files(&envelope);
     if !edited_files.is_empty() {
         session_row_metadata.insert(
@@ -1346,7 +1355,9 @@ mod tests {
             assert_eq!(output.message().message_id, row_id);
             assert_eq!(output.session().project_key, "user");
             assert_eq!(output.session().project_path, "user");
-            assert!(output.session().metadata_json.is_none());
+            let session_metadata: serde_json::Value =
+                serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+            assert_eq!(session_metadata["claude_session_cwd"], cwd);
         }
     }
 

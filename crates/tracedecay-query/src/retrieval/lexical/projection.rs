@@ -379,6 +379,9 @@ fn exact_matches(
     row: ExactMatchRowViewV1<'_>,
     request: &ExactLaneRequest,
 ) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
+    if !tracedecay_domain::path_matches_scope(row.logical_path, request.path_prefix) {
+        return (Vec::new(), Vec::new());
+    }
     let mut matched_literals = Vec::new();
     let mut matched_kinds = BTreeSet::new();
     for (ordinal, literal) in request.literals.iter().enumerate() {
@@ -539,7 +542,7 @@ impl<'request> PreparedLexicalQueryV1<'request> {
     }
 }
 
-fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
+pub(crate) fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
     match kind {
         ExactTechnicalTermKindV1::WholeSymbol => ExactFieldV1::Identifier,
         ExactTechnicalTermKindV1::QualifiedName => ExactFieldV1::QualifiedName,

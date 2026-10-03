@@ -134,7 +134,9 @@ export class ServeSession {
       args,
       env: childEnv(options.env),
       cwd: options.cwd,
-      stderr: "pipe",
+      // A piped stderr nobody reads fills the OS buffer and blocks the
+      // daemon. stdout is the MCP channel, so stderr goes to ours.
+      stderr: "inherit",
     });
     this.#client = new Client({ name: "tracedecay-chatgpt-extension", version: "0.0.0" });
     this.#transport.onclose = () => {
@@ -187,8 +189,7 @@ export class ServeSession {
     const result = await this.#client.callTool({ name: toolName, arguments: { ...args, format: "json" } }, undefined, {
       ...(signal === undefined ? {} : { signal }),
     });
-    const text = textOf(result as CallToolResult);
-    let payload = parseJson(text, toolName);
+    let payload = payloadOf(result as CallToolResult, toolName);
     const handle = ResponseHandleSchema.safeParse(payload);
     if (handle.success) {
       payload = parseJson(await this.#retrieveAll(handle.data.handle, signal), toolName);
@@ -205,7 +206,7 @@ export class ServeSession {
         undefined,
         { ...(signal === undefined ? {} : { signal }) },
       );
-      const page = parseJson(textOf(result as CallToolResult), "tracedecay_retrieve");
+      const page = payloadOf(result as CallToolResult, "tracedecay_retrieve");
       const parsed = RetrievePageSchema.safeParse(page);
       if (!parsed.success) {
         const missing = RetrieveMissingSchema.safeParse(page);
@@ -236,6 +237,21 @@ export class ServeSession {
 function textOf(result: CallToolResult): string {
   for (const item of result.content) if (item.type === "text") return item.text;
   return "";
+}
+
+const ProblemSchema = z.object({ problem: z.object({ kind: z.string(), code: z.string(), message: z.string() }) });
+
+// The daemon refuses a call only through `structuredContent.problem`. It also
+// sets isError on typed outcomes such as a not-found node, whose payload the
+// view model renders, so those still decode. The code matches failureFromSdk.
+function payloadOf(result: CallToolResult, toolName: string): unknown {
+  const problem = result.isError === true ? ProblemSchema.safeParse(result.structuredContent) : null;
+  if (problem?.success) {
+    const { kind, code, message } = problem.data.problem;
+    const qualified = `${kind}/${code}`;
+    throw new DaemonFailure({ kind: classifyCode(qualified), code: qualified, message });
+  }
+  return parseJson(textOf(result), toolName);
 }
 
 function parseJson(text: string, toolName: string): unknown {

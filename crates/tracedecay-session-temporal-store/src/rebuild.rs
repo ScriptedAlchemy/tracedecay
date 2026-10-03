@@ -8,13 +8,15 @@ use tracedecay_temporal_query::execution::TemporalPortError;
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
 use super::relation_projection::candidate_session_relation_projection;
-use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
+use super::relation_receipts::{record_relation_receipt, write_relation_projection};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
 use crate::handle::{SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
+/// Leaves the relation receipt pending. The caller acknowledges it in the
+/// transaction that activates the generation.
 #[tracing::instrument(name = "session_temporal.rebuild.relations", level = "trace", skip_all)]
 pub(super) async fn rebuild_candidate_session_relations(
     database: &impl SessionTemporalRegisteredDb,
@@ -74,7 +76,7 @@ pub(super) async fn rebuild_candidate_session_relations(
 
     let apply_cancellation = execution_control_graph_cancellation(control);
     checkpoint_relation_rebuild_control(control)?;
-    let applied = apply_relation_projection(database, &reconstructed, apply_cancellation).await;
+    let applied = write_relation_projection(database, &reconstructed, apply_cancellation).await;
     checkpoint_relation_rebuild_control(control)?;
     applied?;
 

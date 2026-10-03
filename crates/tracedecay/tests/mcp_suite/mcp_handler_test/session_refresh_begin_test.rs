@@ -6,7 +6,7 @@
 
 use crate::support::{
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, production_composition_fixture,
+    handle_real_server_tool_call_raw, production_composition_fixture, route_refusal,
 };
 use serde_json::{Value, json};
 
@@ -111,9 +111,8 @@ async fn session_refresh_begin_starts_then_joins_the_same_profile_operation() {
     )
     .await;
     assert_eq!(
-        unknown_scope["error"],
+        route_refusal(&unknown_scope),
         application_invalid_request_error(
-            TOOL,
             "scope.kind: unknown variant `user`, expected `project` or `profile`"
         ),
         "{unknown_scope}"
@@ -122,8 +121,8 @@ async fn session_refresh_begin_starts_then_joins_the_same_profile_operation() {
     let missing_scope =
         handle_real_server_tool_call_raw(&server, TOOL, json!({"format": "json"})).await;
     assert_eq!(
-        missing_scope["error"],
-        application_invalid_request_error(TOOL, "missing field `scope`"),
+        route_refusal(&missing_scope),
+        application_invalid_request_error("missing field `scope`"),
         "{missing_scope}"
     );
 

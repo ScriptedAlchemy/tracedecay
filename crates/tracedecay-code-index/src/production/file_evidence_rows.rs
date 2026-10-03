@@ -199,7 +199,12 @@ pub(super) fn compact_file_evidence(
             edge,
         ));
     }
-    for call in unresolved_calls {
+    // `Implements` rows are Go implementor gaps, which no file reference
+    // carries; restore re-derives them from the persisted method sets.
+    for call in unresolved_calls
+        .iter()
+        .filter(|call| call.kind != RelationEdgeKindV1::Implements)
+    {
         let (file, _) = owner(
             &call.from_occurrence,
             "sealed call limitation site is not a generation symbol",

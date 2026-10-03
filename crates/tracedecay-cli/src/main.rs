@@ -1,9 +1,6 @@
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 // binary crate: match lib allow policy for CLI dispatch
-
-use clap::ArgMatches;
-use clap::{CommandFactory, FromArgMatches};
-
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -480,6 +477,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     };
 
     let command_name = command_profile_label(&matches);
+    let json_requested = json_flag_set(&matches);
     let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => {
@@ -581,7 +579,34 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     } else {
         runtime.shutdown_timeout(std::time::Duration::from_secs(2));
     }
+    if json_requested
+        && let Err(error) = &result
+        && !matches!(
+            error,
+            tracedecay_domain::errors::TraceDecayError::ToolRefused(_)
+        )
+    {
+        println!(
+            "{}",
+            tracedecay::mcp::tools::command_refusal_document(error)?
+        );
+    }
     result
+}
+
+/// Whether the parsed command asked for `--json` output. A `ToolRefused`
+/// error is an owner refusal its command already rendered, so only the
+/// remaining refusals print their problem document at the process boundary.
+fn json_flag_set(matches: &ArgMatches) -> bool {
+    matches
+        .try_get_one::<bool>("json")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+        || matches
+            .subcommand()
+            .is_some_and(|(_, matches)| json_flag_set(matches))
 }
 
 /// Hooks are silent on stderr unless `RUST_LOG` says otherwise: their host
@@ -757,16 +782,18 @@ async fn resolve_registered_project_root(
         (None, None) => return Ok(None),
     };
     let request = AdminCliSurfaceRequestV1::RegistryContext {
-        project_arg: Some(PathBuf::from(selector)),
+        project_arg: Some(PathBuf::from(&selector)),
     };
     match commands::admin_cli_result(profile, None, request).await? {
         AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok { project, .. }) => {
             Ok(Some(PathBuf::from(project.display_root)))
         }
         AdminCliResultV1::RegistryContext(_) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "registered project not found for selector".to_string(),
-            })
+            Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                "project_route_not_found",
+                false,
+                format!("registered project not found for '{selector}'"),
+            ))
         }
         _ => Err(commands::admin_cli_result_mismatch("registry_context")),
     }

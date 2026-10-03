@@ -126,10 +126,17 @@ impl SessionSyncSurface {
     }
 }
 
-fn sync_failed(label: &str, detail: &str) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("{label} did not complete successfully ({detail})"),
-    }
+fn sync_failed(
+    label: &str,
+    reason_code: &str,
+    retryable: bool,
+    detail: &str,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
+        reason_code,
+        retryable,
+        format!("{label} did not complete successfully ({detail})"),
+    )
 }
 
 pub(super) fn session_sync_poll_state(
@@ -177,6 +184,12 @@ pub(super) fn session_sync_poll_state(
                 });
             }
             if termination != OperationTermination::Completed || remaining_work > 0 {
+                let reason_code = if termination == OperationTermination::Completed {
+                    "session_sync_incomplete".to_owned()
+                } else {
+                    format!("session_sync_{}", termination_label(termination))
+                };
+                let termination_kind = termination;
                 let termination = termination_label(termination);
                 let detail = if failure_codes.is_empty() {
                     termination
@@ -188,17 +201,39 @@ pub(super) fn session_sync_poll_state(
                 } else {
                     format!("{detail}; remaining work {remaining_work}")
                 };
-                return Err(sync_failed(label, &detail));
+                return Err(sync_failed(
+                    label,
+                    &reason_code,
+                    termination_retryable(termination_kind, remaining_work),
+                    &detail,
+                ));
             }
             Ok(SessionSyncPollState::Completed { operation_id })
         }
-        AdminCliSessionSyncV1::Cancelled => Err(sync_failed(label, "cancelled")),
-        AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(label, "deadline_exceeded")),
-        AdminCliSessionSyncV1::WrongScope => Err(sync_failed(label, "wrong_scope")),
+        AdminCliSessionSyncV1::Cancelled => Err(sync_failed(
+            label,
+            tracedecay_mcp::tool_errors::SESSION_SYNC_CANCELLED_BEFORE_ADMISSION,
+            false,
+            "cancelled",
+        )),
+        AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(
+            label,
+            tracedecay_mcp::tool_errors::SESSION_SYNC_DEADLINE_EXCEEDED,
+            true,
+            "deadline_exceeded",
+        )),
+        AdminCliSessionSyncV1::WrongScope => Err(sync_failed(
+            label,
+            "session_sync_wrong_scope",
+            false,
+            "wrong_scope",
+        )),
         AdminCliSessionSyncV1::Unavailable { reason_code } => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{label} unavailable ({reason_code})"),
-            })
+            Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                &reason_code,
+                true,
+                format!("{label} unavailable ({reason_code})"),
+            ))
         }
     }
 }
@@ -208,6 +243,21 @@ fn termination_label(termination: OperationTermination) -> String {
     match serde_json::to_value(termination) {
         Ok(serde_json::Value::String(label)) => label,
         _ => format!("{termination:?}"),
+    }
+}
+
+/// Whether rerunning the same sync can make progress. The owner ends a pass
+/// `Partial` after committing progress with coverage left and `TimedOut` when
+/// its deadline elapses, so a rerun resumes; it ends `Failed` only when
+/// nothing committed, a caller's `Cancelled` stands, and `EffectUnknown`
+/// cannot prove a rerun safe.
+fn termination_retryable(termination: OperationTermination, remaining_work: u64) -> bool {
+    match termination {
+        OperationTermination::Completed | OperationTermination::Partial => remaining_work > 0,
+        OperationTermination::TimedOut | OperationTermination::Unavailable => true,
+        OperationTermination::Failed
+        | OperationTermination::Cancelled
+        | OperationTermination::EffectUnknown => false,
     }
 }
 
@@ -472,24 +522,32 @@ mod tests {
     }
 
     #[test]
-    fn session_sync_noncompletion_is_a_cli_error() {
-        for (outcome, expected) in [
+    fn session_sync_noncompletion_is_a_typed_route_refusal() {
+        for (outcome, code, retryable, detail) in [
             (
                 AdminCliSessionSyncV1::WrongScope,
+                "session_sync_wrong_scope",
+                false,
                 "session import did not complete successfully (wrong_scope)",
             ),
             (
                 AdminCliSessionSyncV1::DeadlineExceeded,
+                "session_sync_deadline_exceeded",
+                true,
                 "session import did not complete successfully (deadline_exceeded)",
             ),
             (
                 AdminCliSessionSyncV1::Cancelled,
+                "session_sync_cancelled_before_admission",
+                false,
                 "session import did not complete successfully (cancelled)",
             ),
             (
                 AdminCliSessionSyncV1::Unavailable {
                     reason_code: "session_sync_authority_unavailable".to_owned(),
                 },
+                "session_sync_authority_unavailable",
+                true,
                 "session import unavailable (session_sync_authority_unavailable)",
             ),
             (
@@ -498,14 +556,85 @@ mod tests {
                     vec![SessionSyncCoverageV1::Complete],
                     &["native_transcript_scan_failed"],
                 ),
+                "session_sync_failed",
+                false,
                 "session import did not complete successfully (failed: native_transcript_scan_failed)",
             ),
+            (
+                complete(
+                    OperationTermination::Partial,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &["native_transcript_scan_failed"],
+                ),
+                "session_sync_partial",
+                true,
+                "session import did not complete successfully (partial: native_transcript_scan_failed; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::Failed,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &["native_transcript_scan_failed"],
+                ),
+                "session_sync_failed",
+                false,
+                "session import did not complete successfully (failed: native_transcript_scan_failed; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::EffectUnknown,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &[],
+                ),
+                "session_sync_effect_unknown",
+                false,
+                "session import did not complete successfully (effect_unknown; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::TimedOut,
+                    vec![SessionSyncCoverageV1::Complete],
+                    &[],
+                ),
+                "session_sync_timed_out",
+                true,
+                "session import did not complete successfully (timed_out)",
+            ),
+            (
+                complete(
+                    OperationTermination::Completed,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 4 }],
+                    &[],
+                ),
+                "session_sync_incomplete",
+                true,
+                "session import did not complete successfully (completed; remaining work 4)",
+            ),
         ] {
+            let error = session_sync_poll_state(SessionSyncSurface::Import, outcome).unwrap_err();
             assert_eq!(
-                session_sync_poll_state(SessionSyncSurface::Import, outcome)
-                    .unwrap_err()
-                    .to_string(),
-                format!("config error: {expected}")
+                error.project_route_context(),
+                Some((code, retryable, detail)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_sync_refused_at_admission_renders_its_own_problem_kind() {
+        for (outcome, kind) in [
+            (AdminCliSessionSyncV1::Cancelled, "cancelled"),
+            (AdminCliSessionSyncV1::DeadlineExceeded, "timed_out"),
+        ] {
+            let error = session_sync_poll_state(SessionSyncSurface::Import, outcome).unwrap_err();
+            let document: serde_json::Value = serde_json::from_str(
+                &tracedecay::mcp::tools::command_refusal_document(&error).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["problem"]["kind"], kind, "{document}");
+            assert_eq!(
+                document["problem"]["cancellation_stage"], "before_admission",
+                "{document}"
             );
         }
     }
@@ -590,9 +719,12 @@ mod tests {
             .expect_err("git sync schedules no background catch-up");
 
             assert_eq!(
-                error.to_string(),
-                "config error: session sync did not complete successfully \
-                 (partial; remaining work 1)"
+                error.project_route_context(),
+                Some((
+                    "session_sync_partial",
+                    true,
+                    "session sync did not complete successfully (partial; remaining work 1)"
+                ))
             );
         }
     }
@@ -646,9 +778,12 @@ mod tests {
         .expect_err("git sync still requires the bounded pass to finish");
 
         assert_eq!(
-            error.to_string(),
-            "config error: session git sync did not complete successfully \
-             (partial; remaining work 1)"
+            error.project_route_context(),
+            Some((
+                "session_sync_partial",
+                true,
+                "session git sync did not complete successfully (partial; remaining work 1)"
+            ))
         );
     }
 

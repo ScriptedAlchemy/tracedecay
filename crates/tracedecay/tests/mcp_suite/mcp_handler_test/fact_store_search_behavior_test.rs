@@ -19,7 +19,7 @@ use super::fact_store_list_test::assert_cursor_refused;
 use crate::support::{
     TestTempDir, application_invalid_request_error, commit_worktree, extract_real_server_text,
     handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
-    test_temp_dir,
+    route_refusal, test_temp_dir,
 };
 
 const TOOL: &str = "tracedecay_fact_store_search";
@@ -198,13 +198,9 @@ fn assert_empty_miss(payload: &Value, project_id: &str) {
 fn assert_schema_rejection(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
-    assert!(
-        response.get("result").is_none() || response["result"].is_null(),
-        "{response}"
-    );
     assert_eq!(
-        response["error"],
-        application_invalid_request_error(TOOL, detail),
+        route_refusal(response),
+        application_invalid_request_error(detail),
         "{response}"
     );
 }
@@ -583,22 +579,9 @@ async fn fact_store_search_rejects_blank_limit_and_unknown_fields() {
     .await;
     assert_eq!(missing["jsonrpc"], "2.0", "{missing}");
     assert_eq!(missing["id"], 1, "{missing}");
-    assert!(
-        missing.get("result").is_none() || missing["result"].is_null(),
-        "{missing}"
-    );
     assert_eq!(
-        missing["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
-            "data": {
-                "detail": "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
-                "reason_code": "project_route_not_found",
-                "retryable": false,
-                "tool": TOOL
-            }
-        }),
+        route_refusal(&missing),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
         "{missing}"
     );
 

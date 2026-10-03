@@ -1861,6 +1861,7 @@ impl TypeScriptExtractor {
             clone_bodies: Vec::new(),
             schema_evidence: None,
             callable_arities: Vec::new(),
+            go_method_sets: Vec::new(),
         }
     }
 }

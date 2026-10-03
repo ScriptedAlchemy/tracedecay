@@ -437,6 +437,142 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
 }
 
 #[test]
+fn graph_reads_carry_the_worktree_freshness_verdict_search_reports() {
+    run_on_current_thread(graph_reads_carry_the_worktree_freshness_verdict_search_reports_case());
+}
+
+async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() {
+    let dir = tempfile::TempDir::new().expect("graph read freshness isolation");
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
+    let project = dir.path().join("freshness-verdict-graph-reads");
+    std::fs::create_dir_all(project.join("src")).expect("create freshness sources");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn SparseLexicalWidget() {}\n",
+    )
+    .expect("write freshness fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.freshness-verdict-graph-reads",
+    )
+    .await
+    .expect("registered freshness fixture");
+    let options = |staleness_state: &str| {
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions {
+                code_index_freshness_reader: Some(freshness_reader(
+                    Some("generation.mcp-verified-graph-fixture.1"),
+                    staleness_state,
+                    false,
+                )),
+                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+            },
+        )
+    };
+    let reads = [
+        (
+            "tracedecay_find_exact_symbol",
+            json!({"name": "SparseLexicalWidget"}),
+            false,
+        ),
+        (
+            "tracedecay_node",
+            json!({"node_id": "node.absent-widget"}),
+            true,
+        ),
+    ];
+
+    for (tool_name, args, not_found) in reads {
+        let markdown =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                args.clone(),
+                options("verifying"),
+            )
+            .await
+            .expect("unsettled graph read renders");
+        let text = response_text(&markdown);
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["status"], "not_found", "{text}");
+            assert_eq!(
+                (
+                    &body["freshness"]["state"],
+                    &body["freshness"]["indexing"]["staleness_state"]
+                ),
+                (&json!("possibly_stale"), &json!("verifying")),
+                "{tool_name} not-found carries the verdict search reports: {text}"
+            );
+        } else {
+            assert!(
+                text.starts_with(
+                    "freshness: possibly_stale\nindexing: state=verifying rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n"
+                ),
+                "{tool_name} opens with the worktree verdict search reports: {text}"
+            );
+        }
+        assert_eq!(
+            markdown.structured_result().expect("typed result")["freshness"]["state"],
+            "possibly_stale",
+            "{tool_name} carries the verdict in its typed result"
+        );
+
+        let mut json_args = args.clone();
+        json_args["format"] = json!("json");
+        let json_result =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                json_args,
+                options("verifying"),
+            )
+            .await
+            .expect("unsettled graph read renders JSON");
+        let payload: Value =
+            serde_json::from_str(&response_text(&json_result)).expect("graph read JSON");
+        assert_eq!(
+            payload["freshness"]["state"], "possibly_stale",
+            "{tool_name}"
+        );
+        assert_eq!(
+            payload["freshness"]["indexing"]["served_generation"],
+            "generation.mcp-verified-graph-fixture.1",
+            "{tool_name}"
+        );
+
+        let settled =
+            crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+                &cg,
+                tool_name,
+                args,
+                options("fresh"),
+            )
+            .await
+            .expect("settled graph read renders");
+        let text = response_text(&settled);
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["freshness"], json!({"state": "fresh"}), "{text}");
+        } else {
+            assert!(
+                text.starts_with("freshness: fresh\n") && !text.contains("indexing:"),
+                "{tool_name} on a settled worktree opens with the fresh verdict: {text}"
+            );
+        }
+        assert_eq!(
+            settled.structured_result().expect("typed result")["freshness"]["state"],
+            "fresh",
+            "{tool_name}"
+        );
+    }
+    cg.close();
+}
+
+#[test]
 fn search_lanes_answer_to_the_freshness_the_verdict_reports() {
     run_on_current_thread(search_lanes_answer_to_the_freshness_the_verdict_reports_case());
 }

@@ -397,7 +397,7 @@ impl ProjectRootMatcher {
 /// directory still lies inside whatever worktree its nearest surviving
 /// ancestor belongs to. A relative path, or one whose existence cannot be
 /// read, is probed as given.
-fn nearest_existing_ancestor(path: &Path) -> &Path {
+pub(crate) fn nearest_existing_ancestor(path: &Path) -> &Path {
     if !path.is_absolute() {
         return path;
     }

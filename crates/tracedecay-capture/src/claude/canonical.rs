@@ -133,6 +133,17 @@ fn normalize_record(
                 output_tokens: None,
             });
         }
+        if let Some(branch) = native
+            .get("gitBranch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+        {
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+                reference: Some(branch.to_owned()),
+                content: None,
+            });
+        }
     } else {
         append_non_message_fact(&mut facts, native, record_kind);
     }

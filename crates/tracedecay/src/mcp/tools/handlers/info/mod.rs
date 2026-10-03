@@ -1,6 +1,6 @@
 //! Project-info handlers that still depend on composition-root authorities.
 //!
-//! Portable file-inspection and registry/config/remote-status/simplify tools
+//! Portable file-inspection and registry/config/remote-status tools
 //! live in `tracedecay_mcp::handlers::info`.
 
 #[cfg(test)]

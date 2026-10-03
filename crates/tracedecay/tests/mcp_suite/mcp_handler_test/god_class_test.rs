@@ -124,9 +124,14 @@ fn assert_ranking(payload: &Value, expected: &[Value]) {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["ranking".to_owned(), "result_count".to_owned()],
+        vec![
+            "freshness".to_owned(),
+            "ranking".to_owned(),
+            "result_count".to_owned()
+        ],
         "{payload}"
     );
+    assert_eq!(payload["freshness"], json!({"state": "fresh"}), "{payload}");
     assert_eq!(payload["result_count"], json!(expected.len()), "{payload}");
     let ranking = payload["ranking"]
         .as_array()
@@ -169,6 +174,7 @@ async fn god_class_json(server: &McpServer, arguments: Value) -> Value {
 fn delta_markdown(id: &str) -> String {
     format!(
         "\
+freshness: fresh
 **result_count:** 1
 
 ## ranking

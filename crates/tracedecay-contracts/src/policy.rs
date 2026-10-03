@@ -531,7 +531,6 @@ fn route_effect(effect: EffectClass) -> Result<CapabilityEffectClassV1, Applicat
         EffectClass::Preview => Ok(CapabilityEffectClassV1::Preview),
         EffectClass::GitIndexStage => Ok(CapabilityEffectClassV1::GitIndexStage),
         EffectClass::GitIndexUnstage => Ok(CapabilityEffectClassV1::GitIndexUnstage),
-        EffectClass::GitIndexCommit => Ok(CapabilityEffectClassV1::GitIndexCommit),
         EffectClass::SourceEdit
         | EffectClass::ConfigurationWrite
         | EffectClass::Administrative

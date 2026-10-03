@@ -42,6 +42,9 @@ pub(super) struct SessionActivityPageRow {
 pub struct SessionActivityRow {
     pub provider: String,
     pub session_id: String,
+    /// Where the session ran: its retained `{provider}_session_cwd`, else the
+    /// session row's `project_path`. A linked-worktree session shares the
+    /// primary checkout's `project_path`, so only its cwd names its worktree.
     pub project_path: String,
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
@@ -916,7 +919,13 @@ pub(super) async fn session_activity_rows(
     }
     let mut rows = conn
         .query(
-            "SELECT s.provider, s.session_id, s.project_path,
+            "SELECT s.provider, s.session_id,
+                    COALESCE(
+                        CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                            s.metadata_json, '$.' || s.provider || '_session_cwd'
+                        ), '') END,
+                        s.project_path
+                    ),
                     s.started_at, s.ended_at,
                     MIN(m.timestamp), MAX(m.timestamp)
              FROM sessions s
@@ -953,7 +962,14 @@ const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
          WHERE store_id > ?1
          GROUP BY provider, session_id
      )
-     SELECT s.provider, s.session_id, s.project_path, s.started_at, s.ended_at,
+     SELECT s.provider, s.session_id,
+            COALESCE(
+                CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                    s.metadata_json, '$.' || s.provider || '_session_cwd'
+                ), '') END,
+                s.project_path
+            ),
+            s.started_at, s.ended_at,
             (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
             (SELECT MAX(m.timestamp) FROM lcm_raw_messages m

@@ -32,7 +32,7 @@ fn qualified_trait_selection_returns_only_its_stable_typed_implementors() {
         .interactive_reader(&generation(), &cancellation)
         .expect("interactive reader");
 
-    let records = trait_implementations(
+    let (records, _) = trait_implementations(
         &reader,
         Arc::new(NeverCancelled),
         "src/storage/mod.rs::KeyValueStore",
@@ -70,7 +70,7 @@ fn simple_trait_selection_uses_every_typed_same_name_identity() {
     let reader = store
         .interactive_reader(&generation(), &cancellation)
         .expect("interactive reader");
-    let simple_records = trait_implementations(
+    let (simple_records, _) = trait_implementations(
         &reader,
         Arc::new(NeverCancelled),
         "KeyValueStore",

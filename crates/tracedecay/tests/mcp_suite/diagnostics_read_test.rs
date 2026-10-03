@@ -70,7 +70,7 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
     )
     .await;
     assert_eq!(
-        missing_path["error"],
+        crate::support::route_refusal(&missing_path),
         rejected_diagnostics_request(
             "application surface request does not match its reviewed schema: `path` is required when `scope` is file",
         )
@@ -83,7 +83,7 @@ async fn diagnostics_read_names_a_missing_producer_and_rejects_a_bad_scope() {
     )
     .await;
     assert_eq!(
-        package_scope["error"],
+        crate::support::route_refusal(&package_scope),
         rejected_diagnostics_request(
             "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
         )
@@ -573,7 +573,7 @@ fn published_records(result: &Value) -> Vec<Value> {
 }
 
 fn rejected_diagnostics_request(detail: &str) -> Value {
-    crate::support::application_surface_refusal_error("tracedecay_diagnostics", detail)
+    crate::support::application_surface_refusal_error(detail)
 }
 
 fn workspace_absent_detail() -> Value {

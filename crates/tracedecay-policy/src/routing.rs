@@ -36,7 +36,6 @@ pub enum CapabilityEffectClassV1 {
     Advisory,
     GitIndexStage,
     GitIndexUnstage,
-    GitIndexCommit,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

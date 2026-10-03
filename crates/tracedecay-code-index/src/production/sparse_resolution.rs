@@ -420,32 +420,6 @@ pub(super) fn resolve_edit(
         }
     }
     drop(pages);
-    // A file a carried name reaches keeps every decision; it re-seals only
-    // when one of its sealed edges lands in an edited file.
-    let edited_paths = edited_indices
-        .iter()
-        .map(|&file_index| files[file_index].logical_path())
-        .collect::<HashSet<_>>();
-    let dependents = collect_bounded_ordered(
-        &reached
-            .difference(&referencing)
-            .copied()
-            .collect::<Vec<_>>(),
-        |&file_index| {
-            let parent_key = parent_key_of_path
-                .get(files[file_index].logical_path())
-                .ok_or_else(|| contract("a carried file has no parent segment"))?;
-            Ok::<_, CodeIndexProductionErrorV1>(
-                parent
-                    .file_evidence(*parent_key)?
-                    .is_some_and(|evidence| evidence.targets_any(&edited_paths))
-                    .then_some(file_index),
-            )
-        },
-    )?
-    .into_iter()
-    .flatten()
-    .collect::<BTreeSet<_>>();
     let candidates = edited_indices
         .iter()
         .chain(&referencing)
@@ -454,11 +428,7 @@ pub(super) fn resolve_edit(
     // Each referencing file decodes independently, so they decode across the
     // indexing pool before the selection reads them in order.
     collect_bounded_ordered(
-        &candidates
-            .iter()
-            .chain(&dependents)
-            .copied()
-            .collect::<Vec<_>>(),
+        &candidates.iter().copied().collect::<Vec<_>>(),
         |&file_index| {
             files[file_index].artifacts();
             Ok::<_, CodeIndexProductionErrorV1>(())
@@ -483,6 +453,39 @@ pub(super) fn resolve_edit(
             selection.push((file_index, picks));
         }
     }
+    // A file the selection leaves out keeps every decision, including a
+    // referencing file none of whose references the edit can move. It
+    // re-seals only when one of its sealed edges lands in an edited file.
+    let selected = selection
+        .iter()
+        .map(|(file_index, _)| *file_index)
+        .collect::<BTreeSet<_>>();
+    let edited_paths = edited_indices
+        .iter()
+        .map(|&file_index| files[file_index].logical_path())
+        .collect::<HashSet<_>>();
+    let dependents = collect_bounded_ordered(
+        &reached
+            .union(&referencing)
+            .filter(|file_index| !selected.contains(file_index))
+            .copied()
+            .collect::<Vec<_>>(),
+        |&file_index| {
+            let parent_key = parent_key_of_path
+                .get(files[file_index].logical_path())
+                .ok_or_else(|| contract("a carried file has no parent segment"))?;
+            let repoints = parent
+                .file_evidence(*parent_key)?
+                .is_some_and(|evidence| evidence.targets_any(&edited_paths));
+            if repoints {
+                files[file_index].artifacts();
+            }
+            Ok::<_, CodeIndexProductionErrorV1>(repoints.then_some(file_index))
+        },
+    )?
+    .into_iter()
+    .flatten()
+    .collect::<BTreeSet<_>>();
     let moved = selected_references(files, Some(&selection))
         .map(|(_, reference)| site(reference))
         .chain(

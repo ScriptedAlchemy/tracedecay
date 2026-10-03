@@ -325,13 +325,6 @@ const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
 
 const CLI_MCP_PRIMITIVE_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 
-const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
-    BindingSurface::Cli,
-    BindingSurface::Mcp,
-    BindingSurface::Http,
-    BindingSurface::Dashboard,
-];
-
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
         // The project's graph-tool owner answers these for the tool surfaces
@@ -406,7 +399,6 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "admin_cli"
         | "admin_project"
         | "hook_runtime" => &CLI_MCP_PRIMITIVE_SURFACES,
-        "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
 }

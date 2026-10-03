@@ -640,14 +640,19 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
         &engine.store_administration,
     )
     .await;
+    assert!(project_action.error.is_none(), "{project_action:?}");
+    let refused = project_action.result.expect("typed project refusal");
+    assert_eq!(refused["isError"], true);
+    let problem = &refused["structuredContent"]["problem"];
+    assert_eq!(problem["kind"], "invalid_request", "{problem}");
+    assert_eq!(problem["retryable"], false);
     assert_eq!(
-        project_action.error.map(|error| error.message),
-        Some(
-            "tool project route failed: reason_code=project_required retryable=false: \
-             tracedecay_admin_project requires an initialized code project; run it inside an \
-             initialized project or pass --project <path>"
-                .to_owned()
-        )
+        problem["diagnostic"],
+        json!({
+            "code": "project_required",
+            "message": "tracedecay_admin_project requires an initialized code project; run it \
+                        inside an initialized project or pass --project <path>"
+        })
     );
     wait_for_automation_scheduler_state(
         &engine,

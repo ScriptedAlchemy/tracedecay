@@ -439,10 +439,23 @@ impl CodexObservationAdmission<'_> {
         !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
     }
 
-    fn projection_project_path<'b>(&'b self, cwd: Option<&'b Path>) -> Option<&'b Path> {
-        match self {
-            Self::Project { root, .. } => Some(root),
-            Self::Profile { .. } => cwd,
+    /// A project rollout's session row keys on the registered root, and a
+    /// profile rollout's on its session cwd, while each record's location is
+    /// the cwd in effect when it was written. That is the linked worktree the
+    /// record ran in whenever it differs from the root, and a `turn_context`
+    /// can move it mid-rollout.
+    fn projection_location<'b>(
+        &'b self,
+        session_cwd: &'b Path,
+        record_cwd: &'b Path,
+    ) -> CodexObservationLocation<'b> {
+        let project_path = match self {
+            Self::Project { root, .. } => *root,
+            Self::Profile { .. } => session_cwd,
+        };
+        CodexObservationLocation {
+            project_path: Some(project_path),
+            location_path: Some(record_cwd),
         }
     }
 }
@@ -631,11 +644,6 @@ async fn admit_codex_jsonl_page(
     // no frame and must not pay it on every pass.
     let resolved_scope = OnceLock::new();
     let scope_matcher = || resolved_scope.get_or_init(|| admission_scope.scope_matcher());
-    let source_location_path = admission_scope.projection_project_path(Some(meta.cwd.as_path()));
-    let source_location = CodexObservationLocation {
-        project_path: source_location_path,
-        location_path: source_location_path,
-    };
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -717,7 +725,8 @@ async fn admit_codex_jsonl_page(
                     native_thread_id,
                     record_id.clone(),
                     range,
-                    source_location,
+                    admission_scope
+                        .projection_location(meta.cwd.as_path(), state.context.cwd.as_path()),
                 )?;
                 stable_record_id = Some(record_id);
                 Ok(envelope)

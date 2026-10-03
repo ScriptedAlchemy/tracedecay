@@ -14,6 +14,7 @@ use crate::chunks::{
     rust_type_path_alias_for_trait_impl_method, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
+use crate::production::go_satisfaction::go_satisfaction;
 use crate::production::module_resolution::{ModuleImportIndexV1, is_module_import_language};
 use crate::production::resolution_view::{FileSymbolsByNameV1, ResolutionFileV1, SymbolsByNameV1};
 use crate::production::typescript_resolution::{
@@ -306,20 +307,29 @@ pub(crate) fn edge_order(
         ))
 }
 
+type EdgeEvidenceV1 = (
+    Vec<CanonicalRelationEdgeV1>,
+    Vec<CodeIndexEdgeAbstentionV1>,
+    Vec<CodeIndexUnresolvedReferenceV1>,
+);
+
+/// `files`' edge evidence resolved whole, with the interfaces whose
+/// implementors the seal cannot decide.
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
-) -> Result<
-    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
-    CodeIndexProductionErrorV1,
->
+) -> Result<EdgeEvidenceV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     // Resolution's whole-set indexes are gone before the per-file copies are
     // made, and the one exact-capacity vector never regrows, so the peak is
     // the edges this returns plus one sort buffer.
-    let cross_file = resolve_cross_file_references(files)?;
-    Ok(edge_evidence(files, cross_file))
+    let CrossFileResolutionV1 {
+        edges,
+        implementor_gaps,
+    } = resolve_cross_file_references(files)?;
+    let (edges, abstentions) = edge_evidence(files, edges);
+    Ok((edges, abstentions, implementor_gaps))
 }
 
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
@@ -361,10 +371,13 @@ where
 /// through [`ModuleImportIndexV1`]. Other bare names have no cross-file
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
+///
+/// Go types implement interfaces implicitly, so the whole-set pass also
+/// decides Go interface satisfaction from every Go method set.
 #[tracing::instrument(name = "code_index.seal.resolve", level = "trace", skip_all)]
 pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
-) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
@@ -394,7 +407,14 @@ pub(crate) fn resolve_selected_cross_file_references<T>(
 where
     T: ResolutionFileV1,
 {
-    resolve_references(files, by_simple_name, Some(selection))
+    resolve_references(files, by_simple_name, Some(selection)).map(|resolution| resolution.edges)
+}
+
+/// A whole-set resolution: the cross-file edges, and one row per interface
+/// whose implementors the seal cannot decide.
+pub(crate) struct CrossFileResolutionV1 {
+    pub(crate) edges: Vec<CanonicalRelationEdgeV1>,
+    pub(crate) implementor_gaps: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// `selection`'s references, or every retained reference, as `(file index,
@@ -458,7 +478,7 @@ fn resolve_references<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
     selection: Option<&ReferenceSelectionV1>,
-) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
@@ -481,11 +501,29 @@ where
         };
         resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
     })?;
+    // Satisfaction needs every Go method set, so only a whole-set pass
+    // decides it, and only a file set with Go types builds the module index.
+    let satisfaction = if selection.is_none()
+        && files
+            .iter()
+            .any(|file| !file.as_ref().artifacts.go_method_sets.is_empty())
+    {
+        go_satisfaction(files, modules.modules())
+    } else {
+        Default::default()
+    };
     drop(modules);
-    let mut edges = Vec::with_capacity(per_file.iter().map(Vec::len).sum());
+    let mut edges = Vec::with_capacity(
+        per_file
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_add(satisfaction.edges.len()),
+    );
     for file_edges in per_file {
         edges.extend(file_edges);
     }
+    edges.extend(satisfaction.edges);
     {
         let _span = tracing::trace_span!("code_index.seal.edge_materialization").entered();
         {
@@ -493,7 +531,10 @@ where
             edges.dedup();
         }
     };
-    Ok(edges)
+    Ok(CrossFileResolutionV1 {
+        edges,
+        implementor_gaps: satisfaction.gaps,
+    })
 }
 
 /// Retained call sites whose import binding names project code the seal

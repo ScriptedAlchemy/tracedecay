@@ -55,6 +55,10 @@ pub enum CodeIndexColdBuildReasonV1 {
     /// An edited file changed its imports, package clauses, or a manifest,
     /// which decides where every name lookup lands.
     MovesNameLookups,
+    /// An edited Go file declares method sets, and interface satisfaction
+    /// pairs them with every other Go file's, including files that never
+    /// name the edited file's types.
+    MovesGoMethodSets,
 }
 
 impl CodeIndexColdBuildReasonV1 {
@@ -66,6 +70,7 @@ impl CodeIndexColdBuildReasonV1 {
             Self::FilesAddedOrRemoved => "files_added_or_removed",
             Self::ChangedShare => "changed_share",
             Self::MovesNameLookups => "moves_name_lookups",
+            Self::MovesGoMethodSets => "moves_go_method_sets",
         }
     }
 }
@@ -300,15 +305,18 @@ impl SparseBuildV1<'_> {
         if plan.is_full_rebuild() {
             return Ok(Err(CodeIndexColdBuildReasonV1::FullRebuild));
         }
-        let parent_evidence = parent.generation_evidence()?;
-        if parent_evidence.projection_request.target_projection_key() != self.target_projection_key
-        {
-            return Ok(Err(CodeIndexColdBuildReasonV1::ProjectionKeyChange));
-        }
         if plan.deleted > 0
             || present_paths(&snapshot.files) != present_paths(&parent.snapshot().files)
         {
             return Ok(Err(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved));
+        }
+        if parent
+            .generation_evidence()?
+            .projection_request
+            .target_projection_key()
+            != self.target_projection_key
+        {
+            return Ok(Err(CodeIndexColdBuildReasonV1::ProjectionKeyChange));
         }
         let parent_rows = parent
             .snapshot()
@@ -339,6 +347,12 @@ impl SparseBuildV1<'_> {
             .any(|file| moves_name_lookups(&file.before, &file.after))
         {
             return Ok(Err(CodeIndexColdBuildReasonV1::MovesNameLookups));
+        }
+        if edited.iter().any(|file| {
+            !file.before.artifacts.go_method_sets.is_empty()
+                || !file.after.artifacts.go_method_sets.is_empty()
+        }) {
+            return Ok(Err(CodeIndexColdBuildReasonV1::MovesGoMethodSets));
         }
         lexical_page_source::checkpoint(control)?;
 

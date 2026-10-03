@@ -267,13 +267,11 @@ fn emit_query_response(
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
-        Err(problem) => Err(TraceDecayError::Config {
-            message: format!(
-                "Remote Brain request {} failed: {}",
-                response.request_id,
-                problem.problem.summary()
-            ),
-        }),
+        Err(problem) => Err(TraceDecayError::tool_refused(
+            format!("remote request {}", response.request_id),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )),
     }
 }
 
@@ -610,16 +608,24 @@ mod tests {
     }
 
     #[test]
-    fn emit_protocol_response_returns_config_error_for_typed_problem() {
+    fn emit_protocol_response_returns_a_tool_refusal_for_typed_problem() {
         let response = protocol_problem_response();
         let error = emit_protocol_response(&response, true)
             .expect_err("typed Remote Brain problem must be non-zero");
+        let expected = response.result.as_ref().unwrap_err();
         match error {
-            TraceDecayError::Config { message } => {
-                assert!(message.contains("request.cli.remote.7"));
-                assert!(message.contains(&response.result.as_ref().unwrap_err().problem.code));
+            TraceDecayError::ToolRefused(refusal) => {
+                assert_eq!(refusal.tool, "remote request request.cli.remote.7");
+                assert_eq!(
+                    refusal.code.as_deref(),
+                    Some(expected.problem.code.as_str())
+                );
+                assert_eq!(
+                    refusal.reason.as_deref(),
+                    Some(expected.problem.message.as_str())
+                );
             }
-            other => panic!("expected config error, got {other:?}"),
+            other => panic!("expected tool refusal, got {other:?}"),
         }
     }
 

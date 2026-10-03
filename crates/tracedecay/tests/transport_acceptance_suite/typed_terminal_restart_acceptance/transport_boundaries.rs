@@ -687,16 +687,18 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
     super::initialize_project(&home_path, &project_path, "reset-required-boundaries");
     let identity = admitted_project_id(&home_path, &project_path);
 
-    // Tamper the store. `tracedecay init` is daemon-owned, so this daemon holds
-    // a verified handle already; the refused shape is what the *next* process
-    // observes on its first open, which is the physical restart below.
-    super::make_store_reset_required(&home_path, &project_path);
-
     let first_pid = daemon.id();
     let stopped = daemon
         .kill_and_wait()
         .expect("force-stop and reap the first physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
+
+    // Tamper the store between processes. `tracedecay init` is daemon-owned,
+    // so the first daemon already opened it; the refused shape is what the
+    // *next* process observes on its first open. Tampering while that daemon
+    // lived would race its writes.
+    super::make_store_reset_required(&home_path, &project_path);
+
     let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),

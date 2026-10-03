@@ -275,7 +275,6 @@ mod tests {
                     "capability.application.native-integration.worktree-inventory",
                     "available",
                 ),
-                ("capability.git.commit-index", "eligible"),
                 ("capability.git.stage-hunks", "eligible"),
                 ("capability.git.unstage-hunks", "eligible"),
             ],

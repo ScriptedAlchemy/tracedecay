@@ -13,11 +13,12 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::support::{
-    ProductionCompositionFixture, extract_first_json_content,
+    ProductionCompositionFixture, extract_first_json_content, harness_wait_for_readiness,
     production_composition_fixture_with_sources, refusal_problem,
 };
 
@@ -31,6 +32,7 @@ const GREETING_RS: &str = "pub fn hello() -> i32 {\n    7\n}\n";
 const README_MD: &str = "not indexed\n";
 
 const GROUPED_ALL: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 3
 **layout:** grouped
@@ -44,6 +46,7 @@ src/
 ";
 
 const FLAT_ALL: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 3
 **layout:** flat
@@ -56,6 +59,7 @@ const FLAT_ALL: &str = "\
 ";
 
 const GROUPED_SRC: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 2
 **layout:** grouped
@@ -68,6 +72,7 @@ src/
 ";
 
 const GROUPED_GREETING: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -78,6 +83,7 @@ const GROUPED_GREETING: &str = "\
 ";
 
 const GROUPED_LIB: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -88,6 +94,7 @@ const GROUPED_LIB: &str = "\
 ";
 
 const GROUPED_CARGO: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -98,6 +105,7 @@ const GROUPED_CARGO: &str = "\
 ";
 
 const EMPTY_GROUPED: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 0
 **layout:** grouped
@@ -252,13 +260,21 @@ async fn files_lists_the_indexed_census_and_filters() {
 }
 
 async fn files_project() -> ProductionCompositionFixture {
-    production_composition_fixture_with_sources(|root| {
+    let fixture = production_composition_fixture_with_sources(|root| {
         write(root, "Cargo.toml", CARGO_TOML);
         write(root, "src/lib.rs", LIB_RS);
         write(root, "src/greeting.rs", GREETING_RS);
         write(root, "README.md", README_MD);
     })
-    .await
+    .await;
+    harness_wait_for_readiness(
+        &fixture.harness,
+        &fixture.project_root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
+    fixture
 }
 
 fn all_files() -> Value {
@@ -274,7 +290,7 @@ fn file(path: &str, symbols: u64, bytes: u64) -> Value {
 }
 
 fn listing(count: u64, layout: &str, files: Value) -> Value {
-    json!({"count": count, "layout": layout, "files": files})
+    json!({"count": count, "layout": layout, "files": files, "freshness": {"state": "fresh"}})
 }
 
 async fn call_json(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
@@ -301,7 +317,8 @@ async fn call_markdown(fixture: &ProductionCompositionFixture, arguments: Value)
         .and_then(|items| {
             items.iter().find_map(|item| {
                 let text = item.get("text").and_then(Value::as_str)?;
-                text.starts_with("## Files\n").then_some(text)
+                text.starts_with("freshness: fresh\n## Files\n")
+                    .then_some(text)
             })
         })
         .unwrap_or_else(|| panic!("missing files markdown in {result}"))
@@ -331,14 +348,12 @@ fn assert_tool_error(response: &tracedecay_mcp::JsonRpcResponse, message: &str) 
 }
 
 /// A non-object argument list never reaches the owner's typed parser: the
-/// MCP boundary rejects the call itself.
+/// MCP boundary refuses the call itself.
 fn assert_malformed_call(response: &tracedecay_mcp::JsonRpcResponse, detail: &str) {
-    assert!(response.result.is_none(), "{response:?}");
-    let error = response.error.as_ref().expect("tool error");
     assert_eq!(
-        json!({"code": error.code, "message": error.message, "data": error.data}),
-        crate::support::application_invalid_request_error(TOOL, detail),
-        "{error:?}"
+        crate::support::route_refusal(&serde_json::to_value(response).expect("response")),
+        crate::support::application_invalid_request_error(detail),
+        "{response:?}"
     );
 }
 

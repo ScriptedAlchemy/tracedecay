@@ -25,7 +25,7 @@ const TOOL: &str = "tracedecay_feedback_diagnostics";
 const ADVISORY_CYCLE: &str = "tracedecay_feedback_advisory_cycle";
 
 fn invalid_request(detail: &str) -> Value {
-    application_surface_refusal_error(TOOL, detail)
+    application_surface_refusal_error(detail)
 }
 
 fn denied_problem(request_id: &str) -> Value {
@@ -313,11 +313,10 @@ fn assert_published_cycle(envelope: &Value, expected_cycle: &Value, branch: &str
 fn assert_invalid_request(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
-    assert!(
-        response.get("result").is_none(),
-        "schema refusal must be a JSON-RPC error, not a tool result: {response}"
+    assert_eq!(
+        crate::support::route_refusal(response),
+        invalid_request(detail)
     );
-    assert_eq!(response["error"], invalid_request(detail));
 }
 
 fn assert_unknown_handle(response: &Value) {
