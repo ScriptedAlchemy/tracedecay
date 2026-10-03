@@ -31,12 +31,15 @@
 //! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`,
 //!   OpenCode 2 native plugin, MCP companion, and MCP registration.
 //!   OpenCode has no `plugin.json`.
-//! - `plugin/.mcp.json`, shared Claude/Codex MCP config (byte-identical);
-//!   `plugin/mcp-cursor.json`, Cursor MCP config (deploys to `mcp.json`).
+//! - `plugin/.mcp.json`, Claude MCP config; `plugin/mcp-cursor.json`, Cursor
+//!   MCP config (deploys to `mcp.json`).
 //! - `plugin/plugin.json` + `plugin/mcp.json`, the portable Agent Plugins
-//!   pair. ChatGPT's staged bundle deploys them verbatim at its root; no
-//!   host-specific dot-dir manifest exists because the portable manifest
-//!   carries the `extensions.com.openai` interface block directly.
+//!   pair. Codex renders its `.mcp.json` from this `mcp.json`, so it also
+//!   carries the explorer (with a plugin-relative adapter path, since Codex
+//!   does not expand `${PLUGIN_ROOT}`). ChatGPT's staged bundle deploys them
+//!   verbatim at its root; no host-specific dot-dir manifest exists because
+//!   the portable manifest carries the `extensions.com.openai` interface
+//!   block directly.
 //! - `plugin/chatgpt-extension/`, the ChatGPT code explorer: a bundled
 //!   single-file MCP adapter (`embedded/server.mjs`), its shared MCP App
 //!   resource (`embedded/app.html`), and the manifest icon
