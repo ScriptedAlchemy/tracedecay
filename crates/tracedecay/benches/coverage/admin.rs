@@ -559,7 +559,7 @@ fn wt_cleanup_primes(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
             .clone()
             .unwrap_or_else(|| "td-bench-missing".into()),
         "target": {
-            "kind": "repository",
+            "kind": "worktree",
             "project_id": ctx
                 .seeds
                 .project_id
@@ -570,6 +570,11 @@ fn wt_cleanup_primes(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
                 .repository_id
                 .clone()
                 .unwrap_or_else(|| "td-bench-missing".into()),
+            "worktree_id": ctx
+                .seeds
+                .worktree_id
+                .clone()
+                .unwrap_or_else(|| "worktree.bench.missing".into()),
         },
     });
     let mut confirm_args = claim.clone();

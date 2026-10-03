@@ -1113,13 +1113,15 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         out.push(tg(
             "tracedecay_workflow_register_definition",
             fiveq(&|_| {
+                // No primes: the timed call IS the registration — priming the
+                // same definition would only measure the idempotent replay.
                 eqn(
                     "tracedecay_workflow_register_definition",
                     "register",
                     json!({
                         "definition": wf_definition(ctx, "{{iter}}"),
                     }),
-                    p_wf_register,
+                    no_primes,
                 )
             }),
         ));

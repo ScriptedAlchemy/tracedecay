@@ -3,9 +3,9 @@
 
 use serde_json::json;
 
-use crate::queries::{PrimeStep, Query, QueryContext, ToolGroup, five};
+use crate::queries::{EffectCleanup, PrimeStep, Query, QueryContext, ToolGroup, five};
 
-use super::{eq, rq};
+use super::{eq, eqc, rq};
 
 fn path_at(ctx: &QueryContext, i: usize) -> String {
     crate::queries::dir(ctx, i)
@@ -142,6 +142,48 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             ],
         }]
     }
+    /// Applying a stage preview consumes the working-tree hunks into the
+    /// index; this cleanup chain unstages them so the next iteration's
+    /// `git_hunks` call sees the same dirty file again.
+    fn unstage_cleanup(_ctx: &QueryContext, iter: u64) -> Vec<PrimeStep> {
+        vec![
+            PrimeStep {
+                inject: Vec::new(),
+                tool: "tracedecay_git_hunks",
+                args: json!({"scope": "staged", "format": "json"}),
+                capture: &[
+                    ("dig:preview_input_id", "staged_input_id"),
+                    ("deep_array:hunk_digests", "staged_digests"),
+                ],
+            },
+            PrimeStep {
+                inject: Vec::new(),
+                tool: "tracedecay_git_preview",
+                args: json!({
+                    "operation": "unstage_hunks",
+                    "preview_input_id": "{{staged_input_id}}",
+                    "selected_hunk_digests": "{{staged_digests}}",
+                    "format": "json",
+                }),
+                capture: &[
+                    ("dig:preview_id", "unstage_preview_id"),
+                    ("dig:preview_digest", "unstage_preview_digest"),
+                ],
+            },
+            PrimeStep {
+                inject: Vec::new(),
+                tool: "tracedecay_git_apply",
+                args: json!({
+                    "preview_id": "{{unstage_preview_id}}",
+                    "preview_digest": "{{unstage_preview_digest}}",
+                    "idempotency_key": format!("bench-git-unstage-{iter}"),
+                    "format": "json",
+                }),
+                capture: &[],
+            },
+        ]
+    }
+
     // Preview/apply lanes only run when seeding proved the hunk evidence
     // path serves a real preview input for this composition's dirty file.
     let preview_ready = ctx.seeds.preview_input_id.is_some() && !ctx.seeds.hunk_digests.is_empty();
@@ -164,7 +206,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         out.push(ToolGroup {
             tool: "tracedecay_git_apply",
             queries: five(|_i| {
-                eq(
+                eqc(
                     "tracedecay_git_apply",
                     "apply_stage",
                     json!({
@@ -189,6 +231,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                             ],
                         });
                         steps
+                    },
+                    EffectCleanup {
+                        capture: &[],
+                        steps: unstage_cleanup,
                     },
                 )
             }),

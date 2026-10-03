@@ -26,7 +26,7 @@ fn revision_prime(key: &'static str) -> PrimeStep {
         tool: "tracedecay_configuration_get",
         args: json!({"key": key, "format": "json"}),
         capture: &[
-            ("dig:revision_id", "revision"),
+            ("digpath:payload:revision_id", "revision"),
             ("dig:effective_value", "effective"),
         ],
     }
@@ -39,7 +39,7 @@ fn change_topology_primes() -> Vec<PrimeStep> {
         inject: Vec::new(),
         tool: "tracedecay_configuration_get",
         args: json!({"key": TOPOLOGY_KEY, "format": "json"}),
-        capture: &[("dig:revision_id", "revision")],
+        capture: &[("digpath:payload:revision_id", "revision")],
     }]
 }
 
@@ -66,7 +66,7 @@ fn changed_policy_step() -> PrimeStep {
         tool: "tracedecay_configuration_get",
         args: json!({"key": TOPOLOGY_KEY, "format": "json"}),
         capture: &[
-            ("dig:revision_id", "revision"),
+            ("digpath:payload:revision_id", "revision"),
             ("transform:trim_review_allowed", "changed_policy"),
         ],
     }

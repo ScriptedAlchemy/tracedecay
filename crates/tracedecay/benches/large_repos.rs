@@ -236,9 +236,7 @@ fn call_step_transient(
         )) {
             Err(error)
                 if attempt < 239
-                    && TRANSIENT_STEP_CODES
-                        .iter()
-                        .any(|code| error.contains(code)) =>
+                    && TRANSIENT_STEP_CODES.iter().any(|code| error.contains(code)) =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
@@ -281,10 +279,8 @@ fn run_primes(
         tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, &tokens);
-        let payload =
-            call_step_transient(rt, harness, project_root, step.tool, args).map_err(|error| {
-                format!("{} prime step {} failed: {error}", q.tool, step.tool)
-            })?;
+        let payload = call_step_transient(rt, harness, project_root, step.tool, args)
+            .map_err(|error| format!("{} prime step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, &mut tokens, q)?;
     }
     // The timed call observes state after its primes: verified-snapshot reads
@@ -342,10 +338,8 @@ fn run_cleanup(
         }
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, tokens);
-        let payload =
-            call_step_transient(rt, harness, project_root, step.tool, args).map_err(|error| {
-                format!("{} cleanup step {} failed: {error}", q.tool, step.tool)
-            })?;
+        let payload = call_step_transient(rt, harness, project_root, step.tool, args)
+            .map_err(|error| format!("{} cleanup step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, tokens, q)?;
     }
     Ok(())

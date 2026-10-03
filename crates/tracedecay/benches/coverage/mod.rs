@@ -673,6 +673,7 @@ pub(crate) async fn seed_all(
     // rather than a timed panic.
     let probe_path = files
         .first()
+        .and_then(|f| f.get("path"))
         .and_then(Value::as_str)
         .unwrap_or("LICENSE.txt");
     for (tool, args) in [(
@@ -1144,9 +1145,10 @@ async fn seed_affected_tests(
     files: &[Value],
     seeds: &mut Seeds,
 ) {
+    let file_path = |f: &Value| f.get("path").and_then(Value::as_str);
     let mut candidates: Vec<String> = files
         .iter()
-        .filter_map(Value::as_str)
+        .filter_map(|f| file_path(f))
         .filter(|p| p.contains("test"))
         .take(3)
         .map(str::to_owned)
@@ -1154,7 +1156,7 @@ async fn seed_affected_tests(
     candidates.extend(
         files
             .iter()
-            .filter_map(Value::as_str)
+            .filter_map(|f| file_path(f))
             .take(2)
             .map(str::to_owned),
     );
@@ -1933,9 +1935,8 @@ async fn settle_attempt(
         .ok()
         .and_then(|v| dig(v, "identity").cloned())
         .unwrap_or(Value::Null);
-    let terminal = |state: &str| {
-        matches!(state, "succeeded" | "failed" | "timed_out" | "cancelled")
-    };
+    let terminal =
+        |state: &str| matches!(state, "succeeded" | "failed" | "timed_out" | "cancelled");
     let mut state = String::new();
     // Lease-fence conflicts retry the running transition asynchronously for
     // tens of seconds; the attempt stays non-terminal meanwhile and occupies
