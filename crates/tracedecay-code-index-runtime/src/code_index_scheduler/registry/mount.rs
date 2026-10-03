@@ -2539,12 +2539,20 @@ impl CodeIndexSchedulerRegistryV1 {
                         &worker_phase_signal,
                         super::CodeIndexWorkerPhaseV1::PublishingGraph,
                     );
+                    // The serving generation's graph store is the catalog a
+                    // layered successor carries from.
+                    let predecessor = worker_serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(|serving| serving.interactive_graph_store().ok());
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
                             &worker_repository_id,
                             &worker_worktree_id,
                             latest.clone(),
+                            predecessor,
                             replay_binding.clone(),
                             Arc::clone(&worker_shutting_down),
                         )

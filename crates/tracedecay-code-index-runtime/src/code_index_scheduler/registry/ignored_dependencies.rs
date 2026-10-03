@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
@@ -702,6 +703,7 @@ impl CodeIndexSchedulerRegistryV1 {
             &repository_id,
             &worktree_id,
             build.latest.clone(),
+            serving.interactive_graph_store().ok(),
             replay_binding,
         )
         .await;
@@ -878,6 +880,7 @@ async fn activate_committed_generation(
     repository_id: &tracedecay_domain::RepositoryId,
     worktree_id: &tracedecay_domain::WorktreeId,
     latest: LatestCompleteCodeIndexV1,
+    predecessor: Option<Arc<CodeGraphProjectionStore>>,
     replay_binding: CodeGraphReplayBindingV1,
 ) -> Result<(), CodeIndexSchedulerErrorV1> {
     graph_activation
@@ -886,6 +889,7 @@ async fn activate_committed_generation(
             repository_id,
             worktree_id,
             latest,
+            predecessor,
             replay_binding,
             Arc::new(AtomicBool::new(false)),
         )
