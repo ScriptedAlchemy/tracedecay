@@ -624,15 +624,21 @@ fn unbound_refusal(
     )
 }
 
-/// The graph-tool owner reports handler argument errors as invalid requests,
-/// a typed route detail, a persisted-shape refusal, or a lock that missed its
-/// deadline as that detail, a session sync refused at admission as the
-/// matching pre-admission cancellation or timeout, a route refusal as
-/// unavailable under its own reason code, and any other handler failure as an
-/// internal execution failure.
+/// The graph-tool owner reports an owner refusal as the owner's own problem,
+/// handler argument errors as invalid requests, a typed route detail, a
+/// persisted-shape refusal, or a lock that missed its deadline as that
+/// detail, a session sync refused at admission as the matching pre-admission
+/// cancellation or timeout, a route refusal as unavailable under its own
+/// reason code, and any other handler failure as an internal execution
+/// failure.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
+    if let Some(record) =
+        tracedecay_mcp::application_output::tool_result::error_problem_record(error)
+    {
+        return record.into_source();
+    }
     if let Some(detail) = error.project_route_typed_detail() {
         return tracedecay_contracts::ApplicationProblem::from_detail(detail.clone());
     }

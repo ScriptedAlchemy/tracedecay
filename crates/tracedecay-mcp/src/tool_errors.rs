@@ -181,11 +181,9 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | "session_sync_wrong_scope"
         | CURSOR_PARAMETER_CHANGED_CODE
         | CURSOR_INVALID_CODE => Some("invalid_request"),
-        // `not_found_or_not_authorized` is the code an owner's denial record
-        // carries back from a daemon or remote tool result.
-        "application_surface_not_found_or_not_authorized"
-        | "project_route_not_found"
-        | "not_found_or_not_authorized" => Some("denied"),
+        "application_surface_not_found_or_not_authorized" | "project_route_not_found" => {
+            Some("denied")
+        }
         _ => None,
     }
 }
@@ -208,6 +206,9 @@ fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option<Val
         kind = Some(json!(
             ApplicationProblem::from_detail(typed_detail.clone()).kind()
         ));
+    }
+    if let Some(record) = crate::application_output::tool_result::error_problem_record(error) {
+        kind = Some(json!(record.kind));
     }
     if let (Some(kind), Some(object)) = (kind, data.as_object_mut()) {
         object.insert("kind".to_string(), json!(kind));
