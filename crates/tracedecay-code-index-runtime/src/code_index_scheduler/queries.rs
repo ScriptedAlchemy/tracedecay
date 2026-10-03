@@ -4239,7 +4239,7 @@ mod tests {
         let start_of = |needle: &str| source.find(needle).expect("fixture needle") as u64;
         for (literal, owner_start) in [
             ("probe_method", start_of("pub fn probe_method")),
-            ("--probe-member-flag", start_of("impl Probe")),
+            ("--probe-member-flag", start_of("pub fn probe_method")),
             ("multi_line_target", start_of("pub fn multi_line_target")),
         ] {
             let outcome = exact_occurrences(&[("src/lib.rs", source)], literal, None).await;
