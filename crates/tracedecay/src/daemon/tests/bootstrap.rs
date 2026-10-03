@@ -4347,9 +4347,15 @@ async fn production_composition_harness_rejects_live_profile_overlap() {
         Err(error) => error,
     };
     let message = error.to_string();
+    // The message must identify the protected live profile; spellings
+    // differ across hosts (8.3 aliases, verbatim prefixes), so compare
+    // against the same canonical spelling the product reports.
+    let expected_live_profile =
+        tracedecay_runtime_core::path_safety::canonical_existing_identity(&live_profile)
+            .expect("canonical live profile");
     assert!(
         message.contains("overlaps live profile")
-            && message.contains(&live_profile.display().to_string()),
+            && message.contains(&expected_live_profile.display().to_string()),
         "overlap rejection must identify the protected live profile: {message}"
     );
     assert!(

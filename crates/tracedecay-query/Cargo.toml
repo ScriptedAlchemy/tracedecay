@@ -58,6 +58,7 @@ production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
 [dev-dependencies]
 static_assertions = "1.1.0"
 tempfile = "3"
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
 # through the code-index intake and the extracted language registry, which
 # needs the bundled lite grammar tier (Rust).

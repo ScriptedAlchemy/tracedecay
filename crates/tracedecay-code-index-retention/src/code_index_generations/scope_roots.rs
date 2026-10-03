@@ -1088,7 +1088,9 @@ mod worktree_inventory_tests {
                 .expect("absolute git executable should resolve"),
         )
         .current_dir(root)
-        .args(args)
+        // A canonicalized Windows fixture root is `\\?\`-verbatim, which git
+        // refuses as a path argument; spell it plainly for the child process.
+        .args(tracedecay_runtime_core::path_safety::plain_git_args(args))
         .status()
         .expect("run git fixture command");
         assert!(status.success(), "git fixture command failed: {args:?}");

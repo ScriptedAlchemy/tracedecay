@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 
 use super::journey_test_support::git;
 use super::*;
@@ -321,10 +321,13 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
             .project_servers()
             .lock()
             .await;
+        // Server keys carry the verbatim path the routing layer stores,
+        // while this test's roots use the plain canonical convention;
+        // spell both sides the same before comparing membership.
         servers
             .servers
             .keys()
-            .map(|key| key.project_root.clone())
+            .map(|key| canonical_root_identity(&key.project_root))
             .collect::<std::collections::BTreeSet<_>>()
     };
     let initial_cached_owner_count = initial_cached_projects.len();
@@ -416,7 +419,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
                 servers
                     .servers
                     .keys()
-                    .all(|key| key.project_root != canonical),
+                    .all(|key| canonical_root_identity(&key.project_root) != canonical),
                 "the concurrent admission fixture must start with an uncached route"
             );
         }
@@ -469,7 +472,12 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         servers
             .servers
             .iter()
-            .map(|(key, entry)| (key.project_root.clone(), Arc::clone(&entry.server)))
+            .map(|(key, entry)| {
+                (
+                    canonical_root_identity(&key.project_root),
+                    Arc::clone(&entry.server),
+                )
+            })
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     let uncached_project = projects

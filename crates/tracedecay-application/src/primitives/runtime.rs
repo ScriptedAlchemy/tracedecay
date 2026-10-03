@@ -2482,7 +2482,12 @@ mod tests {
         assert_eq!(
             pending.detail(),
             Some(&ApplicationProblemDetailV1::DiagnosticsPending {
-                producer: "node_modules/.bin/tsc".to_owned(),
+                producer: if cfg!(windows) {
+                    "node_modules/.bin/tsc.cmd"
+                } else {
+                    "node_modules/.bin/tsc"
+                }
+                .to_owned(),
                 generation: None,
             })
         );

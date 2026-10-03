@@ -50,10 +50,11 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
     CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
-    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1,
-    LexicalLane, LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1,
+    CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuildProgressV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
+    CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
+    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1,
     LexicalSpellingVariantV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
     VerifiedCodeLexicalArtifactV1,
@@ -1092,6 +1093,13 @@ fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() 
                 .expect("capture the killed builder's file");
         }
     }
+    #[cfg(windows)]
+    // fs::copy gives the destination the directory's inherited DACL; a real
+    // killed staging file carries the private DACL its creator installed.
+    drop(
+        tracedecay_private_fs::make_private_file(&killed_path)
+            .expect("restore the private DACL on the captured staging"),
+    );
     assert!(
         PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
         "an unsynced append must live in the staging WAL"
@@ -4740,13 +4748,21 @@ fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
         expected_cursor.emitted_imports() > 0,
         "fixture must authenticate a nonempty import dictionary"
     );
+    // The record chain is independent of where pages are cut; the import
+    // dictionary folds per-page digests, so only its import totals are.
     assert_eq!(
         source.cursor().cumulative_digest(),
         expected_cursor.cumulative_digest()
     );
     assert_eq!(
-        source.cursor().import_dictionary_digest(),
-        expected_cursor.import_dictionary_digest()
+        (
+            source.cursor().emitted_imports(),
+            source.cursor().emitted_import_payload_bytes()
+        ),
+        (
+            expected_cursor.emitted_imports(),
+            expected_cursor.emitted_import_payload_bytes()
+        )
     );
     let (rows, distinct) = staged_row_cardinality(&path);
     assert_eq!(
@@ -4847,13 +4863,21 @@ fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
     assert!(refusals > 0);
     assert_eq!(receipt.total_chunks(), expected_receipt.total_chunks());
     let expected = single_pages.last().unwrap().next_cursor();
+    // The record chain is independent of where pages are cut; the import
+    // dictionary folds per-page digests, so only its import totals are.
     assert_eq!(
         source.cursor().cumulative_digest(),
         expected.cumulative_digest()
     );
     assert_eq!(
-        source.cursor().import_dictionary_digest(),
-        expected.import_dictionary_digest()
+        (
+            source.cursor().emitted_imports(),
+            source.cursor().emitted_import_payload_bytes()
+        ),
+        (
+            expected.emitted_imports(),
+            expected.emitted_import_payload_bytes()
+        )
     );
     assert_eq!(
         source.cursor().emitted_imports(),
@@ -4990,12 +5014,17 @@ fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
         resumed.advance_finalization(&source_receipt, 2, &interrupted),
         Err(CodeLexicalArtifactErrorV1::Interrupted(_))
     ));
+    let resumed_progress = resumed
+        .progress(&UninterruptibleCodeIndexControlV1)
+        .expect("source progress after interruption");
     assert_eq!(
-        resumed
-            .progress(&UninterruptibleCodeIndexControlV1)
-            .expect("source progress after interruption"),
-        staged,
+        staged_totals(&resumed_progress),
+        staged_totals(&staged),
         "finalization never replays or mutates staged source pages"
+    );
+    assert!(
+        staged.next_cursor.is_some() && resumed_progress.next_cursor.is_none(),
+        "a finalizing artifact reports its staged totals and needs no source cursor"
     );
     drop(resumed);
 
@@ -6005,10 +6034,12 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
              interruption, never a terminal activation failure"
         );
         assert_eq!(
-            builder
-                .progress(&UninterruptibleCodeIndexControlV1)
-                .expect("progress after exhausted round"),
-            staged,
+            staged_totals(
+                &builder
+                    .progress(&UninterruptibleCodeIndexControlV1)
+                    .expect("progress after exhausted round")
+            ),
+            staged_totals(&staged),
             "round {round}: an exhausted bounded work budget must not mutate staged progress"
         );
         staged_row_cardinality(&artifact_path);
@@ -7041,4 +7072,19 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             .contains(first_request.generation.as_str()),
         "the source occurrence names the generation it was retrieved from"
     );
+}
+
+/// The staged source totals progress reports, which finalization must leave
+/// as staging left them.
+fn staged_totals(
+    progress: &CodeLexicalArtifactBuildProgressV1,
+) -> (u64, u64, u64, u64, u64, Option<ManifestDigest>) {
+    (
+        progress.next_page_ordinal,
+        progress.completed_chunks,
+        progress.completed_payload_bytes,
+        progress.completed_imports,
+        progress.completed_import_payload_bytes,
+        progress.import_dictionary_digest.clone(),
+    )
 }

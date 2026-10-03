@@ -96,12 +96,11 @@ pub(crate) fn validate_or_initialize_format(
         validate_or_initialize_format_marker(database, validated)
     )?;
     // The pinned grafeo fork persists the store's property-index keys in the
-    // catalog section (sealed compact containers write them at seal time) and
-    // `GrafeoDB::with_config` rebuilds each one with a full node scan, so a
-    // reopened store already has every index. Re-declaring one is not a
-    // no-op: on a compacted store it rebuilds the columnar base's hash index
-    // a second time and marks the container stale, which also forces a full
-    // checkpoint on close. This loop stays as the authority that *defines*
+    // catalog section, and a sealed compact container stores each indexed
+    // column's rows in value order at seal time, so a reopened store already
+    // has every index without scanning a node. Re-declaring one is not a
+    // no-op: it marks the container stale, which forces a full checkpoint
+    // on close. This loop stays as the authority that *defines*
     // the index set for a fresh store and a store whose last checkpoint
     // predates catalog index persistence; without the indexes the unique-key
     // lookups in `state.rs` degrade from a hash hit to a full node scan,
