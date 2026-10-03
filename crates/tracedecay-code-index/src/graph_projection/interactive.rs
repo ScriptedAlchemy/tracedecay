@@ -1623,9 +1623,10 @@ impl CodeGraphInteractiveReader {
     }
 
     /// The catalog carried from `parent` when this generation layers over
-    /// the parent's base, otherwise scanned from the projection. Only a
-    /// carry that declines falls back; a carry that fails is this build's
-    /// failure.
+    /// the parent's base, otherwise scanned from the projection. A carry
+    /// that declines or finds its edits inconsistent falls back to the scan,
+    /// so a carry defect costs one scan instead of every warm build; the
+    /// scan still rejects a graph that is itself corrupt.
     fn build_catalog(
         &self,
         parent: Option<Arc<InteractiveCatalog>>,
@@ -1641,15 +1642,20 @@ impl CodeGraphInteractiveReader {
                     self.projection_node_count,
                     Arc::clone(cancellation),
                 )
-            )? {
-                Ok(catalog) => {
+            ) {
+                Ok(Ok(catalog)) => {
                     hotpath::gauge!("code_graph.catalog.carried_builds").inc(1_u64);
                     return Ok(catalog);
                 }
-                Err(decline) => {
+                Ok(Err(decline)) => {
                     hotpath::gauge!("code_graph.catalog.carry_declined").inc(1_u64);
                     hotpath::val!("code_graph.catalog.carry_decline").set(&decline.as_str());
                 }
+                Err(CodeGraphProjectionError::Corrupt(message)) => {
+                    hotpath::gauge!("code_graph.catalog.carry_failed").inc(1_u64);
+                    hotpath::val!("code_graph.catalog.carry_failure").set(&message.as_str());
+                }
+                Err(error) => return Err(error),
             }
         }
         self.catalog
