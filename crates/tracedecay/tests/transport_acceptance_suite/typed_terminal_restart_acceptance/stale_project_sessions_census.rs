@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use tracedecay_lcm::LCM_SCHEMA_VERSION;
+
 use super::stale_profile_authority_reset::{
     REGISTRY_REASON, STALE_STORE_RESET, doctor_store_resets,
     give_registry_the_released_graph_scope_shape, registered_project_ids,
@@ -188,6 +190,135 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
     assert_eq!(
         registered, ids,
         "both projects register again after one reset"
+    );
+    assert_eq!(
+        doctor_store_resets(&home_path, first_project).1,
+        Vec::<String>::new(),
+        "no store requires reset after one scoped reset"
+    );
+
+    let _ = daemon.kill_and_wait();
+}
+
+/// The shape an LCM schema bump leaves (v1.0.0-beta.65 to 66): every
+/// registered store, `global.db` included, records the previous LCM schema. One census names the session stores
+/// only; the profile authority holds no session rows, so its registry keeps
+/// both projects through the scoped reset without another `tracedecay init`.
+#[test]
+fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry() {
+    let previous = LCM_SCHEMA_VERSION - 1;
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let profile_root = home_path.join(".tracedecay");
+    let projects: Vec<(tempfile::TempDir, PathBuf, String)> = (0..2)
+        .map(|_| {
+            let project = tempfile::TempDir::new().expect("project");
+            let path = canonical_existing_path(project.path());
+            let id = tracedecay_runtime_core::storage::default_profile_project_id(&path);
+            (project, path, id)
+        })
+        .collect();
+    let mut ids: Vec<&str> = projects.iter().map(|(_, _, id)| id.as_str()).collect();
+    ids.sort_unstable();
+    let first_project = projects[0].1.as_path();
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    for (_, path, _) in &projects {
+        super::initialize_project(&home_path, path, "previous-lcm-profile");
+        wait_for_code_index_hit(&home_path, path, "probe");
+    }
+    // The profile session store is mounted by the first session read.
+    super::tool_call(
+        &home_path,
+        first_project,
+        "tracedecay_lcm_status",
+        &serde_json::json!({ "storage_scope": "user", "format": "json" }),
+    );
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+    let mut released_stores = vec![
+        PathBuf::from("global.db"),
+        PathBuf::from("user-sessions.db"),
+    ];
+    released_stores.extend(
+        ids.iter()
+            .map(|id| PathBuf::from("projects").join(id).join("sessions.db")),
+    );
+    for store in &released_stores {
+        let rewritten = rusqlite::Connection::open(profile_root.join(store))
+            .expect("open a registered store")
+            .execute(
+                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                [previous],
+            )
+            .expect("record the released LCM schema");
+        assert_eq!(rewritten, 1, "{} records one LCM marker", store.display());
+    }
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let lcm_reset = |store: &str| {
+        format!(
+            "Store {store} requires reset (LCM profile schema {previous} is incompatible with \
+             required schema {LCM_SCHEMA_VERSION}; reset the profile). Pending operator action: \
+             run `{STALE_STORE_RESET}`"
+        )
+    };
+    let (exit, mut pending) = doctor_store_resets(&home_path, first_project);
+    pending.sort_unstable();
+    let mut expected = vec![
+        lcm_reset("profile sessions"),
+        lcm_reset(&format!("project sessions {}", ids[0])),
+        lcm_reset(&format!("project sessions {}", ids[1])),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        (exit, pending),
+        (Some(75), expected),
+        "one census names every session store and never the profile authority"
+    );
+    let mut registered = registered_project_ids(&home_path, first_project);
+    registered.sort_unstable();
+    assert_eq!(registered, ids, "the registry serves over refused sessions");
+
+    let mut before_reset = BTreeMap::new();
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, first_project, &mut daemon, || {
+            before_reset = file_digests(&profile_root);
+        });
+    assert!(
+        reset_status.success(),
+        "the scoped reset failed:\n{reset_output}"
+    );
+    let after_reset = file_digests(&profile_root);
+    let removed_databases: Vec<&PathBuf> = before_reset
+        .keys()
+        .filter(|relative| !after_reset.contains_key(*relative))
+        .filter(|relative| {
+            relative
+                .extension()
+                .is_some_and(|extension| extension == "db")
+        })
+        .collect();
+    let mut expected_removed = released_stores[1..].to_vec();
+    expected_removed.sort();
+    assert_eq!(
+        removed_databases,
+        expected_removed.iter().collect::<Vec<_>>(),
+        "the scoped reset deletes exactly the session stores:\n{reset_output}"
+    );
+    assert_eq!(
+        after_reset.get(Path::new("global.db")),
+        before_reset.get(Path::new("global.db")),
+        "the profile authority stays byte-identical:\n{reset_output}"
+    );
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let mut registered = registered_project_ids(&home_path, first_project);
+    registered.sort_unstable();
+    assert_eq!(
+        registered, ids,
+        "both projects stay registered without another `tracedecay init`"
     );
     assert_eq!(
         doctor_store_resets(&home_path, first_project).1,

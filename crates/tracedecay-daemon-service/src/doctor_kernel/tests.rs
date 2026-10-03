@@ -4,10 +4,14 @@
 //! `tracedecay-contracts::doctor`. Composition from resolved kernel reads is
 //! owned here at the composition root.
 
+use tracedecay_agent_hosts::agents::host_bundle::{
+    HostBundleComponentDoctorResultV1, HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1,
+    HostBundleRegistrationStateV1, HostComponentV1, HostKindV1,
+};
 use tracedecay_contracts::doctor::{
-    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalV1,
-    LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityReadV1, ObservabilityStateV1,
+    DoctorCoverageCompletenessV1, HostComponentDriftV1, HostConformanceV1, HostIntegrationReadV1,
+    IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
 use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
@@ -162,33 +166,58 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
 
 #[test]
 fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
-    let checked_in =
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleDoctorReportV1::default();
+    let checked_in = HostBundleDoctorReportV1::default();
     assert_eq!(
         host_integration_read_from_report(&checked_in),
         HostIntegrationReadV1::Absent
     );
 
-    let mut drifted = checked_in;
-    drifted.components.push(
-        tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorResultV1 {
+    // A beta.66 profile: one Codex artifact's bytes moved while its
+    // registration and every other component stay current.
+    let component =
+        |host, component, state, repair_action: &str| HostBundleComponentDoctorResultV1 {
             receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
-            host: Some(tracedecay_agent_hosts::agents::host_bundle::HostKindV1::Codex),
-            component: Some(tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core),
-            state: tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorStateV1::Repairable,
-            registration: Some(
-                tracedecay_agent_hosts::agents::host_bundle::HostBundleRegistrationStateV1::Repairable,
-            ),
+            host: Some(host),
+            component: Some(component),
+            state,
+            registration: Some(HostBundleRegistrationStateV1::Current),
             artifacts: Vec::new(),
-            repair_action: "repair fixture".to_owned(),
-        },
-    );
+            repair_action: repair_action.to_owned(),
+        };
+    let mut drifted = checked_in;
+    drifted.components = vec![
+        component(
+            HostKindV1::ClaudeCode,
+            HostComponentV1::Core,
+            HostBundleComponentDoctorStateV1::Current,
+            "none",
+        ),
+        component(
+            HostKindV1::Codex,
+            HostComponentV1::ContextMcp,
+            HostBundleComponentDoctorStateV1::Drifted,
+            "run `tracedecay reinstall --component context-mcp` (refreshes tracedecay-owned files)",
+        ),
+    ];
+    let read = host_integration_read_from_report(&drifted);
     assert_eq!(
-        host_integration_read_from_report(&drifted),
+        read,
         HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::Drifted,
+            conformance: HostConformanceV1::Drifted(vec![HostComponentDriftV1 {
+                component: "codex/context-mcp".to_owned(),
+                remedy: "run `tracedecay reinstall --component context-mcp` (refreshes \
+                         tracedecay-owned files)"
+                    .to_owned(),
+            }]),
             coverage: DoctorCoverageCompletenessV1::Complete,
         }
+    );
+    let finding = host_integration_finding(&read).unwrap();
+    assert_eq!(
+        finding.coverage().statement(),
+        "codex/context-mcp has drifted from its installed shape; run `tracedecay reinstall \
+         --component context-mcp` (refreshes tracedecay-owned files)",
+        "a drift finding names the drifted component and its remedy"
     );
 }
 

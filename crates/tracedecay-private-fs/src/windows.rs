@@ -216,15 +216,30 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Protect an existing regular file through its exact opened handle.
+///
+/// The open asks for data-write access so callers can still sync through
+/// the returned handle. A file carrying the read-only attribute gates
+/// `FILE_GENERIC_WRITE` but never the DACL rewrite this performs, so the
+/// denied open retries without it and that handle cannot write or sync.
 #[hotpath::measure(label = "private_fs.make_private_file")]
 pub fn make_private_file(path: &Path) -> io::Result<File> {
-    let file = open_handle_with_share(
+    let file = match open_handle_with_share(
         path,
         OPEN_EXISTING,
         SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER,
         null(),
         SHARE_READ_WRITE_DELETE,
-    )?;
+    ) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(5) => open_handle_with_share(
+            path,
+            OPEN_EXISTING,
+            SECURITY_ACCESS | FILE_GENERIC_READ | WRITE_DAC | WRITE_OWNER,
+            null(),
+            SHARE_READ_WRITE_DELETE,
+        )?,
+        Err(error) => return Err(error),
+    };
     validate_file_kind(&file, path, PathKind::File)?;
     protect_existing(&file, path, PathKind::File)?;
     validate_private_handle(&file, path, PathKind::File)?;

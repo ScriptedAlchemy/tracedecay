@@ -38,6 +38,9 @@ use crate::ports::mcp_tools::{advertised_tool_schemas_json, advertised_tools};
 
 pub struct PiIntegration;
 
+const PI_CLI: &str = "pi";
+const PI_CLI_DETECTION: &str = "Pi host detection";
+
 const PI_EXTENSION_SOURCE: &str = include_str!("../../../../plugin/pi/index.ts");
 const PI_PACKAGE_TEMPLATE: &str = include_str!("../../../../plugin/pi/package.json");
 const PI_SKILL_SOURCE: &str = include_str!("../../../../plugin/pi/skill/SKILL.md");
@@ -221,13 +224,14 @@ impl AgentIntegration for PiIntegration {
         component_state(&ctx.home, component)
     }
 
-    fn is_detected(&self, home: &Path) -> bool {
-        pi_agent_dir(home).is_dir()
+    /// Pi is a CLI; its agent directory outlives an uninstalled `pi`.
+    fn is_detected(&self, _home: &Path) -> bool {
+        super::host_cli::require_host_cli(PI_CLI, PI_CLI_DETECTION).is_ok()
     }
 
     fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let dir = pi_agent_dir(home);
-        dir.is_dir().then_some(dir)
+        (dir.is_dir() && self.is_detected(home)).then_some(dir)
     }
 
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {

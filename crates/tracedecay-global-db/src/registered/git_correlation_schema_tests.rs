@@ -4,11 +4,11 @@ use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
 use crate::tests::harness::open_registered_test_database_fixture;
 
-/// A store recorded at the whole-projection Git evidence schema (version 5)
-/// is admitted in its typed reset-required state and left byte-for-byte
+/// A store recorded at the previous Git evidence schema is admitted in its typed reset-required state and left byte-for-byte
 /// untouched: nothing converts or copies the older shape.
 #[tokio::test]
 async fn an_older_git_correlation_schema_is_refused_without_mutation() {
@@ -24,11 +24,12 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
             .await
             .unwrap(),
     );
+    let previous = GIT_CORRELATION_SCHEMA_VERSION - 1;
     rusqlite::Connection::open(&database_path)
         .unwrap()
         .execute(
-            "UPDATE session_schema_migrations SET version = 5 WHERE name = 'git_correlation'",
-            (),
+            "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
+            [previous],
         )
         .unwrap();
     let before = fs::read(&database_path).unwrap();
@@ -42,9 +43,9 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
                 refusal,
                 Some(TraceDecayError::ProfileResetRequired {
                     component: "git correlation",
-                    found_version: Some(5),
-                    required_version: 6,
-                })
+                    found_version: Some(found),
+                    required_version: GIT_CORRELATION_SCHEMA_VERSION,
+                }) if found == previous
             ),
             "an older Git correlation schema refuses session features: {refusal:?}"
         );
