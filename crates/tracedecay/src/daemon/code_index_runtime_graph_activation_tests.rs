@@ -2359,7 +2359,10 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
     let mount = PersistentGraphMountV1::mount(
         CodeIndexSchedulerRegistryV1::with_resident_memory(
             1,
-            Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure)),
+            Arc::new(ProcessResidentMemoryV1::with_pressure(
+                limit,
+                Arc::clone(&pressure),
+            )),
         )
         .with_resident_owners(Arc::clone(&owners)),
         &fixture,
@@ -2374,16 +2377,29 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
         "the first generation's graph engine is resident: {before:?}"
     );
 
+    // The model reads the first graph itself rather than the inventory, so an
+    // outgoing graph the inventory loses sight of still holds the memory.
+    let first_graph = Arc::downgrade(
+        &mount
+            .registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .expect("the first text owner serves")
+            .interactive_graph_store()
+            .expect("the first graph serves"),
+    );
     let model = tokio::spawn({
-        let owners = Arc::clone(&owners);
         let resident = Arc::clone(&resident);
-        let first = first.clone();
+        let pressure = Arc::clone(&pressure);
         async move {
             loop {
-                let graph_held =
-                    !serving_graph_owners(&owners.report(std::time::Instant::now()), &first)
-                        .is_empty();
+                let graph_held = first_graph.upgrade().is_some_and(|graph| {
+                    graph.serving_engine_bytes().ok().flatten().is_some()
+                        || graph.interactive_catalog_bytes().is_some()
+                });
                 resident.store(if graph_held { beside_graph } else { 0 }, Ordering::Release);
+                // The daemon's resident-memory sampler.
+                pressure.sample_and_publish();
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
