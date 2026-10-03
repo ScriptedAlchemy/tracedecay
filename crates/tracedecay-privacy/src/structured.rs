@@ -102,7 +102,7 @@ pub(crate) enum StructuredSanitizationError {
 
 /// Runs on every structured payload the privacy boundary admits (including
 /// each LCM hydration), so this entry span is the per-call cost authority;
-/// per-value work inside stays span-free and is aggregated by gauges.
+/// per-value work inside stays span-free.
 #[tracing::instrument(
     name = "runtime_core.privacy.sanitize_structured",
     level = "trace",
