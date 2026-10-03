@@ -2781,10 +2781,10 @@ fn execute_prepared_exact_query(
     };
     // Identifier terms are minted only from definition names, so a complete
     // lane read still omits every use of the identifier.
-    let definitions_only = lane_request.literals.iter().any(|literal| {
-        literal.field == ExactFieldV1::Identifier
-            && literal.original_bytes == request.literal.as_bytes()
-    });
+    let definitions_only = lane_request
+        .literals
+        .iter()
+        .any(|literal| literal.field == ExactFieldV1::Identifier);
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
@@ -4155,6 +4155,26 @@ mod tests {
             "a definitions-only page must not claim complete coverage: {evidence:?}"
         );
         assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+    }
+
+    #[tokio::test]
+    async fn prefixed_identifier_exact_reads_are_not_complete() {
+        for literal in ["identifier:shared_probe_target", "id:shared_probe_target"] {
+            let outcome = exact_occurrences(
+                &[(
+                    "src/lib.rs",
+                    "pub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                )],
+                literal,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(outcome, RetrievalPortOutcome::Partial(_)),
+                "`{literal}` reads only identifier definitions: {outcome:?}"
+            );
+        }
     }
 
     #[tokio::test]
