@@ -594,36 +594,30 @@ impl GraphDb {
         idempotency_key: &GraphIdempotencyKey,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphPublicationReceipt>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        publication(database, namespace, idempotency_key)?
-            .map(|stored| {
-                Ok(GraphPublicationReceipt {
-                    digest: GraphPublicationDigest::from_persisted(stored.digest)?,
-                    input_digest: GraphPublicationInputDigest::from_persisted(stored.input_digest)?,
-                    commit: stored.commit,
-                })
+        self.read_intact(cancellation.as_ref(), |database| {
+            publication(database, namespace, idempotency_key)
+        })?
+        .map(|stored| {
+            Ok(GraphPublicationReceipt {
+                digest: GraphPublicationDigest::from_persisted(stored.digest)?,
+                input_digest: GraphPublicationInputDigest::from_persisted(stored.input_digest)?,
+                commit: stored.commit,
             })
-            .transpose()
+        })
+        .transpose()
     }
 
     #[hotpath::measure(label = "graph_db.traversal", impl_type = "GraphDb")]
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(
-            database,
-            &request.namespace,
-            std::slice::from_ref(&request.start),
-        )?;
-        let result = traversal::traverse(database, request, &|namespace, projection| {
-            self.approve_projection(namespace, projection)
+        let result = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(
+                database,
+                &request.namespace,
+                std::slice::from_ref(&request.start),
+            )?;
+            traversal::traverse(database, request, &|namespace, projection| {
+                self.approve_projection(namespace, projection)
+            })
         })?;
         #[cfg(feature = "hotpath")]
         {
@@ -677,15 +671,15 @@ impl GraphDb {
             &crate::adjacency_id_index::AdjacencyIdIndexCache,
         ) -> Result<Vec<Vec<T>>, GraphDbError>,
     ) -> Result<Vec<Vec<T>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = read(
-            database,
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            &self.inner.label_keys,
-            &self.inner.adjacency_ids,
-        )?;
+        let batches = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(database, namespace, starts)?;
+            read(
+                database,
+                &|namespace, projection| self.approve_projection(namespace, projection),
+                &self.inner.label_keys,
+                &self.inner.adjacency_ids,
+            )
+        })?;
         #[cfg(feature = "hotpath")]
         {
             let edges = batches.iter().map(Vec::len).sum();
@@ -908,18 +902,22 @@ impl GraphDb {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, std::slice::from_ref(start))?;
-        let edges = traversal::visit_outgoing_relation_targets(
-            database,
-            namespace,
-            start,
-            relation_kinds,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-            visitor,
-        )?;
+        let edges = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_start_projections_readable(
+                database,
+                namespace,
+                std::slice::from_ref(start),
+            )?;
+            traversal::visit_outgoing_relation_targets(
+                database,
+                namespace,
+                start,
+                relation_kinds,
+                cancellation.as_ref(),
+                &|namespace, projection| self.approve_projection(namespace, projection),
+                visitor,
+            )
+        })?;
         #[cfg(feature = "hotpath")]
         {
             crate::hotpath_observe::record_counts(1, edges, 0, 0);
@@ -986,21 +984,21 @@ impl GraphDb {
         max_visits: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<BTreeSet<GraphEntityId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(namespace, projection)?;
-        self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
-        let results = traversal::reachable_entities(
-            database,
-            namespace,
-            projection,
-            starts,
-            relation_kinds,
-            outgoing_overrides,
-            max_visits,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
+        let results = self.read_intact(&crate::NeverCancelled, |database| {
+            self.ensure_projection_readable(namespace, projection)?;
+            self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
+            traversal::reachable_entities(
+                database,
+                namespace,
+                projection,
+                starts,
+                relation_kinds,
+                outgoing_overrides,
+                max_visits,
+                cancellation.as_ref(),
+                &|namespace, projection| self.approve_projection(namespace, projection),
+            )
+        })?;
         #[cfg(feature = "hotpath")]
         {
             let entities: usize = results.iter().map(BTreeSet::len).sum();
@@ -1372,20 +1370,6 @@ impl GraphDb {
         Ok(commit)
     }
 
-    pub(crate) fn read_database(
-        &self,
-        cancellation: &dyn GraphCancellation,
-    ) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        let guard = self.read_guard()?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        Ok(guard)
-    }
-
     /// Runs `read` against the open database and refuses its answer as
     /// corrupt when the read touched a sealed page that failed verification.
     pub(crate) fn read_intact<T>(
@@ -1393,7 +1377,13 @@ impl GraphDb {
         cancellation: &dyn GraphCancellation,
         read: impl FnOnce(&GrafeoDB) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        let guard = self.read_database(cancellation)?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let guard = self.read_guard()?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let answer = read(database);
         ensure_intact(database)?;
@@ -1474,6 +1464,9 @@ impl GraphDb {
         Ok(())
     }
 
+    /// The open database, refused once a sealed page has failed. The read
+    /// that first touches a corrupt page still answers without it, so a read
+    /// whose answer leaves the guard goes through [`Self::read_intact`].
     pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         loop {
             self.ensure_available()?;

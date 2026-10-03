@@ -147,9 +147,10 @@ pub(crate) fn open_direct_sealed_generation(
         error => sealed_store_failure("reopen failed", error),
     })?;
     let identity = {
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let recovered = latest_projection(native, &physical_namespace, &projection.projection)?
+        let recovered = database
+            .read_intact(&NeverCancelled, |native| {
+                latest_projection(native, &physical_namespace, &projection.projection)
+            })?
             .ok_or_else(|| GraphDbError::GenerationMismatch {
                 namespace: projection.namespace.to_string(),
                 projection: projection.projection.to_string(),
@@ -2605,13 +2606,13 @@ pub(crate) fn sealed_copy_proof(
         );
         return Ok(canonical_bytes);
     }
-    let canonical_bytes = hotpath::measure_block!("code_index.seal.verify.rows", {
-        let guard = database.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let (_, canonical_bytes) =
-            verify_sealed_copy_generation(native, identity, expected, check)?;
-        Ok::<u64, GraphDbError>(canonical_bytes)
-    })?;
+    let canonical_bytes = hotpath::measure_block!(
+        "code_index.seal.verify.rows",
+        database.read_intact(&NeverCancelled, |native| {
+            verify_sealed_copy_generation(native, identity, expected, check)
+                .map(|(_, canonical_bytes)| canonical_bytes)
+        })
+    )?;
     database
         .inner
         .markers
