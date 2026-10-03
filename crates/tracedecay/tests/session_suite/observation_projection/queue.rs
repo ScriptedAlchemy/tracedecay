@@ -63,7 +63,12 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
             },
         )
         .unwrap();
-    assert_eq!(session, ("user".to_owned(), "user".to_owned(), None));
+    assert_eq!((session.0.as_str(), session.1.as_str()), ("user", "user"));
+    let metadata: serde_json::Value = serde_json::from_str(&session.2.unwrap()).unwrap();
+    assert_eq!(
+        metadata["claude_session_cwd"], "/workspace/first",
+        "the first record's cwd annotates the session"
+    );
 }
 
 #[tokio::test]
