@@ -286,6 +286,7 @@ async fn largest_ranks_by_inclusive_line_span() {
     assert_eq!(
         absent,
         json!({
+            "freshness": {"state": "fresh"},
             "node_kind_filter": null,
             "result_count": 0,
             "ranking": []

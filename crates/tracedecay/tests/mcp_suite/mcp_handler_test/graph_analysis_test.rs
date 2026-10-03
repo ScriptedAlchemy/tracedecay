@@ -1104,6 +1104,7 @@ async fn commit_context_clean_worktree_returns_json() {
     assert_eq!(
         output,
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [],
             "symbols_by_role": {},
             "suggested_category": null,
@@ -1157,6 +1158,7 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
     assert_eq!(
         commit_context_json(&result.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [
                 {"file": "src/lib.rs", "role": "source", "symbols": 1},
                 {"file": "tests/invoice_test.rs", "role": "test", "symbols": 1}
@@ -1218,6 +1220,7 @@ async fn commit_context_config_and_docs_report_chore() {
     assert_eq!(
         commit_context_json(&result.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [
                 {"file": "billing.cfg", "role": "config", "symbols": 0},
                 {"file": "notes.txt", "role": "docs", "symbols": 0}
@@ -1284,6 +1287,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
     assert_eq!(
         commit_context_json(&staged.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [
                 {"file": "src/lib.rs", "role": "source", "symbols": 1}
             ],
@@ -1304,6 +1308,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
     assert_eq!(
         commit_context_json(&everything.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [
                 {"file": "notes.txt", "role": "docs", "symbols": 0},
                 {"file": "src/lib.rs", "role": "source", "symbols": 1}
@@ -1363,6 +1368,7 @@ async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
     assert_eq!(
         commit_context_json(&result.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [
                 {"file": "src/lib.rs", "role": "source", "symbols": 1}
             ],
@@ -1678,6 +1684,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         stats_markdown,
         "\
+freshness: fresh
 ## Design Structure Matrix
 **shape:** stats
 **files:** 5
@@ -1697,6 +1704,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         stats,
         json!({
+            "freshness": {"state": "fresh"},
             "shape": "stats",
             "stats": coupling_stats(),
             "clusters": coupling_clusters(),
@@ -1708,6 +1716,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         named_stats,
         json!({
+            "freshness": {"state": "fresh"},
             "shape": "stats",
             "stats": coupling_stats(),
             "clusters": coupling_clusters(),
@@ -1719,6 +1728,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         clusters,
         json!({
+            "freshness": {"state": "fresh"},
             "shape": "clusters",
             "stats": coupling_stats(),
             "clusters": coupling_clusters(),
@@ -1744,6 +1754,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     let matrix =
         parse_dsm_json(&call_dsm(&host, json!({ "format": "json", "shape": "matrix" })).await);
     assert_eq!(matrix["shape"], "matrix");
+    assert_eq!(matrix["freshness"], json!({"state": "fresh"}));
     assert_eq!(matrix["stats"], coupling_stats());
     assert_eq!(matrix["clusters"], coupling_clusters());
     let mut files = matrix["matrix"]["files"]
@@ -1787,6 +1798,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         ui_only,
         json!({
+            "freshness": {"state": "fresh"},
             "shape": "stats",
             "stats": {
                 "files": 1,
@@ -1810,6 +1822,7 @@ async fn test_dsm_reports_authored_file_dependencies() {
     assert_eq!(
         missing,
         "\
+freshness: fresh
 ## Design Structure Matrix
 **shape:** stats
 **files:** 0
@@ -4257,6 +4270,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     assert_eq!(
         bare,
         json!({
+            "freshness": {"state": "fresh"},
             "field": "n",
             "qualifier": null,
             "qualifier_applied": false,
@@ -4276,6 +4290,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     assert_eq!(
         writes_only,
         json!({
+            "freshness": {"state": "fresh"},
             "field": "n",
             "qualifier": null,
             "qualifier_applied": false,
@@ -4292,6 +4307,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     assert_eq!(
         limited,
         json!({
+            "freshness": {"state": "fresh"},
             "field": "n",
             "qualifier": null,
             "qualifier_applied": false,
@@ -4357,6 +4373,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     assert_eq!(
         qualified,
         json!({
+            "freshness": {"state": "fresh"},
             "field": "Counter::n",
             "qualifier": "Counter",
             "qualifier_applied": true,
@@ -4385,6 +4402,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     assert_eq!(
         missing,
         json!({
+            "freshness": {"state": "fresh"},
             "field": "Missing::n",
             "qualifier": "Missing",
             "qualifier_applied": true,
@@ -4671,6 +4689,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         extract_json(&absent.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": ["src/not_in_repo.rs"],
             "modified_symbols": [],
             "impacted_symbols_count": 0,
@@ -4691,6 +4710,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         extract_json(&empty_files.value),
         json!({
+            "freshness": {"state": "fresh"},
             "changed_files": [],
             "modified_symbols": [],
             "impacted_symbols_count": 0,
@@ -4830,6 +4850,7 @@ fn outliers_sorted_by_name(mut payload: Value) -> Value {
 #[tokio::test]
 async fn gini_reports_literal_coefficients_for_known_distributions() {
     let host = production_composition_fixture_with_sources(write_gini_distribution_sources).await;
+    wait_for_current_graph(&host).await;
 
     let lines = gini_json(
         &host,
@@ -4844,6 +4865,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         lines,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.25,
             "interpretation": "moderate inequality",
             "total_items": 2,
@@ -4872,6 +4894,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         truncated,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.25,
             "interpretation": "moderate inequality",
             "total_items": 2,
@@ -4897,6 +4920,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         one_file,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.0,
             "interpretation": "low inequality (healthy)",
             "total_items": 1,
@@ -4922,6 +4946,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         missing,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.0,
             "interpretation": "low inequality (healthy)",
             "total_items": 0,
@@ -4946,6 +4971,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         outliers_sorted_by_name(defaults.clone()),
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.0,
             "interpretation": "low inequality (healthy)",
             "total_items": 2,
@@ -4972,6 +4998,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         members,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.25,
             "interpretation": "moderate inequality",
             "total_items": 2,
@@ -4999,6 +5026,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
     assert_eq!(
         symbols,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.3,
             "interpretation": "moderate inequality",
             "total_items": 2,
@@ -5019,10 +5047,12 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
 #[tokio::test]
 async fn gini_empty_index_reports_perfect_equality() {
     let host = setup_empty_analysis_project().await;
+    wait_for_current_graph(&host).await;
     let payload = gini_json(&host, json!({"format": "json"})).await;
     assert_eq!(
         payload,
         json!({
+            "freshness": {"state": "fresh"},
             "gini": 0.0,
             "interpretation": "low inequality (healthy)",
             "total_items": 0,
@@ -5343,7 +5373,7 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     assert_eq!(
         body_text(&chain_markdown),
         format!(
-            "**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
+            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
         )
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());
@@ -5450,9 +5480,10 @@ fn public_recursion_report(payload: &Value) -> Value {
     let keys = sorted_keys(payload, "recursion payload");
     assert_eq!(
         keys,
-        ["cycle_count", "cycles"],
+        ["cycle_count", "cycles", "freshness"],
         "recursion payload keys drifted: {payload}"
     );
+    assert_eq!(payload["freshness"], json!({"state": "fresh"}), "{payload}");
     let cycles = payload["cycles"]
         .as_array()
         .unwrap_or_else(|| panic!("cycles must be an array: {payload}"));

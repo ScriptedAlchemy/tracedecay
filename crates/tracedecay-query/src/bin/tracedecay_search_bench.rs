@@ -595,6 +595,7 @@ where
                 query_view,
                 generation: generation.clone(),
                 literals,
+                path_prefix: None,
                 budget: request.budget,
             })
             .map_err(|error| format!("exact lane {class}: {error}"))?;

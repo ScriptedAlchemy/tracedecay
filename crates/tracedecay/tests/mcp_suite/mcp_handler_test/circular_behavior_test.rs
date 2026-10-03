@@ -82,6 +82,7 @@ fn parse_payload(text: &str) -> Value {
 }
 
 const NAMED_CYCLES_MARKDOWN: &str = "\
+freshness: fresh
 # Circular Dependencies (2)
 
 1. src/left.rs -> src/mid.rs -> src/right.rs -> src/left.rs
@@ -89,6 +90,7 @@ const NAMED_CYCLES_MARKDOWN: &str = "\
 ";
 
 const BOUNDED_MARKDOWN: &str = "\
+freshness: fresh
 # Circular Dependencies (2)
 
 1. src/left.rs -> … (2 further member(s) not shown of 3 at member_limit)
@@ -98,6 +100,7 @@ const BOUNDED_MARKDOWN: &str = "\
 
 fn named_cycles_payload(limit: u64, member_limit: u64) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "cycle_count": 2,
         "reported_cycle_count": 2,
         "omitted_cycle_count": 0,
@@ -120,6 +123,7 @@ fn named_cycles_payload(limit: u64, member_limit: u64) -> Value {
 
 fn largest_cycle_page(limit: u64, member_limit: u64) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "cycle_count": 2,
         "reported_cycle_count": 1,
         "omitted_cycle_count": 1,
@@ -198,6 +202,7 @@ async fn circular_names_the_cycles_and_an_empty_graph_stays_empty() {
     assert_eq!(
         parse_payload(&call_circular(&acyclic, json!({"format": "json"})).await),
         json!({
+            "freshness": {"state": "fresh"},
             "cycle_count": 0,
             "reported_cycle_count": 0,
             "omitted_cycle_count": 0,
@@ -208,7 +213,7 @@ async fn circular_names_the_cycles_and_an_empty_graph_stays_empty() {
     );
     assert_eq!(
         call_circular(&acyclic, json!({"format": "markdown"})).await,
-        "No circular dependencies found.\n"
+        "freshness: fresh\nNo circular dependencies found.\n"
     );
     acyclic.shutdown().await;
 }

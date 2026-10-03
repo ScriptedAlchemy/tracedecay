@@ -198,6 +198,7 @@ fn symbol_id(payload: &Value, bucket: &str, name_key: &str, name: &str, id_key: 
 
 fn surface_mapping() -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "covered_symbols": 4,
         "uncovered_symbols": 1,
         "test_files": ["tests/behavior.rs"],
@@ -270,6 +271,7 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
     assert_eq!(
         comparable_map(&by_node),
         json!({
+            "freshness": {"state": "fresh"},
             "covered_symbols": 1,
             "uncovered_symbols": 0,
             "test_files": ["tests/behavior.rs"],
@@ -283,6 +285,7 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
     assert_eq!(
         comparable_map(&by_unused),
         json!({
+            "freshness": {"state": "fresh"},
             "covered_symbols": 0,
             "uncovered_symbols": 1,
             "test_files": [],
@@ -294,6 +297,7 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
     assert_eq!(
         success_payload(&call_test_map(&fixture, json!({"file": "src/missing.rs"})).await,),
         json!({
+            "freshness": {"state": "fresh"},
             "covered_symbols": 0,
             "uncovered_symbols": 0,
             "test_files": [],
@@ -306,6 +310,7 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
             &call_test_map(&fixture, json!({"node_id": "missing-test-map-symbol"})).await,
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "covered_symbols": 0,
             "uncovered_symbols": 0,
             "test_files": [],

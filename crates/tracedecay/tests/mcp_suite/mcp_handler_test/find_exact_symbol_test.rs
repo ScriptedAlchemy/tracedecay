@@ -159,6 +159,7 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
     assert_eq!(
         sorted_without_ids(gmres),
         json!({
+            "freshness": {"state": "fresh"},
             "name": "gmres",
             "count": 2,
             "matches": [gmres_field(), gmres_function()],
@@ -184,7 +185,7 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
     ] {
         assert_eq!(
             exact_payload(&server, json!({"name": name, "format": "json"})).await,
-            json!({"name": name, "count": 0, "matches": []}),
+            json!({"name": name, "count": 0, "matches": [], "freshness": {"state": "fresh"}}),
             "a non-equal bare name must not match"
         );
     }
@@ -202,6 +203,7 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
     assert_eq!(
         sorted_without_ids(all),
         json!({
+            "freshness": {"state": "fresh"},
             "name": "shared_token",
             "count": 2,
             "matches": [billing.clone(), ledger.clone()],
