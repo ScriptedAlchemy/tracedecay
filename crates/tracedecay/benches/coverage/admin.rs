@@ -508,7 +508,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         (
             "tracedecay_context_scout_delivery",
             "scout_delivery",
-            json!({"address": scout_addr(), "claim": {"envelope_id": vec![0u8; 16], "lease_id": vec![0u8; 16], "lease_expires_at": "{{now}}"}, "delivered_at": "{{now}}", "outcome": "displayed", "idempotency_key": "bench-scout-delivery-{{iter}}"}),
+            json!({"address": scout_addr(), "claim": {"work": {"address": scout_addr(), "generation": 0, "input_watermark": vec![0u8; 32]}, "envelope_id": vec![0u8; 16], "lease_id": vec![0u8; 16], "lease_expires_at": "{{now}}"}, "delivered_at": "{{now}}", "outcome": "displayed", "idempotency_key": "bench-scout-delivery-{{iter}}"}),
         ),
         (
             "tracedecay_context_scout_feedback",
