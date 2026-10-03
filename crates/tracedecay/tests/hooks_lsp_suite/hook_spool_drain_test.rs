@@ -316,6 +316,7 @@ fn a_receipt_spool_root_that_is_not_a_directory_is_reported_on_status() {
     }
     std::fs::create_dir_all(receipts.parent().unwrap()).unwrap();
     std::fs::write(&receipts, b"not a receipt spool").unwrap();
+    capture_edit(&home, &project, "after-unsafe-root");
 
     let failed = json!({
         "status": "failed",
