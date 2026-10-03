@@ -26,8 +26,8 @@ tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-policy = { path = "../tracedecay-policy" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
-
 tracing = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

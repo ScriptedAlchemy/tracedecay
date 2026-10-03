@@ -11,7 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 # Cross-crate fixture surface for composition-root store-runtime tests:
 # schema-convergence gates and remote-recovery authority reads exercised by
 # the root crate's store_runtime_tests / HTTP suites. Production code is

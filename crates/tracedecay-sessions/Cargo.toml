@@ -9,7 +9,6 @@ description = "TraceDecay session parsing and retrieval primitives"
 include = ["/src/**", "/tests/**"]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
 test-helpers = []

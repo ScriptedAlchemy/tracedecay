@@ -10,9 +10,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [lib]
 doctest = false
 
-[features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
-
 [dependencies]
 metrics.workspace = true
 serde = { version = "1", features = ["derive"] }

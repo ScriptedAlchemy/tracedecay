@@ -21,8 +21,8 @@ tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
-
 tracing = "0.1"
+
 [dev-dependencies]
 # The advertised application schemas must round-trip through the shared
 # CLI/MCP request adapter that daemon-protocol owns.

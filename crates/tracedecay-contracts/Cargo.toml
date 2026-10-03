@@ -7,9 +7,6 @@ license = "MIT"
 description = "Transport-neutral application contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
-
 [dependencies]
 metrics.workspace = true
 schemars.workspace = true
@@ -22,8 +19,8 @@ thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-policy = { path = "../tracedecay-policy" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
-
 tracing = "0.1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 

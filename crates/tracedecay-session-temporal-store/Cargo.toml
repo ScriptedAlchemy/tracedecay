@@ -9,7 +9,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = [
     "tracedecay-graph-db/test-helpers",
@@ -25,7 +24,6 @@ test-transport = [
 [dependencies]
 getrandom = "0.2"
 hex = "0.4"
-# both modes (the plain tokio mutex until a binary selects the backend).
 metrics.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

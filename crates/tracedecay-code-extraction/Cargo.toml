@@ -18,7 +18,6 @@ include = [
 ]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 default = ["lite", "medium", "full"]
 test-helpers = []
 # Markdown rides in `lite` as well as `full`: docs are architecture content and

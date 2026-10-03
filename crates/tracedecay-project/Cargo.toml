@@ -14,7 +14,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-
 # Integration fixture surface: `HostAdmissionTestRuntimeV1`, the registered
 # database scaffolding it owns, and the explicit `TraceDecay::*_for_test`
 # constructors that open a project through it. Production code is never gated

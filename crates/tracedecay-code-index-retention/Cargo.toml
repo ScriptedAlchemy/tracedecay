@@ -23,8 +23,8 @@ tracedecay-code-index = { path = "../tracedecay-code-index", default-features = 
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-
 tracing = "0.1"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

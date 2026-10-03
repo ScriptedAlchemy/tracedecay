@@ -65,11 +65,6 @@ edition = "2024"
 version = "1.0.0-beta.66"
 
 [workspace.dependencies]
-# Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
-# the macros must always resolve, and with no profiling feature selected the
-# explicit feature-off comparison build carries no measurable profiler weight.
-# roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
-# build across the graph, so no member needs a feature just to be measured.
 grafeo-adapters = { version = "=0.5.43", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.43", default-features = false }
 grafeo-core = { version = "=0.5.43", default-features = false, features = ["lpg"] }

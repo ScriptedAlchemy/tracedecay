@@ -15,7 +15,6 @@ doctest = false
 # `DaemonInvocationService::invoke`, publication gates, and test constructors.
 # Production code is never gated by this feature.
 test-helpers = []
-# that change compiled behaviour under profiling. It forwards nowhere else.
 
 [dependencies]
 hyper = { version = "1", features = ["http1", "server"] }

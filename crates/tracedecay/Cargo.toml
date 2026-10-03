@@ -66,24 +66,10 @@ include = [
 
 [features]
 # Default and explicitly selected production artifacts resolve through the
-# same feature. Release packaging selects exactly `production`; profiling is a
+# same feature. Release packaging selects exactly `production`.
 # `--all-features` is test-only because it includes `test-transport`.
 default = ["production"]
 
-# Opt-in profiling. Never in `default` and never in `production`.
-#
-# dependency graph: with no profiling feature selected every macro is a no-op,
-# `measure_block!`, `gauge!`, `future!`, ... in every crate is live, no
-# per-crate feature is involved. The crates listed below are the runtime owners
-# sites: allocation/lock/IO wrappers, observation sinks, the axum server layer,
-# the process guard); their thin features forward nowhere else. `tracedecay-sdk`
-# the host context, so it mirrors every selected backend onto that side.
-#
-# by the GitHub client reached from here, so no second HTTP stack is
-# introduced. The axum 0.8 server layer is selected by the crates that mount
-# routers, `tracedecay-daemon-service` and `tracedecay-dashboard-api`.
-# Binary-only: the live query server runs in this process, so no library crate
-# needs a passthrough for it.
 # Opt-in spill for graph index buffers. Never in `default` or `production`.
 # See `crates/tracedecay-graph-db/Cargo.toml` for why the live LPG stays in RAM.
 graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
@@ -239,7 +225,6 @@ path = "../../tests/storage_runtime_rusqlite_suite/main.rs"
 
 [dependencies]
 axum = "0.8"
-# both modes (the plain tokio mutex until a binary selects the backend).
 metrics.workspace = true
 tower = "0.5"
 constant_time_eq = "0.5.0"

@@ -11,9 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
-# `transport::ProfiledStdin`/`ProfiledStdout` erase the stdio halves behind a
-# supplies the async I/O impls the instrumented halves are stored as.
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []

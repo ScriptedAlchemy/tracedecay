@@ -20,7 +20,7 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-
 tracing = "0.1"
+
 [dev-dependencies]
 tempfile = "3"

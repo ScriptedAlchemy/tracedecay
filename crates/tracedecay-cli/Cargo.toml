@@ -66,10 +66,6 @@ required-features = ["test-transport"]
 
 [features]
 default = ["production"]
-# Opt-in profiling; never in `default`/`production`. Backend selection lives
-# owners whose compiled behaviour changes, and cargo's feature unification
-# `tracedecay-sdk` mirrors the selected backend onto its build-script (host)
-# in `main.rs`.
 production = ["tracedecay/production", "alloc-mimalloc"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
@@ -145,7 +141,6 @@ futures-util = "0.3.33"
 hex = "0.4"
 metrics.workspace = true
 rayon = "1"
-regex = { version = "1.12.3", optional = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 self-replace = "1"
 semver = "1"

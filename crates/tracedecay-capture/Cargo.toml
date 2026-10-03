@@ -12,8 +12,6 @@ keywords = ["ai", "code-intelligence", "observability", "capture"]
 categories = ["development-tools", "parsing"]
 include = ["/src/**", "/tests/**", "/README.md"]
 
-[features]
-
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 hex = "0.4"

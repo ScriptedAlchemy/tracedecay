@@ -45,7 +45,6 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
 # Exact BPE counting lives in this crate (`tiktoken-rs`); no agent-hosts forward.

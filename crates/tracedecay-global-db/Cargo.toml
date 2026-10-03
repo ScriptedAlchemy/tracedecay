@@ -9,7 +9,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
 test-helpers = [

@@ -41,7 +41,6 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 zeroize = "1.9.0"
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]
@@ -62,7 +61,6 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-f
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
-# instrumentation. Run with `cargo bench -p tracedecay-query
 [[bench]]
 name = "code_lexical_catchup"
 harness = false

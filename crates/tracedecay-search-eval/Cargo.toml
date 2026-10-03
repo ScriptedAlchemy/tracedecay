@@ -24,8 +24,8 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-query = { path = "../tracedecay-query" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
-
 tracing = "0.1"
+
 [features]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
 # default so a composing binary keeps its own tier selection authoritative; the

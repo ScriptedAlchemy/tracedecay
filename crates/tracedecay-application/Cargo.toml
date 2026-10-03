@@ -9,7 +9,6 @@ description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and
 include = ["/src/**"]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 default = []
 # Exposes test-only helper surfaces to dependent crates' test builds without
 # enabling in-process transports. Forwards to tracedecay-sessions so the

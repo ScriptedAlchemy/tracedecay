@@ -19,8 +19,8 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
-
 tracing = "0.1"
+
 [features]
 # Explicit opt-in: exposes the fixture-only `VerifiedGraphQuery`
 # constructors (`from_fixture_reader`, `with_source`) to dependent crates'

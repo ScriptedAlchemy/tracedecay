@@ -11,9 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
-# stay in local `let` bindings whose type is inferred, so selecting the backend
-# without this feature still compiles.
 lite = ["tracedecay-code-extraction/lite", "tracedecay-code-index/lite"]
 full = ["tracedecay-code-extraction/full", "tracedecay-code-index/full"]
 # Forwards the kernel test-transport seam so this crate's unit tests can
@@ -37,7 +34,6 @@ gix = { version = "=0.87.1", default-features = false, features = [
     "sha256",
     "status",
 ] }
-# both modes (the plain tokio mutex until a binary selects the backend).
 metrics.workspace = true
 rayon = "1"
 same-file = "1"

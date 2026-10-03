@@ -39,8 +39,8 @@ tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" 
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
-
 tracing = "0.1"
+
 [dev-dependencies]
 filetime = "0.2"
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", features = ["test-helpers"] }

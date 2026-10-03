@@ -9,7 +9,6 @@ description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]
-# that change compiled behaviour under profiling. It forwards nowhere else.
 default = [
     "lite",
     "medium",
@@ -100,7 +99,6 @@ tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 
-# instrumentation. Run with `cargo bench -p tracedecay-code-index
 [[bench]]
 name = "code_index_chunks"
 harness = false
