@@ -18,7 +18,7 @@ use super::{
     should_resume_jsonl, stable_jsonl_file_id,
 };
 
-pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
+pub use crate::runtime::jsonl_io::{JsonlChangeKind, JsonlIoAccounting};
 
 /// Why strict JSONL framing stopped before consuming the next record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2006,7 +2006,6 @@ fn try_stream_new_jsonl_raw_from_file(
     let scan_payload_reads = ScanPayloadMeter::new();
     let file = MeasuredJsonlFile::new(file, &scan_payload_reads);
     let mut io = JsonlIoAccounting::default();
-    let mut classified = false;
     let result = (|| {
         let prepared = match PreparedJsonlScan::capture(
             path,
@@ -2023,7 +2022,6 @@ fn try_stream_new_jsonl_raw_from_file(
                 return Ok(RawNewJsonl::prefix_diverged(previous, file_identity, io));
             }
         };
-        classified = true;
         if prepared.is_complete() {
             prepared.into_empty_outcome(path, &mut io)
         } else {

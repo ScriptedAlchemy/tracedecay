@@ -1058,11 +1058,11 @@ impl CodexDiscoveryHub {
     /// `witness`.
     fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let converged = inner
+
+        inner
             .consumers
             .get(consumer)
-            .is_some_and(|state| state.holds_converged(path, witness));
-        converged
+            .is_some_and(|state| state.holds_converged(path, witness))
     }
 
     /// The delivered paths `consumer` would still read, in delivery order, so
