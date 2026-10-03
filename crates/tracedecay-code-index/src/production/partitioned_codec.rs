@@ -4007,7 +4007,7 @@ mod tests {
         assert_eq!(
             peak_retained_owned_bytes,
             GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1 + descriptor_bytes,
-            "the live encoder gauge must include exactly one page and its descriptors"
+            "the live encoder peak must include exactly one page and its descriptors"
         );
         assert!(
             peak_retained_owned_bytes * 8 < published_bytes,

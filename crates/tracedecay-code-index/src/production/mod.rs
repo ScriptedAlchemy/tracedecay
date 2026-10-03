@@ -721,9 +721,8 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         extractor_revision: &ExtractorRevision,
     ) -> Option<Arc<FileGenerationArtifactsV1>> {
         crate::observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
-            let artifact = {
-                upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
-            }?;
+            let artifact =
+                upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())?;
             let rebound = Arc::new(
                 artifact
                     .rematerialize_for_file(file, extractor_revision)
