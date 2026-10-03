@@ -17,7 +17,12 @@ use tracedecay_sessions::runtime::{SessionProvider, with_transcript_source_profi
 use crate::codex::write_jsonl;
 use crate::support::{init_project_at, run_git};
 
-fn write_claude_transcript(home: &std::path::Path, cwd: &std::path::Path, session: &str) {
+fn write_claude_transcript(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    session: &str,
+    branch: &str,
+) {
     let dir = home.join(".claude/projects/-linked-worktree-slug");
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = cwd.to_string_lossy();
@@ -28,7 +33,7 @@ fn write_claude_transcript(home: &std::path::Path, cwd: &std::path::Path, sessio
                 "type": "user",
                 "cwd": cwd,
                 "sessionId": session,
-                "gitBranch": "linked-worktree",
+                "gitBranch": branch,
                 "uuid": format!("{session}-u1"),
                 "timestamp": "2026-02-01T00:00:00.000Z",
                 "message": {"role": "user", "content": format!("{session} asks about the worktree")}
@@ -37,7 +42,7 @@ fn write_claude_transcript(home: &std::path::Path, cwd: &std::path::Path, sessio
                 "type": "assistant",
                 "cwd": cwd,
                 "sessionId": session,
-                "gitBranch": "linked-worktree",
+                "gitBranch": branch,
                 "uuid": format!("{session}-a1"),
                 "timestamp": "2026-02-01T00:00:05.000Z",
                 "message": {
@@ -142,8 +147,8 @@ async fn sessions_for_lists_linked_worktree_sessions_under_their_worktree() {
     let nested = linked.join("src");
     std::fs::create_dir_all(&nested).unwrap();
 
-    write_claude_transcript(&home, &linked, "claude-linked");
-    write_claude_transcript(&home, &project, "claude-primary");
+    write_claude_transcript(&home, &linked, "claude-linked", "linked-worktree");
+    write_claude_transcript(&home, &project, "claude-primary", "main");
     write_codex_rollout(&home, &nested, "codex-linked");
 
     let project_id = ProjectId::new("project.linked-worktree-sessions").unwrap();
@@ -190,26 +195,39 @@ async fn sessions_for_lists_linked_worktree_sessions_under_their_worktree() {
         BTreeSet::from([(
             "claude".to_owned(),
             "claude-primary".to_owned(),
-            primary_key
+            primary_key.clone()
         )]),
         "the primary checkout lists only the session that ran there"
     );
 
-    let branch_query = SessionsForQuery {
-        git_ref: GitRefFilter::Branch("linked-worktree".to_owned()),
+    assert_eq!(
+        sessions_in(&runtime, &branch_query("linked-worktree")).await,
+        BTreeSet::from([
+            (
+                "claude".to_owned(),
+                "claude-linked".to_owned(),
+                linked_key.clone()
+            ),
+            ("codex".to_owned(), "codex-linked".to_owned(), linked_key),
+        ]),
+        "the recorded branch keeps each linked-worktree session"
+    );
+    assert_eq!(
+        sessions_in(&runtime, &branch_query("main")).await,
+        BTreeSet::from([(
+            "claude".to_owned(),
+            "claude-primary".to_owned(),
+            primary_key
+        )]),
+        "Claude's recorded gitBranch is branch evidence"
+    );
+}
+
+fn branch_query(branch: &str) -> SessionsForQuery {
+    SessionsForQuery {
+        git_ref: GitRefFilter::Branch(branch.to_owned()),
         since: None,
         until: None,
         limit: 20,
-    };
-    let on_branch = sessions_in(&runtime, &branch_query).await;
-    assert!(
-        on_branch.contains(&("codex".to_owned(), "codex-linked".to_owned(), linked_key)),
-        "the rollout's recorded branch keeps the linked worktree: {on_branch:?}"
-    );
-    assert!(
-        !on_branch
-            .iter()
-            .any(|(_, session_id, _)| session_id == "claude-primary"),
-        "a primary-checkout session never joins the linked branch: {on_branch:?}"
-    );
+    }
 }
