@@ -113,26 +113,22 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
 /// The frame accumulator lives in the reader, not in the `read_line` future, so
 /// a read dropped by a lost `tokio::select!` race resumes rather than truncating
 /// the frame. See [`tracedecay_framing::BoundedLineReader`].
-/// Erasing the half behind a trait object keeps one stored type whether or
-/// not an instrumentation wrapper sits on it.
-type ProfiledStdin = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-type ProfiledStdout = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
-
-type StdinLineReader = tracedecay_framing::BoundedLineReader<tokio::io::BufReader<ProfiledStdin>>;
+type StdinLineReader =
+    tracedecay_framing::BoundedLineReader<tokio::io::BufReader<tokio::io::Stdin>>;
 
 /// Real stdio transport, reads from stdin, writes to stdout.
 pub struct StdioTransport {
     reader: StdinLineReader,
-    writer: ProfiledStdout,
+    writer: tokio::io::Stdout,
 }
 
 impl Default for StdioTransport {
     fn default() -> Self {
         Self {
             reader: tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(
-                Box::new(tokio::io::stdin()),
+                tokio::io::stdin(),
             )),
-            writer: Box::new(tokio::io::stdout()),
+            writer: tokio::io::stdout(),
         }
     }
 }
@@ -173,7 +169,7 @@ where
     }
 }
 
-impl McpTransportWriter for &mut ProfiledStdout {
+impl McpTransportWriter for &mut tokio::io::Stdout {
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         tokio::io::AsyncWriteExt::write_all(&mut **self, line.as_bytes()).await
     }
@@ -185,7 +181,7 @@ impl McpTransportWriter for &mut ProfiledStdout {
 
 impl McpDuplexTransport for StdioTransport {
     type Reader<'a> = &'a mut StdinLineReader;
-    type Writer<'a> = &'a mut ProfiledStdout;
+    type Writer<'a> = &'a mut tokio::io::Stdout;
 
     fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {
         (&mut self.reader, &mut self.writer)

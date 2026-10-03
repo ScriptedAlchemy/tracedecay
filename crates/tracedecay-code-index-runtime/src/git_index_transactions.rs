@@ -418,8 +418,7 @@ impl FixedGitIndexRunner {
 
     pub fn index_bytes(&self) -> Result<Vec<u8>, NativeGitIndexError> {
         match File::open(&self.index_path) {
-            Ok(file) => {
-                let mut file = file;
+            Ok(mut file) => {
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes)
                     .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;

@@ -642,10 +642,10 @@ impl ProjectRuntimeRootFencesV1 {
 
 #[derive(Clone)]
 pub struct ProjectRuntimeRegistryV1 {
-    runtimes: Arc<ProfiledMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
+    runtimes: Arc<std::sync::Mutex<BTreeMap<PathBuf, ProjectRuntime>>>,
     /// Permanent deletion fences and temporary recovery fences share one lock,
     /// so dropping a recovery guard cannot undo a concurrent deletion.
-    root_fences: Arc<ProfiledMutex<ProjectRuntimeRootFencesV1>>,
+    root_fences: Arc<std::sync::Mutex<ProjectRuntimeRootFencesV1>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
     /// Bumped whenever a published owner or a project's publication state
@@ -686,9 +686,6 @@ impl Default for ProjectRuntimeRegistryV1 {
         }
     }
 }
-
-type ProfiledMutex<T> = std::sync::Mutex<T>;
-type ProfiledMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProjectRuntimeBuildOutcomeV1 {
@@ -989,14 +986,14 @@ impl Drop for ProjectRuntimeBuildReservationLeaseV1 {
 }
 
 impl ProjectRuntimeRegistryV1 {
-    fn lock_root_fences(&self) -> ProfiledMutexGuard<'_, ProjectRuntimeRootFencesV1> {
+    fn lock_root_fences(&self) -> std::sync::MutexGuard<'_, ProjectRuntimeRootFencesV1> {
         match self.root_fences.lock() {
             Ok(fences) => fences,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    fn lock_runtimes(&self) -> ProfiledMutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
+    fn lock_runtimes(&self) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
         self.runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

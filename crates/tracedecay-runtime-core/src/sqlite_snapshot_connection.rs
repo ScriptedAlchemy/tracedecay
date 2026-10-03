@@ -6,10 +6,9 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 use crate::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
 };
-use std::sync::Mutex as ProfiledMutex;
 
 pub struct SnapshotConnection {
-    pub(super) connection: Arc<ProfiledMutex<Connection>>,
+    pub(super) connection: Arc<std::sync::Mutex<Connection>>,
 }
 
 impl SnapshotConnection {

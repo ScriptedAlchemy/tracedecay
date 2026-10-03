@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
-use std::sync::Mutex as ProfiledMutex;
 use tracedecay_domain::errors::TraceDecayError;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
@@ -152,7 +151,7 @@ struct DatabaseOwnerStateV1 {
     inner: Arc<DatabaseInner>,
     access: DatabaseAccessMode,
     owner_id: DatabaseRuntimeOwnerIdentityV1,
-    lifecycle: ProfiledMutex<DatabaseOwnerLifecycleV1>,
+    lifecycle: std::sync::Mutex<DatabaseOwnerLifecycleV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

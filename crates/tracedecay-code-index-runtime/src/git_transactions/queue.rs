@@ -6,8 +6,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -49,7 +47,7 @@ impl Drop for OccupiedGate<'_> {
 }
 
 pub struct RepositoryMutationQueue {
-    gates: ProfiledStdMutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
+    gates: std::sync::Mutex<BTreeMap<RepositoryId, Arc<RepositoryGate>>>,
     pending: AtomicUsize,
     capacity: usize,
 }

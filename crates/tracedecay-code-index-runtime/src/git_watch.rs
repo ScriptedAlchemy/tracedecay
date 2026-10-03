@@ -54,9 +54,6 @@ use crate::ports::{
 };
 pub(crate) use tracedecay_runtime_core::logging::log_daemon_event;
 
-pub type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-pub type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
-
 mod admission;
 mod backstop;
 mod health;
@@ -165,22 +162,22 @@ pub struct GitWatcherInner {
     enabled: bool,
     /// Home of the owning profile's user, never implicitly watched.
     ambient_home: Option<PathBuf>,
-    admission: ProfiledStdMutex<()>,
+    admission: std::sync::Mutex<()>,
     /// Canonical git common directory → repository-scoped watch state.
-    projects: ProfiledTokioMutex<HashMap<PathBuf, Arc<WatchState>>>,
+    projects: tokio::sync::Mutex<HashMap<PathBuf, Arc<WatchState>>>,
     /// Single-flight retry owners for roots whose identity discovery timed
     /// out: a bounded git timeout is uncertainty, not absence, so admission
     /// arms a backoff retry instead of leaving the repository unwatched until
     /// the next handshake. Keyed by requested project root.
-    identity_retries: ProfiledStdMutex<HashMap<PathBuf, JoinHandle<()>>>,
+    identity_retries: std::sync::Mutex<HashMap<PathBuf, JoinHandle<()>>>,
     /// Bounded roster of capacity-refused repositories kept on the backstop's
     /// scheduler-ingress freshness floor until a watch slot frees.
-    overflow: ProfiledStdMutex<overflow::OverflowRoster>,
+    overflow: std::sync::Mutex<overflow::OverflowRoster>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
-    backstop_task: ProfiledTokioMutex<Option<JoinHandle<()>>>,
+    backstop_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
     shutdown_completion:
-        ProfiledTokioMutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
+        tokio::sync::Mutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
     #[cfg(test)]
     repository_publication_probe: ownership::PublicationRaceProbe,
     #[cfg(test)]

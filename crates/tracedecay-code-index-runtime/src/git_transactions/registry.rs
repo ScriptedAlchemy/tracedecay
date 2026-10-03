@@ -16,13 +16,11 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
 
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-
 /// Retains the one `DaemonGitIndexTransactionStore` actor for each daemon-owned
 /// project database. Dropping the registry closes every actor when the daemon
 /// store administration shuts down.
 pub struct GitIndexTransactionStoreRegistry {
-    stores: ProfiledStdMutex<HashMap<PathBuf, SharedDaemonGitIndexTransactionStore>>,
+    stores: std::sync::Mutex<HashMap<PathBuf, SharedDaemonGitIndexTransactionStore>>,
     closed: AtomicBool,
 }
 

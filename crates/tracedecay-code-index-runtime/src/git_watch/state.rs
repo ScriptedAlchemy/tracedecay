@@ -133,16 +133,16 @@ impl RetirementRaceProbe {
 /// OS watchers without collapsing their freshness requests.
 pub struct WatchState {
     pub common_dir: PathBuf,
-    ownership: super::ProfiledStdMutex<WatchStateOwnership>,
-    pub dirty: super::ProfiledTokioMutex<DirtySet>,
+    ownership: std::sync::Mutex<WatchStateOwnership>,
+    pub dirty: tokio::sync::Mutex<DirtySet>,
     pub reconciliation_pending: AtomicBool,
     pub wake: Notify,
     pub reconfigure: Notify,
-    retry_not_before: super::ProfiledStdMutex<Option<Instant>>,
+    retry_not_before: std::sync::Mutex<Option<Instant>>,
     retry_backoff_ms: AtomicU64,
     pub maintenance: MaintenanceCoordinator,
     pub health: ProjectHealth,
-    task: super::ProfiledStdMutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     retirement: CancellationToken,
     #[cfg(test)]
     pub entered_debounce: Notify,

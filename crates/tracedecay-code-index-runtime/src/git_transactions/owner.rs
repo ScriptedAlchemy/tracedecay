@@ -35,8 +35,6 @@ use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
-type ProfiledStdRwLock<T> = std::sync::RwLock<T>;
-type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 type ApplicationCatalogComposer =
     Arc<dyn Fn() -> Result<CatalogSnapshotV1, CatalogCompositionError> + Send + Sync>;
 
@@ -214,7 +212,7 @@ enum DaemonGitAuthority {
 /// A slot is only ever constructed around an installed source, so a mounted
 /// owner always carries authority until shutdown revokes it.
 struct DaemonGitAuthoritySlot {
-    source: ProfiledStdRwLock<DaemonGitAuthority>,
+    source: std::sync::RwLock<DaemonGitAuthority>,
 }
 
 impl DaemonGitAuthoritySlot {
@@ -439,10 +437,10 @@ pub struct DaemonGitIndexTransactionServiceRegistry {
     catalog: ApplicationCatalogComposer,
     stores: GitIndexTransactionStoreRegistry,
     mutation_queue: Arc<RepositoryMutationQueue>,
-    services: ProfiledTokioMutex<HashMap<ServiceKey, ServiceEntry>>,
-    creation_gate: ProfiledTokioMutex<()>,
+    services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
+    creation_gate: tokio::sync::Mutex<()>,
     shutdown_fenced: AtomicBool,
-    shutdown_receipt: ProfiledTokioMutex<Option<DaemonGitIndexShutdownReceiptV1>>,
+    shutdown_receipt: tokio::sync::Mutex<Option<DaemonGitIndexShutdownReceiptV1>>,
 }
 
 impl DaemonGitIndexTransactionServiceRegistry {

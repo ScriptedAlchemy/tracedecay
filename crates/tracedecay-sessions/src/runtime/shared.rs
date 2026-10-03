@@ -18,8 +18,6 @@ use tracedecay_runtime_core::git_discovery::{
 
 pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 
-type ProfiledMutex<T> = std::sync::Mutex<T>;
-
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
 ///
@@ -28,7 +26,7 @@ type ProfiledMutex<T> = std::sync::Mutex<T>;
 /// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
 #[derive(Clone)]
 pub struct SqliteReadConn {
-    inner: Arc<ProfiledMutex<rusqlite::Connection>>,
+    inner: Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
 impl SqliteReadConn {

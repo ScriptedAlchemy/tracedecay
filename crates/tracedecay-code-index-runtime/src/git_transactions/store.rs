@@ -9,8 +9,6 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -80,8 +78,8 @@ enum StoreCommand {
 /// actor exit. It intentionally has no `Clone` implementation: one daemon
 /// service owns one bounded queue and actor for its transaction authority.
 pub struct DaemonGitIndexTransactionStore {
-    commands: ProfiledStdMutex<Option<SyncSender<StoreCommand>>>,
-    worker: ProfiledStdMutex<Option<std::thread::JoinHandle<()>>>,
+    commands: std::sync::Mutex<Option<SyncSender<StoreCommand>>>,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 enum ActorDatabase {

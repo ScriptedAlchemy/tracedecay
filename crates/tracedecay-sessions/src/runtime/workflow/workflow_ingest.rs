@@ -660,7 +660,6 @@ fn summarize_transcript_file(path: &Path) -> TranscriptSummary {
     let Ok(file) = File::open(path) else {
         return TranscriptSummary::default();
     };
-    let file = file;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut summary = TranscriptSummary::default();
     loop {
@@ -735,7 +734,6 @@ fn read_journal(agents_dir: &Path) -> Vec<JournalEvent> {
     let Ok(file) = File::open(&path) else {
         return Vec::new();
     };
-    let file = file;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut events = Vec::new();
     while events.len() < MAX_WORKFLOW_JOURNAL_EVENTS {

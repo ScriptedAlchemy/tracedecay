@@ -498,12 +498,12 @@ pub fn live_remote_operational_status(
     let auth_token = connection.auth_token();
     let origin = format!("http://{endpoint}");
     let url = format!("http://{endpoint}/remote-status");
-    let agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT));
-
-    let agent = agent;
-    let agent = http_agent(agent.build());
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
+            .build(),
+    );
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))

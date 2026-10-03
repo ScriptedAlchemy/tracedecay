@@ -32,8 +32,6 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::store::SharedDaemonNativeIntegrationStore;
 
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-
 #[derive(Clone)]
 pub struct DaemonAuthorizedScopeSetReader {
     storage: AuthorizedScopeSetSqliteStorage,
@@ -82,7 +80,7 @@ impl Default for HolderFenceRootV1 {
 /// requests and daemon-owned runtime mounts until reconciliation is terminal.
 #[derive(Clone)]
 pub struct WorktreeHolderAdmissionFenceV1 {
-    state: Arc<ProfiledStdMutex<HolderFenceStateV1>>,
+    state: Arc<std::sync::Mutex<HolderFenceStateV1>>,
 }
 
 impl Default for WorktreeHolderAdmissionFenceV1 {

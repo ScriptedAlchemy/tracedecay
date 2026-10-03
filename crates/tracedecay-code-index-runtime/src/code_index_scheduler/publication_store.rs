@@ -57,7 +57,7 @@ use crate::code_index::{
     },
 };
 
-use super::{CodeIndexSchedulerErrorV1, PendingHintsV1, ProfiledStdMutex};
+use super::{CodeIndexSchedulerErrorV1, PendingHintsV1};
 use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
@@ -107,7 +107,7 @@ pub struct CodeIndexBytePoolStatsV1 {
 /// included, after the last `Arc` dropped. Each pass therefore drops the
 /// entries its capture let go of, see [`Self::release_dead_entries`].
 pub struct SharedCodeIndexBytePoolV1 {
-    bytes: ProfiledStdMutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
+    bytes: std::sync::Mutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
     pub(super) physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     /// Decoded generation pages by content, so linked worktrees that sealed
     /// identical trees hold one decode between them.
@@ -572,7 +572,7 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     pub(super) project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
-    pointer_memo: Arc<ProfiledStdMutex<Option<PublicationPointerMemoV1>>>,
+    pointer_memo: Arc<std::sync::Mutex<Option<PublicationPointerMemoV1>>>,
     undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
     /// The canonical source-hint authority plus the exact pre-capture epoch
     /// used by a retained rebuild. Ordinary publication leaves this absent.
@@ -1146,12 +1146,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(path)
             .map_err(Self::unavailable)?;
-        let mut file = file;
         file.write_all(bytes).map_err(Self::unavailable)?;
         file.sync_all().map_err(Self::unavailable)
     }
@@ -1218,13 +1217,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
         }
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary_path)
             .map_err(Self::unavailable)?;
         staged.pending.insert(final_path, temporary_path.clone());
-        let mut file = file;
         file.write_all(bytes).map_err(Self::unavailable)?;
         staged
             .durable

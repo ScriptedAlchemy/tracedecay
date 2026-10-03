@@ -72,9 +72,9 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, DaemonCodeTextArtifactStoreV1, DaemonProjectionSinkV1,
     DurableActiveSealedGenerationBindingV1, GenerationDecodeAdmissionV1, GenerationServingCachesV1,
     GenerationTextControlV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
-    ProfiledStdMutex, SharedCodeIndexBytePoolV1, branch_generations, classification,
-    file_occurrence_id, freshness_witness, git_tree_capture, id, identity, ignored_dependencies,
-    projection_key, snapshot_content_identity, try_publish_build_progress,
+    SharedCodeIndexBytePoolV1, branch_generations, classification, file_occurrence_id,
+    freshness_witness, git_tree_capture, id, identity, ignored_dependencies, projection_key,
+    snapshot_content_identity, try_publish_build_progress,
 };
 #[cfg(test)]
 use super::{HeldActiveDecodeV1, reconcile_panic_guard};
@@ -970,7 +970,7 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// refusal is stale bytes, and its successor must re-capture it under the
     /// same roster.
     pub(super) refused_ignored_source_paths: BTreeSet<String>,
-    query_owners: ProfiledStdMutex<Option<GenerationServingCachesV1>>,
+    query_owners: std::sync::Mutex<Option<GenerationServingCachesV1>>,
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
     build_progress: CodeIndexBuildProgressSlotV1,

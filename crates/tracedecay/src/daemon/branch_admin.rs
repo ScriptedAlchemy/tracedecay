@@ -47,20 +47,14 @@ mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
-#[cfg(unix)]
-type ProfiledStdMutex<T> = std::sync::Mutex<T>;
-#[cfg(unix)]
-type ProfiledStdMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
-type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
-
 type HostAdmissionBrokers =
-    Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
+    Arc<tokio::sync::Mutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
 /// One profile session refresh service per profile session store. The service
 /// owns the opaque refresh handles it issued, so every route that reaches the
 /// same store (project MCP servers and the projectless client) must share the
 /// instance for `status`/`cancel` to resolve a `begin` handle.
 type ProfileSessionRefreshServices =
-    Arc<ProfiledTokioMutex<HashMap<PathBuf, ProfileSessionRefreshAuthorityV1>>>;
+    Arc<tokio::sync::Mutex<HashMap<PathBuf, ProfileSessionRefreshAuthorityV1>>>;
 
 /// The daemon-wide refresh service of one profile session store and the
 /// serving status of the scheduler worker it wakes.
@@ -141,7 +135,7 @@ struct MaintenanceReaperRegistryState {
 
 #[cfg(unix)]
 struct MaintenanceReaperRegistry {
-    state: ProfiledStdMutex<MaintenanceReaperRegistryState>,
+    state: std::sync::Mutex<MaintenanceReaperRegistryState>,
     changed: tokio::sync::Notify,
     #[cfg(test)]
     registration_barrier: std::sync::Mutex<Option<Arc<RetirementReaperRegistrationBarrier>>>,
@@ -174,7 +168,7 @@ impl Default for MaintenanceReaperRegistry {
 
 #[cfg(unix)]
 impl MaintenanceReaperRegistry {
-    fn state(&self) -> ProfiledStdMutexGuard<'_, MaintenanceReaperRegistryState> {
+    fn state(&self) -> std::sync::MutexGuard<'_, MaintenanceReaperRegistryState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -344,7 +338,7 @@ pub(super) struct SessionRuntimeRegistryEntryV1 {
         Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
 }
 type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
-pub(super) type SharedSessionRuntimeRegistries = Arc<ProfiledTokioMutex<SessionRuntimeRegistries>>;
+pub(super) type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
 
 #[derive(Clone)]
 struct ProfileHostAdmissionBootstrapContext {
@@ -353,7 +347,7 @@ struct ProfileHostAdmissionBootstrapContext {
     session_runtime_registry:
         Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
+    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
 }
 
@@ -463,7 +457,7 @@ pub(super) struct StoreAdministration {
     /// The profile the daemon process serves, as its boundary resolved it.
     owner_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
     authenticated_profile_database_scopes:
-        Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
+        Arc<tokio::sync::Mutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
@@ -474,7 +468,7 @@ pub(super) struct StoreAdministration {
         Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<ProfiledTokioMutex<()>>,
+    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,

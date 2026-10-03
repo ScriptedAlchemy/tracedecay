@@ -13,8 +13,6 @@ use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
-use std::sync::{Mutex as ProfiledMutex, MutexGuard as ProfiledMutexGuard};
-
 mod owners;
 
 pub use owners::{
@@ -586,9 +584,9 @@ pub struct ResidentMemoryPressureV1 {
     over_budget: AtomicBool,
     headroom: watch::Sender<u64>,
     /// Authorities holding a refused request, settled on every observation.
-    waiting: ProfiledMutex<Vec<Weak<ProcessResidentMemoryV1>>>,
+    waiting: std::sync::Mutex<Vec<Weak<ProcessResidentMemoryV1>>>,
     any_waiting: AtomicBool,
-    state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
+    state: std::sync::Mutex<ResidentMemoryPressureReclaimerStateV1>,
     sampler: Arc<ProcessResidentSamplerV1>,
     checkpoint_epoch: Instant,
     /// Microseconds after `checkpoint_epoch` before which a checkpoint keeps
@@ -905,7 +903,7 @@ impl ResidentMemoryPressureV1 {
         released_bytes
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryPressureReclaimerStateV1> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryPressureReclaimerStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1355,7 +1353,7 @@ struct ResidentMemoryStateV1 {
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
-    state: ProfiledMutex<ResidentMemoryStateV1>,
+    state: std::sync::Mutex<ResidentMemoryStateV1>,
     /// Measured RSS this admission consults before trusting its own model.
     pressure: Arc<ResidentMemoryPressureV1>,
 }
@@ -1437,7 +1435,7 @@ impl ProcessResidentMemoryV1 {
     }
 
     /// Settle waiters after the ledger gave bytes back.
-    fn ledger_released(&self, mut state: ProfiledMutexGuard<'_, ResidentMemoryStateV1>) {
+    fn ledger_released(&self, mut state: std::sync::MutexGuard<'_, ResidentMemoryStateV1>) {
         let settled = self.settle_waiter(&mut state);
         drop(state);
         if settled {
@@ -1586,7 +1584,7 @@ impl ProcessResidentMemoryV1 {
             .min(self.limit_bytes.get())
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

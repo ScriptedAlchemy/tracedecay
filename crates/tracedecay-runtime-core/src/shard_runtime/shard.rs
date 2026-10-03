@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::UtcMicros;
 
 use super::utc_now;
-use std::sync::{Mutex as ProfiledMutex, MutexGuard as ProfiledMutexGuard};
 use tracedecay_store::{
     RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, RuntimeMaintenanceTransitionV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -210,7 +209,7 @@ pub struct ShardRuntime {
     /// Every lease acquire and release, every queue-depth update, and every
     /// telemetry observation for this shard takes this one lock, so it is the
     /// per-shard serialization point under concurrent operation load.
-    state: ProfiledMutex<ShardRuntimeState>,
+    state: std::sync::Mutex<ShardRuntimeState>,
 }
 
 /// Hand-written because the instrumented lock wrapper has no `Debug`; the
@@ -619,7 +618,7 @@ impl ShardRuntime {
         state.touch();
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, ShardRuntimeState> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ShardRuntimeState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

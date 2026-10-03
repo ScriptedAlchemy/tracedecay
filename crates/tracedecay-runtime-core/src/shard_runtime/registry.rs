@@ -39,7 +39,6 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
 use crate::cancellation::CancellationToken;
-use std::sync::{Mutex as ProfiledMutex, MutexGuard as ProfiledMutexGuard};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -206,7 +205,7 @@ struct StoreRuntimeLeaseSource {
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
     database_attachments:
-        ProfiledMutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
+        std::sync::Mutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
     next_database_attachment_id: AtomicU64,
     next_database_owner_id: AtomicU64,
     next_database_attachment_reservation_id: AtomicU64,
@@ -1454,7 +1453,7 @@ struct StoreRuntimeRegistryInner {
     /// pin token. Every lookup, open, lease, eviction, and destructive
     /// reservation funnels through `lock_state`, so it is the coarsest lock in
     /// the store runtime and the first place cross-shard queueing shows up.
-    state: ProfiledMutex<RegistryState>,
+    state: std::sync::Mutex<RegistryState>,
     open_cancellation: CancellationToken,
 }
 
@@ -1711,7 +1710,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, RegistryState> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         self.inner
             .state
             .lock()
