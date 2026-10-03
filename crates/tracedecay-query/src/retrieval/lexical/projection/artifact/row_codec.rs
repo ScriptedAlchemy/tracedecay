@@ -791,7 +791,8 @@ fn encode_row_block(rows: &[BlockRowV1<'_>]) -> Result<Vec<u8>, CodeLexicalArtif
     put_varint(&mut preface, length_u64(rows.len())?);
     let mut previous: Option<i64> = None;
     for (index, row) in rows.iter().enumerate() {
-        // The first row spells its document out, binding the block to its key.
+        // Documents count from the block's key, so a block carried to a new
+        // position keeps its bytes and only its key moves.
         let gap = document_gap(previous, row.document_id)?;
         previous = Some(row.document_id);
         put_varint(&mut payload, gap);
@@ -832,8 +833,10 @@ fn document_gap(
     document_id: i64,
 ) -> Result<u64, CodeLexicalArtifactErrorV1> {
     match previous {
-        None => u64::try_from(document_id)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string())),
+        None if document_id >= 0 => Ok(0),
+        None => Err(CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact row block document is negative".to_owned(),
+        )),
         Some(previous) => document_id
             .checked_sub(previous)
             .and_then(|delta| delta.checked_sub(1))
@@ -923,7 +926,7 @@ impl RowBlockV1 {
         for index in 0..count {
             let gap = i64::try_from(cursor.take_varint()?).map_err(corrupt)?;
             document = if index == 0 {
-                if gap != first_document {
+                if gap != 0 {
                     return Err(CodeLexicalArtifactErrorV1::Corrupt(
                         "lexical artifact row block does not start at its key".to_owned(),
                     ));
@@ -1180,7 +1183,7 @@ fn take_preface_document(
             .and_then(|next| next.checked_add(gap))
             .ok_or_else(|| corrupt("lexical artifact scoring preface document overflowed"));
     }
-    if gap != first_document {
+    if gap != 0 {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact scoring preface does not start at its key".to_owned(),
         ));
@@ -1948,7 +1951,8 @@ mod tests {
         let mut cursor = RowCursorV1 { bytes: preface };
         assert_eq!(cursor.take_varint().unwrap(), 1);
         let document_offset = preface.len() - cursor.bytes.len();
-        assert_eq!(cursor.take_varint().unwrap(), 7);
+        // The first row's document counts from the block key: its gap is 0.
+        assert_eq!(cursor.take_varint().unwrap(), 0);
         assert_eq!(cursor.take_u8().unwrap(), super::BLOCK_CHUNK_DIGEST);
         let chunk_offset = preface.len() - cursor.bytes.len();
 
@@ -2131,9 +2135,16 @@ mod tests {
             decode_row_block(*first, &damaged).is_err(),
             "damaged stream"
         );
-        assert!(
-            decode_row_block(first + 1, stored).is_err(),
-            "wrong block key"
+        // Documents count from the key, so a block carried to another key
+        // names the same rows moved by the same offset.
+        let moved = decode_row_block(first + 3, stored).expect("decode under a moved key");
+        assert_eq!(
+            moved.iter().map(|row| row.document_id).collect::<Vec<_>>(),
+            decode_row_block(*first, stored)
+                .expect("decode under its key")
+                .iter()
+                .map(|row| row.document_id + 3)
+                .collect::<Vec<_>>()
         );
         let mut trailing = stored.clone();
         trailing.push(0);

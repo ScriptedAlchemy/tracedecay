@@ -1921,6 +1921,29 @@ impl PartitionedLexicalFileSourceV1 {
         }
     }
 
+    /// Ordinals of the files whose segment differs from `parent`'s at the same
+    /// position, or `None` when the two rosters name different files.
+    pub(super) fn changed_files_since(&self, parent: &Self) -> Option<Vec<u64>> {
+        if self.descriptors.len() != parent.descriptors.len() {
+            return None;
+        }
+        let mut changed = Vec::new();
+        for (ordinal, (child, parent)) in
+            self.descriptors.iter().zip(&parent.descriptors).enumerate()
+        {
+            if child.file_key != parent.file_key {
+                return None;
+            }
+            if child.segment_digest != parent.segment_digest
+                || child.file_occurrence_id != parent.file_occurrence_id
+                || child.symbol_identities_digest != parent.symbol_identities_digest
+            {
+                changed.push(u64::try_from(ordinal).ok()?);
+            }
+        }
+        Some(changed)
+    }
+
     pub(super) fn lexical_byte_offsets(&self) -> Result<Vec<u64>, CodeIndexProductionErrorV1> {
         let mut offsets = Vec::with_capacity(self.descriptors.len().saturating_add(1));
         offsets.push(0_u64);

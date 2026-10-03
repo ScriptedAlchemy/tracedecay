@@ -1246,6 +1246,8 @@ fn check_host_integrations(
 
 /// A host that is on this machine but carries no tracedecay integration,
 /// which an operator most likely wants wired up; an absent one says nothing.
+/// A host with its own CLI is here only when that CLI resolves: a directory
+/// can be shared (`~/.gemini` with Antigravity) or outlive the host.
 fn warn_detected_unintegrated_host(
     dc: &mut DoctorCounters,
     agent: &dyn agents::AgentIntegration,
@@ -1253,8 +1255,10 @@ fn warn_detected_unintegrated_host(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) {
     let surface = agent.detected_host_surface(home, profile);
-    if surface.is_none() && !agent.is_detected(home) {
-        return;
+    match agent.require_host(home) {
+        Ok(agents::HostPresence::HostCli) => {}
+        Ok(agents::HostPresence::NoHostCli) if surface.is_some() || agent.is_detected(home) => {}
+        Ok(agents::HostPresence::NoHostCli) | Err(_) => return,
     }
     eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
     dc.warn(&format!(

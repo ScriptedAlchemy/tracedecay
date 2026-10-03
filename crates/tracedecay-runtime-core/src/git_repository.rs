@@ -490,6 +490,8 @@ struct RepositoryDiscoveryObservation {
     /// When set, the walk waits on a test channel instead of sleeping, so a
     /// hung discovery is controllable without occupying a timeout.
     block: Option<std::sync::Arc<RepositoryDiscoveryBlockGate>>,
+    /// When set, a caller's discovery budget ends only when the walk does.
+    clock_held: bool,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -803,6 +805,31 @@ fn count_topology_observation(
             *count = count.saturating_add(1);
         }
     }
+}
+
+/// Stop the wall clock from ending discovery budgets under `root`, for tests
+/// whose subject is not the discovery deadline. Keeps any delay or block
+/// already armed there.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn hold_repository_discovery_clock_for_test(root: &Path) {
+    repository_discovery_observations()
+        .entry(observed_discovery_root(root))
+        .or_default()
+        .clock_held = true;
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn repository_discovery_clock_held(directory: &Path) -> bool {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return false;
+    }
+    let canonical = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    observations
+        .iter()
+        .any(|(root, observation)| observation.clock_held && canonical.starts_with(root))
 }
 
 /// Stop observing `root` and drop its retained topology.

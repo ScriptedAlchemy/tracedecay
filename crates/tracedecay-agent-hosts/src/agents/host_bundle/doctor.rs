@@ -111,6 +111,22 @@ pub struct HostBundleComponentDoctorResultV1 {
     pub repair_action: String,
 }
 
+impl HostBundleComponentDoctorResultV1 {
+    /// `host/component`, or the receipt path when the receipt names neither.
+    pub fn label(&self) -> String {
+        match (self.host, self.component) {
+            (Some(host), Some(component)) => {
+                format!(
+                    "{}/{}",
+                    host.descriptor().cli_id(),
+                    component_slug(component)
+                )
+            }
+            _ => self.receipt_path.display().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostBundleDoctorReportV1 {
     pub components: Vec<HostBundleComponentDoctorResultV1>,

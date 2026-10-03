@@ -564,18 +564,27 @@ pub trait OperationalAuditDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, OperationalAuditReadV1>;
 }
 
+/// One installed host component that does not match its expected shape, and
+/// the operator command that converges it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostComponentDriftV1 {
+    /// `host/component`, for example `codex/context-mcp`.
+    pub component: String,
+    pub remedy: String,
+}
+
 /// The observed conformance of a host/agent integration.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostConformanceV1 {
     /// The integration matches the expected installed shape.
     Conformant,
-    /// The integration is installed but has drifted from the expected shape.
-    Drifted,
+    /// These installed components drifted from the expected shape.
+    Drifted(Vec<HostComponentDriftV1>),
     /// The integration's executable is absent.
     ExecutableAbsent,
-    /// The integration's protocol/version has drifted.
-    ProtocolDrift,
+    /// These installed components are corrupt or contested.
+    ProtocolDrift(Vec<HostComponentDriftV1>),
     /// A configured fallback is invalid.
     InvalidFallback,
 }
@@ -599,6 +608,13 @@ pub enum HostIntegrationReadV1 {
     Unknown,
 }
 
+fn host_drift_statement(drifted: &[HostComponentDriftV1], shape: &str) -> String {
+    let statements = drifted
+        .iter()
+        .map(|drift| format!("{} {shape}; {}", drift.component, drift.remedy));
+    bounded_statement(&statements.collect::<Vec<_>>().join("; "))
+}
+
 /// Map a host-integration conformance read into its `Advisory`-family finding.
 #[tracing::instrument(name = "application.doctor_sources.host", level = "trace", skip_all)]
 pub fn host_integration_finding(
@@ -616,12 +632,12 @@ pub fn host_integration_finding(
                 *coverage,
                 "host integration matches the expected installed shape",
             ),
-            HostConformanceV1::Drifted => source_finding(
+            HostConformanceV1::Drifted(drifted) => source_finding(
                 family,
                 DoctorEvidenceStateV1::Degraded,
                 "host.conformance.drifted",
                 *coverage,
-                "host integration has drifted from the expected shape",
+                &host_drift_statement(drifted, "has drifted from its installed shape"),
             ),
             HostConformanceV1::ExecutableAbsent => source_finding(
                 family,
@@ -630,12 +646,12 @@ pub fn host_integration_finding(
                 *coverage,
                 "host integration executable is absent",
             ),
-            HostConformanceV1::ProtocolDrift => source_finding(
+            HostConformanceV1::ProtocolDrift(drifted) => source_finding(
                 family,
                 DoctorEvidenceStateV1::Degraded,
                 "host.conformance.protocol-drift",
                 *coverage,
-                "host integration protocol/version has drifted",
+                &host_drift_statement(drifted, "is corrupt or contested"),
             ),
             HostConformanceV1::InvalidFallback => source_finding(
                 family,
@@ -2253,7 +2269,10 @@ mod tests {
     #[test]
     fn host_drift_maps_to_advisory_diagnostic_evidence() {
         let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::ProtocolDrift,
+            conformance: HostConformanceV1::ProtocolDrift(vec![HostComponentDriftV1 {
+                component: "claude/core".to_owned(),
+                remedy: "run `tracedecay reinstall --component core`".to_owned(),
+            }]),
             coverage: DoctorCoverageCompletenessV1::Complete,
         })
         .expect("finding");
@@ -2262,6 +2281,35 @@ mod tests {
         assert_eq!(
             finding.evidence()[0].reference().as_str(),
             "host.conformance.protocol-drift"
+        );
+        assert_eq!(
+            finding.coverage().statement(),
+            "claude/core is corrupt or contested; run `tracedecay reinstall --component core`"
+        );
+    }
+
+    #[test]
+    fn host_drift_names_every_drifted_component_and_its_remedy() {
+        let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
+            conformance: HostConformanceV1::Drifted(vec![
+                HostComponentDriftV1 {
+                    component: "codex/context-mcp".to_owned(),
+                    remedy: "run `tracedecay reinstall --component context-mcp`".to_owned(),
+                },
+                HostComponentDriftV1 {
+                    component: "pi/core".to_owned(),
+                    remedy: "run `tracedecay install --agent pi`".to_owned(),
+                },
+            ]),
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.coverage().statement(),
+            "codex/context-mcp has drifted from its installed shape; run `tracedecay reinstall \
+             --component context-mcp`; pi/core has drifted from its installed shape; run \
+             `tracedecay install --agent pi`"
         );
     }
 

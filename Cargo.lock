@@ -2612,7 +2612,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.43"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=efac2f98614d672c30f379debfb802f998c9bf32#efac2f98614d672c30f379debfb802f998c9bf32"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=8dd5e85990581bead93dba4b17aaa15c36069319#8dd5e85990581bead93dba4b17aaa15c36069319"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2627,7 +2627,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.43"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=efac2f98614d672c30f379debfb802f998c9bf32#efac2f98614d672c30f379debfb802f998c9bf32"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=8dd5e85990581bead93dba4b17aaa15c36069319#8dd5e85990581bead93dba4b17aaa15c36069319"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2647,7 +2647,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.43"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=efac2f98614d672c30f379debfb802f998c9bf32#efac2f98614d672c30f379debfb802f998c9bf32"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=8dd5e85990581bead93dba4b17aaa15c36069319#8dd5e85990581bead93dba4b17aaa15c36069319"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2670,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.43"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=efac2f98614d672c30f379debfb802f998c9bf32#efac2f98614d672c30f379debfb802f998c9bf32"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=8dd5e85990581bead93dba4b17aaa15c36069319#8dd5e85990581bead93dba4b17aaa15c36069319"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2692,7 +2692,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.43"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=efac2f98614d672c30f379debfb802f998c9bf32#efac2f98614d672c30f379debfb802f998c9bf32"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=8dd5e85990581bead93dba4b17aaa15c36069319#8dd5e85990581bead93dba4b17aaa15c36069319"
 dependencies = [
  "bincode",
  "byteorder",

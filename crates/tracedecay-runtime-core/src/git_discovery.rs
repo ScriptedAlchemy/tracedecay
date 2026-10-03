@@ -309,11 +309,15 @@ async fn authority_identity_off_executor(
 ///
 /// A test that parks the walk on a channel ends the budget as soon as the
 /// walk is parked: the project is discovery-blocked, and sleeping out the
-/// deadline would hold the caller open for the whole hang.
+/// deadline would hold the caller open for the whole hang. A test that holds
+/// the discovery clock keeps the budget open until the walk finishes.
 pub async fn repository_discovery_budget(directory: &Path, deadline: Instant) {
     let elapsed = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
     #[cfg(any(test, feature = "test-helpers"))]
     let elapsed = async {
+        if crate::git_repository::repository_discovery_clock_held(directory) {
+            return std::future::pending().await;
+        }
         tokio::select! {
             () = elapsed => {}
             true = crate::git_repository::wait_until_repository_discovery_blocks(directory) => {}

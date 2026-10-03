@@ -81,7 +81,11 @@ lang-lean = ["large-grammars"]
 metrics.workspace = true
 serde = { version = "1", features = ["derive", "rc"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
-tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
+# v0.5.0 plus the COBOL external-scanner fix (yutaro-sakamoto/tree-sitter-cobol#42,
+# unmerged upstream, #1104): the published scanner spins forever at end of
+# input when a token starts in the sequence-number area with no six-column
+# line before EOF, and no parse deadline can interrupt a scanner call.
+tracedecay-large-treesitters = { package = "tokensave-large-treesitters", git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracing = "0.1"
 tree-sitter = "0.26"

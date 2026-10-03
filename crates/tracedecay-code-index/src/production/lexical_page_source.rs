@@ -389,6 +389,7 @@ fn symbol_display_for_chunk(
 #[derive(Debug)]
 pub struct VerifiedSealedLexicalPageV1 {
     page_ordinal: u64,
+    file_ordinal: u64,
     chunk_count: u64,
     payload_bytes: u64,
     import_count: u64,
@@ -396,6 +397,7 @@ pub struct VerifiedSealedLexicalPageV1 {
     clone_body_count: u64,
     clone_body_payload_bytes: u64,
     page_digest: ManifestDigest,
+    import_digest: ManifestDigest,
     cumulative_digest: ManifestDigest,
     next_cursor: VerifiedSealedLexicalCursorV1,
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
@@ -408,6 +410,11 @@ pub struct VerifiedSealedLexicalPageV1 {
 impl VerifiedSealedLexicalPageV1 {
     pub fn page_ordinal(&self) -> u64 {
         self.page_ordinal
+    }
+
+    /// The one file every record on this page belongs to.
+    pub fn file_ordinal(&self) -> u64 {
+        self.file_ordinal
     }
 
     pub fn chunk_count(&self) -> u64 {
@@ -428,6 +435,16 @@ impl VerifiedSealedLexicalPageV1 {
 
     pub fn page_digest(&self) -> &ManifestDigest {
         &self.page_digest
+    }
+
+    /// Digest of this page's import records alone; the source's import
+    /// dictionary digest folds it with `advance_import_dictionary_digest`.
+    pub fn import_digest(&self) -> &ManifestDigest {
+        &self.import_digest
+    }
+
+    pub fn clone_body_count(&self) -> u64 {
+        self.clone_body_count
     }
 
     pub fn cumulative_digest(&self) -> &ManifestDigest {
@@ -487,8 +504,8 @@ impl VerifiedSealedLexicalPageV1 {
             Some(_) | None => {}
         }
         let mut page_hasher = page_hasher(self.page_ordinal);
+        let mut import_hasher = page_import_hasher();
         let mut cumulative_digest = self.previous_cursor.cumulative_digest.clone();
-        let mut import_dictionary_digest = self.previous_cursor.import_dictionary_digest.clone();
         let mut payload_bytes = 0u64;
         if self.symbol_displays.len() != self.chunks.len() {
             return Err(CodeIndexProductionErrorV1::Contract(
@@ -547,11 +564,7 @@ impl VerifiedSealedLexicalPageV1 {
             hash_import_record(&mut page_hasher, &serialized)?;
             cumulative_digest =
                 advance_digest(&cumulative_digest, IMPORT_RECORD_DOMAIN, &serialized)?;
-            import_dictionary_digest = advance_digest(
-                &import_dictionary_digest,
-                IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN,
-                &serialized,
-            )?;
+            hash_record(&mut import_hasher, &serialized)?;
             import_payload_bytes = import_payload_bytes
                 .checked_add(u64::try_from(serialized.len()).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -585,7 +598,11 @@ impl VerifiedSealedLexicalPageV1 {
             )
         })?;
         let expected_cumulative = cumulative_digest;
-        let expected_import_dictionary = import_dictionary_digest;
+        let import_digest = digest_hasher(import_hasher)?;
+        let expected_import_dictionary = advance_import_dictionary_digest(
+            &self.previous_cursor.import_dictionary_digest,
+            &import_digest,
+        )?;
         let expected_next_page = self
             .previous_cursor
             .next_page_ordinal
@@ -602,6 +619,7 @@ impl VerifiedSealedLexicalPageV1 {
             || self.import_payload_bytes != import_payload_bytes
             || self.clone_body_count != clone_body_count
             || self.clone_body_payload_bytes != clone_body_payload_bytes
+            || self.import_digest != import_digest
             || self.cumulative_digest != expected_cumulative
             || self.next_cursor.next_page_ordinal != expected_next_page
             || self.next_cursor.emitted_chunks
@@ -725,6 +743,7 @@ impl VerifiedSealedLexicalPageV1 {
             .page_digest
             .as_str()
             .len()
+            .saturating_add(self.import_digest.as_str().len())
             .saturating_add(self.cumulative_digest.as_str().len())
             .saturating_add(self.next_cursor.source_state_digest.as_str().len())
             .saturating_add(self.next_cursor.import_dictionary_digest.as_str().len())
@@ -1014,6 +1033,7 @@ struct PendingSealedLexicalPageV1 {
     clone_body_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     page_hasher: Sha256,
+    import_hasher: Sha256,
 }
 
 struct CloneBodyPageStageV1<'a> {
@@ -1358,6 +1378,77 @@ impl VerifiedSealedLexicalPageSourceV1 {
         self.format_revision
     }
 
+    pub fn source_state_digest(&self) -> &ManifestDigest {
+        &self.source_state_digest
+    }
+
+    /// File ordinals whose pages differ from `parent`'s, or `None` when the
+    /// two sources cannot share pages: a different file roster, or route
+    /// identities of a different width, which the serialized rows carry and
+    /// page cuts therefore follow.
+    pub fn changed_files_since(&self, parent: &Self) -> Option<Vec<u64>> {
+        if self.format_revision != parent.format_revision
+            || self.maximum_page_chunks != parent.maximum_page_chunks
+            || self.maximum_page_bytes != parent.maximum_page_bytes
+            || self.metadata.manifest().generation_id.as_str().len()
+                != parent.metadata.manifest().generation_id.as_str().len()
+            || self.metadata.manifest().snapshot_digest.as_str().len()
+                != parent.metadata.manifest().snapshot_digest.as_str().len()
+        {
+            return None;
+        }
+        self.file_source.changed_files_since(&parent.file_source)
+    }
+
+    /// Stage every page of one file as a build that reached it at
+    /// `first_page_ordinal` with `first_chunk` chunks emitted would. Pages
+    /// never span files, so these are exactly the pages a full pass mints
+    /// for that file; only the per-page chunk positions depend on the files
+    /// before it, and the caller supplies them. Only this file is decoded.
+    #[tracing::instrument(
+        name = "code_index.lexical_source.stage_file_pages",
+        level = "trace",
+        skip_all
+    )]
+    pub fn stage_file_pages(
+        &mut self,
+        file_ordinal: u64,
+        first_page_ordinal: u64,
+        first_chunk: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Vec<VerifiedSealedLexicalPageV1>, CodeIndexProductionErrorV1> {
+        if file_ordinal >= self.file_count {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical file ordinal is outside the source".to_owned(),
+            ));
+        }
+        let mut cursor =
+            VerifiedSealedLexicalCursorV1::initial(self.source_state_digest.clone(), file_ordinal)?;
+        cursor.next_file_ordinal = file_ordinal;
+        cursor.next_page_ordinal = first_page_ordinal;
+        cursor.emitted_chunks = first_chunk;
+        self.admitted_window.clear();
+        self.admit_files(file_ordinal, 1, control)?;
+        let admitted = self.admitted_arc(file_ordinal)?;
+        let mut pages = Vec::new();
+        if !(admitted.chunks.is_empty()
+            && admitted.imports.is_empty()
+            && admitted.clone_bodies.is_empty())
+        {
+            while cursor.next_file_ordinal == file_ordinal {
+                match self.stage_next_page_at(&cursor, file_ordinal + 1, control)? {
+                    StagedSealedLexicalPageReadV1::Page(staged) => {
+                        cursor = staged.cursor;
+                        pages.push(staged.page);
+                    }
+                    StagedSealedLexicalPageReadV1::Complete { .. } => break,
+                }
+            }
+        }
+        self.admitted_window.clear();
+        Ok(pages)
+    }
+
     /// Adopt a persisted cursor after binding it to this source and validating
     /// its first unread file. This deliberately never walks earlier files.
     pub fn restore_cursor(
@@ -1582,7 +1673,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         admit: impl FnOnce(&VerifiedSealedLexicalPageV1) -> Result<(), E>,
     ) -> Result<Result<VerifiedSealedLexicalPageReadV1, E>, CodeIndexProductionErrorV1> {
         let cursor = self.cursor.clone();
-        match self.stage_next_page_at(&cursor, control)? {
+        match self.stage_next_page_at(&cursor, self.file_count, control)? {
             StagedSealedLexicalPageReadV1::Page(staged) => {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
@@ -1649,7 +1740,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                     let mut retained_bytes = retained_page_slots;
                     let mut completion = None;
                     while pages.len() < bounds.maximum_pages() {
-                        match self.stage_next_page_at(&working_cursor, control)? {
+                        match self.stage_next_page_at(&working_cursor, self.file_count, control)? {
                             StagedSealedLexicalPageReadV1::Page(staged) => {
                                 let next_retained_bytes = retained_bytes
                                     .checked_add(staged.page.retained_owned_bytes())
@@ -1719,11 +1810,13 @@ impl VerifiedSealedLexicalPageSourceV1 {
     fn stage_next_page_at(
         &mut self,
         previous_cursor: &VerifiedSealedLexicalCursorV1,
+        files_end: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         checkpoint(control)?;
         let mut cursor = previous_cursor.clone();
         let mut page_hasher = page_hasher(cursor.next_page_ordinal);
+        let mut import_hasher = page_import_hasher();
         let mut chunks = Vec::new();
         let mut page_bytes = 0usize;
         let mut symbol_displays = Vec::new();
@@ -1733,7 +1826,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         let mut clone_bodies = Vec::new();
         let mut clone_body_bytes = 0usize;
 
-        while cursor.next_file_ordinal < self.file_count {
+        while cursor.next_file_ordinal < files_end {
             checkpoint(control)?;
             self.ensure_admitted_file(cursor.next_file_offset, control)?;
             let admitted = self.admitted_arc(cursor.next_file_offset)?;
@@ -1785,6 +1878,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                             clone_body_bytes,
                             cursor,
                             page_hasher,
+                            import_hasher,
                         },
                     );
                 }
@@ -1829,6 +1923,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                             clone_body_bytes,
                             cursor,
                             page_hasher,
+                            import_hasher,
                         },
                     );
                 }
@@ -1877,17 +1972,14 @@ impl VerifiedSealedLexicalPageSourceV1 {
                             clone_body_bytes,
                             cursor,
                             page_hasher,
+                            import_hasher,
                         },
                     );
                 }
                 hash_import_record(&mut page_hasher, &serialized)?;
                 cursor.cumulative_digest =
                     advance_digest(&cursor.cumulative_digest, IMPORT_RECORD_DOMAIN, &serialized)?;
-                cursor.import_dictionary_digest = advance_digest(
-                    &cursor.import_dictionary_digest,
-                    IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN,
-                    &serialized,
-                )?;
+                hash_record(&mut import_hasher, &serialized)?;
                 import_bytes = import_bytes.checked_add(serialized.len()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical import page byte count overflowed".to_owned(),
@@ -1930,6 +2022,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                         clone_body_bytes,
                         cursor,
                         page_hasher,
+                        import_hasher,
                     },
                 );
             }
@@ -1944,9 +2037,10 @@ impl VerifiedSealedLexicalPageSourceV1 {
             cursor.next_chunk_ordinal = 0;
             cursor.next_import_ordinal = 0;
             cursor.next_clone_body_ordinal = 0;
-            // The page contract serializes chunks, then imports, then clone
-            // bodies. Commit before a later file restarts that ordering.
-            if !imports.is_empty() || !clone_bodies.is_empty() {
+            // A page never spans files, so one file's pages depend on that
+            // file alone and an unchanged file's pages carry across
+            // generations.
+            if !chunks.is_empty() || !imports.is_empty() || !clone_bodies.is_empty() {
                 return self.commit_page(
                     previous_cursor,
                     PendingSealedLexicalPageV1 {
@@ -1959,6 +2053,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                         clone_body_bytes,
                         cursor,
                         page_hasher,
+                        import_hasher,
                     },
                 );
             }
@@ -1977,6 +2072,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                     clone_body_bytes,
                     cursor,
                     page_hasher,
+                    import_hasher,
                 },
             );
         }
@@ -2037,23 +2133,36 @@ impl VerifiedSealedLexicalPageSourceV1 {
         self.fill_admitted_window(file_offset, control)
     }
 
+    fn fill_admitted_window(
+        &mut self,
+        file_offset: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        self.admit_files(
+            file_offset,
+            crate::parallelism::indexing_workers()
+                .max(1)
+                .saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1),
+            control,
+        )
+    }
+
     #[tracing::instrument(
         name = "code_index.restore.partitioned_window",
         level = "trace",
         skip_all
     )]
-    fn fill_admitted_window(
+    fn admit_files(
         &mut self,
         file_offset: u64,
+        maximum_files: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start = self.file_range_index(file_offset)?;
         let files = self.file_source.read_window(
             start,
-            crate::parallelism::indexing_workers()
-                .max(1)
-                .saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1),
+            maximum_files,
             LEXICAL_FILE_PREFETCH_BYTES_V1,
             control,
         )?;
@@ -2092,8 +2201,27 @@ impl VerifiedSealedLexicalPageSourceV1 {
             clone_body_bytes,
             mut cursor,
             mut page_hasher,
+            import_hasher,
         } = pending;
         let page_ordinal = cursor.next_page_ordinal;
+        // A page that ends its file leaves the cursor at the next file's
+        // start; one cut inside its file leaves it at a record of that file.
+        let file_ordinal = if cursor.next_chunk_ordinal == 0
+            && cursor.next_import_ordinal == 0
+            && cursor.next_clone_body_ordinal == 0
+        {
+            cursor.next_file_ordinal.checked_sub(1)
+        } else {
+            Some(cursor.next_file_ordinal)
+        }
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page precedes every file".to_owned(),
+            )
+        })?;
+        let import_digest = digest_hasher(import_hasher)?;
+        cursor.import_dictionary_digest =
+            advance_import_dictionary_digest(&cursor.import_dictionary_digest, &import_digest)?;
         let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical page chunk count exceeds u64".to_owned(),
@@ -2136,6 +2264,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         hash_cursor(&mut page_hasher, &cursor)?;
         let page = VerifiedSealedLexicalPageV1 {
             page_ordinal,
+            file_ordinal,
             chunk_count,
             payload_bytes,
             import_count,
@@ -2143,6 +2272,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             clone_body_count,
             clone_body_payload_bytes,
             page_digest: digest_hasher(page_hasher)?,
+            import_digest,
             cumulative_digest: cursor.cumulative_digest.clone(),
             next_cursor: cursor.clone(),
             chunks,
@@ -2421,6 +2551,31 @@ fn advance_digest(
     hash_record(&mut hasher, previous.as_str().as_bytes())?;
     hash_record(&mut hasher, bytes)?;
     digest_hasher(hasher)
+}
+
+/// The source's import dictionary digest before any page.
+pub fn initial_import_dictionary_digest() -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+    initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)
+}
+
+/// Fold one page's import digest into the source's import dictionary
+/// digest. Every page folds, in page order, so the digest is a function of
+/// the per-page digests a lexical artifact stores.
+pub fn advance_import_dictionary_digest(
+    previous: &ManifestDigest,
+    page_import_digest: &ManifestDigest,
+) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+    advance_digest(
+        previous,
+        IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN,
+        page_import_digest.as_str().as_bytes(),
+    )
+}
+
+fn page_import_hasher() -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(IMPORT_RECORD_DOMAIN);
+    hasher
 }
 
 fn page_hasher(page_ordinal: u64) -> Sha256 {

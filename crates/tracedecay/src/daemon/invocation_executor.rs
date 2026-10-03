@@ -489,7 +489,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
 /// Settles one in-process invocation. `request_cancellations` is the owning
 /// service's table: a caller-side cancellation or deadline is relayed to the
 /// daemon-side registration through it when no pre-admitted token exists.
-async fn settle_in_process_invocation(
+pub(super) async fn settle_in_process_invocation(
     request_cancellations: &tracedecay_daemon_service::RequestCancellationRegistryV1,
     request_id: &str,
     invocation: tokio::task::JoinHandle<DaemonInvocationResponse>,

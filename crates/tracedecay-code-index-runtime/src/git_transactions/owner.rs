@@ -671,8 +671,16 @@ impl DaemonGitIndexTransactionServiceRegistry {
             .for_repository_root(repository_root)
             .await?
             .ok_or(GitIndexTransactionPortError::DaemonUnavailable)?;
-        owner
-            .service
-            .quarantine_preview_for_test(preview, observed_at)
+        // The store actor waits on the project writer lane, which a task on
+        // the caller's runtime may hold, so the synchronous port cannot run
+        // on that runtime's thread.
+        let preview = preview.clone();
+        tokio::task::spawn_blocking(move || {
+            owner
+                .service
+                .quarantine_preview_for_test(&preview, observed_at)
+        })
+        .await
+        .unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()))
     }
 }

@@ -49,6 +49,7 @@ mod residency;
 mod retained_configuration_tests;
 mod search_permit_release;
 mod serving;
+mod text_artifact_carry_tests;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
 ///

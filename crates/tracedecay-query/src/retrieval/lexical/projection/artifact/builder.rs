@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use rayon::prelude::*;
+use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -19,7 +20,8 @@ use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
-    VerifiedSealedLexicalSymbolDisplayV1,
+    VerifiedSealedLexicalSymbolDisplayV1, advance_import_dictionary_digest,
+    initial_import_dictionary_digest,
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -32,15 +34,17 @@ use super::clone_census::read_clone_index_census;
 use super::clone_codec::{digest_from_key, digest_key};
 use super::fingerprints::CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1;
 use super::format::{
-    BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
-    PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
-    STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt,
-    content_metadata_bytes, contract_number, decode_fingerprint_postings,
-    decode_padded_receipt_with_control, decode_page_base_sections_receipt,
-    encode_fingerprint_postings, encode_term_lists, finish_base_section_receipt_fold, hash_bytes,
-    initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
-    receipt_artifact_digest, stored_metadata_digest, verify_artifact_table_layout,
+    BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, CodeLexicalSourceSummaryV1,
+    PostingListDecoderV1, PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES,
+    SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1,
+    absorb_page_base_sections_receipt, content_metadata_bytes, contract_number,
+    decode_fingerprint_postings, decode_padded_receipt_with_control,
+    decode_page_base_sections_receipt, encode_fingerprint_postings, encode_term_lists,
+    finish_base_section_receipt_fold, hash_bytes, initial_base_section_receipt_fold,
+    metadata_digest, new_verified_receipt, padded_receipt, receipt_artifact_digest,
+    stored_metadata_digest, verify_artifact_table_layout,
 };
+use super::increment::{CarriedFilePagesV1, carry_parent_rows};
 use super::postings::document_ngram_scratch;
 use super::prepared::document_ngram_keys;
 use super::prepared::{
@@ -71,8 +75,8 @@ use crate::retrieval::lexical::LexicalFieldV1;
 
 use super::super::{CodeLexicalProjectionMetadataV1, normalized_search_text};
 
-const SQLITE_HEADER_COMMIT_COUNTER_OFFSETS: [u64; 2] = [24, 92];
-const SEALED_COMMIT_COUNTER: u32 = 1;
+const SQLITE_HEADER_HISTORY_OFFSETS: [u64; 3] = [24, 40, 92];
+const SEALED_HEADER_HISTORY: u32 = 1;
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
@@ -636,7 +640,7 @@ impl FinalizationSectionV1 {
     const fn full_query(self) -> Option<&'static str> {
         match self {
             Self::SourcePages => Some(
-                "SELECT page_ordinal, chunk_count, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt FROM source_pages ORDER BY page_ordinal",
+                "SELECT page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt FROM source_pages ORDER BY page_ordinal",
             ),
             Self::CloneOccurrences => Some(
                 "SELECT ordinal, symbol_key, payload_ordinal, path, body_start, body_end, eligibility FROM clone_occurrences ORDER BY ordinal",
@@ -668,10 +672,10 @@ impl FinalizationSectionV1 {
     const fn seek_query(self, after: bool) -> Option<&'static str> {
         match (self, after) {
             (Self::SourcePages, false) => Some(
-                "SELECT page_ordinal, chunk_count, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt FROM source_pages ORDER BY page_ordinal LIMIT ?1",
+                "SELECT page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt FROM source_pages ORDER BY page_ordinal LIMIT ?1",
             ),
             (Self::SourcePages, true) => Some(
-                "SELECT page_ordinal, chunk_count, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2",
+                "SELECT page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2",
             ),
             (Self::FieldStatistics, false) => {
                 Some("SELECT field, total_length FROM field_stats ORDER BY field LIMIT ?1")
@@ -820,10 +824,11 @@ struct PersistedFinalizationStateV1 {
     completed_rows: u64,
     content_epoch: i64,
     source_state_digest: ManifestDigest,
-    /// The accepted source's terminal cursor. Statistics drops the staged
-    /// per-page cursors before the seal, and a resumed finalization restores
-    /// its source to this cursor to re-mint the completion receipt.
-    terminal_cursor: Option<Vec<u8>>,
+    /// The sealed source's format revision; every other source total the
+    /// receipt binds is folded from `source_pages`. The state holds no
+    /// cursor, so a cold and a carried build of one generation write the
+    /// same row before the layout rewrite.
+    source_format_revision: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1151,6 +1156,124 @@ impl CodeLexicalArtifactBuilderV1 {
             mutation_gate,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
+            memory_budget_bytes,
+            fixed_ledger_charge_bytes,
+        })
+    }
+
+    /// Stage a successor over a byte copy of the sealed `parent`, re-encoding
+    /// only `changed_files` (ascending file ordinals) through
+    /// `stage_file_pages`. The result stands where a cold build of the same
+    /// generation stands on entering digest verification, so
+    /// `advance_started_finalization` seals the bytes a cold build seals.
+    /// The copy is named only once complete; an interrupted carry leaves a
+    /// staging file holding the parent's metadata, which a resume refuses as
+    /// incompatible.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is a separate authority the carry binds once"
+    )]
+    #[tracing::instrument(name = "query.artifact.carry", level = "trace", skip_all)]
+    pub fn carry_parent_with_memory_budget(
+        path: impl AsRef<Path>,
+        parent: File,
+        metadata: CodeLexicalProjectionMetadataV1,
+        memory_budget_bytes: usize,
+        source_state_digest: ManifestDigest,
+        source_format_revision: u32,
+        changed_files: &[u64],
+        stage_file_pages: &mut CarriedFilePagesV1<'_>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        metadata
+            .validate()
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let fixed_ledger_charge_bytes =
+            validated_fixed_ledger_charge(&metadata, memory_budget_bytes)?;
+        let path = path.as_ref();
+        if path.try_exists().map_err(private_staging_error)? {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact staging path already contains state".to_owned(),
+            ));
+        }
+        let metadata_digest = metadata_digest(&metadata)?;
+        {
+            let _span = tracing::trace_span!("query.artifact.carry.copy").entered();
+            copy_sealed_parent(parent, path)
+        }?;
+        let (mut connection, private_file, file_identity) =
+            open_private_builder_connection(path, memory_budget_bytes)?;
+        let mutation_gate = register_builder_mutation_gate(&connection)?;
+        require_staged_revision(&connection)?;
+        verify_artifact_table_layout(&connection)?;
+        if read_receipt_with_control(&connection, control)?.is_none()
+            || finalization_started(&connection)?
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "a carried lexical parent must be a sealed artifact".to_owned(),
+            ));
+        }
+        enter_resumable_journal(&connection)?;
+        // The sealed parent's freeze triggers stay in its schema unchanged,
+        // since the layout rewrite copies the schema as it stands; the carry
+        // only switches them off for its own connection.
+        set_triggers_enabled(&connection, false)?;
+        let transaction = connection.transaction().map_err(sqlite_error)?;
+        let carried = carry_parent_rows(
+            &transaction,
+            &metadata,
+            changed_files,
+            stage_file_pages,
+            control,
+        )?;
+        let content_epoch =
+            i64::try_from(carried.pages + carried.documents).map_err(contract_number)?;
+        transaction
+            .execute(
+                "UPDATE artifact_state SET metadata = ?1, metadata_digest = ?2, receipt = ?3 WHERE singleton = 1",
+                params![
+                    content_metadata_bytes(&metadata)?,
+                    metadata_digest.as_str(),
+                    vec![0u8; RECEIPT_RESERVATION_BYTES]
+                ],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "UPDATE content_epoch SET epoch = ?1 WHERE singleton = 1",
+                [content_epoch],
+            )
+            .map_err(sqlite_error)?;
+        store_finalization_state(
+            &transaction,
+            &PersistedFinalizationStateV1::new(
+                content_epoch,
+                source_state_digest,
+                source_format_revision,
+                PersistedFinalizationPhaseV1::Digest,
+            )?,
+        )?;
+        checkpoint(control)?;
+        transaction.commit().map_err(sqlite_error)?;
+        set_triggers_enabled(&connection, true)?;
+        metrics::gauge!("query.artifact.carry.pages_carried")
+            .increment(carried.carried_pages as f64);
+        tracing::debug!(
+            pages = carried.pages,
+            re_encoded_pages = carried.re_encoded_pages,
+            carried_pages = carried.carried_pages,
+            "carried lexical artifact staged over its sealed parent"
+        );
+        crate::observe::Residency::Rebuilding.record("query.artifact.residency");
+        Ok(Self {
+            path: path.to_path_buf(),
+            private_file,
+            file_identity,
+            connection,
+            mutation_gate,
+            metadata,
+            metadata_digest,
             memory_budget_bytes,
             fixed_ledger_charge_bytes,
         })
@@ -1653,6 +1776,38 @@ impl CodeLexicalArtifactBuilderV1 {
         maximum_work: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactErrorV1> {
+        self.advance_finalization_from(Some(source), maximum_work, control)
+    }
+
+    /// Continue a finalization that has begun. Its source totals are folded
+    /// from the staged pages, so a resumed or carried build needs no sealed
+    /// source receipt.
+    pub fn advance_started_finalization(
+        &mut self,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactErrorV1> {
+        self.advance_finalization_from(None, maximum_work, control)
+    }
+
+    /// Whether finalization has begun (or the artifact is sealed), so no
+    /// further source page may be appended.
+    pub fn finalization_started(
+        &self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<bool, CodeLexicalArtifactErrorV1> {
+        Ok(
+            read_receipt_with_control(&self.connection, control)?.is_some()
+                || finalization_started(&self.connection)?,
+        )
+    }
+
+    fn advance_finalization_from(
+        &mut self,
+        source: Option<&VerifiedSealedLexicalSourceReceiptV1>,
+        maximum_work: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactErrorV1> {
         if maximum_work == 0 {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact finalization work budget must be non-zero".to_owned(),
@@ -1668,7 +1823,15 @@ impl CodeLexicalArtifactBuilderV1 {
             control,
         )?;
         if let Some(receipt) = read_receipt_with_control(&self.connection, control)? {
-            verify_sealed_receipt_header(&receipt, &self.metadata_digest, source)?;
+            let summary = match source {
+                Some(source) => CodeLexicalSourceSummaryV1::of_receipt(source),
+                None => CodeLexicalSourceSummaryV1::of_staged_pages(
+                    &self.connection,
+                    receipt.source_format_revision(),
+                    control,
+                )?,
+            };
+            verify_sealed_receipt_header(&receipt, &self.metadata_digest, &summary)?;
             self.canonicalize_sealed_header()?;
             let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
             record_finalization_step(&step);
@@ -1689,9 +1852,14 @@ impl CodeLexicalArtifactBuilderV1 {
             )?,
         )?;
         if pending_state.is_none() {
+            let Some(source) = source else {
+                return Err(CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact finalization has not begun".to_owned(),
+                ));
+            };
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
-            let terminal_cursor = verify_staged_source_chain(&transaction, source, control)?;
+            verify_staged_source_chain(&transaction, source, control)?;
             // The sorted pass and the count aggregation are the heaviest
             // sorter statements in finalization; run them under the same
             // sorter CPU admission as the pre-digest index wakes.
@@ -1708,7 +1876,12 @@ impl CodeLexicalArtifactBuilderV1 {
             install_base_freeze(&transaction)?;
             store_finalization_state(
                 &transaction,
-                &PersistedFinalizationStateV1::new(content_epoch, source, terminal_cursor)?,
+                &PersistedFinalizationStateV1::new(
+                    content_epoch,
+                    source.source_state_digest().clone(),
+                    source.format_revision(),
+                    PersistedFinalizationPhaseV1::Indexes,
+                )?,
             )?;
             checkpoint(control)?;
             commit_finalization_transaction(transaction, &mut transaction_metrics)?;
@@ -1731,7 +1904,7 @@ impl CodeLexicalArtifactBuilderV1 {
         validate_finalization_state(&state)?;
         wake_metrics.digest_pass(state.phase);
         ensure_content_epoch(&transaction, state.content_epoch)?;
-        if &state.source_state_digest != source.source_state_digest() {
+        if source.is_some_and(|source| &state.source_state_digest != source.source_state_digest()) {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "bounded lexical artifact finalization received a different source receipt"
                     .to_owned(),
@@ -1857,7 +2030,17 @@ impl CodeLexicalArtifactBuilderV1 {
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let sections = state.completed_sections;
-        verify_final_sections_against_source(&sections, source)?;
+        let summary = CodeLexicalSourceSummaryV1::of_staged_pages(
+            &transaction,
+            state.source_format_revision,
+            control,
+        )?;
+        if source.is_some_and(|source| CodeLexicalSourceSummaryV1::of_receipt(source) != summary) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact staged pages disagree with the sealed source receipt".to_owned(),
+            ));
+        }
+        verify_final_sections_against_source(&sections, &summary)?;
         let clone_index_census = {
             let _span = tracing::trace_span!("query.artifact.finalization.clone_census").entered();
             read_clone_index_census(
@@ -1875,7 +2058,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let file_size_bytes = sqlite_file_size(&transaction)?;
         let receipt = new_verified_receipt(
             self.metadata_digest.clone(),
-            source,
+            &summary,
             sections,
             clone_index_census,
             file_size_bytes,
@@ -1965,16 +2148,18 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 
     /// SQLite's file change counter (header offset 24) and version-valid-for
-    /// number (offset 92) count commits, so one content staged through a
-    /// different number of transactions differs only there. Once sealed no
-    /// connection writes the file again, and both are set to one value.
+    /// number (offset 92) count commits, and its schema cookie (offset 40)
+    /// counts schema edits, which the layout rewrite carries forward. One
+    /// content staged through a different history (a cold build, or a
+    /// carried parent) differs only there. Once sealed no connection writes
+    /// the file again, and all three are set to one value.
     fn canonicalize_sealed_header(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
         leave_resumable_journal(&self.connection)?;
         let mut file = &self.private_file;
-        for offset in SQLITE_HEADER_COMMIT_COUNTER_OFFSETS {
+        for offset in SQLITE_HEADER_HISTORY_OFFSETS {
             file.seek(SeekFrom::Start(offset))
-                .and_then(|_| file.write_all(&SEALED_COMMIT_COUNTER.to_be_bytes()))
+                .and_then(|_| file.write_all(&SEALED_HEADER_HISTORY.to_be_bytes()))
                 .map_err(private_staging_error)?;
         }
         file.sync_all().map_err(private_staging_error)
@@ -2074,6 +2259,39 @@ fn publish_initialized_staging(
         .map_err(|error| staging_initialization_error("name the staging path", error))?;
     sync_parent_directory(path, DirectorySyncPolicy::Strict)
         .map_err(|error| staging_initialization_error("sync the staging directory", error))
+}
+
+/// Copy the sealed `parent` under the initializing sibling and name it the
+/// staging path once its bytes are durable.
+fn copy_sealed_parent(mut parent: File, path: &Path) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let initializing = initializing_staging_sibling(path)?;
+    match std::fs::remove_file(&initializing) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(private_staging_error(error)),
+    }
+    let mut target = create_private_file_retained(&initializing)
+        .map_err(|failure| private_staging_error(failure.into_error()))?;
+    std::io::copy(&mut parent, &mut target)
+        .map_err(|error| staging_initialization_error("copy its sealed parent", error))?;
+    target
+        .sync_all()
+        .map_err(|error| staging_initialization_error("sync its carried parent", error))?;
+    drop(target);
+    std::fs::rename(&initializing, path)
+        .map_err(|error| staging_initialization_error("name the staging path", error))?;
+    sync_parent_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(|error| staging_initialization_error("sync the staging directory", error))
+}
+
+fn set_triggers_enabled(
+    connection: &Connection,
+    enabled: bool,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, enabled)
+        .map(drop)
+        .map_err(sqlite_error)
 }
 
 fn staging_initialization_error(
@@ -2993,7 +3211,7 @@ fn symbol_field_size(display: Option<&VerifiedSealedLexicalSymbolDisplayV1>) -> 
 /// The widest transient upper bound one staged chunk can require.
 /// It is evaluated a record at a time without allocations and aborts once
 /// `abort_above` is exceeded. The returned lower bound already fails admission.
-fn page_transient_peak_bytes(
+pub(super) fn page_transient_peak_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
     abort_above: usize,
@@ -3340,15 +3558,23 @@ fn validate_prepared_page_batch(
         }
         expected_document = page_end;
         let next_cursor = decode_cursor(&page.next_cursor)?;
-        if next_cursor.next_page_ordinal()
-            != expected_ordinal.checked_add(1).ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "prepared lexical page ordinal overflowed".to_owned(),
-                )
-            })?
+        let previous_import_dictionary = match expected_previous.as_deref() {
+            Some(previous) => decode_cursor(previous)?.import_dictionary_digest().clone(),
+            None => initial_import_dictionary_digest()
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        };
+        let import_dictionary =
+            advance_import_dictionary_digest(&previous_import_dictionary, &page.import_digest)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        if next_cursor.import_dictionary_digest() != &import_dictionary
+            || next_cursor.next_page_ordinal()
+                != expected_ordinal.checked_add(1).ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "prepared lexical page ordinal overflowed".to_owned(),
+                    )
+                })?
             || next_cursor.emitted_chunks() != expected_document
             || next_cursor.cumulative_digest() != &page.cumulative_digest
-            || next_cursor.import_dictionary_digest() != &page.import_dictionary_digest
         {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "prepared lexical page receipt disagrees with its exact next cursor".to_owned(),
@@ -3659,7 +3885,7 @@ fn append_prepared_clone_bodies(
 }
 
 /// The key `clone_body_payloads.payload_digest` stores for `digest`.
-fn stored_digest_key(digest: &str) -> Result<[u8; 32], CodeLexicalArtifactErrorV1> {
+pub(super) fn stored_digest_key(digest: &str) -> Result<[u8; 32], CodeLexicalArtifactErrorV1> {
     digest_key(
         &ManifestDigest::new(digest.to_owned())
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
@@ -3978,15 +4204,18 @@ fn insert_prepared_source_page(
     let page_ordinal = i64::try_from(page.page_ordinal).map_err(contract_number)?;
     transaction
         .prepare_cached(
-            "INSERT INTO source_pages(page_ordinal, chunk_count, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO source_pages(page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .map_err(sqlite_error)?
         .execute(params![
             page_ordinal,
+            i64::try_from(page.file_ordinal).map_err(contract_number)?,
             i64::try_from(page.chunk_count).map_err(contract_number)?,
+            i64::try_from(page.payload_bytes).map_err(contract_number)?,
             i64::try_from(page.import_count).map_err(contract_number)?,
             i64::try_from(page.import_payload_bytes).map_err(contract_number)?,
-            page.import_dictionary_digest.as_str(),
+            page.import_digest.as_str(),
+            i64::try_from(page.clone_bodies.len()).map_err(contract_number)?,
             page.ngram_digest.as_str(),
             page.base_sections_receipt.as_slice(),
         ])
@@ -4047,10 +4276,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 metadata_digest TEXT NOT NULL,
                 receipt BLOB NOT NULL
             );
-            CREATE TABLE finalization_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                state BLOB NOT NULL
-            );
             CREATE TABLE content_epoch (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                 epoch INTEGER NOT NULL CHECK(epoch >= 0)
@@ -4058,10 +4283,13 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             INSERT INTO content_epoch(singleton, epoch) VALUES (1, 0);
             CREATE TABLE source_pages (
                 page_ordinal INTEGER PRIMARY KEY,
+                file_ordinal INTEGER NOT NULL,
                 chunk_count INTEGER NOT NULL,
+                payload_bytes INTEGER NOT NULL,
                 import_count INTEGER NOT NULL,
                 import_payload_bytes INTEGER NOT NULL,
-                import_dictionary_digest TEXT NOT NULL,
+                import_digest TEXT NOT NULL,
+                clone_body_count INTEGER NOT NULL,
                 ngram_digest TEXT NOT NULL,
                 base_sections_receipt BLOB NOT NULL
             );
@@ -4130,7 +4358,8 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TABLE row_dictionary (
                 entry_id INTEGER PRIMARY KEY,
-                entry BLOB NOT NULL
+                entry BLOB NOT NULL,
+                page_references INTEGER NOT NULL CHECK(page_references > 0)
             );
             CREATE TABLE row_dictionary_pages (
                 page_ordinal INTEGER NOT NULL,
@@ -5469,10 +5698,11 @@ fn derive_ngram_postings(
 }
 
 impl PersistedFinalizationStateV1 {
-    fn new(
+    pub(super) fn new(
         content_epoch: i64,
-        source: &VerifiedSealedLexicalSourceReceiptV1,
-        terminal_cursor: Option<Vec<u8>>,
+        source_state_digest: ManifestDigest,
+        source_format_revision: u32,
+        phase: PersistedFinalizationPhaseV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         if content_epoch < 0 {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -5482,7 +5712,7 @@ impl PersistedFinalizationStateV1 {
         let (base_section_row_counts, base_section_accumulators) =
             initial_base_section_receipt_fold()?;
         Ok(Self {
-            phase: PersistedFinalizationPhaseV1::Indexes,
+            phase,
             section_ordinal: 0,
             section_row_count: 0,
             section_last_key: None,
@@ -5492,8 +5722,8 @@ impl PersistedFinalizationStateV1 {
             completed_sections: Vec::new(),
             completed_rows: 0,
             content_epoch,
-            source_state_digest: source.source_state_digest().clone(),
-            terminal_cursor,
+            source_state_digest,
+            source_format_revision,
         })
     }
 }
@@ -5564,14 +5794,7 @@ fn require_staged_revision(connection: &Connection) -> Result<(), CodeLexicalArt
 }
 
 fn finalization_started(connection: &Connection) -> Result<bool, CodeLexicalArtifactErrorV1> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM finalization_state WHERE singleton = 1)",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|exists| exists != 0)
-        .map_err(sqlite_error)
+    Ok(load_finalization_state(connection)?.is_some())
 }
 
 fn content_epoch(connection: &Connection) -> Result<i64, CodeLexicalArtifactErrorV1> {
@@ -5628,6 +5851,11 @@ fn store_finalization_state(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let bytes = serde_json::to_vec(state)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    // Created by the first finalization step on both build paths, so the
+    // table sits after every content table when the layout is rewritten.
+    transaction
+        .execute_batch(FINALIZATION_STATE_SCHEMA)
+        .map_err(sqlite_error)?;
     transaction
         .execute(
             "INSERT INTO finalization_state(singleton, state) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET state = excluded.state",
@@ -5636,6 +5864,11 @@ fn store_finalization_state(
         .map_err(sqlite_error)?;
     Ok(())
 }
+
+const FINALIZATION_STATE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS finalization_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                state BLOB NOT NULL
+            );";
 
 fn validate_finalization_state(
     state: &PersistedFinalizationStateV1,
@@ -5890,7 +6123,7 @@ fn advance_native_section_rows<P: rusqlite::Params>(
                         "lexical artifact base-section receipt has a negative page".to_owned(),
                     )
                 })?;
-            let receipt: Vec<u8> = row.get(6).map_err(sqlite_error)?;
+            let receipt: Vec<u8> = row.get(9).map_err(sqlite_error)?;
             absorb_page_base_sections_receipt(
                 page_ordinal,
                 &receipt,
@@ -6085,10 +6318,10 @@ fn verify_staged_source_chain(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<Option<Vec<u8>>, CodeLexicalArtifactErrorV1> {
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut statement = connection
         .prepare(
-            "SELECT p.page_ordinal, c.cumulative_digest, p.chunk_count, c.payload_bytes, p.import_count, p.import_payload_bytes, p.import_dictionary_digest, c.next_cursor FROM source_pages p LEFT JOIN source_page_cursors c ON c.page_ordinal = p.page_ordinal ORDER BY p.page_ordinal",
+            "SELECT p.page_ordinal, c.cumulative_digest, p.chunk_count, p.payload_bytes, p.import_count, p.import_payload_bytes, p.import_digest, c.next_cursor FROM source_pages p LEFT JOIN source_page_cursors c ON c.page_ordinal = p.page_ordinal ORDER BY p.page_ordinal",
         )
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
@@ -6097,14 +6330,16 @@ fn verify_staged_source_chain(
     let mut payload_bytes = 0u64;
     let mut imports = 0u64;
     let mut import_payload_bytes = 0u64;
+    let mut import_dictionary_digest = initial_import_dictionary_digest()
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     let mut terminal = None;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
         checkpoint(control)?;
         let ordinal =
             u64::try_from(row.get::<_, i64>(0).map_err(sqlite_error)?).map_err(contract_number)?;
-        let (Some(cumulative_digest), Some(page_payload), Some(cursor_bytes)) = (
+        let page_payload: i64 = row.get(3).map_err(sqlite_error)?;
+        let (Some(cumulative_digest), Some(cursor_bytes)) = (
             row.get::<_, Option<String>>(1).map_err(sqlite_error)?,
-            row.get::<_, Option<i64>>(3).map_err(sqlite_error)?,
             row.get::<_, Option<Vec<u8>>>(7).map_err(sqlite_error)?,
         ) else {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -6118,7 +6353,11 @@ fn verify_staged_source_chain(
             u64::try_from(row.get::<_, i64>(4).map_err(sqlite_error)?).map_err(contract_number)?;
         let page_import_payload =
             u64::try_from(row.get::<_, i64>(5).map_err(sqlite_error)?).map_err(contract_number)?;
-        let import_digest: String = row.get(6).map_err(sqlite_error)?;
+        let import_digest = ManifestDigest::new(row.get::<_, String>(6).map_err(sqlite_error)?)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        import_dictionary_digest =
+            advance_import_dictionary_digest(&import_dictionary_digest, &import_digest)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let cursor = decode_cursor(&cursor_bytes)?;
         chunks = chunks
             .checked_add(page_chunks)
@@ -6139,7 +6378,7 @@ fn verify_staged_source_chain(
             || cursor.emitted_imports() != imports
             || cursor.emitted_import_payload_bytes() != import_payload_bytes
             || cursor.cumulative_digest().as_str() != cumulative_digest
-            || cursor.import_dictionary_digest().as_str() != import_digest
+            || cursor.import_dictionary_digest() != &import_dictionary_digest
         {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact source-page cursor chain is inconsistent".to_owned(),
@@ -6152,8 +6391,7 @@ fn verify_staged_source_chain(
     }
     source
         .verify_completion(terminal.as_ref())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    terminal.as_ref().map(encode_cursor).transpose()
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
 }
 
 fn source_chain_overflow() -> CodeLexicalArtifactErrorV1 {
@@ -6165,7 +6403,7 @@ fn source_chain_overflow() -> CodeLexicalArtifactErrorV1 {
 fn verify_sealed_receipt_header(
     receipt: &VerifiedCodeLexicalArtifactV1,
     expected_metadata_digest: &ManifestDigest,
-    source: &VerifiedSealedLexicalSourceReceiptV1,
+    source: &CodeLexicalSourceSummaryV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     verify_source_receipt(receipt, source)?;
     if receipt.metadata_digest() != expected_metadata_digest {
@@ -6178,7 +6416,7 @@ fn verify_sealed_receipt_header(
 
 fn verify_final_sections_against_source(
     sections: &[CodeLexicalArtifactSectionDigestV1],
-    source: &VerifiedSealedLexicalSourceReceiptV1,
+    source: &CodeLexicalSourceSummaryV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     // Receipts count admitted documents, bounded by the source's chunks;
     // the freeze already matched them against the stored rows.
@@ -6186,14 +6424,14 @@ fn verify_final_sections_against_source(
         .iter()
         .find(|section| section.name == "rows")
         .map(|section| section.row_count)
-        .filter(|rows| *rows <= source.total_chunks())
+        .filter(|rows| *rows <= source.total_chunks)
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact rows exceed the sealed source's chunks".to_owned(),
             )
         })?;
     let expected = [
-        ("source_pages", source.page_count()),
+        ("source_pages", source.page_count),
         ("document_integrity", admitted_documents),
         ("rows", admitted_documents),
     ];
@@ -6229,7 +6467,23 @@ fn progress(
         ));
     }
     let cursor_bytes = match load_finalization_state(connection)? {
-        Some(state) => state.terminal_cursor,
+        Some(state) => {
+            let summary = CodeLexicalSourceSummaryV1::of_staged_pages(
+                connection,
+                state.source_format_revision,
+                control,
+            )?;
+            return Ok(CodeLexicalArtifactBuildProgressV1 {
+                next_page_ordinal: summary.page_count,
+                completed_chunks: summary.total_chunks,
+                completed_payload_bytes: summary.total_payload_bytes,
+                completed_imports: summary.total_imports,
+                completed_import_payload_bytes: summary.import_payload_bytes,
+                import_dictionary_digest: Some(summary.import_dictionary_digest),
+                cumulative_source_digest: None,
+                next_cursor: None,
+            });
+        }
         None => {
             let tail: Option<(i64, Vec<u8>)> = connection
                 .query_row(PROGRESS_TAIL_QUERY, [], |row| {
@@ -6308,7 +6562,7 @@ fn verify_replayed_page(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let stored: Option<StoredSourcePageRowV1> = connection
         .query_row(
-            "SELECT c.page_digest, c.cumulative_digest, p.chunk_count, c.payload_bytes, p.import_count, p.import_payload_bytes, p.import_dictionary_digest, c.next_cursor FROM source_pages p JOIN source_page_cursors c ON c.page_ordinal = p.page_ordinal WHERE p.page_ordinal = ?1",
+            "SELECT c.page_digest, c.cumulative_digest, p.chunk_count, c.payload_bytes, p.import_count, p.import_payload_bytes, p.import_digest, c.next_cursor FROM source_pages p JOIN source_page_cursors c ON c.page_ordinal = p.page_ordinal WHERE p.page_ordinal = ?1",
             [i64::try_from(page.page_ordinal()).map_err(contract_number)?],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         )
@@ -6322,7 +6576,7 @@ fn verify_replayed_page(
         i64::try_from(page.payload_bytes()).map_err(contract_number)?,
         i64::try_from(page.import_count()).map_err(contract_number)?,
         i64::try_from(page.import_payload_bytes()).map_err(contract_number)?,
-        page.next_cursor().import_dictionary_digest().as_str(),
+        page.import_digest().as_str(),
         cursor.as_slice(),
     );
     if stored.as_ref().map(|stored| {
@@ -6434,7 +6688,7 @@ fn digest_source_pages_and_base_receipts(
                     "lexical artifact base-section receipt has a negative page".to_owned(),
                 )
             })?;
-        let receipt: Vec<u8> = row.get(6).map_err(sqlite_error)?;
+        let receipt: Vec<u8> = row.get(9).map_err(sqlite_error)?;
         absorb_page_base_sections_receipt(
             page_ordinal,
             &receipt,
@@ -6546,15 +6800,15 @@ fn read_receipt_with_control(
 
 fn verify_source_receipt(
     receipt: &VerifiedCodeLexicalArtifactV1,
-    source: &VerifiedSealedLexicalSourceReceiptV1,
+    source: &CodeLexicalSourceSummaryV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    if receipt.page_count() != source.page_count()
-        || receipt.total_chunks() != source.total_chunks()
-        || receipt.total_payload_bytes() != source.total_payload_bytes()
-        || receipt.total_imports() != source.total_imports()
-        || receipt.import_payload_bytes() != source.import_payload_bytes()
-        || receipt.import_dictionary_digest() != source.import_dictionary_digest()
-        || receipt.source_format_revision() != source.format_revision()
+    if receipt.page_count() != source.page_count
+        || receipt.total_chunks() != source.total_chunks
+        || receipt.total_payload_bytes() != source.total_payload_bytes
+        || receipt.total_imports() != source.total_imports
+        || receipt.import_payload_bytes() != source.import_payload_bytes
+        || receipt.import_dictionary_digest() != &source.import_dictionary_digest
+        || receipt.source_format_revision() != source.format_revision
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "sealed lexical source receipt disagrees with finalized artifact".to_owned(),
@@ -6734,7 +6988,7 @@ fn verify_finalized_artifact(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     checkpoint(control)?;
     require_integrity(connection, control)?;
-    verify_source_receipt(receipt, source)?;
+    verify_source_receipt(receipt, &CodeLexicalSourceSummaryV1::of_receipt(source))?;
     if receipt.metadata_digest() != expected_metadata_digest {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "finalized lexical artifact metadata digest changed".to_owned(),
@@ -7786,7 +8040,7 @@ mod tests {
         let _mutation_authority = create_mutable_test_schema(&connection);
         connection
             .execute_batch(
-                "INSERT INTO source_pages(page_ordinal, chunk_count, import_count, import_payload_bytes, import_dictionary_digest, ngram_digest, base_sections_receipt) VALUES (0, 1, 1, 1, 'imports', 'ngrams', X'00');
+                "INSERT INTO source_pages(page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt) VALUES (0, 0, 1, 1, 1, 1, 'imports', 0, 'ngrams', X'00');
                  INSERT INTO field_stats(field, total_length) VALUES (1, 1);
                  INSERT INTO term_postings(term, in_fuzzy, lists) VALUES ('term', 1, X'01010102');",
             )
