@@ -918,8 +918,11 @@ async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
         .status()
         .expect("git init");
     assert!(init.success(), "git init must succeed");
-    let slug = tracedecay_sessions::runtime::hosts::cursor::cursor_project_slug(&project)
-        .expect("cursor project slug");
+    let slug = tracedecay_sessions::runtime::hosts::cursor::cursor_project_slug(
+        &tracedecay_runtime_core::path_safety::canonical_existing_identity(&project)
+            .expect("canonical project root"),
+    )
+    .expect("cursor project slug");
     let session_dir = transcripts
         .join(".cursor/projects")
         .join(slug)

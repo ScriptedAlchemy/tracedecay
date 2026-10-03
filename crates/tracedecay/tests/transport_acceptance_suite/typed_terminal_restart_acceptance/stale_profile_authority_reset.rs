@@ -235,7 +235,10 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
             store.display()
         );
     }
-    let init_command = format!("tracedecay init {}", project_path.display());
+    let init_command = format!(
+        "tracedecay init {}",
+        shell_words::quote(&project_path.to_string_lossy())
+    );
     assert!(
         reset_output.contains(&format!(
             "the project registry is empty; register each project store again with:\n  \

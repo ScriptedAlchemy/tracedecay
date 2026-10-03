@@ -42,7 +42,12 @@ pub fn load_standard_hermes_skill_bridge(
     let user_home = user_home.ok_or_else(|| {
         config_error("could not determine the user home for Hermes skill inventory")
     })?;
-    load_standard_hermes_skill_bridge_from_user_home(user_home, options)
+    // Reported paths spell plainly; a verbatim home leaks `\\?\` into every
+    // serialized skill and usage path.
+    load_standard_hermes_skill_bridge_from_user_home(
+        &tracedecay_runtime_core::path_safety::plain_host_path(user_home),
+        options,
+    )
 }
 
 fn load_standard_hermes_skill_bridge_from_user_home(

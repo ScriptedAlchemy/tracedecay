@@ -108,8 +108,18 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
             .await
             .expect("second shared consumer");
 
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    #[cfg(unix)]
+    {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly reads its own page.
+    #[cfg(not(unix))]
+    {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
     assert_eq!(
         first
             .frames
@@ -172,8 +182,18 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let (first, first_hit) = first.expect("first concurrent page");
     let (second, second_hit) = second.expect("second concurrent page");
 
-    assert_ne!(first_hit, second_hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    #[cfg(unix)]
+    {
+        assert_ne!(first_hit, second_hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles: each
+    // consumer's key is unique, so both honestly read the file.
+    #[cfg(not(unix))]
+    {
+        assert!(!first_hit && !second_hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
 }
 
 #[tokio::test]
@@ -442,8 +462,18 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
     )
     .await
     .expect("replayed pinned page");
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    #[cfg(unix)]
+    {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replayed read honestly misses.
+    #[cfg(not(unix))]
+    {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
 }
 
 #[tokio::test]
@@ -503,8 +533,18 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
     )
     .await
     .expect("replayed exact append page");
-    assert!(replay_hit);
-    assert!(Arc::ptr_eq(&exact, &replayed));
+    #[cfg(unix)]
+    {
+        assert!(replay_hit);
+        assert!(Arc::ptr_eq(&exact, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replay honestly rebuilds its own page.
+    #[cfg(not(unix))]
+    {
+        assert!(!replay_hit);
+        assert!(!Arc::ptr_eq(&exact, &replayed));
+    }
     assert!(!Arc::ptr_eq(&prefetched, &exact));
 }
 
@@ -1824,10 +1864,19 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
         .await
         .expect("second profile consumer");
 
+    #[cfg(unix)]
     assert_eq!(
         crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
         1,
         "canonical path+native identity must share one bounded prefix decode"
+    );
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly decodes the prefix itself.
+    #[cfg(not(unix))]
+    assert_eq!(
+        crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
+        2,
+        "no stat witness exists, so each consumer decodes its own prefix"
     );
 }
 
@@ -2027,7 +2076,12 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
          the one that can is not"
     );
     assert_eq!(progress.frames_persisted, 0);
+    #[cfg(unix)]
     assert!(hit);
+    // Without a stat witness the shared identity never settles, so the
+    // retained page is honestly re-read.
+    #[cfg(not(unix))]
+    assert!(!hit);
     assert_eq!(
         super::shared_jsonl_frame_preparations_for_test(page.file_identity),
         1,

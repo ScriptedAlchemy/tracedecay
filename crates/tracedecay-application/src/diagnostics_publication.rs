@@ -17,6 +17,7 @@
 //! provider payloads are never copied into a diagnostic record; consumers
 //! reach evidence through the authorized expansion path instead.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
@@ -300,17 +301,35 @@ pub fn code_index_logical_path(project_root: &Path, reported: &str) -> Option<St
     }
     let relative = if is_logical_absolute(&reported_logical) {
         let root_logical = project_root.to_str()?.replace('\\', "/");
-        strip_logical_prefix(&reported_logical, &root_logical)?
+        let relative: String = strip_logical_prefix(&reported_logical, &root_logical)
+            .map(str::to_string)
+            .or_else(|| {
+                // Alias spellings (Windows 8.3 names, verbatim roots, symlinked
+                // parents) all resolve to the root the code index records, so
+                // the raw compare misses them. Canonicalize through the
+                // deepest existing ancestor — the reported file may not exist
+                // yet.
+                let reported_canonical =
+                    tracedecay_runtime_core::path_safety::canonical_root_identity(Path::new(
+                        &reported_logical,
+                    ));
+                let root_canonical =
+                    tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+                let reported_canonical = reported_canonical.to_str()?.replace('\\', "/");
+                let root_canonical = root_canonical.to_str()?.replace('\\', "/");
+                strip_logical_prefix(&reported_canonical, &root_canonical).map(str::to_string)
+            })?;
+        Cow::Owned(relative)
     } else {
-        reported_logical.as_str()
+        Cow::Borrowed(reported_logical.as_str())
     };
     if relative.is_empty()
-        || logical_path_components(relative)
+        || logical_path_components(&relative)
             .any(|component| !is_normal_logical_component(component))
     {
         return None;
     }
-    Some(relative.to_string())
+    Some(relative.into_owned())
 }
 
 fn is_logical_absolute(path: &str) -> bool {

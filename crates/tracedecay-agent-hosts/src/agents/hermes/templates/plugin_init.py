@@ -996,7 +996,9 @@ def _tool_project_candidates(messages):
                 arguments.get("cwd"),
                 arguments.get("workdir"),
             ):
-                if isinstance(candidate, str) and os.path.isabs(os.path.expanduser(candidate)):
+                if isinstance(candidate, str) and _path_is_absolute(
+                    os.path.expanduser(candidate)
+                ):
                     candidates.append(candidate)
             if name in ("terminal", "bash", "shell", "exec_command"):
                 candidates.extend(_terminal_cd_candidates(arguments.get("command") or arguments.get("cmd")))
@@ -1240,9 +1242,18 @@ def _runtime_working_directory():
             return candidate
     return os.getcwd()
 
+def _path_is_absolute(candidate):
+    if os.path.isabs(candidate):
+        return True
+    # ntpath.isabs rejects "/..." spellings as root-relative, but a host may
+    # forward POSIX-absolute project roots to a Windows-hosted plugin; the
+    # containment checks still run on the realpath'd candidate.
+    return candidate.startswith("/")
+
+
 def _code_project_root(explicit=None, cwd=None, configured=None, hermes_home=None):
     candidate = explicit or cwd or configured or _runtime_working_directory()
-    if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
+    if isinstance(candidate, str) and candidate.strip() and _path_is_absolute(candidate):
         candidate = candidate.strip()
         try:
             candidate_real = os.path.realpath(candidate)

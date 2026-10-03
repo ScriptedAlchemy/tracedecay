@@ -15,6 +15,7 @@ use serde_json::Value;
 use tracedecay_contracts::ObservatoryReadModelV1;
 use tracedecay_contracts::retrieval::{AnalyticsHintCategoryV1, AnalyticsHintsPayloadV1};
 use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
 use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
@@ -689,6 +690,10 @@ async fn subagent_tree_reading(
     let connection = db.read_connection();
     let canonical = RegisteredGlobalDb::canonical_project_key(project_root);
     let opened = project_root.to_string_lossy().into_owned();
+    // `project_path` is persisted through `durable_project_path_key`, which
+    // folds Windows drive/UNC spelling; scoped reads must compare in the same
+    // stored form or a `C:\` display path never matches the `c:/` row.
+    let stored_path = durable_project_path_key(&opened);
     let rows = query_rows(
         &connection,
         "SELECT provider,
@@ -709,10 +714,16 @@ async fn subagent_tree_reading(
          -- (`/var` vs `/private/var`) are one project; matching only the
          -- canonical key silently empties the tree for rows stored under the
          -- alias the host wrote.
-         WHERE (project_key IN (?1, ?2) OR project_path IN (?1, ?2))
+         WHERE (project_key IN (?1, ?2) OR project_path IN (?3, ?4))
          ORDER BY COALESCE(started_at, 0), provider, session_id
-         LIMIT ?3",
-        params![canonical, opened, SUBAGENT_TREE_SESSION_CEILING],
+         LIMIT ?5",
+        params![
+            canonical,
+            opened.clone(),
+            stored_path,
+            opened,
+            SUBAGENT_TREE_SESSION_CEILING
+        ],
     )
     .await
     .map_err(|error| format!("analytics subagent tree query failed: {error}"))?;

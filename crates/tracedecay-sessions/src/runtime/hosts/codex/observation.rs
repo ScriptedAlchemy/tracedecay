@@ -146,7 +146,7 @@ fn record_in_flight_wait_for_test(key: &CodexMetaCacheKey) {
     *waits.entry(key.clone()).or_default() += 1;
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn in_flight_waits_for_test(key: &CodexMetaCacheKey) -> usize {
     CODEX_META_IN_FLIGHT_WAITS
         .get_or_init(Mutex::default)

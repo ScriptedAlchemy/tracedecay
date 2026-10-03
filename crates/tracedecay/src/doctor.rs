@@ -345,7 +345,10 @@ fn check_reset_required_stores(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     build_version: &str,
 ) -> bool {
-    if !tracedecay_daemon_control::daemon_reachable(profile) {
+    // Gate on the socket accepting, not a one-second initialize answer: the
+    // reset census probe owns its own deadline, and a daemon busy attaching
+    // stores still answers it there.
+    if !tracedecay_daemon_control::daemon_socket_connectable(profile) {
         return false;
     }
     match tracedecay_daemon_control::daemon_reset_required_stores(profile, build_version) {

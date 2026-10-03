@@ -18,10 +18,14 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 fn test_runtime_profile(
     runtime: &HostAdmissionTestRuntimeV1,
 ) -> tracedecay_runtime_core::config::ProfileRoot {
+    use tracedecay_runtime_core::path_safety::plain_host_path;
     let profile_root = runtime.profile_root_for_test();
-    let profile = tracedecay_runtime_core::config::ProfileRoot::new(profile_root);
+    // The runtime's profile root is the verbatim filesystem identity; the
+    // env-derived profile a production server holds carries the plain
+    // spelling a child process or serializer can consume.
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(plain_host_path(profile_root));
     match profile_root.parent() {
-        Some(home) => profile.with_home(home),
+        Some(home) => profile.with_home(plain_host_path(home)),
         None => profile,
     }
 }
