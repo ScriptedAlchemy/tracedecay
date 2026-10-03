@@ -311,11 +311,13 @@ struct UnchangedGenerationProof {
 }
 
 impl UnchangedGenerationProof {
+    /// Proofs of the same physical file version. Each scope can resume it
+    /// under its own generation, so the generation does not tell versions
+    /// apart and must not evict another scope's proof.
     fn same_cached_file(&self, other: &Self) -> bool {
         other.key.size == self.key.size
             && other.key.change == self.key.change
-            && other.key.generation == self.key.generation
-            && other.key.stable_file_identity == self.key.stable_file_identity
+            && other.physical_identity == self.physical_identity
     }
 }
 
@@ -2406,6 +2408,72 @@ mod tests {
             expected_prefix_validation(&resumed),
             "the idle cursor rehashed its prefix after the other ran ahead"
         );
+    }
+
+    /// After an atomic replacement the project scope resumes a minted rewrite
+    /// generation while the profile scope takes the new file's identity. Both
+    /// sit at end-of-file on one settled file, so neither repoll may evict the
+    /// other's proof and re-read the file (#2889).
+    #[test]
+    fn cursors_under_different_generations_both_settle_at_end_of_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("replaced.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(64)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let profile = resume_next_batch(&path, None, 1 << 20);
+        assert_eq!(
+            profile.new_cursor.position,
+            std::fs::metadata(&path).unwrap().len()
+        );
+        let rewrite_generation = profile.new_cursor.file_id ^ 1;
+        let project_cursor = StoredCursor {
+            file_id: rewrite_generation,
+            ..profile.new_cursor
+        };
+        let project_resume = JsonlResumeState {
+            generation: rewrite_generation,
+            file_identity: profile.file_identity,
+            fingerprint: profile.frames.last().unwrap().resume_fingerprint,
+        };
+        let profile_resume = JsonlResumeState {
+            generation: profile.new_cursor.file_id,
+            ..project_resume
+        };
+        let repoll = |cursor, resume| {
+            try_stream_new_jsonl_raw_strict_with_resume(
+                &path,
+                cursor,
+                None,
+                MAX_JSONL_RECORD_BYTES,
+                Some(resume),
+            )
+            .unwrap()
+        };
+        // The first repoll of each scope proves its checkpoint; every later
+        // one must be served from that proof.
+        repoll(profile.new_cursor, profile_resume);
+        repoll(project_cursor, project_resume);
+        for round in 0..3 {
+            for (scope, cursor, resume) in [
+                ("profile", profile.new_cursor, profile_resume),
+                ("project", project_cursor, project_resume),
+            ] {
+                let next = repoll(cursor, resume);
+                assert_eq!(next.new_cursor.file_id, cursor.file_id);
+                assert!(next.frames.is_empty());
+                if cfg!(unix) {
+                    assert_eq!(
+                        (
+                            next.io.prefix_validation_bytes,
+                            next.io.identity_window_bytes
+                        ),
+                        (0, 0),
+                        "round {round}: the {scope} scope re-read the settled file"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
