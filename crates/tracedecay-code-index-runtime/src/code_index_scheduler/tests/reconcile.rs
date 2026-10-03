@@ -3592,7 +3592,10 @@ async fn graph_reads_serve_the_outgoing_warm_graph_until_the_successor_warms() {
         .expect("remount graph-on");
 
     warming
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("warm the successor's catalog");
     assert_eq!(
         served().await.map(|(generation, _)| generation),
