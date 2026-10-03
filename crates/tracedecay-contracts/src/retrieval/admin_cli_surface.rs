@@ -19,7 +19,7 @@ use tracedecay_tool_catalog::OwnerStoresV1;
 use crate::project_registry::{ProjectRegistrySummary, ProjectRepoGroup, PublicCodeProject};
 use crate::session_sync::{
     SessionSyncAdmissionReceiptV1, SessionSyncOutcomeV1, SessionSyncSourceCoverageV1,
-    SessionSyncSourceFrontierV1, SessionSyncStatsV1,
+    SessionSyncSourceFrontierV1, SessionSyncSourceV1, SessionSyncStatsV1,
 };
 use crate::{IdempotencyKey, OperationTermination, RequestId};
 use tracedecay_domain::UtcMicros;
@@ -202,6 +202,7 @@ pub enum AdminCliSessionSyncV1 {
     Complete {
         operation_id: RequestId,
         idempotency_key: IdempotencyKey,
+        source: SessionSyncSourceV1,
         coalesced_primary: Option<IdempotencyKey>,
         termination: OperationTermination,
         stats: SessionSyncStatsV1,
@@ -239,9 +240,10 @@ impl From<SessionSyncOutcomeV1> for AdminCliSessionSyncV1 {
                 idempotency_key,
                 accepted_at,
             },
-            SessionSyncOutcomeV1::Complete(receipt) => Self::Complete {
+            SessionSyncOutcomeV1::Complete { source, receipt } => Self::Complete {
                 operation_id: receipt.admission.operation_id,
                 idempotency_key: receipt.admission.idempotency_key,
+                source,
                 coalesced_primary: receipt.coalesced_primary,
                 termination: receipt.termination,
                 stats: receipt.stats,
