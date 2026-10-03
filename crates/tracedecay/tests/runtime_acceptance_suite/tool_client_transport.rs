@@ -547,19 +547,26 @@ fn generic_tool_rejects_unrepresentable_deadline() {
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
     assert!(!result.killed_by_harness);
     assert!(!result.output.status.success());
-    let document: Value =
-        serde_json::from_slice(&result.output.stdout).expect("typed --json problem document");
-    assert_eq!(document["problem"]["kind"], "invalid_request", "{document}");
+    let refusal: Value = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json deadline refusal must be one JSON document ({error}): {}",
+            String::from_utf8_lossy(&result.output.stdout)
+        )
+    });
     assert_eq!(
-        document["problem"]["message"],
-        "TRACEDECAY_TOOL_DEADLINE_MS exceeds the supported monotonic deadline range",
-        "{document}"
+        (&refusal["problem"]["kind"], &refusal["problem"]["code"],),
+        (
+            &json!("invalid_request"),
+            &json!("application.surface.invalid_request"),
+        ),
+        "deadline validation must be a typed invalid request: {refusal}"
     );
-    let stderr = String::from_utf8_lossy(&result.output.stderr);
     assert!(
-        stderr.contains("TRACEDECAY_TOOL_DEADLINE_MS")
-            && stderr.contains("monotonic deadline range"),
-        "unexpected deadline validation error: {stderr}"
+        refusal["problem"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TRACEDECAY_TOOL_DEADLINE_MS")
+                && message.contains("monotonic deadline range")),
+        "typed deadline refusal must retain its diagnostic: {refusal}"
     );
 }
 
