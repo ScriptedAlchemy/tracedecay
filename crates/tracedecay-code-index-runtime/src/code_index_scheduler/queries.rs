@@ -4147,21 +4147,14 @@ mod tests {
             !page.items.is_empty(),
             "the definition must match: {page:?}"
         );
-        let found_use = page
-            .items
-            .iter()
-            .any(|item| item.occurrence.path == "src/user.rs");
-        if !found_use {
-            assert_eq!(
-                evidence.coverage.completeness,
-                CoverageCompleteness::Partial,
-                "a page missing the use in src/user.rs must not claim complete coverage: {evidence:?}"
-            );
-            assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
-        }
-        if evidence.coverage.completeness == CoverageCompleteness::Complete {
-            assert_eq!(page.total, Some(page.items.len() as u64));
-        }
+        // The exact projection indexes identifier definitions only, so the
+        // uses in both files can never be on the page.
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Partial,
+            "a definitions-only page must not claim complete coverage: {evidence:?}"
+        );
+        assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
     }
 
     #[tokio::test]
