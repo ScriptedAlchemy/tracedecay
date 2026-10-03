@@ -47,7 +47,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         &self,
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
-        crate::observe::record_transaction_rows(1);
         preview.validate().map_err(invalid_domain)?;
         let transaction = self.begin_write().await?;
         let outcome = insert_preview_if_absent(&transaction, &preview).await;
@@ -122,7 +121,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        crate::observe::record_transaction_rows(1);
         record.validate().map_err(invalid_domain)?;
         if record.terminal_receipt.is_some()
             || record.status.terminal_outcome.is_some()
@@ -244,7 +242,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
-        crate::observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         replacement.validate().map_err(invalid_domain)?;
         // Terminal states are only reachable through `write_terminal`, which
@@ -290,7 +287,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
-        crate::observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         receipt.validate().map_err(invalid_domain)?;
         let Some(outcome_code) = receipt.status.terminal_outcome.map(terminal_outcome_code) else {

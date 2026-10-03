@@ -4,10 +4,6 @@
 //! digests, or schema content. Every call is a no-op unless this crate's
 //! `metrics` recorder is installed.
 
-/// Size of a successfully assembled MCP dispatch catalog.
-#[inline]
-pub(crate) fn mcp_catalog_entries(entries: usize) {}
-
 /// Per-dispatch contract lookup outcome; a miss is recorded, never silent.
 #[inline]
 pub(crate) fn mcp_contract_lookup(hit: bool) {
@@ -31,8 +27,3 @@ pub(crate) fn binding_resolution(resolved: bool) {
     } else {
     }
 }
-
-/// Number of bindings published by the last discovery listing, including
-/// empty listings for hidden or disabled surfaces.
-#[inline]
-pub(crate) fn visible_bindings_published(count: usize) {}

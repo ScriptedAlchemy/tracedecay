@@ -16,9 +16,6 @@ pub(crate) fn record_error_class(class: &'static str) {
 }
 
 #[inline(always)]
-pub(crate) fn record_response_bytes(len: usize) {}
-
-#[inline(always)]
 pub(crate) fn record_status_class(status: StatusCode) {
     if status.is_success() {
         return;
@@ -49,16 +46,9 @@ pub(crate) fn observe_response(response: &Response) {
             .get(header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<usize>().ok())
-        {
-            record_response_bytes(len);
-        }
+        {}
     }
 }
-
-/// Strata is the largest structure payload (up to `STRATA_MAX_FILES` rows);
-/// its serialized size tracks this element count, which is free to observe.
-#[inline(always)]
-pub(crate) fn record_strata_files(len: usize) {}
 
 #[inline(always)]
 pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {

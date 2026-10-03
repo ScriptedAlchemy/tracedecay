@@ -251,7 +251,7 @@ impl McpDispatchCatalogV1 {
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
         let fingerprint = CatalogDigest::from_manifest_digest(fingerprint)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
-        crate::observe::mcp_catalog_entries(by_name.len());
+
         Ok(Self {
             contracts: by_name,
             fingerprint,

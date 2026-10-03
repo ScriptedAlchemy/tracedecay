@@ -795,12 +795,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             && observed.fingerprint == fingerprint
             && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
         {
-            record_session_doctor_cache_hit();
             return self
                 .with_relation_graph_health(observed.report.clone())
                 .await;
         }
-        record_session_doctor_cache_miss();
+
         let snapshot = match self.health_read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -940,7 +939,7 @@ async fn diagnose_snapshot(
             status = SessionTemporalHealthStatus::Partial;
             continue;
         }
-        record_session_doctor_check();
+
         if diagnose_health_check(
             conn,
             check,
@@ -1240,15 +1239,6 @@ fn unavailable_report_with_detail(
         reason: Some(format!("{probe}: {error}")),
     }
 }
-
-#[inline(always)]
-fn record_session_doctor_cache_hit() {}
-
-#[inline(always)]
-fn record_session_doctor_cache_miss() {}
-
-#[inline(always)]
-fn record_session_doctor_check() {}
 
 #[cfg(test)]
 mod cache_tests {

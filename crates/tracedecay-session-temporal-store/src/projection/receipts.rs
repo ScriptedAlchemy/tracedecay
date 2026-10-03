@@ -237,7 +237,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
+
     let mut required = BTreeSet::new();
     while let Some(row) = rows
         .next()
@@ -324,7 +324,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
+
     while let Some(row) = rows
         .next()
         .await
@@ -995,7 +995,7 @@ async fn fold_coverage_rows(
         let mut after = (0_i64, 0_i64);
         loop {
             checkpoint_relation_rebuild_control(control)?;
-            record_coverage_query_probe();
+
             let mut page = conn
                 .query(
                     &sql,
@@ -1213,15 +1213,9 @@ pub(crate) async fn base_projection_coverage(
 }
 
 #[inline(always)]
-fn record_assertion_validation_probe() {}
-
-#[inline(always)]
 fn record_assertion_history_row(bytes: u64) {
     {}
 }
-
-#[inline(always)]
-fn record_coverage_query_probe() {}
 
 #[inline(always)]
 fn record_coverage_row(bytes: u64) {

@@ -34,8 +34,6 @@ impl MaintenanceLifecycleInstrumentation {
             MaintenanceTickOutcome::Retry => {}
         }
     }
-
-    fn record_cancellation(&self) {}
 }
 
 impl Drop for MaintenanceLifecycleInstrumentation {
@@ -131,7 +129,6 @@ pub async fn run_maintenance_loop<F, Fut>(
             () = tokio::time::sleep_until(deadline) => {}
         }
         if cancellation.is_cancelled() {
-            lifecycle.record_cancellation();
             break;
         }
         let now = CadenceInstant::now();
@@ -144,7 +141,6 @@ pub async fn run_maintenance_loop<F, Fut>(
         let _phase = MaintenancePhaseInstrumentation::new(continuation);
         let outcome = run_tick(continuation).await;
         if cancellation.is_cancelled() {
-            lifecycle.record_cancellation();
             break;
         }
         lifecycle.record_outcome(outcome);

@@ -309,7 +309,7 @@ impl LspSessionRegistry {
                 control: LspSessionControl::default(),
             },
         );
-        self.observe_active_sessions();
+
         Ok(access)
     }
 
@@ -333,7 +333,7 @@ impl LspSessionRegistry {
             if let Some(mut expired) = self.sessions.remove(access.session_id()) {
                 expired.control.expire();
             }
-            self.observe_active_sessions();
+
             return Err(LspEndpointError::SessionExpired);
         }
         self.sessions
@@ -388,7 +388,7 @@ impl LspSessionRegistry {
             .remove(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.control.expire();
-        self.observe_active_sessions();
+
         Ok(())
     }
 
@@ -398,7 +398,6 @@ impl LspSessionRegistry {
         if let Some(mut session) = self.sessions.remove(session_id) {
             session.control.expire();
         }
-        self.observe_active_sessions();
     }
 
     pub fn reconnect(
@@ -454,15 +453,13 @@ impl LspSessionRegistry {
         }
         self.sessions
             .retain(|_, session| session.expires_at_ms > now_ms);
-        self.observe_active_sessions();
+
         expired.len()
     }
 
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
     }
-
-    fn observe_active_sessions(&self) {}
 
     fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
         if self

@@ -65,7 +65,6 @@ impl RegisteredGlobalDb {
         key: &str,
         value: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .insert_session_sync_journal(key, value)
             .await
@@ -77,7 +76,6 @@ impl RegisteredGlobalDb {
         expected: &str,
         replacement: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .compare_and_swap_session_sync_journal(key, expected, replacement)
             .await
@@ -88,7 +86,6 @@ impl RegisteredGlobalDb {
         key: &str,
         expected: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .compare_and_delete_session_sync_journal(key, expected)
             .await

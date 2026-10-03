@@ -550,8 +550,6 @@ fn compare_installed_plan(
     }
 }
 
-fn record_plan(plan: CodeIndexWorkerPlanV1) {}
-
 /// Install the process-resident plan before the first code-index build.
 /// Repeating the byte-identical plan is idempotent and returns the same
 /// installed authority; a second owner asking for a different process-wide
@@ -572,7 +570,6 @@ pub fn install_worker_plan(
         && installed.0.plan.configured == configured
         && installed.0.plan.environment_override_workers == environment_override_workers
     {
-        record_plan(installed.0.plan);
         return Ok(installed.0.installed_plan());
     }
     let requested = worker_plan_from(
@@ -583,7 +580,7 @@ pub fn install_worker_plan(
     )?;
     if let Some(existing) = WORKER_RUNTIME.get() {
         compare_installed_plan(&existing.0.plan, &requested)?;
-        record_plan(existing.0.plan);
+
         return Ok(existing.0.installed_plan());
     }
     let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
@@ -593,7 +590,7 @@ pub fn install_worker_plan(
         .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
             message: "worker runtime installation did not settle".to_owned(),
         })?;
-    record_plan(requested);
+
     Ok(installed)
 }
 

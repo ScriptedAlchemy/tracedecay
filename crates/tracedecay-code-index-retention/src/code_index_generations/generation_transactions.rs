@@ -150,14 +150,7 @@ pub(super) fn stage_collectable_generations(
             Ok(())
         })?;
     }
-    crate::observe::retention_quarantined(
-        transaction
-            .receipt
-            .deleted_generations
-            .iter()
-            .map(|generation| generation.size_bytes)
-            .sum(),
-    );
+
     Ok(())
 }
 
@@ -239,7 +232,6 @@ impl GraphReplayPoolLockV1 {
         let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
         loop {
             if observe_cancel(is_cancelled) {
-                crate::observe::retention_replay_pool_acquire_cancelled();
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             // One non-blocking try comes before the elapsed-deadline
@@ -252,14 +244,12 @@ impl GraphReplayPoolLockV1 {
             GRAPH_REPLAY_POOL_ACQUIRE_TRIES.with(|tries| tries.set(tries.get() + 1));
             match try_acquire_code_generation_store_lock(pool_root)? {
                 Some(guard) => {
-                    crate::observe::retention_replay_pool_acquired();
                     return Ok(Self {
                         root: guard.generation_store_root()?.to_path_buf(),
                         guard: Some(guard),
                     });
                 }
                 None if Instant::now() >= deadline => {
-                    crate::observe::retention_replay_pool_busy();
                     return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
                 }
                 None => Self::wait_for_exclusive(deadline),
@@ -270,7 +260,7 @@ impl GraphReplayPoolLockV1 {
     fn wait_for_exclusive(deadline: Instant) {
         #[cfg(test)]
         GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(waits.get() + 1));
-        crate::observe::retention_replay_pool_acquire_wait();
+
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return;
@@ -279,9 +269,7 @@ impl GraphReplayPoolLockV1 {
     }
 
     fn release_exclusive(&mut self) {
-        if self.guard.take().is_some() {
-            crate::observe::retention_replay_pool_released();
-        }
+        if self.guard.take().is_some() {}
     }
 }
 
@@ -631,8 +619,7 @@ pub(super) fn open_file_sha256_hex_cancellable(
             return Ok(encode_lowercase_hex(&hasher.finalize()));
         }
         let hashed = read as u64;
-        crate::observe::retention_inspected(hashed);
-        crate::observe::retention_hashed(hashed);
+
         hasher.update(&buffer[..read]);
     }
 }

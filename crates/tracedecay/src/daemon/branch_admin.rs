@@ -174,15 +174,13 @@ impl MaintenanceReaperRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn publish_counts(state: &MaintenanceReaperRegistryState) {}
-
     fn reserve(self: &Arc<Self>, owner: &ProjectServerKey) -> Option<MaintenanceReaperReservation> {
         let mut state = self.state();
         if !state.accepting {
             return None;
         }
         *state.pending.entry(owner.owner.clone()).or_default() += 1;
-        Self::publish_counts(&state);
+
         drop(state);
         self.changed.notify_waiters();
         Some(MaintenanceReaperReservation {
@@ -203,7 +201,7 @@ impl MaintenanceReaperRegistry {
         if remove {
             state.pending.remove(owner);
         }
-        Self::publish_counts(&state);
+
         drop(state);
         self.changed.notify_waiters();
     }
@@ -230,7 +228,7 @@ impl MaintenanceReaperRegistry {
     fn finish(&self, key: &MaintenanceReaperKey) {
         let mut state = self.state();
         state.reapers.remove(key);
-        Self::publish_counts(&state);
+
         drop(state);
         self.changed.notify_waiters();
     }
@@ -1554,7 +1552,7 @@ impl StoreAdministration {
             state.pending.remove(&reservation.owner);
         }
         reservation.active = false;
-        MaintenanceReaperRegistry::publish_counts(&state);
+
         drop(state);
         self.retirement_reapers.changed.notify_waiters();
         let _ = start.send(());

@@ -860,7 +860,6 @@ async fn install_registered_schema_stage_sequence(
     session_features: SessionFeatureSchema,
     force_exhaustive: bool,
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
-    crate::observe::record_transaction_rows(1);
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await

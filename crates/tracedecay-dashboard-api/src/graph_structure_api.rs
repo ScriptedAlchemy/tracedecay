@@ -496,7 +496,6 @@ async fn strata(
                 Ok(cached) => cached,
                 Err(response) => return response,
             };
-            crate::observe::record_strata_files(snapshot.files.len());
 
             measured_response(
                 &state,

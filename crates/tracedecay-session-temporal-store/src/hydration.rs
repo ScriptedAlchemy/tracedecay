@@ -151,7 +151,6 @@ impl BoundedPayload {
                 for chunk in bytes.chunks(max_chunk_bytes) {
                     control.checkpoint()?;
                     emit(chunk)?;
-                    record_hydration_emitted_bytes(chunk.len());
                 }
                 Ok(())
             }
@@ -163,7 +162,7 @@ impl BoundedPayload {
                 stream
                     .emit(&mut window, &mut checkpoint, &mut |chunk| {
                         emit(chunk)?;
-                        record_hydration_emitted_bytes(chunk.len());
+
                         Ok(())
                     })
                     .map(drop)
@@ -237,7 +236,7 @@ impl SessionTemporalHydrationAdapter<'_> {
         if !payload.matches(descriptor) {
             return Err(HydrationError::Unavailable);
         }
-        record_hydration_verified_bytes(descriptor.byte_count);
+
         control.checkpoint()?;
         if max_chunk_bytes == 0 && descriptor.byte_count > 0 {
             return Err(HydrationError::BudgetExceeded {

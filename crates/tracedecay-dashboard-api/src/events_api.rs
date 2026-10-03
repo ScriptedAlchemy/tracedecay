@@ -998,7 +998,7 @@ fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
         let _span = tracing::trace_span!("dashboard_api.http.serialize").entered();
         serde_json::to_string(event)
     }?;
-    crate::observe::record_response_bytes(data.len());
+
     let frame = Event::default().event(event.kind.stream()).data(data);
     let resume_sequence = match &event.kind {
         DashboardEventKindV1::ResumeGap {

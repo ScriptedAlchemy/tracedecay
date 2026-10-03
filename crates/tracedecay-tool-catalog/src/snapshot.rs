@@ -505,7 +505,7 @@ impl CatalogSnapshotV1 {
                 left.operation().as_str().cmp(right.operation().as_str())
             });
         }
-        crate::observe::visible_bindings_published(visible.len());
+
         visible
     }
 }

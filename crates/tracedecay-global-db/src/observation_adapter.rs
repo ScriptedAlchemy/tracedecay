@@ -766,7 +766,6 @@ impl GlobalDbObservationStore {
         Vec<ObservationBatchPersistOutcome>,
         Vec<AnchoredObservationWrite>,
     )> {
-        crate::observe::record_transaction_rows(1);
         let preflight = load_observation_preflight(&self.database, &writes).await?;
         let mut batch_state = ObservationBatchState::from_preflight(&preflight);
         let mut published_cursors = HashMap::<
@@ -866,9 +865,6 @@ fn record_observation_snapshot_probe() {
         "query observation batch snapshot"
     );
 }
-
-#[inline(always)]
-fn record_observation_snapshot_row() {}
 
 impl ObservationPreflightSnapshot {
     fn admission_refusal(
@@ -1225,7 +1221,6 @@ async fn read_admission_refusals_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let observation_id = row
             .get::<String>(0)
             .map_err(|error| runtime_storage_error(operation, error))?;
@@ -1289,7 +1284,6 @@ async fn read_source_cursors_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let source = decode_json(
             row.get::<String>(0)
                 .map_err(|error| runtime_storage_error(operation, error))?,
@@ -1373,7 +1367,6 @@ async fn read_retrieval_aliases_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let key = (
             row.get::<String>(0)
                 .map_err(|error| runtime_storage_error(operation, error))?,
@@ -1444,7 +1437,6 @@ async fn read_stored_observations_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?
     {
-        record_observation_snapshot_row();
         let observation_id = row
             .get::<String>(0)
             .map_err(|error| runtime_storage_error(operation, error))?;

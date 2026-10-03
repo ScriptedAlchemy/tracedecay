@@ -1972,14 +1972,7 @@ where
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
 
         crate::observe::record_files(captured_files.len());
-        if crate::observe::observing() {
-            crate::observe::record_source_bytes(
-                captured_files
-                    .values()
-                    .map(|file| file.sanitized_bytes.len() as u64)
-                    .fold(0_u64, u64::saturating_add),
-            );
-        }
+        if crate::observe::observing() {}
         lexical_page_source::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
@@ -2111,9 +2104,6 @@ where
         )?;
 
         if let Ok(statistics) = candidate.generation_statistics() {
-            crate::observe::record_source_bytes(statistics.source_total_bytes);
-            crate::observe::record_symbols(statistics.symbol_count);
-            crate::observe::record_relations(statistics.edge_count);
             crate::observe::record_files(candidate.files.len());
         }
         self.publish(

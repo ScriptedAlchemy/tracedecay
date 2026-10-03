@@ -178,13 +178,11 @@ pub fn search_tree_with_cancel(
         if stop {
             crate::observe::record_files(result.files_scanned);
 
-            crate::observe::record_source_bytes(source_bytes);
             return Ok(result);
         }
     }
     crate::observe::record_files(result.files_scanned);
 
-    crate::observe::record_source_bytes(source_bytes);
     Ok(result)
 }
 

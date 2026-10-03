@@ -231,7 +231,7 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
-        self.observe_outbound_queue();
+
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -333,7 +333,7 @@ where
         self.poll_semantic_requests();
         self.flush_context_changes();
         self.flush_native_integration_status();
-        self.observe_outbound_queue();
+
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(

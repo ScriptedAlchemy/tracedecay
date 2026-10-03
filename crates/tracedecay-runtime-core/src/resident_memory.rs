@@ -705,7 +705,6 @@ impl ResidentMemoryPressureV1 {
         );
         if let Some(sample) = sample {
             self.publish_observation(sample.admission_bytes());
-            self.publish_over_budget_gauge();
         }
         self.state()
     }
@@ -714,7 +713,7 @@ impl ResidentMemoryPressureV1 {
     fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
         let sample = (self.sampler)()?;
         self.publish_observation(sample.admission_bytes());
-        self.publish_over_budget_gauge();
+
         Some(self.state())
     }
 
@@ -763,7 +762,7 @@ impl ResidentMemoryPressureV1 {
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
-        self.publish_over_budget_gauge();
+
         self.state()
     }
 
@@ -826,8 +825,6 @@ impl ResidentMemoryPressureV1 {
             self.note_headroom();
         }
     }
-
-    fn publish_over_budget_gauge(&self) {}
 
     #[must_use]
     pub fn state(&self) -> ResidentMemoryPressureStateV1 {

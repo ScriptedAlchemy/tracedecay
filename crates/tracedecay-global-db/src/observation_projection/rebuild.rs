@@ -110,7 +110,6 @@ pub async fn project_observation(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-    crate::observe::record_transaction_rows(1);
     let transaction = database
         .begin_write_transaction("begin projection transaction")
         .await
@@ -234,7 +233,7 @@ pub async fn project_queued_observations(
         }
     }
     let has_more = projection_queue_has_items(&transaction).await?;
-    crate::observe::record_transaction_rows(items.len() as u64);
+
     transaction
         .commit()
         .await

@@ -348,8 +348,6 @@ const fn admit_rollback_revision(
     Ok(())
 }
 
-fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {}
-
 #[tracing::instrument(
     name = "hooks.runtime.deliver_feedback_rollback",
     level = "trace",
@@ -366,7 +364,6 @@ where
     admit_rollback_revision(rollback)?;
     let outcome = port.deliver_hook_v2(feedback);
 
-    record_feedback_outcome(outcome);
     Ok(outcome)
 }
 
@@ -401,7 +398,6 @@ where
     admit_rollback_revision(rollback)?;
     let outcome = port.deliver_hook_v2(envelope, feedback, deadline).await;
 
-    record_feedback_outcome(outcome);
     Ok(outcome)
 }
 

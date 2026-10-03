@@ -26,8 +26,6 @@ const STATE_COOLDOWN: &str = "cooldown";
 
 const STATE_SKIP: &str = "skip";
 
-fn publish_queue_gauges() {}
-
 /// Holds `automation.running` for the lifetime of one orchestration run.
 pub(crate) struct RunningGuard;
 
@@ -37,7 +35,6 @@ impl RunningGuard {
         {
             RUNNING.fetch_add(1, Ordering::Relaxed);
             QUEUED.store(0, Ordering::Relaxed);
-            publish_queue_gauges();
         }
         Self
     }
@@ -49,7 +46,6 @@ impl Drop for RunningGuard {
             let _ = RUNNING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             });
-            publish_queue_gauges();
         }
     }
 }
@@ -169,7 +165,6 @@ pub(crate) fn observe_due() {
         tracing::trace!(name: "automation.schedule_state", value = ?STATE_DUE);
         QUEUED.store(1, Ordering::Relaxed);
         COOLDOWN.store(0, Ordering::Relaxed);
-        publish_queue_gauges();
     }
 }
 
@@ -193,6 +188,5 @@ pub(crate) fn observe_skip_reason(reason: AutomationSkipReasonV1) {
                 COOLDOWN.store(0, Ordering::Relaxed);
             }
         }
-        publish_queue_gauges();
     }
 }

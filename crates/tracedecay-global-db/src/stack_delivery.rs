@@ -352,10 +352,6 @@ async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<
     Ok(promoted)
 }
 
-/// Records the durable queue depth a caller has already counted inside its
-/// own transaction; it never issues extra queries for observability.
-fn record_queue_depth(pending: usize, deferred: usize) {}
-
 async fn lookup_signal(
     executor: &impl QueryExecutor,
     project_id: &str,
@@ -553,7 +549,7 @@ impl RegisteredGlobalDb {
                 return Err("GitHub stack signal identity conflict".to_owned());
             }
             let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-            record_queue_depth(pending_count, deferred_count);
+
             transaction
                 .rollback()
                 .await
@@ -610,7 +606,7 @@ impl RegisteredGlobalDb {
                 .map_err(|error| format!("append GitHub stack delivery recipient: {error}"))?;
         }
         let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-        record_queue_depth(pending_count, deferred_count);
+
         let saturated = deferred_count > 0;
         transaction
             .commit()

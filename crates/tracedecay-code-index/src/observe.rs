@@ -91,7 +91,6 @@ impl PendingWorkQueue {
         let observed = observing();
         if observed {
             PENDING_WORK.fetch_add(depth, Ordering::Relaxed);
-            refresh_queue_gauge();
         }
         Self {
             observed,
@@ -103,7 +102,6 @@ impl PendingWorkQueue {
     pub(crate) fn start_worker(&self) -> WorkerBusyGuard {
         if self.observed && decrement_if_positive(&self.remaining) {
             let _ = decrement_if_positive(&PENDING_WORK);
-            refresh_queue_gauge();
         }
         WorkerBusyGuard::enter(self.observed)
     }
@@ -116,7 +114,6 @@ impl Drop for PendingWorkQueue {
             let _ = PENDING_WORK.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_sub(abandoned))
             });
-            refresh_queue_gauge();
         }
     }
 }
@@ -205,16 +202,9 @@ fn refresh_worker_gauges() {
 }
 
 #[inline(always)]
-fn refresh_queue_gauge() {}
-
-#[inline(always)]
 pub(crate) fn record_files(count: usize) {
     {}
 }
-
-/// Carries a caller-computed total so this helper never re-walks sources.
-#[inline(always)]
-pub(crate) fn record_source_bytes(bytes: u64) {}
 
 #[inline(always)]
 pub(crate) fn add_parse_bytes(bytes: u64) {
@@ -225,12 +215,6 @@ pub(crate) fn add_parse_bytes(bytes: u64) {
 pub(crate) fn add_reused_parses(count: u64) {
     {}
 }
-
-#[inline(always)]
-pub(crate) fn record_symbols(count: u64) {}
-
-#[inline(always)]
-pub(crate) fn record_relations(count: u64) {}
 
 #[inline(always)]
 pub(crate) fn record_pages(count: u64) {

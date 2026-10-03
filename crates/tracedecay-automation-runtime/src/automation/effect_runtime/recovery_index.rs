@@ -82,7 +82,7 @@ pub async fn prepare_reserved_automation_effect_recovery(
     })??;
     if indexed.is_empty() {
         let report = reset_report(reset_journals);
-        observe_recovery_report(&report);
+
         return Ok(AutomationEffectRecoveryPreparation::Complete(report));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(
@@ -351,11 +351,9 @@ where
             }
         }
     }
-    observe_recovery_report(&report);
+
     Ok(report)
 }
-
-fn observe_recovery_report(report: &AutomationEffectRecoveryReport) {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryRecoveryOutcome {

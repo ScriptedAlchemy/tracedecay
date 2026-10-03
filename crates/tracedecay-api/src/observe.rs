@@ -37,27 +37,21 @@ pub(crate) fn record_contract_error_class() {
     tracing::trace!(name: "api.http.error_class", value = ?"application_contract");
 }
 
-#[inline(always)]
-pub(crate) fn record_response_bytes(len: usize) {}
-
 pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     let match_result = {
         let _span = tracing::trace_span!("api.http.serialize").entered();
         serde_json::to_vec(value)
     };
     match match_result {
-        Ok(body) => {
-            record_response_bytes(body.len());
-            (
-                status,
-                [(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )],
-                body,
-            )
-                .into_response()
-        }
+        Ok(body) => (
+            status,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            body,
+        )
+            .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

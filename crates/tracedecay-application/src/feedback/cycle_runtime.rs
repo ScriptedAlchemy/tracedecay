@@ -397,7 +397,7 @@ impl FeedbackCycleRuntime {
         let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
-        crate::observe::feedback_query(execution.cycle.findings.len());
+
         compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
@@ -428,7 +428,7 @@ impl FeedbackCycleRuntime {
             .service
             .execute_with_advisory(context, request, advisory)
             .await?;
-        crate::observe::feedback_query(execution.cycle.findings.len());
+
         compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 

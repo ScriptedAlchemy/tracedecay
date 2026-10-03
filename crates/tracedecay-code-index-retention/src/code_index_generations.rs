@@ -184,9 +184,7 @@ const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
 #[inline]
 fn observe_cancel(is_cancelled: &dyn Fn() -> bool) -> bool {
     let cancelled = is_cancelled();
-    if cancelled {
-        crate::observe::retention_cancelled();
-    }
+    if cancelled {}
     cancelled
 }
 
@@ -1028,7 +1026,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
     }
     if transaction_path(store_root).exists() || text_artifact_transaction_path(store_root).exists()
     {
-        crate::observe::retention_recovery_pending();
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "code-generation retention recovery is pending".to_owned(),
         ));
@@ -1264,12 +1261,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
             .map(|candidate| candidate.size_bytes)
             .sum::<u64>(),
     );
-    crate::observe::retention_plan(
-        collectable_generations
-            .len()
-            .saturating_add(text_artifact_inventory.candidates.len()),
-        planned_bytes,
-    );
 
     Ok(CodeGenerationRetentionPlanV1 {
         active_generation_id,
@@ -1312,7 +1303,7 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         if (self.is_cancelled)() {
             self.cancelled = true;
-            crate::observe::retention_cancelled();
+
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "generation segment mark cancelled",
@@ -1320,7 +1311,7 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
         }
         let read = self.file.read(buffer)?;
         self.hasher.update(&buffer[..read]);
-        crate::observe::retention_inspected(read as u64);
+
         Ok(read)
     }
 }
@@ -1694,7 +1685,6 @@ pub fn execute_code_generation_retention_cancellable(
     }
     if transaction_path(store_root).exists() || text_artifact_transaction_path(store_root).exists()
     {
-        crate::observe::retention_recovery_pending();
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "code-generation retention recovery is pending".to_owned(),
         ));
@@ -1860,8 +1850,6 @@ pub fn execute_code_generation_retention_cancellable(
                 .unwrap_or(0),
         )
         .saturating_add(reclaimed_segment_bytes);
-    crate::observe::retention_reclaimed(reclaimed_bytes);
-    crate::observe::retention_recovery_idle();
 
     Ok(CodeGenerationRetentionReportV1 {
         plan,
@@ -1898,7 +1886,6 @@ fn recover_code_generation_retention_cancellable(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    crate::observe::retention_recovery_running();
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1931,7 +1918,7 @@ fn recover_code_generation_retention_cancellable(
         &graph_replay_release::queued_release_receipt_digests(store_root)?,
     )?;
     receipt_store::prune_receipts(store_root, &TEXT_ARTIFACT_RECEIPT_STORE, &BTreeSet::new())?;
-    crate::observe::retention_recovery_idle();
+
     Ok(())
 }
 

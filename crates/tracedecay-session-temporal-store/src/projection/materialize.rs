@@ -177,7 +177,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
 
     let (all_occurrences, occurrence_work) =
         materialize_effect_occurrences(conn, &effects, item_count).await?;
-    record_occurrence_materialization_work(occurrence_work);
+
     let mut parents = candidate_parent_message_resolver(
         conn,
         recovery.session_id(),
@@ -209,7 +209,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
                 &parents,
             )
             .await?;
-        record_relation_derivation_work(relation_work);
+
         let effect_items = effect_occurrences
             .len()
             .saturating_add(effect_copies.len())
@@ -359,9 +359,6 @@ pub(super) async fn materialize_effect_occurrences(
 pub(super) struct OccurrenceMaterializationWork {
     pub(super) envelope_parses: u64,
 }
-
-#[inline(always)]
-fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {}
 
 pub(super) fn derived_temporal_assertion_id(
     subject_anchor_id: &tracedecay_domain::RetrievalAnchorId,
@@ -628,9 +625,6 @@ pub(super) struct RelationDerivationWork {
     pub(super) envelope_parses: u64,
 }
 
-#[inline(always)]
-fn record_relation_derivation_work(work: RelationDerivationWork) {}
-
 #[tracing::instrument(
     name = "session_temporal.projection.candidate_parent",
     level = "trace",
@@ -653,7 +647,7 @@ async fn candidate_parent_message_resolver(
     }
     let encoded_ids =
         serde_json::to_string(&message_ids).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-    record_parent_resolver_probe();
+
     let mut rows = conn
         .query(
             "SELECT requested.value,
@@ -725,7 +719,7 @@ pub async fn canonical_parent_message_resolver(
         if let Some(control) = control {
             checkpoint_relation_rebuild_control(control)?;
         }
-        record_parent_resolver_probe();
+
         let mut rows = conn
             .query(
                 &format!(
@@ -830,9 +824,6 @@ pub async fn canonical_parent_message_resolver(
     resolver.reject_ambiguity()?;
     Ok(resolver)
 }
-
-#[inline(always)]
-fn record_parent_resolver_probe() {}
 
 #[inline(always)]
 fn record_parent_resolver_row(bytes: u64) {

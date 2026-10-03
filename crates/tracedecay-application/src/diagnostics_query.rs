@@ -362,13 +362,10 @@ impl<'a> DiagnosticsQuery<'a> {
     ) -> Result<DiagnosticAnchorLookup, DiagnosticQueryError> {
         let operation = "diagnostics query by_anchor";
         match self.store.record_by_anchor(anchor).await {
-            Ok(record) => {
-                crate::observe::diagnostics_query(usize::from(record.is_some()), 1);
-                Ok(DiagnosticAnchorLookup {
-                    record,
-                    coverage: DiagnosticQueryCoverage::Complete,
-                })
-            }
+            Ok(record) => Ok(DiagnosticAnchorLookup {
+                record,
+                coverage: DiagnosticQueryCoverage::Complete,
+            }),
             Err(error) => Ok(DiagnosticAnchorLookup {
                 record: None,
                 coverage: DiagnosticQueryCoverage::StoreUnavailable {
@@ -509,7 +506,7 @@ fn page_from_bounded_records(
                 .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
         })
         .flatten();
-    crate::observe::diagnostics_query(records.len(), total);
+
     DiagnosticPage {
         records,
         total,

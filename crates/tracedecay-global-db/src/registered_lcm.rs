@@ -535,7 +535,6 @@ impl RegisteredGlobalDb {
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), LcmError> {
-        crate::observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .lcm_ingest_raw_message(storage_root, message)
             .await
