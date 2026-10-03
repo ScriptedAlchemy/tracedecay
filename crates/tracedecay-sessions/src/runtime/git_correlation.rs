@@ -652,16 +652,96 @@ pub fn span_debounce_key(
     )
 }
 
+/// The worktrees of one admitted repository that session locations resolve to.
+///
+/// Linked worktrees share the admitted project identity while each keeps its
+/// own worktree identity, so a session that ran in a linked worktree is
+/// evidence for that worktree, not for the primary checkout. A recorded
+/// location that does not resolve to a worktree of the admitted repository (a
+/// worktree removed since, a nested foreign repository, a non-Git project) is
+/// evidence for the admitted root: admission already proved the record belongs
+/// to this project, and the admitted root is the one worktree identity it has.
+///
+/// One resolver serves one capture batch; each distinct location is resolved
+/// once because discovery below a worktree root walks the filesystem.
+pub struct AdmittedWorktrees {
+    admitted_root: std::path::PathBuf,
+    admitted: String,
+    common_dir: Option<std::path::PathBuf>,
+    resolved: HashMap<std::path::PathBuf, String>,
+}
+
+impl AdmittedWorktrees {
+    pub fn new(admitted_project_root: &std::path::Path) -> Self {
+        Self {
+            admitted_root: admitted_project_root.to_path_buf(),
+            admitted: normalize_worktree(&admitted_project_root.to_string_lossy()),
+            common_dir: tracedecay_runtime_core::worktree::git_common_dir(admitted_project_root),
+            resolved: HashMap::new(),
+        }
+    }
+
+    pub fn admitted_root(&self) -> &std::path::Path {
+        &self.admitted_root
+    }
+
+    /// Normalized worktree key for a session recorded at `location`.
+    pub fn worktree_for(&mut self, location: Option<&str>) -> String {
+        let Some(location) = location
+            .map(std::path::Path::new)
+            .filter(|location| location.is_absolute())
+        else {
+            return self.admitted.clone();
+        };
+        if let Some(known) = self.resolved.get(location) {
+            return known.clone();
+        }
+        let worktree = self
+            .common_dir
+            .as_deref()
+            .and_then(|common_dir| {
+                let topology = tracedecay_runtime_core::git_repository::repository_topology(
+                    crate::runtime::shared::nearest_existing_ancestor(location),
+                )
+                .ok()?;
+                if topology.common_dir != common_dir {
+                    return None;
+                }
+                topology.worktree_root.clone()
+            })
+            .map_or_else(
+                || self.admitted.clone(),
+                |root| normalize_worktree(&root.to_string_lossy()),
+            );
+        self.resolved
+            .insert(location.to_path_buf(), worktree.clone());
+        worktree
+    }
+}
+
+/// The session location a canonical record carries, if any.
+fn canonical_session_location(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+    envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Session {
+            location_path: Some(location),
+            ..
+        } if !location.trim().is_empty() => Some(location.as_str()),
+        _ => None,
+    })
+}
+
 /// Derives Git evidence from one privacy-approved canonical observation.
 ///
-/// The envelope contributes only typed Git facts and native identity/time.
-/// Worktree identity comes exclusively from the daemon-admitted repository
-/// root. Commit facts become relations only when the referenced object resolves
-/// independently to a commit in that admitted repository.
+/// The envelope contributes typed Git facts, its session location and native
+/// identity/time. A timestamped message or Git fact is activity in the
+/// worktree its location resolves to under [`AdmittedWorktrees`]; the branch
+/// is attached only when the host recorded one. Commit facts become relations
+/// only when the referenced object resolves independently to a commit in the
+/// admitted repository.
 #[hotpath::measure(label = "sessions.git_correlation.canonical_observation_evidence")]
 pub fn canonical_observation_git_evidence(
     sanitized_payload: &serde_json::Value,
-    admitted_project_root: &std::path::Path,
+    worktrees: &mut AdmittedWorktrees,
 ) -> Result<(Vec<CommitSessionRecord>, Vec<SpanObservation>), GitCorrelationError> {
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(sanitized_payload.clone()).map_err(|error| {
@@ -671,6 +751,7 @@ pub fn canonical_observation_git_evidence(
         })?;
     let mut branch = None;
     let mut commit_references = BTreeSet::new();
+    let mut conversational = false;
     for fact in envelope.facts() {
         let CanonicalObservationFactV1::Git {
             evidence_kind,
@@ -678,6 +759,7 @@ pub fn canonical_observation_git_evidence(
             ..
         } = fact
         else {
+            conversational |= matches!(fact, CanonicalObservationFactV1::Message { .. });
             continue;
         };
         match evidence_kind {
@@ -690,14 +772,14 @@ pub fn canonical_observation_git_evidence(
             _ => {}
         }
     }
-    if branch.is_none() && commit_references.is_empty() {
+    if !conversational && branch.is_none() && commit_references.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
 
     let provider = envelope.provider().as_str().to_owned();
     let session_id = envelope.relations().session_id().as_str().to_owned();
     let timestamp = envelope.evidence().native_timestamp();
-    let worktree = normalize_worktree(&admitted_project_root.to_string_lossy());
+    let worktree = worktrees.worktree_for(canonical_session_location(&envelope));
     let spans = timestamp
         .map(|ts| {
             vec![SpanObservation {
@@ -714,13 +796,17 @@ pub fn canonical_observation_git_evidence(
             }]
         })
         .unwrap_or_default();
+    if commit_references.is_empty() {
+        return Ok((Vec::new(), spans));
+    }
 
-    let repo =
-        tracedecay_runtime_core::git_open::discover(admitted_project_root).map_err(|error| {
+    let repo = tracedecay_runtime_core::git_open::discover(worktrees.admitted_root()).map_err(
+        |error| {
             GitCorrelationError::Unavailable(format!(
                 "admitted repository could not be opened for canonical commit evidence: {error}"
             ))
-        })?;
+        },
+    )?;
     let mut commits = Vec::new();
     for reference in commit_references {
         let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
