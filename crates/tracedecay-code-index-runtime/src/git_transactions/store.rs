@@ -820,10 +820,21 @@ mod gc_tests {
     ) -> GitIndexPreviewInputV1 {
         let template =
             super::super::test_support::preview_input(&super::super::test_support::preview());
-        GitIndexPreviewInputV1::new_commit(
-            GitIndexPreviewId::new(format!("preview.gc.{suffix}")).expect("preview id"),
+        let preview_id =
+            GitIndexPreviewId::new(format!("preview.gc.{suffix}")).expect("preview id");
+        let hunks = template
+            .hunks
+            .iter()
+            .map(|hunk| tracedecay_domain::HunkRefV1 {
+                preview_id: preview_id.as_str().to_owned(),
+                ..hunk.clone()
+            })
+            .collect();
+        GitIndexPreviewInputV1::new_hunk_selection(
+            preview_id,
+            template.operation,
             template.repository_snapshot,
-            template.commit_intent.expect("commit intent"),
+            hunks,
             created_at,
             expires_at,
         )

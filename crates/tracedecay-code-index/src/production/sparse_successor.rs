@@ -217,10 +217,13 @@ impl<'p> SealedSuccessorV1<'p> {
             &self.index_of_path,
             &self.occurrence_of_path,
             &self.parent_key_of_path,
-        )?;
+        );
+        // A stand-in for an undecodable file can trip a contract inside the
+        // resolution; the decode failure is the cause and wins.
         if let Some(error) = self.failure.take() {
             return Err(error);
         }
+        let resolution = resolution?;
         let mut files = BTreeMap::new();
         for (file_index, resolved) in resolution.files {
             let file = self.present[file_index];

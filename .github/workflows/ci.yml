@@ -71,7 +71,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@9e47493557a6716c185b1bc3247cd22c3b6b5bae
+        uses: ScriptedAlchemy/cargo-hauler@0c6802739ae73827a2ae05565b4997af5d119b3f
         with:
           mode: route
           token: ${{ github.token }}
@@ -556,7 +556,7 @@ jobs:
       - name: Install Cargo Hauler
         run: |
           echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
-          npm install --global cargo-hauler@0.13.4
+          npm install --global cargo-hauler@0.13.6
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
@@ -1262,6 +1262,24 @@ jobs:
           (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
           pnpm run build
           (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
+
+      - name: Build TypeScript SDK for the ChatGPT extension
+        working-directory: sdks/typescript
+        run: pnpm run build
+
+      - name: Typecheck ChatGPT extension
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run typecheck
+
+      # extension.test.ts needs a tracedecay binary, which this job does not
+      # build; the adapter tests run against a fake `serve`.
+      - name: Run ChatGPT extension adapter tests
+        working-directory: plugin/chatgpt-extension
+        run: pnpm exec vitest run test/adapter.test.ts
+
+      - name: Verify ChatGPT extension embedded artifacts
+        working-directory: plugin/chatgpt-extension
+        run: pnpm run check:embedded
 
   hermes-integration:
     name: Hermes integration (stock)

@@ -166,7 +166,8 @@ fn rename_identifier(source: &str, name: &str, renamed: &str) -> String {
 struct DifferentialCounts {
     /// Edits sealed over their parent.
     sparse: usize,
-    /// Edits whose edited file moved name lookups, sealed cold.
+    /// Edits whose edited file moved name lookups or Go method sets, sealed
+    /// cold.
     cold: usize,
     /// Sparse edits whose cross-file edges or call limitations moved.
     moved: usize,
@@ -194,8 +195,8 @@ fn restored_answers(
 /// `index`, through one owner, so the edit builds over its sealed parent.
 /// Asserts that the edit seals the file segments and graph pages, the
 /// statistics, and the restored edges and call limitations a cold build of
-/// the edited tree seals, and that only an edit that moved name lookups
-/// resolved the corpus whole.
+/// the edited tree seals, and that only an edit that moved name lookups or
+/// Go method sets resolved the corpus whole.
 fn assert_seals_like_cold(
     base_tree: &[(String, String)],
     base_fresh: Option<usize>,
@@ -255,7 +256,10 @@ fn assert_seals_like_cold(
                 counts.moved += 1;
             }
         }
-        Some(CodeIndexColdBuildReasonV1::MovesNameLookups) => {
+        Some(
+            CodeIndexColdBuildReasonV1::MovesNameLookups
+            | CodeIndexColdBuildReasonV1::MovesGoMethodSets,
+        ) => {
             assert_eq!(build_resolutions, 1, "the whole build after editing {path}");
             counts.cold += 1;
         }
@@ -352,9 +356,9 @@ fn go_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("go"),
         DifferentialCounts {
-            sparse: 46,
-            cold: 20,
-            moved: 46,
+            sparse: 37,
+            cold: 29,
+            moved: 37,
         }
     );
 }

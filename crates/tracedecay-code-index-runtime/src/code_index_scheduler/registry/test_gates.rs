@@ -17,8 +17,8 @@ use super::{
     ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
     QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
-    cold_mount_open_controls, cold_mount_post_check_controls, graph_decode_gate,
-    published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
+    graph_decode_gate, published_text_projection_gate, query_admission_controls, serving_swap_gate,
     unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -80,6 +80,39 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) async fn wait_for_serving_swap_gate(project_root: &Path) {
         let gate = serving_swap_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next complete-seat probe for `project_root` right after its
+    /// read missed. The first receiver resolves once the probe waits there;
+    /// sending on the returned sender releases it.
+    #[cfg(test)]
+    pub fn pause_next_complete_seat_probe_miss(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let replaced = complete_seat_probe_miss_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, WorkerStepGateV1 { entered, release });
+        assert!(
+            replaced.is_none(),
+            "one complete-seat probe gate per worktree"
+        );
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_complete_seat_probe_miss_gate(project_root: &Path) {
+        let gate = complete_seat_probe_miss_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(project_root);

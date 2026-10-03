@@ -206,28 +206,9 @@ fn compile_probe_warning(project: &Path) -> String {
 }
 
 fn assert_invalid_request(response: &Value, detail: &str) {
-    assert!(
-        response["result"].is_null(),
-        "an invalid expand request must be a JSON-RPC error, not a tool result: {response}"
-    );
-    assert_eq!(response["error"]["code"], -32602, "{response}");
-    assert_eq!(response["error"]["data"]["tool"], TOOL);
     assert_eq!(
-        response["error"]["data"]["reason_code"],
-        "application_surface_invalid_request"
-    );
-    assert_eq!(response["error"]["data"]["retryable"], false);
-    assert_eq!(response["error"]["data"]["kind"], "invalid_request");
-    assert_eq!(
-        response["error"]["data"]["code"],
-        "application_surface_invalid_request"
-    );
-    assert_eq!(response["error"]["data"]["detail"], detail);
-    assert_eq!(
-        response["error"]["message"],
-        format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
-        )
+        crate::support::route_refusal(response),
+        crate::support::application_surface_refusal_error(detail)
     );
 }
 

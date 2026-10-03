@@ -51,17 +51,45 @@ impl ApplicationRefusal {
 /// An owner's refusal as the error its first-party caller returns: the
 /// owner's reason code, retryability, and typed detail or diagnostic.
 pub fn problem_error(problem: ApplicationProblemEnvelope) -> TraceDecayError {
-    let record = *problem.problem;
+    problem_record_error(*problem.problem)
+}
+
+/// The owner refusal an `isError` tool result carries at
+/// `structuredContent.problem`, as the error its first-party caller returns.
+#[must_use]
+pub fn tool_result_refusal(result: &Value) -> Option<TraceDecayError> {
+    if result.get("isError").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let record = crate::tool_errors::tool_result_problem(result)?;
+    serde_json::from_value::<ApplicationProblemRecord>(record.clone())
+        .ok()
+        .map(problem_record_error)
+}
+
+fn problem_record_error(record: ApplicationProblemRecord) -> TraceDecayError {
+    let wire = serde_json::to_value(&record).ok();
     let (reason_code, message) = match record.diagnostic {
         Some(diagnostic) => (diagnostic.code, diagnostic.message),
         None => (record.code, record.message),
     };
-    match record.detail {
+    let error = match record.detail {
         Some(detail) => {
             TraceDecayError::project_route_with_detail(reason_code, record.retryable, detail)
         }
         None => TraceDecayError::project_route(reason_code, record.retryable, message),
+    };
+    match wire {
+        Some(wire) => error.with_problem_record(wire),
+        None => error,
     }
+}
+
+/// The owner's problem a refusal error carries, when an owner refusal
+/// produced it.
+#[must_use]
+pub fn error_problem_record(error: &TraceDecayError) -> Option<ApplicationProblemRecord> {
+    serde_json::from_value(error.project_route_problem_record()?.clone()).ok()
 }
 
 /// Renders one settled application call. A problem is a semantic failure

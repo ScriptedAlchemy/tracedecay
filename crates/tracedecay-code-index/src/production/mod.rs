@@ -59,6 +59,7 @@ use super::{
 mod canonical_json;
 mod clone_rows;
 mod file_evidence_rows;
+mod go_satisfaction;
 mod helpers;
 mod module_resolution;
 mod projection_rows;
@@ -916,7 +917,9 @@ pub struct CodeIndexPublishedGenerationV1 {
     lineage: Vec<SymbolLineageCandidateV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
-    /// Canonical unresolved-call limitations derived while sealing.
+    /// Canonical unresolved-reference limitations derived while sealing:
+    /// `Calls` rows are call sites without an edge, `Implements` rows are Go
+    /// interfaces whose implementors the seal could not decide.
     unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
@@ -2162,12 +2165,16 @@ where
             );
             let (edges, edge_abstentions, unresolved_calls) =
                 hotpath::measure_block!("code_index.build.assemble.graph_outputs", {
-                    let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
-                    let unresolved = resolution_outputs::unresolved_calls_for_edges(
+                    let (edges, abstentions, implementor_gaps) =
+                        collect_edge_evidence(&staged.files)?;
+                    let mut unresolved = resolution_outputs::unresolved_calls_for_edges(
                         &staged.files,
                         &edges,
                         &|| Ok(()),
                     )?;
+                    unresolved.extend(implementor_gaps);
+                    unresolved.sort();
+                    unresolved.dedup();
                     Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))
                 })?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(

@@ -134,10 +134,12 @@ pub use clone_body::{
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
 pub use extraction_artifact::{
-    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1,
-    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, ExtractionArtifactV1, ImportModuleKindV1,
-    ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceIssueV1, SchemaEvidenceLanguageV1,
-    SchemaEvidenceStatusV1, SqlSchemaActionV1, SqlSchemaObjectKindV1, import_module_kind,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedGoMethodSetRowV1,
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1,
+    ExtractionArtifactV1, GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1,
+    ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, SqlSchemaActionV1, SqlSchemaObjectKindV1,
+    import_module_kind,
 };
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;

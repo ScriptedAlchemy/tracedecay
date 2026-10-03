@@ -614,6 +614,7 @@ where
                 phrases: std::borrow::Cow::Owned(parts.phrases),
                 proximities: std::borrow::Cow::Owned(Vec::new()),
                 field_filters: std::borrow::Cow::Owned(Vec::new()),
+                path_prefix: None,
                 fuzzy_budget: options.fuzzy_budget,
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),
                 score_domain: prototype.lexical_score_domain.clone(),

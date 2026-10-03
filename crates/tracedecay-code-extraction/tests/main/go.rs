@@ -500,3 +500,294 @@ func (c Circle) Area() float64 { return c.R }\n";
     assert!(contains.contains(&("Shape", "Area")), "{contains:?}");
     assert!(contains.contains(&("Shape", "Scale")), "{contains:?}");
 }
+
+fn go_method_set_rows(source: &str) -> Vec<(String, tracedecay_code_extraction::GoMethodSetRowV1)> {
+    let artifact = GoExtractor.extract_artifact("pkg/file.go", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let mut rows: Vec<_> = artifact
+        .go_method_sets
+        .iter()
+        .map(|row| {
+            let name = artifact
+                .result
+                .nodes
+                .iter()
+                .find(|node| node.id == row.node_id)
+                .map(|node| node.name.clone())
+                .expect("method-set row names an extracted node");
+            (name, row.row.clone())
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn text(token: &str) -> tracedecay_code_extraction::GoTypeTokenV1 {
+    tracedecay_code_extraction::GoTypeTokenV1::Text(token.to_owned())
+}
+
+fn local(name: &str) -> tracedecay_code_extraction::GoTypeTokenV1 {
+    tracedecay_code_extraction::GoTypeTokenV1::Local(name.to_owned())
+}
+
+#[test]
+fn test_go_method_signature_strips_names_and_expands_grouped_params() {
+    use tracedecay_code_extraction::{GoMethodSetRowV1, GoMethodSignatureV1};
+    let rows = go_method_set_rows(
+        r#"package calc
+
+type Simple struct{}
+
+func (s *Simple) Add(a, b int) (sum int, err error) { return a + b, nil }
+func (Simple) Log(format string, args ...any) {}
+"#,
+    );
+    assert_eq!(
+        rows,
+        [
+            (
+                "Add".to_owned(),
+                GoMethodSetRowV1::Receiver {
+                    type_name: "Simple".to_owned(),
+                    method: GoMethodSignatureV1 {
+                        name: "Add".to_owned(),
+                        params: vec![vec![text("int")], vec![text("int")]],
+                        results: vec![vec![text("int")], vec![text("error")]],
+                    },
+                    generic: false,
+                },
+            ),
+            (
+                "Log".to_owned(),
+                GoMethodSetRowV1::Receiver {
+                    type_name: "Simple".to_owned(),
+                    method: GoMethodSignatureV1 {
+                        name: "Log".to_owned(),
+                        params: vec![vec![text("string")], vec![text("..."), text("any")]],
+                        results: vec![],
+                    },
+                    generic: false,
+                },
+            ),
+            ("Simple".to_owned(), GoMethodSetRowV1::NamedType),
+        ]
+    );
+}
+
+#[test]
+fn test_go_method_signature_tokenizes_qualified_and_composite_types() {
+    use tracedecay_code_extraction::{GoMethodSetRowV1, GoTypeTokenV1};
+    let rows = go_method_set_rows(
+        r#"package shapes
+
+import g "example.com/sat/geom"
+
+type Box struct{}
+
+func (Box) Map(m map[string]*g.Rect, f func(int) error) []Box { return nil }
+"#,
+    );
+    let Some((_, GoMethodSetRowV1::Receiver { method, .. })) =
+        rows.iter().find(|(name, _)| name == "Map")
+    else {
+        panic!("Map receiver row: {rows:?}");
+    };
+    assert_eq!(
+        method.params,
+        [
+            vec![
+                text("map"),
+                text("["),
+                text("string"),
+                text("]"),
+                text("*"),
+                GoTypeTokenV1::Qualified {
+                    package: "g".to_owned(),
+                    name: "Rect".to_owned(),
+                },
+            ],
+            vec![
+                text("func"),
+                text("("),
+                text("int"),
+                text(")"),
+                text("("),
+                text("error"),
+                text(")"),
+            ],
+        ]
+    );
+    assert_eq!(method.results, [vec![text("["), text("]"), local("Box")]]);
+}
+
+#[test]
+fn test_go_generic_receiver_binds_its_type_name() {
+    use tracedecay_code_extraction::GoMethodSetRowV1;
+    let source = r#"package gen
+
+type List[T any] struct{ items []T }
+
+func (l *List[T]) Len() int { return len(l.items) }
+"#;
+    let rows = go_method_set_rows(source);
+    assert!(
+        rows.iter().any(|(name, row)| name == "Len"
+            && matches!(row, GoMethodSetRowV1::Receiver { type_name, .. } if type_name == "List")),
+        "generic receiver row: {rows:?}"
+    );
+    let result = GoExtractor.extract_artifact("gen/list.go", source).result;
+    assert_eq!(edge_pairs(&result, EdgeKind::Receives), [("Len", "List")]);
+}
+
+#[test]
+fn test_go_receiver_marks_methods_whose_signature_names_its_type_parameters() {
+    use tracedecay_code_extraction::GoMethodSetRowV1;
+    let rows = go_method_set_rows(
+        r#"package gen
+
+type T int
+
+type List[T any] struct{}
+
+func (l *List[T]) Len() int { return 0 }
+func (l List[U]) First() U { var v U; return v }
+func (l List[U]) Each(f func(U) bool) {}
+func (l List[U]) Base() T { return 0 }
+func (l List[string]) Label() string { var v string; return v }
+"#,
+    );
+    let generic = rows
+        .iter()
+        .filter_map(|(name, row)| match row {
+            GoMethodSetRowV1::Receiver { generic, .. } => Some((name.as_str(), *generic)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generic,
+        [
+            ("Base", false),
+            ("Each", true),
+            ("First", true),
+            ("Label", true),
+            ("Len", false)
+        ],
+        "the receiver's own parameter names decide, not the type declaration's"
+    );
+}
+
+#[test]
+fn test_go_interface_rows_record_methods_embeddings_and_generics() {
+    use tracedecay_code_extraction::{GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1};
+    let rows = go_method_set_rows(
+        r#"package io
+
+import "io"
+
+type Rows interface {
+    io.Reader
+    Count() int
+}
+
+type Box[T any] interface {
+    Get() T
+}
+
+type Any interface{}
+"#,
+    );
+    assert_eq!(
+        rows,
+        [
+            ("Any".to_owned(), GoMethodSetRowV1::EmptyInterface),
+            ("Box".to_owned(), GoMethodSetRowV1::GenericInterface),
+            (
+                "Rows".to_owned(),
+                GoMethodSetRowV1::InterfaceMethod {
+                    method: GoMethodSignatureV1 {
+                        name: "Count".to_owned(),
+                        params: vec![],
+                        results: vec![vec![text("int")]],
+                    },
+                },
+            ),
+            (
+                "Rows".to_owned(),
+                GoMethodSetRowV1::Embeds {
+                    embedded: vec![GoTypeTokenV1::Qualified {
+                        package: "io".to_owned(),
+                        name: "Reader".to_owned(),
+                    }],
+                },
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_go_embedded_fields_and_named_aliases_promote_methods() {
+    use tracedecay_code_extraction::{GoMethodSetRowV1, GoTypeTokenV1};
+    let rows = go_method_set_rows(
+        r#"package wrap
+
+import "bytes"
+
+type Base struct{}
+
+type Ptr struct{}
+
+type List[T any] struct{}
+
+type Wrapped struct {
+    Base
+    *Ptr
+    bytes.Buffer
+    List[int]
+    name string
+}
+
+type Same = Base
+
+type Many = []Base
+"#,
+    );
+    let promotes =
+        |name: &str, embedded| (name.to_owned(), GoMethodSetRowV1::Promotes { embedded });
+    let field = |name: &str| {
+        (
+            "Wrapped".to_owned(),
+            GoMethodSetRowV1::Field {
+                name: name.to_owned(),
+            },
+        )
+    };
+    let buffer = GoTypeTokenV1::Qualified {
+        package: "bytes".to_owned(),
+        name: "Buffer".to_owned(),
+    };
+    assert_eq!(
+        rows,
+        [
+            ("Base".to_owned(), GoMethodSetRowV1::NamedType),
+            ("List".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Many".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Ptr".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Same".to_owned(), GoMethodSetRowV1::NamedType),
+            promotes("Same", vec![local("Base")]),
+            ("Wrapped".to_owned(), GoMethodSetRowV1::NamedType),
+            promotes("Wrapped", vec![local("Base")]),
+            promotes("Wrapped", vec![local("List")]),
+            promotes("Wrapped", vec![local("Ptr")]),
+            promotes("Wrapped", vec![buffer]),
+            field("Base"),
+            field("Buffer"),
+            field("List"),
+            field("Ptr"),
+            field("name"),
+        ]
+    );
+}

@@ -629,25 +629,18 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
     assert_invalid(&over_limit);
     assert_application_invalid_request(
         &as_of_without_cutoff,
-        "tracedecay_lcm_load_session",
         "temporal_mode: missing field `cutoff`",
     );
 
-    assert_application_invalid_request(
-        &missing_session,
-        "tracedecay_lcm_load_session",
-        "missing field `session_id`",
-    );
+    assert_application_invalid_request(&missing_session, "missing field `session_id`");
     assert_application_invalid_request(
         &unknown_field,
-        "tracedecay_lcm_load_session",
         "not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, \
          `cursor`, `temporal_mode`, `limit`, `role`, `roles`, `start_time`, `end_time`, \
          `content_offset`, `content_limit`",
     );
     assert_application_invalid_request(
         &negative_limit,
-        "tracedecay_lcm_load_session",
         "limit: invalid value: integer `-1`, expected u64",
     );
 

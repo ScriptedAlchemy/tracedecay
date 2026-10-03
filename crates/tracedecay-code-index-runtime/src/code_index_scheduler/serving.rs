@@ -2350,6 +2350,16 @@ impl LatestCodeTextGenerationV1 {
         None
     }
 
+    /// The held predecessor whatever this generation's readiness, as the
+    /// resident-memory inventory must see it: it holds its graph until
+    /// released or dropped, not until a read next checks readiness.
+    pub(super) fn held_graph_predecessor(&self) -> Option<Self> {
+        self.graph_predecessor
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     pub(super) fn release_graph_predecessor(&self) {
         drop(self.take_graph_predecessor());
     }

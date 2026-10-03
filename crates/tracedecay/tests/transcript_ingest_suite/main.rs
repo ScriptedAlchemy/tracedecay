@@ -24,6 +24,7 @@ mod cursor_composer;
 mod git_correlation;
 mod hermes;
 mod kiro;
+mod linked_worktree_sessions;
 mod pi;
 mod projector_upgrade;
 mod provider_contract;

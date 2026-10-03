@@ -53,6 +53,18 @@ impl SqliteDriverError {
     }
 }
 
+/// The typed forms a project-route refusal carries beside its reason code.
+#[derive(Debug, Default)]
+pub struct ProjectRouteTyped {
+    detail: Option<ApplicationProblemDetailV1>,
+    /// The owner's `ApplicationProblemRecord` in its serde wire form, when an
+    /// owner refusal produced the error. The record type is defined above
+    /// this crate, so it travels as its wire value and the rendering boundary
+    /// reconstitutes it typed rather than re-deriving its kind, retry
+    /// directive, and legal actions from the reason code.
+    problem_record: Option<serde_json::Value>,
+}
+
 #[derive(Error, Debug)]
 pub enum TraceDecayError {
     #[error("file error: {message} (path: {path})")]
@@ -105,7 +117,7 @@ pub enum TraceDecayError {
         reason_code: String,
         retryable: bool,
         detail: String,
-        typed_detail: Option<Box<ApplicationProblemDetailV1>>,
+        typed_detail: Option<Box<ProjectRouteTyped>>,
     },
 
     /// A project open failed for a reason its admission acts on: first-touch
@@ -491,8 +503,27 @@ impl TraceDecayError {
             reason_code: reason_code.into(),
             retryable,
             detail: detail.message(),
-            typed_detail: Some(Box::new(detail)),
+            typed_detail: Some(Box::new(ProjectRouteTyped {
+                detail: Some(detail),
+                problem_record: None,
+            })),
         }
+    }
+
+    /// Attaches the owner's problem record a project-route refusal came from.
+    #[must_use]
+    pub fn with_problem_record(mut self, record: serde_json::Value) -> Self {
+        if let Self::ProjectRoute { typed_detail, .. } = &mut self {
+            typed_detail.get_or_insert_default().problem_record = Some(record);
+        }
+        self
+    }
+
+    pub fn project_route_problem_record(&self) -> Option<&serde_json::Value> {
+        let Self::ProjectRoute { typed_detail, .. } = self else {
+            return None;
+        };
+        typed_detail.as_deref()?.problem_record.as_ref()
     }
 
     pub fn project_route_context(&self) -> Option<(&str, bool, &str)> {
@@ -512,7 +543,7 @@ impl TraceDecayError {
         let Self::ProjectRoute { typed_detail, .. } = self else {
             return None;
         };
-        typed_detail.as_deref()
+        typed_detail.as_deref()?.detail.as_ref()
     }
 
     pub fn database_operation(

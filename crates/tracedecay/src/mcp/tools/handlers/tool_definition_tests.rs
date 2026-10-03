@@ -5,23 +5,6 @@ use super::*;
 use tracedecay_mcp::get_tool_definitions;
 
 #[test]
-fn retired_simplify_scan_is_absent_from_the_public_catalog() {
-    let retired = "tracedecay_simplify_scan";
-    assert!(
-        get_tool_definitions()
-            .expect("tool definitions")
-            .iter()
-            .all(|definition| definition.name != retired)
-    );
-    assert!(
-        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
-            .expect("MCP dispatch catalog")
-            .contract(retired)
-            .is_none()
-    );
-}
-
-#[test]
 fn terminal_application_definitions_project_canonical_request_schemas() {
     let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");

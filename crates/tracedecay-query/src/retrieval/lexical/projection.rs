@@ -627,7 +627,7 @@ impl<'request> PreparedLexicalQueryV1<'request> {
     }
 }
 
-fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
+pub(crate) fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
     match kind {
         ExactTechnicalTermKindV1::WholeSymbol => ExactFieldV1::Identifier,
         ExactTechnicalTermKindV1::QualifiedName => ExactFieldV1::QualifiedName,

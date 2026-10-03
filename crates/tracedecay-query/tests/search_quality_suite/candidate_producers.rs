@@ -6617,6 +6617,7 @@ pub(crate) fn lexical_request(
         phrases: Cow::Owned(phrases.iter().map(|term| (*term).to_owned()).collect()),
         proximities: Cow::Owned(Vec::new()),
         field_filters: Cow::Owned(Vec::<LexicalFieldFilterV1>::new()),
+        path_prefix: None,
         fuzzy_budget,
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(QUERY_LEXICAL_SCORE_DOMAIN_V1),

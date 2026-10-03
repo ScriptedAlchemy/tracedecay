@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod callers_coverage;
+mod go_interface_satisfaction;
 mod relation_page_cost;
 mod restart_seat;
 mod typed_evidence_trailers;
@@ -1705,18 +1706,28 @@ async fn test_rank_invalid_direction() {
 #[tokio::test]
 async fn test_unknown_tool() {
     let cg = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await;
-    match result {
-        Err(err) => {
-            let err_msg = format!("{}", err);
-            assert!(
-                err_msg.contains("unknown tool"),
-                "error should mention 'unknown tool', got: {}",
-                err_msg,
-            );
-        }
-        Ok(_) => panic!("unknown tool should produce an error"),
-    }
+    let problem = crate::support::expect_tool_refusal(
+        call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await,
+    );
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["diagnostic"]["code"],
+            &problem["retryable"]
+        ),
+        (
+            &json!("invalid_request"),
+            &json!("unknown_tool"),
+            &json!(false)
+        ),
+        "{problem}"
+    );
+    assert!(
+        problem["diagnostic"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown tool")),
+        "{problem}"
+    );
 }
 
 #[tokio::test]

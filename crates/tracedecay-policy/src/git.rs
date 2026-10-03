@@ -18,7 +18,6 @@ pub enum GitIndexEffectV1 {
     Preview,
     StageHunks,
     UnstageHunks,
-    CommitIndex,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,7 +25,6 @@ pub enum GitIndexEffectV1 {
 pub enum GitEffectClassV1 {
     Preview,
     IndexMutation,
-    CommitCreation,
 }
 
 impl GitIndexEffectV1 {
@@ -34,7 +32,6 @@ impl GitIndexEffectV1 {
         match self {
             Self::Preview => GitEffectClassV1::Preview,
             Self::StageHunks | Self::UnstageHunks => GitEffectClassV1::IndexMutation,
-            Self::CommitIndex => GitEffectClassV1::CommitCreation,
         }
     }
 

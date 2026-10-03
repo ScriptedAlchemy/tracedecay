@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessResidentSampleV1, ProcessSharedMemoryReservationV1,
     ResidentHoldingV1, ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
@@ -16,9 +17,10 @@ use tracedecay_runtime_core::resident_memory::{
 use super::super::{
     CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexWorkerPhaseV1,
 };
+
 use super::{
-    CodeIndexSchedulerRegistryV1, GitFixture, core_search_request, git,
-    mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
+    CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING, core_search_request,
+    git, mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
     wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
     with_untouched_fillers,
@@ -122,6 +124,60 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     assert_eq!(
         after.authorized.fallback.ordered_candidates,
         fresh.authorized.fallback.ordered_candidates
+    );
+
+    registry.shutdown().await;
+}
+
+/// The decode a complete read demands can seat between that read's miss and
+/// its look at the slot. The read serves that seat instead of refusing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_read_serves_the_seat_its_demand_lands_after_its_miss() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    assert_eq!(owners.release_idle(Instant::now() + IDLE_WINDOW).len(), 1);
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "only the text owner stays seated"
+    );
+
+    let root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (missed, release_probe) = registry.pause_next_complete_seat_probe_miss(root);
+    let read = tokio::spawn({
+        let registry = registry.clone();
+        let scope = scope.clone();
+        async move {
+            registry
+                .latest_complete_fresh_for_scope_awaiting_seat(
+                    &scope,
+                    tokio::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
+                )
+                .await
+        }
+    });
+    missed
+        .await
+        .expect("the read misses before the decode seats");
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    release_probe.send(()).expect("the probe waits at its gate");
+
+    let served = read.await.expect("read task").expect(
+        "a seat that landed after the miss serves the read instead of ending it unavailable",
+    );
+    assert_eq!(
+        served.generation.manifest().generation_id,
+        seated.generation.manifest().generation_id
     );
 
     registry.shutdown().await;
