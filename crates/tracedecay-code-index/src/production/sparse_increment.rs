@@ -306,15 +306,18 @@ impl SparseBuildV1<'_> {
         if plan.is_full_rebuild() {
             return Ok(Err(CodeIndexColdBuildReasonV1::FullRebuild));
         }
-        let parent_evidence = parent.generation_evidence()?;
-        if parent_evidence.projection_request.target_projection_key() != self.target_projection_key
-        {
-            return Ok(Err(CodeIndexColdBuildReasonV1::ProjectionKeyChange));
-        }
         if plan.deleted > 0
             || present_paths(&snapshot.files) != present_paths(&parent.snapshot().files)
         {
             return Ok(Err(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved));
+        }
+        if parent
+            .generation_evidence()?
+            .projection_request
+            .target_projection_key()
+            != self.target_projection_key
+        {
+            return Ok(Err(CodeIndexColdBuildReasonV1::ProjectionKeyChange));
         }
         let parent_rows = parent
             .snapshot()
