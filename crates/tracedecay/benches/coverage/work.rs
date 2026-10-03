@@ -312,57 +312,85 @@ fn cancel_attempt_step(task: &str, run: &str, attempt: &str, request: &str) -> P
     }
 }
 
+// The recovery sweep seals any `cancellation_*` residue the cancel left
+// behind: a cancel that lands while the provider is still spawning parks the
+// row in `cancellation_requested`, and the topology's single parallel-attempt
+// slot stays occupied until the sweep completes it to `cancelled`.
+fn resume_attempts_step() -> PrimeStep {
+    PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_work_resume_attempts",
+        args: json!({"occurred_at": "{{now}}"}),
+        capture: &[],
+    }
+}
+
 fn cleanup_cancel_start(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![cancel_attempt_step(
-        "task.bench.{{iter}}",
-        "run.bench.{{iter}}",
-        "attempt.bench.{{iter}}",
-        "cancel.cleanup.bench.{{iter}}",
-    )]
+    vec![
+        cancel_attempt_step(
+            "task.bench.{{iter}}",
+            "run.bench.{{iter}}",
+            "attempt.bench.{{iter}}",
+            "cancel.cleanup.bench.{{iter}}",
+        ),
+        resume_attempts_step(),
+    ]
 }
 
 fn cleanup_cancel_pz(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![cancel_attempt_step(
-        "task.bench.{{iter}}",
-        "run.bench.pz.{{iter}}",
-        "attempt.bench.pz.{{iter}}",
-        "cancel.cleanup.bench.pz.{{iter}}",
-    )]
+    vec![
+        cancel_attempt_step(
+            "task.bench.{{iter}}",
+            "run.bench.pz.{{iter}}",
+            "attempt.bench.pz.{{iter}}",
+            "cancel.cleanup.bench.pz.{{iter}}",
+        ),
+        resume_attempts_step(),
+    ]
 }
 
 fn cleanup_cancel_rz(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![cancel_attempt_step(
-        "task.bench.{{iter}}",
-        "run.bench.rz.{{iter}}",
-        "attempt.bench.rz.{{iter}}",
-        "cancel.cleanup.bench.rz.{{iter}}",
-    )]
+    vec![
+        cancel_attempt_step(
+            "task.bench.{{iter}}",
+            "run.bench.rz.{{iter}}",
+            "attempt.bench.rz.{{iter}}",
+            "cancel.cleanup.bench.rz.{{iter}}",
+        ),
+        resume_attempts_step(),
+    ]
 }
 
 fn cleanup_cancel_retry(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
     // The retried attempt lands under the seeded attempt's task/run scope.
     let w = w(ctx);
-    vec![PrimeStep {
-        inject: Vec::new(),
-        tool: "tracedecay_work_cancel_attempt",
-        args: json!({
-            "task_id": w.task_id,
-            "run_id": w.run_id,
-            "attempt_id": "attempt.retry.bench.{{iter}}",
-            "request_id": "cancel.cleanup.bench.retry.{{iter}}",
-            "occurred_at": "{{now}}",
-        }),
-        capture: &[],
-    }]
+    vec![
+        PrimeStep {
+            inject: Vec::new(),
+            tool: "tracedecay_work_cancel_attempt",
+            args: json!({
+                "task_id": w.task_id,
+                "run_id": w.run_id,
+                "attempt_id": "attempt.retry.bench.{{iter}}",
+                "request_id": "cancel.cleanup.bench.retry.{{iter}}",
+                "occurred_at": "{{now}}",
+            }),
+            capture: &[],
+        },
+        resume_attempts_step(),
+    ]
 }
 
 fn cleanup_cancel_synth(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    vec![cancel_attempt_step(
-        "task.bench.synth.{{iter}}",
-        "run.bench.synth.{{iter}}",
-        "attempt.bench.synth.{{iter}}",
-        "cancel.cleanup.bench.synth.{{iter}}",
-    )]
+    vec![
+        cancel_attempt_step(
+            "task.bench.synth.{{iter}}",
+            "run.bench.synth.{{iter}}",
+            "attempt.bench.synth.{{iter}}",
+            "cancel.cleanup.bench.synth.{{iter}}",
+        ),
+        resume_attempts_step(),
+    ]
 }
 
 // ── workflow primes ─────────────────────────────────────────────────────

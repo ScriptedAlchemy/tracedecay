@@ -1642,7 +1642,11 @@ async fn seed_work_attempt_provider(
     seeds: &mut Seeds,
 ) -> bool {
     let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
-    let executable_bytes: &[u8] = b"#!/bin/sh\nexit 0\n";
+    // A provider that exits instantly settles every attempt before the
+    // lifecycle can be exercised: cancel/pause/resume then have nothing live
+    // to operate on (`not-cancellable`). Thirty seconds stays well under the
+    // route's 60s duration ceiling while the cancel rung ends it promptly.
+    let executable_bytes: &[u8] = b"#!/bin/sh\nsleep 30\n";
     // Keep the provider outside the clone: `restore_repo` stashes and drops
     // untracked files between runs, which would leave the persisted
     // binding's canonical_path dangling and fail the next open's route
@@ -1678,13 +1682,18 @@ async fn seed_work_attempt_provider(
             return false;
         }
     };
-    let canonical_path_text = canonical_path.to_string_lossy().into_owned();
     let mut hasher = ManifestDigestHasher::new();
     hasher.update(executable_bytes);
+    let Some(artifact_digest) = hasher.finalize().ok() else {
+        seeds
+            .skipped
+            .push("work_provider: executable digest failed".to_owned());
+        return false;
+    };
     let Some(binding) = (|| {
         let executable = WorkExecutableReference::new(
             "executable.work.bench-provider".to_owned(),
-            hasher.finalize().ok()?,
+            artifact_digest.clone(),
         )
         .ok()?;
         let route = WorkRouteCandidateV1 {
@@ -1711,7 +1720,12 @@ async fn seed_work_attempt_provider(
                 environment_allowlist: BTreeSet::new(),
                 credential_references: BTreeSet::new(),
                 limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).ok()?,
-                maximum_duration_micros: 60_000_000,
+                // Attempt deadline = admit instant + this budget. It must span
+                // the whole prime chain (admit → placement → start) under
+                // transient retries: an expired deadline refuses provider
+                // dispatch (invalid-holder) and the attempt ends terminal
+                // before the lifecycle steps can cancel it.
+                maximum_duration_micros: 900_000_000,
                 fallback: WorkFallbackTopology::Disabled,
             },
         };
@@ -1739,10 +1753,15 @@ async fn seed_work_attempt_provider(
             .push("work_provider: configuration_get failed".to_owned());
         return false;
     };
-    let current_text = json!(current).to_string();
-    if current_text.contains("executable.work.bench-provider")
-        && current_text.contains(&canonical_path_text)
-    {
+    // Structural compare, not a text match: the response re-serializes with a
+    // different field order than the struct writes. Every persisted field —
+    // digest, path, and execution profile like maximum_duration_micros —
+    // must match: a stale profile (e.g. a shorter attempt budget) is as
+    // wrong as a stale file.
+    let want = serde_json::to_value(&binding).unwrap_or(Value::Null);
+    let mut all = Vec::new();
+    objects(&current, &mut all);
+    if all.iter().any(|obj| **obj == want) {
         return true;
     }
     let mut last_err = String::new();
@@ -1880,29 +1899,37 @@ async fn settle_attempt(
         .ok()
         .and_then(|v| dig(v, "identity").cloned())
         .unwrap_or(Value::Null);
+    let terminal = |state: &str| {
+        matches!(state, "succeeded" | "failed" | "timed_out" | "cancelled")
+    };
     let mut state = String::new();
-    for _ in 0..60 {
+    // Lease-fence conflicts retry the running transition asynchronously for
+    // tens of seconds; the attempt stays non-terminal meanwhile and occupies
+    // the topology's single parallel-attempt slot. The poll budget covers
+    // that retry window without starving the daemon's idle watchdog.
+    for _ in 0..250 {
         if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await {
             state = dig_str(&s, "state").unwrap_or("").to_owned();
-            if state == "running"
-                || matches!(
-                    state.as_str(),
-                    "succeeded" | "failed" | "timed_out" | "cancelled"
-                )
-            {
+            if state == "running" || terminal(&state) {
                 break;
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    if state == "running" {
+    // The topology admits a single global active attempt: any non-terminal
+    // residue here, not just a running one, occupies that slot for every
+    // later start_attempt.
+    for _ in 0..3 {
+        if terminal(&state) {
+            break;
+        }
         let _ = call(
             "tracedecay_work_cancel_attempt",
             json!({
                 "task_id": task_id,
                 "run_id": run_id,
                 "attempt_id": attempt_id,
-                "request_id": format!("cancel.bench.{attempt_id}"),
+                "request_id": format!("cancel.bench.{attempt_id}.{}", now_micros()),
                 "occurred_at": now_micros(),
             }),
         )
@@ -1910,7 +1937,28 @@ async fn settle_attempt(
         for _ in 0..60 {
             if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await
                 && let Some(st) = dig_str(&s, "state")
-                && matches!(st, "succeeded" | "failed" | "timed_out" | "cancelled")
+                && terminal(st)
+            {
+                state = st.to_owned();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // A cancellation observed while the provider is still spawning can leave
+    // the row parked in `cancellation_requested`: the orphaned mark_running
+    // transition already lost its fence, so only the recovery sweep seals the
+    // lost cancellation to `cancelled`.
+    if !terminal(&state) {
+        let _ = call(
+            "tracedecay_work_resume_attempts",
+            json!({"occurred_at": now_micros()}),
+        )
+        .await;
+        for _ in 0..60 {
+            if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await
+                && let Some(st) = dig_str(&s, "state")
+                && terminal(st)
             {
                 state = st.to_owned();
                 break;
@@ -2158,13 +2206,25 @@ async fn seed_work(
     } else {
         work.attempt_identity = identity;
     }
+    if !matches!(
+        state.as_str(),
+        "succeeded" | "failed" | "timed_out" | "cancelled"
+    ) {
+        seeds.skipped.push(format!(
+            "work_start_attempt: seed attempt left active ({state}); \
+             it occupies the topology's single parallel-attempt slot"
+        ));
+    }
     // A second attempt gives duplicate-adjudication a pair of identities.
+    // It starts on its own run: two attempts on one lease fence race the
+    // first attempt's terminal transition and wedge both transitions on a
+    // lease-fence conflict.
     let dup = id("dup_attempt_id");
-    let (dup_started, dup_identity, _) = settle_attempt(
+    let (dup_started, dup_identity, dup_state) = settle_attempt(
         harness,
         project_root,
         &work.task_id,
-        &work.run_id,
+        &format!("run.dup.bench.{suffix}"),
         &dup,
         &work.execution_snapshot,
         &commit,
@@ -2172,6 +2232,16 @@ async fn seed_work(
     .await;
     if dup_started.is_ok() && !dup_identity.is_null() {
         work.dup_attempt_identity = Some(dup_identity);
+    }
+    if dup_started.is_ok()
+        && !matches!(
+            dup_state.as_str(),
+            "succeeded" | "failed" | "timed_out" | "cancelled"
+        )
+    {
+        seeds.skipped.push(format!(
+            "work_start_attempt: dup seed attempt left active ({dup_state})"
+        ));
     }
 
     // ── current graph read for verified versions + generation ids ────────

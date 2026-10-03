@@ -205,6 +205,49 @@ fn run_query(
     })
 }
 
+// Lease-fence, capacity, and not-yet-cancellable verdicts are the contract's
+// transient conflicts here: an in-flight mark_running, a leased attempt whose
+// provider is still spawning, a run-control authority mid-admission, or a
+// still-settling cancellation resolves them inside a bounded window, and the
+// problem carries the AfterRevalidate directive. Prime/cleanup steps retry
+// that window; the timed call still fails loudly.
+const TRANSIENT_STEP_CODES: &[&str] = &[
+    "fence-conflict",
+    "capacity-exhausted",
+    "not-cancellable",
+    "authority-conflict",
+    "live-holder",
+    "deadline_exceeded",
+];
+
+fn call_step_transient(
+    rt: &Runtime,
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &std::path::Path,
+    tool: &str,
+    args: Value,
+) -> Result<Value, String> {
+    for attempt in 0..240 {
+        match rt.block_on(queries::call_json_tool(
+            harness,
+            project_root,
+            tool,
+            args.clone(),
+        )) {
+            Err(error)
+                if attempt < 239
+                    && TRANSIENT_STEP_CODES
+                        .iter()
+                        .any(|code| error.contains(code)) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 /// Effect-lane setup: run the prime chain untimed, capturing `{{token}}`
 /// values from each step's payload, then return the timed call's substituted
 /// arguments. The result is fallible so the group warm-up can degrade an
@@ -238,14 +281,10 @@ fn run_primes(
         tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, &tokens);
-        let payload = rt
-            .block_on(queries::call_json_tool(
-                harness,
-                project_root,
-                step.tool,
-                args,
-            ))
-            .map_err(|error| format!("{} prime step {} failed: {error}", q.tool, step.tool))?;
+        let payload =
+            call_step_transient(rt, harness, project_root, step.tool, args).map_err(|error| {
+                format!("{} prime step {} failed: {error}", q.tool, step.tool)
+            })?;
         capture_tokens(&payload, step.capture, &mut tokens, q)?;
     }
     // The timed call observes state after its primes: verified-snapshot reads
@@ -303,14 +342,10 @@ fn run_cleanup(
         }
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, tokens);
-        let payload = rt
-            .block_on(queries::call_json_tool(
-                harness,
-                project_root,
-                step.tool,
-                args,
-            ))
-            .map_err(|error| format!("{} cleanup step {} failed: {error}", q.tool, step.tool))?;
+        let payload =
+            call_step_transient(rt, harness, project_root, step.tool, args).map_err(|error| {
+                format!("{} cleanup step {} failed: {error}", q.tool, step.tool)
+            })?;
         capture_tokens(&payload, step.capture, tokens, q)?;
     }
     Ok(())
