@@ -11,7 +11,7 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
     SymbolOccurrenceId, UnmodeledImportShapeV1,
 };
-use tracedecay_graph_db::GraphEntityId;
+use tracedecay_graph_db::{GraphEntityId, GraphGenerationId, GraphRelationId};
 
 use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, symbol_entity_id};
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
@@ -239,6 +239,7 @@ impl CatalogSymbol {
 /// A map frozen from the `BTreeMap` it was built in: its entries sorted by
 /// key in one exactly sized allocation. It answers the same lookups and
 /// ordered walks without B-tree nodes, so the catalog knows its own bytes.
+#[derive(PartialEq)]
 pub(in crate::graph_projection) struct SortedMap<K, V>(Box<[(K, V)]>);
 
 impl<K: Ord, V> SortedMap<K, V> {
@@ -267,8 +268,43 @@ impl<K: Ord, V> SortedMap<K, V> {
         self.0.iter().map(|(_, value)| value)
     }
 
+    pub(in crate::graph_projection) fn keys(&self) -> impl Iterator<Item = &K> {
+        self.0.iter().map(|(key, _)| key)
+    }
+
     pub(in crate::graph_projection) fn len(&self) -> usize {
         self.0.len()
+    }
+
+    /// This map with `edits` applied: `Some` replaces or inserts the entry,
+    /// `None` removes it. Untouched entries are cloned in order, so the
+    /// result is one exactly sized sorted allocation like the original.
+    pub(super) fn edited(&self, edits: BTreeMap<K, Option<V>>) -> Self
+    where
+        K: Clone,
+        V: Clone,
+    {
+        let mut merged = Vec::with_capacity(self.0.len().saturating_add(edits.len()));
+        let mut edits = edits.into_iter().peekable();
+        for (key, value) in &self.0 {
+            while let Some((edit_key, _)) = edits.peek()
+                && edit_key < key
+            {
+                if let Some((edit_key, Some(edit_value))) = edits.next() {
+                    merged.push((edit_key, edit_value));
+                }
+            }
+            match edits.peek() {
+                Some((edit_key, _)) if edit_key == key => {
+                    if let Some((edit_key, Some(edit_value))) = edits.next() {
+                        merged.push((edit_key, edit_value));
+                    }
+                }
+                _ => merged.push((key.clone(), value.clone())),
+            }
+        }
+        merged.extend(edits.filter_map(|(key, value)| value.map(|value| (key, value))));
+        Self(merged.into_boxed_slice())
     }
 
     /// The entry slice plus what each key and value owns.
@@ -286,21 +322,118 @@ impl<K, V> From<BTreeMap<K, V>> for SortedMap<K, V> {
     }
 }
 
-/// Symbol ids of one lookup key, frozen to their exact count.
-type SymbolIds = Box<[SymbolOccurrenceId]>;
+/// Symbol ids of one lookup key, ascending and distinct, frozen to their
+/// exact count. Ascending occurrence order is the contract every list
+/// keeps, whether a scan or a carry produced it.
+pub(super) type SymbolIds = Box<[SymbolOccurrenceId]>;
+
+pub(super) fn frozen_ids(mut ids: Vec<SymbolOccurrenceId>) -> SymbolIds {
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_boxed_slice()
+}
 
 fn freeze_ids<K: Ord>(map: BTreeMap<K, Vec<SymbolOccurrenceId>>) -> SortedMap<K, SymbolIds> {
     SortedMap(
         map.into_iter()
-            .map(|(key, ids)| (key, ids.into_boxed_slice()))
+            .map(|(key, ids)| (key, frozen_ids(ids)))
             .collect(),
     )
+}
+
+/// What one delta entity contributes to the catalog, by the key the catalog
+/// files it under; `Other` rows (the generation marker) contribute nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum DeltaEntityV1 {
+    File(FileOccurrenceId),
+    Symbol(SymbolOccurrenceId),
+    Import(CodeIndexImportEvidenceV1),
+    Other,
+}
+
+/// What one delta relation contributes to the catalog: a code edge's
+/// degrees and file dependency, or an import's file link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum DeltaRelationV1 {
+    Edge {
+        kind: RelationEdgeKindV1,
+        from: SymbolOccurrenceId,
+        to: SymbolOccurrenceId,
+    },
+    ImportLink {
+        import: GraphEntityId,
+    },
+    Other,
+}
+
+/// What a layered generation's catalog serves differently from its sealed
+/// base's: the base rows it hides, and what each row of its delta
+/// contributes. A successor over the same base reverses those
+/// contributions from here, so it never reads this generation's rows,
+/// which retention retires once the successor publishes.
+#[derive(PartialEq)]
+pub(super) struct CatalogLayerV1 {
+    pub(super) base_generation: GraphGenerationId,
+    /// Ascending.
+    pub(super) hidden_entities: Box<[GraphEntityId]>,
+    /// Ascending.
+    pub(super) hidden_relations: Box<[GraphRelationId]>,
+    pub(super) delta_entities: SortedMap<GraphEntityId, DeltaEntityV1>,
+    pub(super) delta_relations: SortedMap<GraphRelationId, DeltaRelationV1>,
+}
+
+impl CatalogLayerV1 {
+    pub(super) fn hides_entity(&self, identity: &GraphEntityId) -> bool {
+        self.hidden_entities.binary_search(identity).is_ok()
+    }
+
+    pub(super) fn hides_relation(&self, identity: &GraphRelationId) -> bool {
+        self.hidden_relations.binary_search(identity).is_ok()
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let import_bytes = |import: &CodeIndexImportEvidenceV1| import_heap_bytes(import);
+        self.hidden_entities
+            .iter()
+            .fold(
+                self.hidden_entities.len() * size_of::<GraphEntityId>(),
+                |bytes, id| bytes + id.as_str().len(),
+            )
+            .saturating_add(self.hidden_relations.iter().fold(
+                self.hidden_relations.len() * size_of::<GraphRelationId>(),
+                |bytes, id| bytes + id.as_str().len(),
+            ))
+            .saturating_add(self.delta_entities.bytes(|id, entity| {
+                id.as_str().len()
+                    + match entity {
+                        DeltaEntityV1::File(file) => file.as_str().len(),
+                        DeltaEntityV1::Symbol(occurrence) => occurrence.as_str().len(),
+                        DeltaEntityV1::Import(import) => import_bytes(import),
+                        DeltaEntityV1::Other => 0,
+                    }
+            }))
+            .saturating_add(self.delta_relations.bytes(|id, relation| {
+                id.as_str().len()
+                    + match relation {
+                        DeltaRelationV1::Edge { from, to, .. } => {
+                            from.as_str().len() + to.as_str().len()
+                        }
+                        DeltaRelationV1::ImportLink { import } => import.as_str().len(),
+                        DeltaRelationV1::Other => 0,
+                    }
+            }))
+    }
 }
 
 /// Generation-pinned catalog of every file, symbol, and import entity in one
 /// published graph. It is derived from the verified snapshot and remains a
 /// lookup cache rather than a second projection authority.
 pub(in crate::graph_projection) struct InteractiveCatalog {
+    /// The graph generation the catalog describes.
+    pub(super) generation: GraphGenerationId,
+    /// How the generation layers over its sealed base; `None` for a cold
+    /// generation.
+    pub(super) layer: Option<CatalogLayerV1>,
     pub(super) symbols: SortedMap<SymbolOccurrenceId, CatalogSymbol>,
     pub(super) by_qualified_name: SortedMap<String, SymbolIds>,
     /// Keyed by the lowercased trailing segment of the qualified name (split
@@ -319,12 +452,128 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) unresolved_sources_by_entity: SortedMap<GraphEntityId, SymbolOccurrenceId>,
     pub(super) symbols_by_kind: SortedMap<String, u64>,
     pub(super) files_by_language: SortedMap<String, u64>,
+    /// Symbols bound to each logical path; `largest_files` ranks it.
+    pub(super) symbols_by_logical_path: SortedMap<String, u64>,
     pub(super) largest_files: Vec<CodeGraphFileSymbolCountV1>,
     pub(super) semantic_edges: u64,
+    /// `calls`/`uses` edges between each ordered pair of distinct bound
+    /// files; `file_dependencies.adjacency` is its key set. Counted, so a
+    /// carry that drops one edge keeps the pair while another edge holds it.
+    pub(super) dependency_edge_counts: SortedMap<(String, String), u64>,
     pub(super) file_dependencies: CodeGraphFileDependenciesV1,
     /// The heap the catalog was built in, with the bytes of its pages when
     /// the build returned. Last, so every map above drops before the heap.
     pub(super) heap: Option<(OwnerHeapV1, u64)>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl InteractiveCatalog {
+    /// The lookups, censuses, and dependencies on which `self` and `other`
+    /// differ, by name; empty when the two serve exactly the same answers.
+    /// The heap a catalog was built in is not part of what it serves.
+    pub(in crate::graph_projection) fn differences(&self, other: &Self) -> Vec<&'static str> {
+        let mut differences = Vec::new();
+        let mut compare = |name: &'static str, same: bool| {
+            if !same {
+                differences.push(name);
+            }
+        };
+        compare("generation", self.generation == other.generation);
+        compare("layer", self.layer == other.layer);
+        compare("symbols", self.symbols == other.symbols);
+        compare(
+            "by_qualified_name",
+            self.by_qualified_name == other.by_qualified_name,
+        );
+        compare(
+            "by_simple_name",
+            self.by_simple_name == other.by_simple_name,
+        );
+        compare("by_file", self.by_file == other.by_file);
+        compare(
+            "by_logical_path",
+            self.by_logical_path == other.by_logical_path,
+        );
+        compare("files", self.files == other.files);
+        compare("imports", self.imports == other.imports);
+        compare(
+            "unresolved_call_sources",
+            self.unresolved_call_sources == other.unresolved_call_sources,
+        );
+        compare(
+            "unresolved_sources_by_entity",
+            self.unresolved_sources_by_entity == other.unresolved_sources_by_entity,
+        );
+        compare(
+            "symbols_by_kind",
+            self.symbols_by_kind == other.symbols_by_kind,
+        );
+        compare(
+            "files_by_language",
+            self.files_by_language == other.files_by_language,
+        );
+        compare(
+            "symbols_by_logical_path",
+            self.symbols_by_logical_path == other.symbols_by_logical_path,
+        );
+        compare("largest_files", self.largest_files == other.largest_files);
+        compare(
+            "semantic_edges",
+            self.semantic_edges == other.semantic_edges,
+        );
+        compare(
+            "dependency_edge_counts",
+            self.dependency_edge_counts == other.dependency_edge_counts,
+        );
+        compare(
+            "file_dependencies",
+            self.file_dependencies == other.file_dependencies,
+        );
+        differences
+    }
+}
+
+/// The ranking `CodeGraphCensusV1::largest_files` serves: most symbol-dense
+/// files first, ties by path.
+pub(super) fn rank_largest_files(
+    symbols_by_logical_path: &SortedMap<String, u64>,
+) -> Vec<CodeGraphFileSymbolCountV1> {
+    let mut largest_files: Vec<_> = symbols_by_logical_path
+        .iter()
+        .map(|(logical_path, symbols)| CodeGraphFileSymbolCountV1 {
+            logical_path: logical_path.clone(),
+            symbols: *symbols,
+        })
+        .collect();
+    largest_files.sort_by(|left, right| {
+        right
+            .symbols
+            .cmp(&left.symbols)
+            .then_with(|| left.logical_path.cmp(&right.logical_path))
+    });
+    largest_files
+}
+
+/// The adjacency consumers read, folded from the counted pairs.
+pub(super) fn fold_file_dependencies(
+    dependency_edge_counts: &SortedMap<(String, String), u64>,
+    files: &SortedMap<FileOccurrenceId, SanitizedCodeFileV1>,
+    dependency_edges: u64,
+) -> CodeGraphFileDependenciesV1 {
+    let mut adjacency: HashMap<String, HashSet<String>> = files
+        .values()
+        .map(|file| (file.logical_path.clone(), HashSet::new()))
+        .collect();
+    for ((source, target), _) in dependency_edge_counts.iter() {
+        adjacency
+            .entry(source.clone())
+            .or_default()
+            .insert(target.clone());
+    }
+    CodeGraphFileDependenciesV1 {
+        adjacency: Arc::new(adjacency),
+        dependency_edges,
+    }
 }
 
 /// The catalog while a scan fills it: ordered maps that take one entry at a
@@ -361,12 +610,25 @@ impl CatalogBuilder {
         }
     }
 
+    /// The logical path a `calls`/`uses` endpoint is bound to.
+    pub(super) fn bound_logical_path(&self, occurrence: &SymbolOccurrenceId) -> Option<&str> {
+        self.symbols
+            .get(occurrence)?
+            .binding
+            .as_ref()?
+            .logical_path
+            .as_deref()
+    }
+
     /// Derives the generation-wide aggregates once every file and symbol,
     /// with its degrees, is recorded, and freezes every map.
+    /// `dependency_edges` are the `calls`/`uses` edges' endpoints.
     pub(super) fn finish(
         self,
+        generation: GraphGenerationId,
+        layer: Option<CatalogLayerV1>,
         imports: Vec<CodeIndexImportEvidenceV1>,
-        file_dependencies: CodeGraphFileDependenciesV1,
+        dependency_edges: &[(SymbolOccurrenceId, SymbolOccurrenceId)],
     ) -> InteractiveCatalog {
         let mut files_by_language = BTreeMap::new();
         for file in self.files.values() {
@@ -376,35 +638,44 @@ impl CatalogBuilder {
                     .or_default() += 1;
             }
         }
-        let mut largest_files: Vec<_> = self
-            .symbols_by_logical_path
-            .into_iter()
-            .map(|(logical_path, symbols)| CodeGraphFileSymbolCountV1 {
-                logical_path,
-                symbols,
-            })
-            .collect();
-        largest_files.sort_by(|left, right| {
-            right
-                .symbols
-                .cmp(&left.symbols)
-                .then_with(|| left.logical_path.cmp(&right.logical_path))
-        });
+        let mut dependency_edge_counts = BTreeMap::<(String, String), u64>::new();
+        for (from, to) in dependency_edges {
+            if let (Some(source), Some(target)) =
+                (self.bound_logical_path(from), self.bound_logical_path(to))
+                && source != target
+            {
+                *dependency_edge_counts
+                    .entry((source.to_owned(), target.to_owned()))
+                    .or_default() += 1;
+            }
+        }
         let semantic_edges = self.symbols.values().map(|symbol| symbol.outgoing).sum();
+        let files: SortedMap<_, _> = self.files.into();
+        let symbols_by_logical_path: SortedMap<_, _> = self.symbols_by_logical_path.into();
+        let dependency_edge_counts: SortedMap<_, _> = dependency_edge_counts.into();
+        let file_dependencies = fold_file_dependencies(
+            &dependency_edge_counts,
+            &files,
+            dependency_edges.len() as u64,
+        );
         InteractiveCatalog {
+            generation,
+            layer,
             symbols: self.symbols.into(),
             by_qualified_name: freeze_ids(self.by_qualified_name),
             by_simple_name: freeze_ids(self.by_simple_name),
             by_file: freeze_ids(self.by_file),
             by_logical_path: self.by_logical_path.into(),
-            files: self.files.into(),
+            files,
             imports,
             unresolved_call_sources: freeze_ids(self.unresolved_call_sources),
             unresolved_sources_by_entity: self.unresolved_sources_by_entity.into(),
             symbols_by_kind: self.symbols_by_kind.into(),
             files_by_language: files_by_language.into(),
-            largest_files,
+            largest_files: rank_largest_files(&symbols_by_logical_path),
+            symbols_by_logical_path,
             semantic_edges,
+            dependency_edge_counts,
             file_dependencies,
             heap: None,
         }
@@ -498,6 +769,12 @@ impl InteractiveCatalog {
         );
         let bytes = ARC_HEADER_BYTES
             .saturating_add(size_of::<Self>())
+            .saturating_add(self.generation.as_str().len())
+            .saturating_add(
+                self.layer
+                    .as_ref()
+                    .map_or(0, CatalogLayerV1::retained_bytes),
+            )
             .saturating_add(self.symbols.bytes(symbol))
             .saturating_add(self.by_qualified_name.bytes(named_ids))
             .saturating_add(self.by_simple_name.bytes(named_ids))
@@ -528,6 +805,11 @@ impl InteractiveCatalog {
             ))
             .saturating_add(self.symbols_by_kind.bytes(counted))
             .saturating_add(self.files_by_language.bytes(counted))
+            .saturating_add(self.symbols_by_logical_path.bytes(counted))
+            .saturating_add(
+                self.dependency_edge_counts
+                    .bytes(|(source, target), _| source.capacity() + target.capacity()),
+            )
             .saturating_add(vec_bytes(
                 &self.largest_files,
                 self.largest_files.capacity(),
@@ -556,6 +838,16 @@ impl InteractiveCatalog {
             .get(occurrence)
             .map(|record| Self::symbol_summary(occurrence, record))
     }
+
+    /// The logical path a `calls`/`uses` endpoint is bound to.
+    pub(super) fn bound_logical_path(&self, occurrence: &SymbolOccurrenceId) -> Option<&str> {
+        self.symbols
+            .get(occurrence)?
+            .binding
+            .as_ref()?
+            .logical_path
+            .as_deref()
+    }
 }
 
 fn binding_heap_bytes(binding: &CodeGraphSymbolBindingV1) -> usize {
@@ -569,7 +861,7 @@ fn binding_heap_bytes(binding: &CodeGraphSymbolBindingV1) -> usize {
 }
 
 /// Lowercased trailing path segment of a qualified name.
-fn derived_simple_name(qualified_name: &str) -> String {
+pub(super) fn derived_simple_name(qualified_name: &str) -> String {
     let tail = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
     let tail = tail.rsplit('.').next().unwrap_or(tail);
     tail.to_lowercase()

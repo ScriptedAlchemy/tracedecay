@@ -54,8 +54,8 @@ use crate::{
     GraphGenerationRowSpill, GraphNamespace, GraphProjectionIdentity, GraphProjectionPage,
     GraphProjectionReadRequest, GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
     GraphRelation, GraphRelationId, GraphRelationKind, GraphRelationRef, GraphRelationTarget,
-    GraphWatermark, SourceGeneration, SpilledGraphGeneration, VerifiedTraversalResult,
-    VerifiedTraversalVisit,
+    GraphWatermark, NeverCancelled, SourceGeneration, SpilledGraphGeneration,
+    VerifiedTraversalResult, VerifiedTraversalVisit,
 };
 
 pub(crate) const LAYERED_BASE_CONTAINER_FILE: &str = "base.grafeo";
@@ -770,6 +770,19 @@ impl LayeredGraphGeneration {
     }
 }
 
+/// What a layered generation serves differently from its sealed base: the
+/// base rows it hides, and the rows its delta carries, which replace the
+/// base's of the same identity. A row in neither set is the base's row,
+/// byte for byte. Every list is ascending without duplicates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphLayeredRowsV1 {
+    pub base_generation: GraphGenerationId,
+    pub hidden_entities: Vec<GraphEntityId>,
+    pub delta_entities: Vec<GraphEntityId>,
+    pub hidden_relations: Vec<GraphRelationId>,
+    pub delta_relations: Vec<GraphRelationId>,
+}
+
 /// The read side of an installed layered generation: the base engine, the
 /// namespace its rows live under, and what the delta hides or shadows.
 pub(crate) struct SealedLayer {
@@ -808,9 +821,7 @@ impl SealedLayer {
             message: format!("layered hidden rows are unreadable: {error}"),
         })?;
         let delta_namespace = identity.physical_namespace()?;
-        let (delta_entities, delta_relations) = {
-            let guard = delta.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let (delta_entities, delta_relations) = delta.read_intact(&NeverCancelled, |database| {
             let entities = crate::state::projection_entity_nodes_sorted_checked(
                 database,
                 &delta_namespace,
@@ -829,8 +840,8 @@ impl SealedLayer {
             .into_iter()
             .map(|(identity, _)| GraphRelationId::new(identity.as_str()))
             .collect::<Result<HashSet<_>, _>>()?;
-            (entities, relations)
-        };
+            Ok((entities, relations))
+        })?;
         let proven = OnceLock::new();
         if base_proven {
             proven.get_or_init(|| ());
@@ -869,6 +880,50 @@ impl SealedLayer {
             self.base_proven.get_or_init(|| ());
         }
         Ok(&self.base)
+    }
+
+    /// The base generation and every row identity this layer serves
+    /// differently from it: the rows it hides and the delta's own.
+    pub(crate) fn layered_rows(&self) -> GraphLayeredRowsV1 {
+        fn sorted<T: Ord + Clone>(ids: &HashSet<T>) -> Vec<T> {
+            let mut ids: Vec<T> = ids.iter().cloned().collect();
+            ids.sort_unstable();
+            ids
+        }
+        GraphLayeredRowsV1 {
+            base_generation: self.base_identity.generation.clone(),
+            hidden_entities: sorted(&self.hidden_entities),
+            delta_entities: sorted(&self.delta_entities),
+            hidden_relations: sorted(&self.hidden_relations),
+            delta_relations: sorted(&self.delta_relations),
+        }
+    }
+
+    /// The base's own row for `identity`, whether or not this layer hides
+    /// or shadows it; `None` when the base never held it.
+    pub(crate) fn base_entity(
+        &self,
+        identity: &GraphEntityId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.proven_base()?
+            .entity(&self.base_namespace, identity, cancellation)
+    }
+
+    /// The base's own relation for `identity`, whether or not this layer
+    /// hides or shadows it; `None` when the base never held it.
+    pub(crate) fn base_relation(
+        &self,
+        projection: &GraphProjectionIdentity,
+        identity: &GraphRelationId,
+        cancellation: &dyn GraphCancellation,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        self.proven_base()?
+            .read_intact(cancellation, |native| {
+                load_relation(native, &self.base_namespace, identity)
+            })?
+            .map(|stored| generation_relation(projection, stored.relation))
+            .transpose()
     }
 
     /// Rows a base read may return that the layer then drops, the headroom a
@@ -955,9 +1010,11 @@ impl LayeredReads<'_> {
         if self.layer.hidden_entities.contains(identity) {
             return Ok(false);
         }
-        let guard = self.layer.proven_base()?.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        Ok(load_entity(native, &self.layer.base_namespace, identity)?.is_some())
+        self.layer
+            .proven_base()?
+            .read_intact(&NeverCancelled, |native| {
+                Ok(load_entity(native, &self.layer.base_namespace, identity)?.is_some())
+            })
     }
 
     fn relation_visible(&self, identity: &GraphRelationId) -> Result<bool, GraphDbError> {
@@ -967,9 +1024,11 @@ impl LayeredReads<'_> {
         if self.layer.hidden_relations.contains(identity) {
             return Ok(false);
         }
-        let guard = self.layer.proven_base()?.read_guard()?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        Ok(load_relation(native, &self.layer.base_namespace, identity)?.is_some())
+        self.layer
+            .proven_base()?
+            .read_intact(&NeverCancelled, |native| {
+                Ok(load_relation(native, &self.layer.base_namespace, identity)?.is_some())
+            })
     }
 
     /// The visible identities after `after` in one domain, ascending,
@@ -994,21 +1053,21 @@ impl LayeredReads<'_> {
             }
         };
         let page = |database: &GraphDb, namespace: &GraphNamespace, after: Option<&str>| {
-            let guard = database.read_database(cancellation)?;
-            let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            let owner_label = owner(namespace);
-            query_identity_page(
-                database,
-                native,
-                IdentityScope {
-                    owner_label: &owner_label,
-                    record_label,
-                    identity_property,
-                },
-                after,
-                limit,
-                cancellation,
-            )
+            database.read_intact(cancellation, |native| {
+                let owner_label = owner(namespace);
+                query_identity_page(
+                    database,
+                    native,
+                    IdentityScope {
+                        owner_label: &owner_label,
+                        record_label,
+                        identity_property,
+                    },
+                    after,
+                    limit,
+                    cancellation,
+                )
+            })
         };
         let delta = page(self.delta, &self.namespace, after)?;
         let mut base = Vec::with_capacity(limit);
@@ -1136,9 +1195,11 @@ impl LayeredReads<'_> {
         (entities, relations): (usize, usize),
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         crate::projection::check_cancelled(request.cancellation.as_ref())?;
-        let guard = self.delta.read_database(request.cancellation.as_ref())?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let Some(projection) = latest_projection(native, &self.namespace, &request.projection)?
+        let Some(projection) = self
+            .delta
+            .read_intact(request.cancellation.as_ref(), |native| {
+                latest_projection(native, &self.namespace, &request.projection)
+            })?
         else {
             return Ok(None);
         };

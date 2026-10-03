@@ -24,12 +24,13 @@ use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::workflow_index::WorkflowIngestSink;
 
 pub enum IngestAdmissionBinding<'a> {
-    /// Project-scoped admission, optionally carrying the repository
-    /// provenance read from the project's identity marker.
+    /// Project-scoped admission rooted at `project_root`, optionally carrying
+    /// the repository provenance read from the project's identity marker.
     Project {
         brain_id: &'a BrainId,
         profile_id: &'a UserProfileId,
         project_id: &'a ProjectId,
+        project_root: &'a std::path::Path,
         repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
     },
     /// Profile-scoped admission for user-global transcript sources.

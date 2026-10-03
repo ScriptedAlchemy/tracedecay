@@ -932,7 +932,10 @@ fn canonical_message_fields_for(
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
         let role = role.as_str();
-        let text = canonical_fact_text(content)?;
+        let text = match rendering {
+            CanonicalRendering::Current => canonical_message_text(content)?,
+            CanonicalRendering::ShippedRelease => canonical_fact_text(content)?,
+        };
         if let Some(semantics) = rendering_message_semantics(
             rendering,
             envelope.provider().as_str(),
@@ -1095,6 +1098,40 @@ fn canonical_message_fields_for(
         return Ok(Some(fields));
     }
     Ok(first_empty)
+}
+
+/// A content-block array renders as its text blocks and subagent dispatch
+/// inputs; other blocks stay in the envelope.
+fn canonical_message_text(content: &serde_json::Value) -> ProjectionStoreResult<String> {
+    let Some(blocks) = content.as_array() else {
+        return canonical_fact_text(content);
+    };
+    let parts = blocks
+        .iter()
+        .filter_map(
+            |block| match block.get("type").and_then(serde_json::Value::as_str)? {
+                "text" | "input_text" | "output_text" => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                "tool_use"
+                    if block
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_subagent_dispatch_tool) =>
+                {
+                    dispatch_text(block)
+                }
+                _ => None,
+            },
+        )
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        canonical_fact_text(content)
+    } else {
+        Ok(parts.join("\n\n"))
+    }
 }
 
 pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {

@@ -128,7 +128,7 @@ impl AgentIntegration for GeminiIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mGemini CLI integration\x1b[0m");
+        dc.section("Gemini CLI integration");
         doctor_check_staged_extension(dc, &ctx.home);
         doctor_check_installed_extension(dc, &ctx.home);
         doctor_check_host_reported_extensions(dc, &ctx.home);

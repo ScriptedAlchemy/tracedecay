@@ -42,6 +42,7 @@ use super::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
+mod carry;
 mod catalog;
 mod imports;
 mod models;
@@ -274,16 +275,33 @@ impl CodeGraphProjectionStore {
     /// Builds and validates the generation-pinned interactive catalog before
     /// serving latency-bounded reads. Only a fully built immutable catalog is
     /// published into the store's shared slot.
+    ///
+    /// With `predecessor`, the generation this one replaces, a layered
+    /// generation carries the predecessor's ready catalog and reads only the
+    /// rows the two generations serve differently; otherwise, and whenever
+    /// the carry declines, the projection is scanned.
     pub fn warm_interactive_catalog_with_cancellation(
         &self,
+        predecessor: Option<&CodeGraphProjectionStore>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
+        let parent = predecessor.and_then(CodeGraphProjectionStore::ready_catalog);
         let reader =
             self.interactive_reader_with_cancellation(&self.generation, Arc::clone(&cancellation))?;
-        reader.warm_catalog(cancellation)
+        reader.warm_catalog(parent, cancellation)
+    }
+
+    /// This store's ready catalog, as a successor carries it; `None` while
+    /// no catalog is ready.
+    fn ready_catalog(&self) -> Option<Arc<InteractiveCatalog>> {
+        let state = self.interactive_catalog.state.read().ok()?;
+        let InteractiveCatalogState::Ready(catalog) = &*state else {
+            return None;
+        };
+        Some(Arc::clone(catalog))
     }
 
     /// Marks the catalog as background warming before graph serving is
@@ -311,6 +329,16 @@ impl CodeGraphProjectionStore {
         self.interactive_catalog
             .scan_builds
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The lookups, censuses, and dependencies on which the two stores'
+    /// ready catalogs differ; empty when they serve exactly the same
+    /// answers. `None` while either store has no ready catalog.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn interactive_catalog_differences(&self, other: &Self) -> Option<Vec<&'static str>> {
+        let this = self.ready_catalog()?;
+        let that = other.ready_catalog()?;
+        Some(this.differences(&that))
     }
 
     /// Reports whether this store's generation-pinned interactive catalog has
@@ -1536,7 +1564,7 @@ impl CodeGraphInteractiveReader {
         &self,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Arc<InteractiveCatalog>, CodeGraphProjectionError> {
-        self.warm_catalog(cancellation)?;
+        self.warm_catalog(None, cancellation)?;
         let state = self
             .catalog
             .state
@@ -1577,7 +1605,7 @@ impl CodeGraphInteractiveReader {
             .spawn(move || {
                 // A failed build is recorded as the catalog's `Failed` state,
                 // which every later read and the serving status answer.
-                let _ = background.warm_catalog(Arc::new(NeverCancelled));
+                let _ = background.warm_catalog(None, Arc::new(NeverCancelled));
             });
         match spawned {
             Ok(_) => released,
@@ -1597,6 +1625,7 @@ impl CodeGraphInteractiveReader {
     /// is the catalog's measured warm-up when this call builds it.
     fn warm_catalog(
         &self,
+        parent: Option<Arc<InteractiveCatalog>>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
@@ -1604,7 +1633,7 @@ impl CodeGraphInteractiveReader {
         }
         self.catalog.clock.begin(WarmOwner::Catalog);
         let built = match self.catalog.build.lock() {
-            Ok(_build) => self.build_catalog_under_gate(cancellation),
+            Ok(_build) => self.build_catalog_under_gate(parent, cancellation),
             Err(_) => Err(catalog_lock_poisoned()),
         };
         self.catalog
@@ -1613,10 +1642,58 @@ impl CodeGraphInteractiveReader {
         built.map(|_| ())
     }
 
+    /// The catalog carried from `parent` when this generation layers over
+    /// the parent's base, otherwise scanned from the projection. A carry
+    /// that declines or finds its edits inconsistent falls back to the scan,
+    /// so a carry defect costs one scan instead of every warm build; the
+    /// scan still rejects a graph that is itself corrupt.
+    fn build_catalog(
+        &self,
+        parent: Option<Arc<InteractiveCatalog>>,
+        cancellation: &Arc<dyn GraphCancellation>,
+    ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
+        if let Some(parent) = parent {
+            match hotpath::measure_block!(
+                "code_graph.catalog.carry",
+                carry::carry_interactive_catalog(
+                    &parent,
+                    &self.snapshot,
+                    &self.projection,
+                    self.projection_node_count,
+                    Arc::clone(cancellation),
+                )
+            ) {
+                Ok(Ok(catalog)) => {
+                    hotpath::gauge!("code_graph.catalog.carried_builds").inc(1_u64);
+                    return Ok(catalog);
+                }
+                Ok(Err(decline)) => {
+                    hotpath::gauge!("code_graph.catalog.carry_declined").inc(1_u64);
+                    hotpath::val!("code_graph.catalog.carry_decline").set(&decline.as_str());
+                }
+                Err(CodeGraphProjectionError::Corrupt(message)) => {
+                    hotpath::gauge!("code_graph.catalog.carry_failed").inc(1_u64);
+                    hotpath::val!("code_graph.catalog.carry_failure").set(&message.as_str());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.catalog
+            .scan_builds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        catalog::build_interactive_catalog(
+            &self.snapshot,
+            &self.projection,
+            self.projection_node_count,
+            Arc::clone(cancellation),
+        )
+    }
+
     /// Builds and publishes the catalog unless one is ready; `Ok(true)` when
     /// this call published it. The caller holds the build gate.
     fn build_catalog_under_gate(
         &self,
+        parent: Option<Arc<InteractiveCatalog>>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
@@ -1651,20 +1728,10 @@ impl CodeGraphInteractiveReader {
             };
             taken_over
         };
-        self.catalog
-            .scan_builds
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         // Built in a heap of its own, the catalog's pages hold nothing else,
         // are charged as the catalog's, and return whole when it is dropped.
         let (built, heap) = hotpath::measure_block!("code_graph.catalog.build", {
-            OwnerHeapV1::build(|| {
-                catalog::build_interactive_catalog(
-                    &self.snapshot,
-                    &self.projection,
-                    self.projection_node_count,
-                    Arc::clone(&cancellation),
-                )
-            })
+            OwnerHeapV1::build(|| self.build_catalog(parent, &cancellation))
         });
         let result = built.and_then(|mut catalog| {
             if cancellation.is_cancelled() {

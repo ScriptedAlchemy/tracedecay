@@ -23,7 +23,7 @@ pub struct GitEvidencePass {
     /// Retained-history counters; `spans_written` and `commits_attributed`
     /// count the rows the pass changed.
     pub backfill: BackfillStats,
-    /// Durable `(activity, rowid)` history frontier after the pass.
+    /// Durable `(change sequence, rowid)` history frontier after the pass.
     pub frontier: GitHistoryIndexFrontier,
     /// The generation the pass installed; `None` when no row changed.
     pub generation: Option<GitEvidenceGeneration>,
@@ -46,13 +46,14 @@ pub struct GitEvidencePassOutcome {
 pub async fn converge_git_evidence_pass<S, G>(
     session_store: &S,
     git: &G,
+    project_root: Option<&std::path::Path>,
 ) -> Result<GitEvidencePassOutcome, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     G: GitReflogSource + ?Sized,
 {
     session_store.require_project_sessions_authority()?;
-    let backfill = collect_incremental_backfill(session_store, git).await?;
+    let backfill = collect_incremental_backfill(session_store, git, project_root).await?;
     let mut stats = backfill.stats;
     // Spans still inside their merge gap can gain commits made after their
     // last observation, so attribution revisits them until the gap closes.
