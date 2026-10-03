@@ -432,7 +432,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Drop a seat that no longer names the advertised generation. Search
     /// serves the text owner while the seat is empty, and holding the
     /// predecessor's decode would only keep a corpus-sized generation alive.
-    fn release_superseded_serving_seat(
+    pub(super) fn release_superseded_serving_seat(
         serving_generation: &ServingGenerationSlot,
         serving_generation_epoch: &AtomicU64,
         serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
