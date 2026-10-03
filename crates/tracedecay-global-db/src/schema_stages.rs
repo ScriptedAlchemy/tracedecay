@@ -1470,6 +1470,8 @@ pub async fn validate_observation_authority_connection(
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+    use tracedecay_lcm::LCM_SCHEMA_VERSION;
+    use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -1508,11 +1510,15 @@ mod tests {
     #[tokio::test]
     async fn released_session_feature_markers_refuse_session_stores_but_not_the_profile_authority()
     {
-        const AGE_SESSION_FEATURES: &str = "
-            UPDATE session_schema_migrations SET version = 13 WHERE name = 'lcm';
-            UPDATE session_schema_migrations SET version = 5 WHERE name = 'git_correlation';
-            UPDATE workflow_schema SET definition_digest =
-                'sha256:0000000000000000000000000000000000000000000000000000000000000000';";
+        const PREVIOUS_LCM: i64 = LCM_SCHEMA_VERSION - 1;
+        const PREVIOUS_GIT_CORRELATION: i64 = GIT_CORRELATION_SCHEMA_VERSION - 1;
+        let age_session_features = format!(
+            "UPDATE session_schema_migrations SET version = {PREVIOUS_LCM} WHERE name = 'lcm';
+             UPDATE session_schema_migrations SET version = {PREVIOUS_GIT_CORRELATION}
+             WHERE name = 'git_correlation';
+             UPDATE workflow_schema SET definition_digest =
+                'sha256:0000000000000000000000000000000000000000000000000000000000000000';"
+        );
         let directory = TempDir::new().unwrap();
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -1541,7 +1547,7 @@ mod tests {
             drop((lease, owner));
             rusqlite::Connection::open(&path)
                 .unwrap()
-                .execute_batch(AGE_SESSION_FEATURES)
+                .execute_batch(&age_session_features)
                 .unwrap();
 
             let (lease, owner) = open_registered_test_database_fixture(&path, scope)
@@ -1579,8 +1585,8 @@ mod tests {
         }
 
         let aged_markers = (
-            13,
-            5,
+            PREVIOUS_LCM,
+            PREVIOUS_GIT_CORRELATION,
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
         );
         assert_eq!(
@@ -1594,7 +1600,7 @@ mod tests {
                 ),
                 (
                     "user-sessions.db",
-                    Some(("LCM", Some(13), 14)),
+                    Some(("LCM", Some(PREVIOUS_LCM), LCM_SCHEMA_VERSION)),
                     vec!["project.registered".to_owned()],
                     aged_markers,
                 ),

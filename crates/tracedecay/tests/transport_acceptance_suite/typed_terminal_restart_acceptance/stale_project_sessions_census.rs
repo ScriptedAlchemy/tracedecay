@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use tracedecay_lcm::LCM_SCHEMA_VERSION;
+
 use super::stale_profile_authority_reset::{
     REGISTRY_REASON, STALE_STORE_RESET, doctor_store_resets,
     give_registry_the_released_graph_scope_shape, registered_project_ids,
@@ -198,12 +200,13 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
     let _ = daemon.kill_and_wait();
 }
 
-/// The shape v1.0.0-beta.65 left: every registered store, `global.db`
-/// included, records LCM schema 13. One census names the session stores
+/// The shape an LCM schema bump leaves (v1.0.0-beta.65 to 66): every
+/// registered store, `global.db` included, records the previous LCM schema. One census names the session stores
 /// only; the profile authority holds no session rows, so its registry keeps
 /// both projects through the scoped reset without another `tracedecay init`.
 #[test]
-fn lcm_13_profile_resets_its_session_stores_and_keeps_the_registry() {
+fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry() {
+    let previous = LCM_SCHEMA_VERSION - 1;
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = canonical_existing_path(home.path());
     let profile_root = home_path.join(".tracedecay");
@@ -221,7 +224,7 @@ fn lcm_13_profile_resets_its_session_stores_and_keeps_the_registry() {
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     for (_, path, _) in &projects {
-        super::initialize_project(&home_path, path, "lcm-13-profile");
+        super::initialize_project(&home_path, path, "previous-lcm-profile");
         wait_for_code_index_hit(&home_path, path, "probe");
     }
     // The profile session store is mounted by the first session read.
@@ -246,8 +249,8 @@ fn lcm_13_profile_resets_its_session_stores_and_keeps_the_registry() {
         let rewritten = rusqlite::Connection::open(profile_root.join(store))
             .expect("open a registered store")
             .execute(
-                "UPDATE session_schema_migrations SET version = 13 WHERE name = 'lcm'",
-                [],
+                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                [previous],
             )
             .expect("record the released LCM schema");
         assert_eq!(rewritten, 1, "{} records one LCM marker", store.display());
@@ -256,8 +259,9 @@ fn lcm_13_profile_resets_its_session_stores_and_keeps_the_registry() {
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     let lcm_reset = |store: &str| {
         format!(
-            "Store {store} requires reset (LCM profile schema 13 is incompatible with required \
-             schema 14; reset the profile). Pending operator action: run `{STALE_STORE_RESET}`"
+            "Store {store} requires reset (LCM profile schema {previous} is incompatible with \
+             required schema {LCM_SCHEMA_VERSION}; reset the profile). Pending operator action: \
+             run `{STALE_STORE_RESET}`"
         )
     };
     let (exit, mut pending) = doctor_store_resets(&home_path, first_project);

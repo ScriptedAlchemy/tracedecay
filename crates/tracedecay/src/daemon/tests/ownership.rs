@@ -309,6 +309,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         "aliases must share one route gate"
     );
 
+    tracedecay_runtime_core::git_repository::hold_repository_discovery_clock_for_test(&project);
     eprintln!("[cache-test] phase=concurrent-open start");
     let (direct_server, alias_server) = tokio::time::timeout(
         PHASE_TIMEOUT,
@@ -407,6 +408,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         "shutdown must break the server-to-administration ownership cycle"
     );
     eprintln!("[cache-test] phase=shutdown done");
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
 }
 
 /// A mounted route alias answers without re-running registry admission: the
