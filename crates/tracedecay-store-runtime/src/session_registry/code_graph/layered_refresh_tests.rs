@@ -236,7 +236,7 @@ fn answers(snapshot: VerifiedGraphSnapshot, generation: &CodeGenerationId) -> An
         .expect("mark warming");
     store.warm_serving_engine().expect("warm serving engine");
     store
-        .warm_interactive_catalog_with_cancellation(cancellation())
+        .warm_interactive_catalog_with_cancellation(None, cancellation())
         .expect("warm catalog");
     let reader = store
         .interactive_reader_with_cancellation(generation, cancellation())
@@ -693,6 +693,193 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     )
     .await;
     drop((base_runtime, child_runtime, grandchild_runtime));
+}
+
+/// A serving store over `snapshot` whose interactive catalog is warmed from
+/// `predecessor`, as graph activation warms it.
+fn warmed_store(
+    snapshot: VerifiedGraphSnapshot,
+    generation: &CodeGenerationId,
+    predecessor: Option<&CodeGraphProjectionStore>,
+) -> CodeGraphProjectionStore {
+    let store = CodeGraphProjectionStore::from_verified_snapshot(snapshot, generation.clone())
+        .expect("projection store");
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark warming");
+    store.warm_serving_engine().expect("warm serving engine");
+    store
+        .warm_interactive_catalog_with_cancellation(predecessor, Arc::new(NeverCancelled))
+        .expect("warm catalog");
+    store
+}
+
+/// What the catalog-backed graph reads answer: the census and the full
+/// degree ranking.
+fn catalog_reads(
+    store: &CodeGraphProjectionStore,
+    generation: &CodeGenerationId,
+) -> (
+    tracedecay_code_index::graph_projection::CodeGraphCensusV1,
+    tracedecay_code_index::graph_projection::CodeGraphDegreeRankingV1,
+) {
+    let cancellation =
+        || -> Arc<dyn tracedecay_graph_db::GraphCancellation> { Arc::new(NeverCancelled) };
+    let reader = store
+        .interactive_reader_with_cancellation(generation, cancellation())
+        .expect("interactive reader");
+    (
+        reader.census(16, cancellation()).expect("census"),
+        reader
+            .degree_ranking(100_000, cancellation())
+            .expect("degree ranking"),
+    )
+}
+
+/// Fails on a refresh whose interactive catalog is scanned from the whole
+/// projection instead of carried from the generation it replaces, and on a
+/// carried catalog that differs in any lookup, census, or dependency from
+/// the catalog a scan of the same generation derives. Covers a three-file
+/// edit over the cold base, a file added and deleted over that layered
+/// child (carried from the child and from the base alike), and a cold
+/// publication of the same tree, which has no base to carry over and scans.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, MODULES);
+    let project_root = fixture.project_root.clone();
+    let (source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("profile", 52).await;
+    let base_runtime = source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain the base graph runtime");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the base graph cold");
+    let base_store = warmed_store(base, &base_generation, None);
+    assert_eq!(base_store.interactive_catalog_scan_builds(), 1);
+
+    edit_three_files(&project_root, MODULES);
+    fixture.commit("edit three files");
+    let (source, child_generation, _, child_binding) = fixture.seal();
+    let child_runtime = source
+        .retain(
+            &registry,
+            &database,
+            &child_generation,
+            child_binding.clone(),
+        )
+        .await
+        .expect("retain the child graph runtime");
+    let child = child_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the refresh");
+    let carried_child = warmed_store(child.clone(), &child_generation, Some(&base_store));
+    assert_eq!(
+        carried_child.interactive_catalog_scan_builds(),
+        0,
+        "the refresh's catalog must be carried, not scanned"
+    );
+    let scanned_child = warmed_store(child, &child_generation, None);
+    assert_eq!(scanned_child.interactive_catalog_scan_builds(), 1);
+    assert_eq!(
+        carried_child.interactive_catalog_differences(&scanned_child),
+        Some(Vec::new()),
+        "the carried catalog differs from a scan of the same generation"
+    );
+    assert_ne!(
+        carried_child.interactive_catalog_differences(&base_store),
+        Some(Vec::new()),
+        "the edit must change the catalog"
+    );
+    assert_eq!(
+        catalog_reads(&carried_child, &child_generation),
+        catalog_reads(&scanned_child, &child_generation)
+    );
+
+    std::fs::remove_file(project_root.join("src/m030.rs")).expect("delete m030");
+    std::fs::write(
+        project_root.join("src/extra.rs"),
+        "pub fn extra_value() -> usize { crate::m031::value_031() + crate::m003::value_003() }\n",
+    )
+    .expect("add extra");
+    fixture.commit("add and delete a file");
+    let (source, grandchild_generation, _, grandchild_binding) = fixture.seal();
+    let grandchild_runtime = source
+        .retain(
+            &registry,
+            &database,
+            &grandchild_generation,
+            grandchild_binding,
+        )
+        .await
+        .expect("retain the grandchild graph runtime");
+    let grandchild = grandchild_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the second refresh");
+    let scanned_grandchild = warmed_store(grandchild.clone(), &grandchild_generation, None);
+    assert_eq!(scanned_grandchild.interactive_catalog_scan_builds(), 1);
+    // Carried from the layered child, and from the cold base directly: both
+    // predecessors share the grandchild's base.
+    for predecessor in [&carried_child, &base_store] {
+        let carried = warmed_store(
+            grandchild.clone(),
+            &grandchild_generation,
+            Some(predecessor),
+        );
+        assert_eq!(carried.interactive_catalog_scan_builds(), 0);
+        assert_eq!(
+            carried.interactive_catalog_differences(&scanned_grandchild),
+            Some(Vec::new()),
+            "the carried grandchild catalog differs from a scan of the same generation"
+        );
+        assert_eq!(
+            catalog_reads(&carried, &grandchild_generation),
+            catalog_reads(&scanned_grandchild, &grandchild_generation)
+        );
+    }
+    assert_ne!(
+        scanned_grandchild.interactive_catalog_differences(&scanned_child),
+        Some(Vec::new())
+    );
+
+    // The same child published cold in a fresh profile layers over nothing:
+    // a carry from the base declines, and the scan serves the same catalog.
+    let (_cold_scope, cold_registry, cold_database) =
+        fixture.open_profile("profile-cold", 53).await;
+    let cold_runtime = source
+        .retain(
+            &cold_registry,
+            &cold_database,
+            &child_generation,
+            child_binding,
+        )
+        .await
+        .expect("retain the cold child graph runtime");
+    let cold_child = cold_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the child cold");
+    let cold_child_store = warmed_store(cold_child, &child_generation, Some(&base_store));
+    assert_eq!(
+        cold_child_store.interactive_catalog_scan_builds(),
+        1,
+        "a cold generation has no base to carry over and scans"
+    );
+    assert_eq!(
+        cold_child_store.interactive_catalog_differences(&scanned_child),
+        Some(Vec::new())
+    );
+    drop((
+        base_runtime,
+        child_runtime,
+        grandchild_runtime,
+        cold_runtime,
+    ));
 }
 
 /// The layered report of a three-file refresh over a cold base of `modules`

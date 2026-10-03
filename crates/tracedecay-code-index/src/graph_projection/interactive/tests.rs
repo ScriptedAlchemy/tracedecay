@@ -1279,7 +1279,7 @@ fn a_read_past_its_budget_answers_the_measured_remaining_rewarm() {
     let warming = store.clone();
     with_catalog_warm_held(&store, hold, move || {
         warming
-            .warm_interactive_catalog_with_cancellation(request())
+            .warm_interactive_catalog_with_cancellation(None, request())
             .expect("the first warm builds the catalog");
     });
     assert!(matches!(
