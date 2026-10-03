@@ -900,6 +900,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if publication_authority_is_terminal(&worker_convergence_park) {
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
+                        &worker_wake,
                         CodeIndexCadenceTriggerV1::Mount,
                     );
                     tracing::debug!(
@@ -1338,8 +1339,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
                     &worker_pending_wake,
+                    &worker_wake,
                     CodeIndexCadenceTriggerV1::Mount,
                 );
+                if text_slice_incomplete {
+                    worker_wake.notify_one();
+                }
                 // A retryable native-graph failure defers only graph
                 // activation. Reconcile and finish the lightweight text owner
                 // before opening the full generation: a large graph replay
@@ -1552,19 +1557,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 // arrival: a self-woken pass with no arrival reproduces the
                 // identical Noop, and re-notifying it spins a generation-less
                 // worktree forever.
-                if retained_noop_requires_follow_up_wake(
+                let retained_noop_follow_up = retained_noop_requires_follow_up_wake(
                     serving_empty,
                     graph_activation_deferred,
                     arrival.wake_micros().is_some(),
                     matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
-                ) {
-                    // This is the one bounded second look for the arrival the
-                    // Noop just consumed. Keep it unattributed: publishing a
-                    // new pending arrival here would satisfy this same
-                    // predicate on every quiet successor and self-requeue
-                    // forever.
-                    worker_wake.notify_one();
-                }
+                );
                 if let Ok(Ok(outcome)) = &source_result {
                     Self::record_source_reconcile_observation(
                         worker_index_observability.get(),
@@ -1746,12 +1744,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 // must take the scheduler re-enters the pass around that
                 // acquisition (see `lock_scheduler_for_graph_step`); only the
                 // unlocked decode and native activation run outside it.
-                // A successor-only retained projection holds no pass guard of
-                // its own; keeping the worker's guard through graph seat would
-                // report rebuild_in_flight for work that is not query serving.
-                if retained_text_projection.is_none() || retained_projection_successor_only {
-                    drop(reconcile_pass.take());
-                }
                 let gate = GraphSeatGateV1::decide(
                     graph_activation_enabled,
                     graph_activation_deferred,
@@ -1790,6 +1782,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         published_pass,
                         "an arrival is pending; the optional graph decode yields this pass"
                     );
+                }
+                // Stamped after the yield sample, which the worker's own
+                // follow-up must not trigger, and before the guard drops, so
+                // freshness never reads Fresh while the follow-up is owed.
+                if retained_noop_follow_up {
+                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                }
+                // A successor-only retained projection holds no pass guard of
+                // its own; keeping the worker's guard through graph seat would
+                // report rebuild_in_flight for work that is not query serving.
+                if retained_text_projection.is_none() || retained_projection_successor_only {
+                    drop(reconcile_pass.take());
                 }
                 let mut prepare_graph =
                     gate == GraphSeatGateV1::Prepare && !arrival_pending_before_graph_prepare;
