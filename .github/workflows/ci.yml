@@ -71,7 +71,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@0c6802739ae73827a2ae05565b4997af5d119b3f
+        uses: ScriptedAlchemy/cargo-hauler@3146cc68bf6dd067aa302d30f3216e6dc2e01819
         with:
           mode: route
           token: ${{ github.token }}
@@ -556,7 +556,7 @@ jobs:
       - name: Install Cargo Hauler
         run: |
           echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
-          npm install --global cargo-hauler@0.13.6
+          npm install --global cargo-hauler@0.14.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
