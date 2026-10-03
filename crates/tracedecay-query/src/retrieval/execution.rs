@@ -12,7 +12,7 @@ use tracedecay_domain::{
     RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
 };
 
-use super::exact::ExactLaneEvidence;
+use super::exact::{ExactLaneEvidence, ExactLiteralV1};
 use super::graph::GraphLaneEvidence;
 use super::lexical::LexicalLaneEvidence;
 use super::ports::CodeCandidateBindingV1;
@@ -177,7 +177,7 @@ where
     pub fn exact(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>,
-        matched_literal: &str,
+        admitted_literals: &[ExactLiteralV1],
         expected_kind: Option<ExactTechnicalTermKindV1>,
         path_admitted: impl Fn(&str) -> bool,
     ) -> Result<NativeLaneOutcomeV1<NativeExactRecordV1>, QueryExecutionContractErrorV1> {
@@ -186,13 +186,13 @@ where
             for candidate in &batch.candidates {
                 let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
-                if !evidence
+                let Some(literal) = evidence
                     .matched_literals
                     .iter()
-                    .any(|literal| literal.original_bytes == matched_literal.as_bytes())
-                {
+                    .find(|literal| admitted_literals.contains(literal))
+                else {
                     continue;
-                }
+                };
                 let Some(matched_kind) = evidence
                     .binding
                     .matched_term_kinds
@@ -208,7 +208,8 @@ where
                     items.push(NativeExactRecordV1 {
                         occurrence,
                         matched_kind,
-                        matched_literal: matched_literal.to_owned(),
+                        matched_literal: String::from_utf8(literal.original_bytes.clone())
+                            .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?,
                     });
                 }
             }
@@ -353,11 +354,15 @@ where
     }
 
     fn page<E, T>(&self, batch: &RetrieverBatch<E>, items: Vec<T>) -> NativeLanePageV1<T> {
+        let excluded = (batch.candidates.len() as u64).saturating_sub(items.len() as u64);
+        let mut coverage = batch.coverage;
+        coverage.eligible = coverage.eligible.saturating_sub(excluded);
+        coverage.excluded = coverage.excluded.saturating_add(excluded);
         NativeLanePageV1 {
             generation: self.generation.clone(),
             items,
-            total_eligible: batch.coverage.eligible,
-            coverage: batch.coverage,
+            total_eligible: coverage.eligible,
+            coverage,
         }
     }
 }

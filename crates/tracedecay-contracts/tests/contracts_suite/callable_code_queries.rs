@@ -688,8 +688,9 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
             &[tracedecay_tool_catalog::ProfileId::new("profile.default").unwrap()]
         );
         let expected_binding_count = match kind {
-            CallableCodeOperationKind::ExactOccurrence => 5,
-            CallableCodeOperationKind::Callees => 4,
+            CallableCodeOperationKind::ExactOccurrence
+            | CallableCodeOperationKind::Callees
+            | CallableCodeOperationKind::References => 4,
             _ => 3,
         };
         assert_eq!(capability.binding_ids().len(), expected_binding_count);

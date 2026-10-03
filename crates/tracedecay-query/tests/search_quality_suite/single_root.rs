@@ -289,6 +289,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
     let exact_request = ExactLaneRequest {
         control: &FixtureRetrievalExecutionControl,
         literals: authority.parse_literals(&exact_query_view, &request),
+        path_prefix: None,
         base: request.clone(),
         query_view: &exact_query_view,
         generation: generation.clone(),

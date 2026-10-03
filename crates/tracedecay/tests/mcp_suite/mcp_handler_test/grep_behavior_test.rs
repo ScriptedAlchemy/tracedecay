@@ -91,6 +91,7 @@ fn source_coverage(eligible: Option<u64>, returned: u64, partial: bool) -> Value
 fn complete_payload(results: Value, enriched: u64) -> Value {
     let returned = results.as_array().expect("results").len() as u64;
     json!({
+        "freshness": {"state": "fresh"},
         "results": results,
         "match_count": returned,
         "files_scanned": FILES_SCANNED,
@@ -182,6 +183,7 @@ fn assert_grep_refusal(response: &Value, message: &str) {
 fn greeting_markdown(node_id: &str) -> String {
     format!(
         "\
+freshness: fresh
 ## Grep Results
 - src/lib.rs:3
   > {GREETING_LINE}
@@ -229,6 +231,7 @@ async fn tracedecay_grep_reports_literal_matches_and_typed_failures() {
         &absent_markdown,
         &format!(
             "\
+freshness: fresh
 ## Grep Results
 _No matching lines._
 _Scanned {FILES_SCANNED} files._

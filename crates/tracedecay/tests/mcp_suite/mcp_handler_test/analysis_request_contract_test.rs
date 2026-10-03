@@ -95,6 +95,7 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
         )
         .await,
         json!({
+            "freshness": {"state": "fresh"},
             "direction": "fan_in",
             "result_count": 1,
             "ranking": [{"file": "src/b.rs", "coupled_files": 1}],
@@ -118,6 +119,7 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
         )
         .await,
         json!({
+            "freshness": {"state": "fresh"},
             "match_count": 1,
             "by_kind": {"unwrap": 1},
             "matches": [{
@@ -150,6 +152,7 @@ async fn analysis_reports_refuse_arguments_outside_their_typed_request() {
         )
         .await,
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/b.rs",
             "mode": "summary",
             "total_kinds": 1,

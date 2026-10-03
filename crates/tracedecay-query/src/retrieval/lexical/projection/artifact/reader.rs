@@ -33,9 +33,9 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
-    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
+    CompactCandidate, ExactFieldV1, LanguageDescriptorRevision, ManifestDigest, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
+    SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
@@ -78,11 +78,12 @@ use crate::retrieval::ports::{
 };
 
 use super::super::{
-    ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
-    LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
-    bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
-    lexical_lane_binding, lexical_lane_candidate, normalize_lexical, proximity_count_tokens,
-    proximity_tokens, row_field_texts, score_lexical_row, substring_count,
+    ExactMatchRowViewV1, ExactOccurrenceOwnersV1, ExactRowMatchV1, FuzzyExpansionsV1,
+    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalIndexedRow, LexicalRowScoreV1,
+    LiteralProofCacheV1, PreparedLexicalQueryV1, bm25_score_micros, exact_matches,
+    field_weight_millis, fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate,
+    normalize_lexical, proximity_count_tokens, proximity_tokens, row_field_texts,
+    score_lexical_row, substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -2198,24 +2199,43 @@ impl<'a> ArtifactQueryV1<'a> {
         // Central admission runs BEFORE heap eligibility: a document whose
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
-        // fail the batch. Retained state stays bounded: at most `cap`
-        // ranking keys with matched-literal ordinals; proofs are admitted at
+        // fail the batch. Ownership needs every matched row before any row
+        // answers, so matched rows are held until the visit ends; the heap
+        // retains at most `cap` ranking keys, and proofs are admitted at
         // most once per request literal and cloned only for winners.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
+        let mut owners = ExactOccurrenceOwnersV1::default();
+        let mut matched_rows = Vec::new();
+        self.visit_documents(&documents, request.control, |document| {
+            let row = self.row(document)?;
+            let matches = exact_matches_artifact(&row, request);
+            if !matches.is_empty() {
+                owners.offer(&row.anchor, document, &matches);
+                matched_rows.push((
+                    document,
+                    row.id.as_str().to_owned(),
+                    row.anchor.file_occurrence_id,
+                    matches,
+                ));
+            }
+            Ok(())
+        })?;
         let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        self.visit_documents(&documents, request.control, |document| {
-            let row = self.row(document)?;
-            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
+        for (visited, (document, row_id, file, matches)) in matched_rows.into_iter().enumerate() {
+            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
+            let (matched_literals, matched_kinds) = owners.owned(&file, document, &matches);
             if matched_literals.is_empty() {
-                return Ok(());
+                continue;
             }
             let Some((admitted_ordinal, _)) =
                 proofs.first_admitted(&matched_literals, request, authority)?
             else {
-                return Ok(());
+                continue;
             };
             eligible += 1;
             excluded = excluded.saturating_sub(1);
@@ -2223,16 +2243,11 @@ impl<'a> ArtifactQueryV1<'a> {
                 &mut ranked,
                 cap,
                 Keyed {
-                    key: (
-                        Reverse(matched_literals.len()),
-                        row.id.as_str().to_owned(),
-                        document,
-                    ),
+                    key: (Reverse(matched_literals.len()), row_id, document),
                     value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
-            Ok(())
-        })?;
+        }
         retrieval_checkpoint(request.control)?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
@@ -3185,13 +3200,10 @@ fn capped_batch<E>(
     }
 }
 
-/// Matched literal ordinals into `request.literals` plus matched term kinds.
-fn exact_matches_artifact(
-    row: &ArtifactRowV1,
-    request: &ExactLaneRequest,
-) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
+fn exact_matches_artifact(row: &ArtifactRowV1, request: &ExactLaneRequest) -> Vec<ExactRowMatchV1> {
     exact_matches(
         ExactMatchRowViewV1 {
+            anchor: &row.anchor,
             sanitized_text: row.sanitized_text.as_str(),
             logical_path: &row.logical_path,
             exact_terms: &row.exact_terms,

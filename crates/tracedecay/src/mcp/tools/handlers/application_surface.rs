@@ -886,6 +886,7 @@ mod tests {
             touched_files: vec!["src/lib.rs".to_owned()],
             code_graph: Some(ServedCodeGraphGenerationV1 {
                 generation: "generation.render.stale.1".to_owned(),
+                worktree: None,
                 freshness: CodeGraphReadFreshnessV1::LastCompleteStale {
                     sealed_at: UtcMicros(10),
                     rebuild_in_flight: true,
