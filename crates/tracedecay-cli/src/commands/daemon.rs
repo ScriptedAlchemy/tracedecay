@@ -406,13 +406,15 @@ mod tests {
 
         let error = retained_tool_payload::<serde_json::Value>("tracedecay_message_search", reply)
             .expect_err("a problem envelope is a refusal");
-        match error {
-            tracedecay_domain::errors::TraceDecayError::Config { message } => assert_eq!(
-                message,
-                "daemon tool tracedecay_message_search refused: not_found_or_not_authorized: The requested resource was not found or is not authorized"
-            ),
-            other => panic!("expected a config refusal, got {other}"),
-        }
+        assert_eq!(
+            error.project_route_context(),
+            Some((
+                "not_found_or_not_authorized",
+                false,
+                "The requested resource was not found or is not authorized"
+            )),
+            "{error}"
+        );
     }
 
     /// Envelope drift fails with an error naming the tool instead of a bare

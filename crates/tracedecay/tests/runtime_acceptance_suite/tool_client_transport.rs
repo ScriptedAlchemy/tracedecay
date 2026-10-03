@@ -547,7 +547,14 @@ fn generic_tool_rejects_unrepresentable_deadline() {
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
     assert!(!result.killed_by_harness);
     assert!(!result.output.status.success());
-    assert!(result.output.stdout.is_empty());
+    let document: Value =
+        serde_json::from_slice(&result.output.stdout).expect("typed --json problem document");
+    assert_eq!(document["problem"]["kind"], "invalid_request", "{document}");
+    assert_eq!(
+        document["problem"]["message"],
+        "TRACEDECAY_TOOL_DEADLINE_MS exceeds the supported monotonic deadline range",
+        "{document}"
+    );
     let stderr = String::from_utf8_lossy(&result.output.stderr);
     assert!(
         stderr.contains("TRACEDECAY_TOOL_DEADLINE_MS")
