@@ -2,6 +2,7 @@ mod family_report;
 
 pub use family_report::{CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1};
 
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::Cell;
 use std::cmp::Reverse;
@@ -80,8 +81,8 @@ use super::super::{
     ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
     LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
     bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
-    lexical_lane_binding, lexical_lane_candidate, normalize_lexical, phrase_field_counts,
-    proximity_field_counts, score_lexical_row,
+    lexical_lane_binding, lexical_lane_candidate, normalize_lexical, proximity_count_tokens,
+    proximity_tokens, row_field_texts, score_lexical_row, substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -2069,10 +2070,14 @@ impl<'a> ArtifactQueryV1<'a> {
             control,
             |_, stored, _| {
                 let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
+                let field_texts = row_field_texts(&row);
                 // Frequency counts documents once per normalized phrase, even
                 // when the request includes multiple original spellings.
                 for (phrase, frequency) in &mut phrase_frequencies {
-                    if !phrase_field_counts(&row, phrase).is_empty() {
+                    if field_texts
+                        .iter()
+                        .any(|(_, text)| substring_count(text, phrase) > 0)
+                    {
                         *frequency += 1;
                     }
                 }
@@ -2370,19 +2375,34 @@ impl<'a> ArtifactQueryV1<'a> {
                             "lexical scoring preface does not match its row".to_owned(),
                         ));
                     }
+                    let field_texts = row_field_texts(&row);
+                    let field_tokens: Vec<(LexicalFieldV1, Vec<String>)> =
+                        if prepared.proximities.is_empty() {
+                            Vec::new()
+                        } else {
+                            field_texts
+                                .iter()
+                                .map(|(field, text)| (*field, proximity_tokens(text)))
+                                .collect()
+                        };
                     for (index, (_, normalized)) in prepared.phrases.iter().enumerate() {
-                        let counts = phrase_field_counts(&row, normalized);
-                        for (field, count) in counts {
-                            phrase_tfs.push((field, index, count));
+                        for (field, text) in &field_texts {
+                            let count = substring_count(text, normalized);
+                            if count > 0 {
+                                phrase_tfs.push((*field, index, count));
+                            }
                         }
                     }
                     for (index, proximity) in prepared.proximities.iter().enumerate() {
-                        for (field, count) in proximity_field_counts(
-                            &row,
-                            &proximity.terms,
-                            proximity.original.maximum_gap,
-                        ) {
-                            proximity_tfs.push((field, index, count));
+                        for (field, tokens) in &field_tokens {
+                            let count = proximity_count_tokens(
+                                tokens,
+                                &proximity.terms,
+                                proximity.original.maximum_gap,
+                            );
+                            if count > 0 {
+                                proximity_tfs.push((*field, index, count));
+                            }
                         }
                     }
                 }
@@ -2910,6 +2930,24 @@ impl<'a> ArtifactQueryV1<'a> {
         frequencies: &LexicalTermFrequenciesV1,
     ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
+            // Phrase and proximity scoring asks one (field, term) count at a
+            // time; normalize each field's text and tokens once per row so a
+            // query with T terms across F fields scans F texts, not T * F * F.
+            let field_texts: Vec<(LexicalFieldV1, Cow<'_, str>)> =
+                if prepared.phrases.is_empty() && prepared.proximities.is_empty() {
+                    Vec::new()
+                } else {
+                    row_field_texts(row)
+                };
+            let field_tokens: Vec<(LexicalFieldV1, Vec<String>)> =
+                if prepared.proximities.is_empty() {
+                    Vec::new()
+                } else {
+                    field_texts
+                        .iter()
+                        .map(|(field, text)| (*field, proximity_tokens(text)))
+                        .collect()
+                };
             score_lexical_row(
                 row.field_lengths(),
                 &row.exact_terms,
@@ -2922,15 +2960,23 @@ impl<'a> ArtifactQueryV1<'a> {
                     self.term_score_with_df(field, term_frequency, row, document_frequency, stats)
                 },
                 |field, phrase| {
-                    phrase_field_counts(row, phrase)
-                        .into_iter()
-                        .find_map(|(matched, count)| (matched == field).then_some(count))
+                    field_texts
+                        .iter()
+                        .find(|(matched, _)| *matched == field)
+                        .map(|(_, text)| substring_count(text, phrase))
                         .unwrap_or(0)
                 },
                 |field, proximity| {
-                    proximity_field_counts(row, &proximity.terms, proximity.original.maximum_gap)
-                        .into_iter()
-                        .find_map(|(matched, count)| (matched == field).then_some(count))
+                    field_tokens
+                        .iter()
+                        .find(|(matched, _)| *matched == field)
+                        .map(|(_, tokens)| {
+                            proximity_count_tokens(
+                                tokens,
+                                &proximity.terms,
+                                proximity.original.maximum_gap,
+                            )
+                        })
                         .unwrap_or(0)
                 },
                 !prepared.echo_query.is_empty()

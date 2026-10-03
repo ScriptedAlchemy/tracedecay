@@ -2,9 +2,8 @@
 //! served as a typed reset-required state instead of a daemon that refuses to
 //! start.
 //!
-//! The profile session store is stamped with the Git correlation schema a
-//! released binary wrote (version 5, before per-session Git evidence rows) and
-//! a physically spawned `tracedecay daemon run` is started over it. The daemon
+//! The profile session store is stamped with the Git correlation schema the
+//! previous release wrote and a physically spawned `tracedecay daemon run` is started over it. The daemon
 //! must reach readiness, `tracedecay_status` must name the refused store with
 //! its exact reset command, a profile session read must return the typed
 //! `reset_required` problem, and a code-index read on the same project must
@@ -14,6 +13,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
+use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
 use crate::common::{canonical_existing_path, spawn_tracedecay_daemon_with};
 
@@ -127,7 +129,8 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
 
-    stamp_profile_sessions_git_correlation_version(&home_path, 5);
+    let previous = GIT_CORRELATION_SCHEMA_VERSION - 1;
+    stamp_profile_sessions_git_correlation_version(&home_path, previous);
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     assert!(
         daemon
@@ -142,10 +145,12 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
         json!([{
             "store": "profile sessions",
             "authority": "git correlation",
-            "found_version": 5,
-            "required_version": 6,
-            "reason": "git correlation profile schema 5 is incompatible with required schema 6; \
-                       reset the profile",
+            "found_version": previous,
+            "required_version": GIT_CORRELATION_SCHEMA_VERSION,
+            "reason": format!(
+                "git correlation profile schema {previous} is incompatible with required schema \
+                 {GIT_CORRELATION_SCHEMA_VERSION}; reset the profile"
+            ),
             "remedy": "tracedecay wipe --stale --yes",
         }])
     );
@@ -159,10 +164,12 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
         json!({
             "kind": "reset_required",
             "authority": "git correlation",
-            "found_version": 5,
-            "required_version": 6,
-            "reason": "git correlation profile schema 5 is incompatible with required schema 6; \
-                       reset the profile",
+            "found_version": previous,
+            "required_version": GIT_CORRELATION_SCHEMA_VERSION,
+            "reason": format!(
+                "git correlation profile schema {previous} is incompatible with required schema \
+                 {GIT_CORRELATION_SCHEMA_VERSION}; reset the profile"
+            ),
             "remedy": "tracedecay wipe --stale --yes",
         })
     );
@@ -191,9 +198,7 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
     let _ = daemon.kill_and_wait();
 }
 
-/// Stamps a registered store with the session-temporal schema version the
-/// previous release wrote: version 6 copied every projection row into each
-/// refresh generation.
+/// Stamps a registered store with a session-temporal schema version.
 fn stamp_session_temporal_version(db_path: &Path, version: i64) {
     let stamped = rusqlite::Connection::open(db_path)
         .expect("open the registered store")
@@ -239,8 +244,8 @@ fn record_session_generation(db_path: &Path) {
 }
 
 /// Every registered store carries the session-temporal authority, so a
-/// released profile has it at version 6 in the profile authority and each
-/// session store. Only a store holding session state needs the scoped reset;
+/// profile the previous release wrote has the previous version in the profile
+/// authority and each session store. Only a store holding session state needs the scoped reset;
 /// an empty copy is replaced with the final contract on open.
 #[test]
 fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
@@ -261,23 +266,27 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
 
+    let previous = SESSION_TEMPORAL_SCHEMA_VERSION - 1;
     record_session_generation(&profile_root.join("user-sessions.db"));
     for store in [
         profile_root.join("global.db"),
         profile_root.join("user-sessions.db"),
         project_store.clone(),
     ] {
-        stamp_session_temporal_version(&store, 6);
+        stamp_session_temporal_version(&store, previous);
     }
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let temporal_reason = format!(
+        "session temporal profile schema {previous} is incompatible with required schema \
+         {SESSION_TEMPORAL_SCHEMA_VERSION}; reset the profile"
+    );
     let refusal = |store: String| {
         json!({
             "store": store,
             "authority": "session temporal",
-            "found_version": 6,
-            "required_version": 7,
-            "reason": "session temporal profile schema 6 is incompatible with required schema 7; \
-                       reset the profile",
+            "found_version": previous,
+            "required_version": SESSION_TEMPORAL_SCHEMA_VERSION,
+            "reason": temporal_reason,
             "remedy": "tracedecay wipe --stale --yes",
         })
     };
@@ -312,20 +321,22 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
             json!({
                 "kind": "reset_required",
                 "authority": "session temporal",
-                "found_version": 6,
-                "required_version": 7,
-                "reason": "session temporal profile schema 6 is incompatible with required \
-                           schema 7; reset the profile",
+                "found_version": previous,
+                "required_version": SESSION_TEMPORAL_SCHEMA_VERSION,
+                "reason": temporal_reason,
                 "remedy": "tracedecay wipe --stale --yes",
             }),
             "{context}"
         );
     }
-    assert_eq!(session_temporal_version(&profile_root.join("global.db")), 7);
-    assert_eq!(session_temporal_version(&project_store), 6);
+    assert_eq!(
+        session_temporal_version(&profile_root.join("global.db")),
+        SESSION_TEMPORAL_SCHEMA_VERSION
+    );
+    assert_eq!(session_temporal_version(&project_store), previous);
     assert_eq!(
         session_temporal_version(&profile_root.join("user-sessions.db")),
-        6
+        previous
     );
 
     let (reset_status, reset_output) =
@@ -348,10 +359,13 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
             "the {scope} session read must serve after the named reset: {served}"
         );
     }
-    assert_eq!(session_temporal_version(&project_store), 7);
+    assert_eq!(
+        session_temporal_version(&project_store),
+        SESSION_TEMPORAL_SCHEMA_VERSION
+    );
     assert_eq!(
         session_temporal_version(&profile_root.join("user-sessions.db")),
-        7
+        SESSION_TEMPORAL_SCHEMA_VERSION
     );
     assert_eq!(
         status_reset_required_stores(&home_path, &project_path),

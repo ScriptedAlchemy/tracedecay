@@ -481,6 +481,10 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     drop(owners);
     drop(latest);
     drop(scheduler);
+    // Witness files persist only where the platform proves file state, so the
+    // damaged-witness cases exist only there; other hosts always take the
+    // full-decode path this loop exercises as its fallback.
+    #[cfg(unix)]
     for damaged_witness in [None, Some(b"not-a-restore-witness".as_slice())] {
         match damaged_witness {
             None => std::fs::remove_file(&witness_path).expect("remove restore witness"),

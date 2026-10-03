@@ -68,10 +68,15 @@ pub(crate) mod mimalloc_v3 {
             link_name = "?_mi_theap_default_set@@YAXPEAUmi_theap_s@@@Z"
         )]
         fn _mi_theap_default_set(theap: *mut c_void);
+        #[cfg_attr(target_env = "msvc", link_name = "?_mi_is_main_thread@@YA_NXZ")]
         fn _mi_is_main_thread() -> bool;
         fn mi_thread_done();
         // `src/prim/unix/prim.c`: stores `theap` in the pthread key whose
         // destructor (`mi_pthread_done`) calls `_mi_thread_done` on it.
+        #[cfg_attr(
+            target_env = "msvc",
+            link_name = "?_mi_prim_thread_associate_default_theap@@YAXPEAUmi_theap_s@@@Z"
+        )]
         fn _mi_prim_thread_associate_default_theap(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,

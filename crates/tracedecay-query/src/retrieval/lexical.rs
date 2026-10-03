@@ -36,7 +36,7 @@ pub use self::projection::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1,
-    CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
+    CarriedFilePagesV1, CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
     CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
     CloneFingerprintArtifactReadV1, CloneFingerprintCancellationPointV1,
     CloneFingerprintPartialReasonV1, CloneFingerprintReadAccountingV1,

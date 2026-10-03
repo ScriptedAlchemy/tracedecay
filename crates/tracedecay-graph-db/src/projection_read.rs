@@ -94,10 +94,11 @@ impl GraphDb {
         &self,
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
-        let guard = self.read_database(request.cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let page = read_projection(self, database, request)?;
+        let cancellation = Arc::clone(&request.cancellation);
+        let page = self.read_intact(cancellation.as_ref(), |database| {
+            self.ensure_projection_readable(&request.namespace, &request.projection)?;
+            read_projection(self, database, request)
+        })?;
         crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
         crate::hotpath_observe::record_hydration_source(
             crate::hotpath_observe::HydrationSource::Live,
@@ -110,10 +111,11 @@ impl GraphDb {
         &self,
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
-        let guard = self.read_database(request.cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(&request.namespace, &request.projection)?;
-        let telemetry = projection_telemetry(self, database, request)?;
+        let cancellation = Arc::clone(&request.cancellation);
+        let telemetry = self.read_intact(cancellation.as_ref(), |database| {
+            self.ensure_projection_readable(&request.namespace, &request.projection)?;
+            projection_telemetry(self, database, request)
+        })?;
         if let Some(telemetry) = &telemetry {
             crate::hotpath_observe::record_counts(
                 usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
