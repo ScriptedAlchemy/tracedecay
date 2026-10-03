@@ -2259,6 +2259,16 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
             if &graph == ready_state {
                 return;
             }
+            if matches!(
+                staleness,
+                Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Verifying)
+            ) {
+                // A background pass holding the scheduler has not renewed the
+                // freshness proof; the read resolves to `fresh` when it does.
+                assert!(std::time::Instant::now() <= deadline, "{what}: {graph:?} {staleness:?}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             assert!(
                 matches!(
                     graph,
@@ -2289,19 +2299,28 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
         [ResidentOwnerKindV1::GraphEngine],
         "the idle window takes the engine and keeps the catalog"
     );
-    assert_eq!(
-        serving().await,
-        (
-            Some(
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
-                    reason: "code graph engine was released for memory; the next graph read \
-                             re-warms it"
-                        .to_owned(),
-                }
-            ),
-            fresh,
-        )
+    let released_warming = (
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
+                reason: "code graph engine was released for memory; the next graph read \
+                         re-warms it"
+                    .to_owned(),
+            },
+        ),
+        fresh,
     );
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let observed = serving().await;
+        if observed == released_warming {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= settle_deadline,
+            "idle release settles on warming beside a fresh index: {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         tracedecay_daemon_service::doctor_kernel::code_index_read_from_registry(
             &mount.registry,
