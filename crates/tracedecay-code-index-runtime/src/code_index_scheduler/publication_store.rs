@@ -378,7 +378,7 @@ impl GenerationDecodeObservationV1 {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         metrics::gauge!("code_index.generation.decode.attempts_total").increment((1_u64) as f64);
-        metrics::gauge!("code_index.generation.decode.active").set((active) as f64);
+        metrics::gauge!("code_index.generation.decode.active").set(active as f64);
         Self
     }
 }
@@ -402,7 +402,7 @@ impl GenerationDecodeWaitObservationV1 {
         let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        metrics::gauge!("code_index.generation.decode.waiters").set((waiters) as f64);
+        metrics::gauge!("code_index.generation.decode.waiters").set(waiters as f64);
         Self
     }
 }
@@ -497,23 +497,23 @@ pub(super) struct GenerationDecodeBudgetV1 {
 
 fn publish_graph_build_bound_gauges(bound: &CodeGraphBuildBoundV1) {
     metrics::gauge!("daemon.code_index.graph_build.bound.decode_window_bytes")
-        .set((bound.decode_window_bytes) as f64);
+        .set(bound.decode_window_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.resolution_file_bytes")
-        .set((bound.resolution_file_bytes) as f64);
+        .set(bound.resolution_file_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.binding_bytes")
-        .set((bound.binding_bytes) as f64);
+        .set(bound.binding_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.bound_set_bytes")
-        .set((bound.bound_set_bytes) as f64);
+        .set(bound.bound_set_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.derived_bytes")
-        .set((bound.derived_bytes) as f64);
+        .set(bound.derived_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.emit_batch_bytes")
-        .set((bound.emit_batch_bytes) as f64);
+        .set(bound.emit_batch_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.emit_spill_bytes")
-        .set((bound.emit_spill_bytes) as f64);
+        .set(bound.emit_spill_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.emit_window_bytes")
-        .set((bound.emit_window_bytes) as f64);
+        .set(bound.emit_window_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.store_bytes")
-        .set((bound.store_bytes) as f64);
+        .set(bound.store_bytes as f64);
     metrics::gauge!("daemon.code_index.graph_build.bound.peak_bytes")
         .set((bound.peak_bytes()) as f64);
     tracing::info!(
@@ -2086,7 +2086,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         })?;
 
         metrics::gauge!("code_index.generation.decode.bytes_total")
-            .increment((entry.size_bytes) as f64);
+            .increment(entry.size_bytes as f64);
         let decoded = {
             let _span = tracing::trace_span!("code_index.generation.decode.file_read").entered();
             self.decode_generation_file(
@@ -2510,10 +2510,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let encoded_bytes = metadata.len();
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
-        metrics::gauge!("daemon.code_index.generation.decode.bytes").set((encoded_bytes) as f64);
+        metrics::gauge!("daemon.code_index.generation.decode.bytes").set(encoded_bytes as f64);
         if let Some(peak_growth) = generation.decode_peak_growth_bytes() {
             metrics::gauge!("daemon.code_index.generation.decode.peak_growth_bytes")
-                .set((peak_growth) as f64);
+                .set(peak_growth as f64);
         }
         Ok(Some(Arc::new(generation)))
     }

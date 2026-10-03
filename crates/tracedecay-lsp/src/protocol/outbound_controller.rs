@@ -434,7 +434,7 @@ where
     /// truthful depth at each pump boundary, not a per-mutation ledger.
     pub(super) fn observe_outbound_queue(&self) {
         metrics::gauge!("lsp.outbound.queue_depth").set((self.outbound.queue.len()) as f64);
-        metrics::gauge!("lsp.outbound.queue_bytes").set((self.outbound.queued_bytes) as f64);
+        metrics::gauge!("lsp.outbound.queue_bytes").set(self.outbound.queued_bytes as f64);
     }
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {

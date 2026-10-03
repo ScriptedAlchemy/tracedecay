@@ -203,7 +203,7 @@ where
                 .map(WorkArtifactRefV1::byte_length)
                 .fold(0u64, u64::saturating_add);
             metrics::gauge!("application.work.artifact.hydrate.declared_bytes")
-                .set((declared_bytes) as f64);
+                .set(declared_bytes as f64);
         }
         let returned = u32::try_from(page.rows.len())
             .ok()

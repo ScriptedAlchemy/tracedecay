@@ -1564,7 +1564,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 }?;
 
                 metrics::gauge!("query.artifact.store.digest_bytes")
-                    .set((artifact_size_bytes) as f64);
+                    .set(artifact_size_bytes as f64);
                 let descriptor = DurableCodeTextArtifactDescriptorV1 {
                     generation_id: generation_id.clone(),
                     artifact_file: format!(
@@ -2485,9 +2485,9 @@ impl LatestCodeTextGenerationV1 {
 
             {
                 metrics::gauge!("query.artifact.progress.committed_pages")
-                    .set((progress.next_page_ordinal) as f64);
+                    .set(progress.next_page_ordinal as f64);
                 metrics::gauge!("query.artifact.progress.committed_lexical_units")
-                    .set((completed_lexical_units) as f64);
+                    .set(completed_lexical_units as f64);
             }
         }
         let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
@@ -2966,11 +2966,10 @@ impl LatestCodeTextGenerationV1 {
         let (source_batch_pages, source_batch_bytes, _) =
             text_artifact_source_batch_limits(build_memory_budget);
         metrics::gauge!("query.artifact.preferred_build_memory_budget_bytes")
-            .set((preferred_build_memory_budget) as f64);
-        metrics::gauge!("query.artifact.build_memory_budget_bytes")
-            .set((build_memory_budget) as f64);
-        metrics::gauge!("query.artifact.source_batch_pages_max").set((source_batch_pages) as f64);
-        metrics::gauge!("query.artifact.source_batch_bytes_max").set((source_batch_bytes) as f64);
+            .set(preferred_build_memory_budget as f64);
+        metrics::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget as f64);
+        metrics::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages as f64);
+        metrics::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes as f64);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(

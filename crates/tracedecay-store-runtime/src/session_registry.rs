@@ -145,7 +145,7 @@ impl StoreMountObservationV1 {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         metrics::gauge!("daemon.session_registry.mount.attempts_total").increment(1.0);
-        metrics::gauge!("daemon.session_registry.mount.in_flight").set((in_flight) as f64);
+        metrics::gauge!("daemon.session_registry.mount.in_flight").set(in_flight as f64);
         Self
     }
 }

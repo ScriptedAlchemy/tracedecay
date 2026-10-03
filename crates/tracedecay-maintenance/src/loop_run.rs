@@ -23,7 +23,7 @@ struct MaintenanceLifecycleInstrumentation;
 impl MaintenanceLifecycleInstrumentation {
     fn new() -> Self {
         let active = MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-        metrics::gauge!("daemon_maintenance_futures_active").set((active) as f64);
+        metrics::gauge!("daemon_maintenance_futures_active").set(active as f64);
         Self
     }
 
@@ -52,7 +52,7 @@ impl Drop for MaintenanceLifecycleInstrumentation {
         let active = MAINTENANCE_FUTURES_ACTIVE
             .fetch_sub(1, Ordering::SeqCst)
             .saturating_sub(1);
-        metrics::gauge!("daemon_maintenance_futures_active").set((active) as f64);
+        metrics::gauge!("daemon_maintenance_futures_active").set(active as f64);
     }
 }
 

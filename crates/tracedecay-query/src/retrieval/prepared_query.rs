@@ -320,7 +320,7 @@ impl PreparedQueryV1 {
             (None, None)
         };
         let page_len = end.saturating_sub(start);
-        metrics::gauge!("query.stream.results").set((page_len) as f64);
+        metrics::gauge!("query.stream.results").set(page_len as f64);
         Ok(PreparedQueryPageV1 {
             items: materialize(candidates, start, end)?,
             total,

@@ -348,7 +348,7 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
         metrics::gauge!("application.historical.query.blobs_scanned")
             .set((u64::from(coverage.blobs_scanned)) as f64);
         metrics::gauge!("application.historical.query.bytes_scanned")
-            .set((coverage.bytes_scanned) as f64);
+            .set(coverage.bytes_scanned as f64);
         Ok(HistoricalQueryResultV1 {
             scope: self.scope.clone(),
             evidence,

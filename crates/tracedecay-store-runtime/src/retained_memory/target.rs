@@ -78,7 +78,7 @@ impl RetainedMemoryTargetObservationV1 {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         metrics::gauge!("daemon.retained.memory.target.opened_total").increment(1.0);
-        metrics::gauge!("daemon.retained.memory.target.open").set((open) as f64);
+        metrics::gauge!("daemon.retained.memory.target.open").set(open as f64);
         Self
     }
 }

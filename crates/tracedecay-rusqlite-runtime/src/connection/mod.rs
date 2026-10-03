@@ -832,7 +832,7 @@ impl WriterPageCache {
             .authorizer(Some(authorize_writer))
             .map_err(|source| policy("restore writer authorizer", source))?;
         resized.map_err(|source| policy("page cache size", source))?;
-        metrics::gauge!("rusqlite.writer.page_cache_pages").set((pages) as f64);
+        metrics::gauge!("rusqlite.writer.page_cache_pages").set(pages as f64);
         self.fitted_schema_version = Some(schema_version);
         Ok(())
     }

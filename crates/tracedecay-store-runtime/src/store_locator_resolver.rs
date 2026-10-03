@@ -184,9 +184,8 @@ pub struct LocalStoreRuntimeResolverV1 {
     code_authorities: Arc<RwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
 }
 
-/// Hand-written because the instrumented lock wrapper has no `Debug`. The
-/// authority maps are omitted rather than printed, since formatting them would
-/// take the very locks this type exists to hand out.
+/// Hand-written so the authority maps are omitted rather than printed:
+/// formatting them would take the very locks this type exists to hand out.
 impl fmt::Debug for LocalStoreRuntimeResolverV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalStoreRuntimeResolverV1")

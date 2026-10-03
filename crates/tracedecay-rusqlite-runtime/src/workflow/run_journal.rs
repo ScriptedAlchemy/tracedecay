@@ -221,7 +221,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         });
 
         if let Ok(page_runs) = u64::try_from(page_run_ids.len()) {
-            metrics::gauge!("rusqlite.workflow.recovery_page.runs").increment((page_runs) as f64);
+            metrics::gauge!("rusqlite.workflow.recovery_page.runs").increment(page_runs as f64);
         }
         let projections = page_run_ids
             .iter()

@@ -257,7 +257,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
             });
         }
         metrics::gauge!("query.hydrate.results").set((results.len()) as f64);
-        metrics::gauge!("query.hydrate.bytes").set((bytes_hydrated) as f64);
+        metrics::gauge!("query.hydrate.bytes").set(bytes_hydrated as f64);
         Ok(HydrationPageV1 { results, receipts })
     }
 

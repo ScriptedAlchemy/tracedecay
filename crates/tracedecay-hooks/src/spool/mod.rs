@@ -157,7 +157,7 @@ impl SpoolLeaseHoldObservationV1 {
         let held = SPOOL_LEASES_HELD
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        metrics::gauge!("hooks.spool.lease.held").set((held) as f64);
+        metrics::gauge!("hooks.spool.lease.held").set(held as f64);
         Some(Self {
             acquired: std::time::Instant::now(),
         })
@@ -482,7 +482,7 @@ impl HookSpoolV1 {
             _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
         metrics::gauge!("hooks.spool.pending.frame_count").set(report.pending_records);
-        metrics::gauge!("hooks.spool.pending.bytes").set((report.pending_bytes) as f64);
+        metrics::gauge!("hooks.spool.pending.bytes").set(report.pending_bytes as f64);
         Ok((spool, report))
     }
 
@@ -632,7 +632,7 @@ impl HookSpoolV1 {
         }
 
         if observing() {
-            metrics::gauge!("hooks.spool.append.frame_bytes").set((frame_len) as f64);
+            metrics::gauge!("hooks.spool.append.frame_bytes").set(frame_len as f64);
             metrics::gauge!("hooks.spool.pending.frame_count").set((self.pending.len()) as f64);
             metrics::gauge!("hooks.spool.pending.bytes").set((self.pending_bytes()) as f64);
         }
@@ -741,9 +741,9 @@ impl HookSpoolV1 {
                 .max()
                 .unwrap_or(0);
             metrics::gauge!("hooks.spool.replay.batch_count").set((batches.len()) as f64);
-            metrics::gauge!("hooks.spool.replay.frame_count").set((frame_count) as f64);
-            metrics::gauge!("hooks.spool.replay.frame_bytes").set((frame_bytes) as f64);
-            metrics::gauge!("hooks.spool.queue_wait_micros").set((queue_wait_micros) as f64);
+            metrics::gauge!("hooks.spool.replay.frame_count").set(frame_count as f64);
+            metrics::gauge!("hooks.spool.replay.frame_bytes").set(frame_bytes as f64);
+            metrics::gauge!("hooks.spool.queue_wait_micros").set(queue_wait_micros as f64);
         }
         Ok(batches)
     }
@@ -984,7 +984,7 @@ impl HookSpoolV1 {
         self.checkpoint = Some(checkpoint);
         self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
         metrics::gauge!("hooks.spool.compact.frame_count").set((self.pending.len()) as f64);
-        metrics::gauge!("hooks.spool.compact.bytes").set((self.physical_len) as f64);
+        metrics::gauge!("hooks.spool.compact.bytes").set(self.physical_len as f64);
         Ok(())
     }
 

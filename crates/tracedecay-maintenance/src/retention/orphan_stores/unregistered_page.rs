@@ -194,7 +194,7 @@ fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredSto
     metrics::gauge!("maintenance.orphan_stores.unregistered.failed_total")
         .increment((report.outcome.errors.len()) as f64);
     metrics::gauge!("maintenance.orphan_stores.unregistered.reclaimed_bytes_total")
-        .increment((report.outcome.reclaimed_bytes) as f64);
+        .increment(report.outcome.reclaimed_bytes as f64);
     report
 }
 

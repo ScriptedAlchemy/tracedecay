@@ -198,10 +198,10 @@ fn refresh_worker_gauges() {
     let coordinating = WORKERS_POOL_COORDINATION.load(Ordering::Relaxed);
     let cpu = active.saturating_sub(coordinating);
     let workers = crate::parallelism::indexing_workers();
-    metrics::gauge!("code_index_workers_busy").set((active) as f64);
-    metrics::gauge!("code_index_workers_cpu").set((cpu) as f64);
-    metrics::gauge!("code_index_workers_pool_coordination").set((coordinating) as f64);
-    metrics::gauge!("code_index_worker_count").set((workers) as f64);
+    metrics::gauge!("code_index_workers_busy").set(active as f64);
+    metrics::gauge!("code_index_workers_cpu").set(cpu as f64);
+    metrics::gauge!("code_index_workers_pool_coordination").set(coordinating as f64);
+    metrics::gauge!("code_index_worker_count").set(workers as f64);
     let utilization = if workers == 0 {
         0.0
     } else {
@@ -218,44 +218,44 @@ fn refresh_queue_gauge() {
 #[inline(always)]
 pub(crate) fn record_files(count: usize) {
     {
-        metrics::gauge!("code_index_files").set((count) as f64);
+        metrics::gauge!("code_index_files").set(count as f64);
     }
 }
 
 /// Carries a caller-computed total so this helper never re-walks sources.
 #[inline(always)]
 pub(crate) fn record_source_bytes(bytes: u64) {
-    metrics::gauge!("code_index_source_bytes").set((bytes) as f64);
+    metrics::gauge!("code_index_source_bytes").set(bytes as f64);
 }
 
 #[inline(always)]
 pub(crate) fn add_parse_bytes(bytes: u64) {
     {
-        metrics::gauge!("code_index_parse_bytes").increment((bytes) as f64);
+        metrics::gauge!("code_index_parse_bytes").increment(bytes as f64);
     }
 }
 
 #[inline(always)]
 pub(crate) fn add_reused_parses(count: u64) {
     {
-        metrics::gauge!("code_index_reused_parses").increment((count) as f64);
+        metrics::gauge!("code_index_reused_parses").increment(count as f64);
     }
 }
 
 #[inline(always)]
 pub(crate) fn record_symbols(count: u64) {
-    metrics::gauge!("code_index_symbols").set((count) as f64);
+    metrics::gauge!("code_index_symbols").set(count as f64);
 }
 
 #[inline(always)]
 pub(crate) fn record_relations(count: u64) {
-    metrics::gauge!("code_index_relations").set((count) as f64);
+    metrics::gauge!("code_index_relations").set(count as f64);
 }
 
 #[inline(always)]
 pub(crate) fn record_pages(count: u64) {
     {
-        metrics::gauge!("code_index_pages").set((count) as f64);
+        metrics::gauge!("code_index_pages").set(count as f64);
     }
 }
 

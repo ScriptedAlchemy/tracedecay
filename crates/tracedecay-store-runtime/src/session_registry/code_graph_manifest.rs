@@ -388,7 +388,7 @@ fn read_verified_seal_manifest(
         });
     }
 
-    metrics::gauge!("session_registry.seal.decode.bytes_total").increment((admitted_len) as f64);
+    metrics::gauge!("session_registry.seal.decode.bytes_total").increment(admitted_len as f64);
     let mut manifest = Vec::new();
     file.by_ref()
         .take(admitted_len)
@@ -896,8 +896,7 @@ fn verify_checked_seal(
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
     let copied = std::io::copy(&mut reader, &mut std::io::sink());
 
-    metrics::gauge!("session_registry.seal.verify.bytes_total")
-        .increment((reader.bytes_read) as f64);
+    metrics::gauge!("session_registry.seal.verify.bytes_total").increment(reader.bytes_read as f64);
     if let Some(error) = reader.failure.take() {
         return Err(error);
     }

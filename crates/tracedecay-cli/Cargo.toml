@@ -221,7 +221,6 @@ libc = "0.2"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 dirs = "6"
-regex = "1.12.3"
 socket2 = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"

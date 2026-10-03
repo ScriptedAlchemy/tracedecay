@@ -969,11 +969,11 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
     let Some((sample, state)) = pressure.sample_and_publish() else {
         return;
     };
-    metrics::gauge!("daemon.process.resident_bytes").set((sample.resident_bytes) as f64);
+    metrics::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes as f64);
     // The gauge keeps its name: admission may publish the larger cgroup
     // committed figure, which is not this process's unreclaimable set.
     metrics::gauge!("daemon.process.unreclaimable_resident_bytes")
-        .set((sample.unreclaimable_bytes) as f64);
+        .set(sample.unreclaimable_bytes as f64);
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log

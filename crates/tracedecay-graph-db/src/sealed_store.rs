@@ -1980,7 +1980,7 @@ fn push_manifest_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-    metrics::gauge!("code_index.seal.encode.effective_workers").set((workers) as f64);
+    metrics::gauge!("code_index.seal.encode.effective_workers").set(workers as f64);
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();
         {
@@ -2101,7 +2101,7 @@ fn push_spilled_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-    metrics::gauge!("code_index.seal.encode.effective_workers").set((workers) as f64);
+    metrics::gauge!("code_index.seal.encode.effective_workers").set(workers as f64);
     let (entity_count, relation_count) = spilled.row_counts();
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();

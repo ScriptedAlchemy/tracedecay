@@ -551,9 +551,9 @@ fn compare_installed_plan(
 }
 
 fn record_plan(plan: CodeIndexWorkerPlanV1) {
-    metrics::gauge!("code_index_workers_requested").set((plan.requested_workers) as f64);
-    metrics::gauge!("code_index_workers_effective").set((plan.effective_workers) as f64);
-    metrics::gauge!("code_index_workers_memory_safe").set((plan.memory_safe_workers) as f64);
+    metrics::gauge!("code_index_workers_requested").set(plan.requested_workers as f64);
+    metrics::gauge!("code_index_workers_effective").set(plan.effective_workers as f64);
+    metrics::gauge!("code_index_workers_memory_safe").set(plan.memory_safe_workers as f64);
     metrics::gauge!("code_index_workers_memory_headroom_bytes")
         .set(plan.memory_headroom_bytes as f64);
     metrics::gauge!("code_index_workers_limiting_reason").set(match plan.limiting_reason {

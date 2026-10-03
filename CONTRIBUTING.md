@@ -301,7 +301,8 @@ integration branch waits behind, so a run spends only what its state earns:
 
 Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add
 `-f run_os=true` or `-f run_hosts=true` only for those lanes. Opening,
-pushing, labeling, and marking ready create no run at all. A newer master push cancels the one in flight. Closing or merging a PR cancels
+pushing, labeling, and marking ready create no run at all. A newer
+master push cancels the one in flight. Closing or merging a PR cancels
 its remaining runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.

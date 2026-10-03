@@ -212,9 +212,8 @@ pub struct ShardRuntime {
     state: std::sync::Mutex<ShardRuntimeState>,
 }
 
-/// Hand-written because the instrumented lock wrapper has no `Debug`; the
-/// state behind the lock is never printed anyway, since formatting it would
-/// have to acquire the lock being described.
+/// Hand-written so the state behind the lock is never printed: formatting it
+/// would have to acquire the lock being described.
 impl std::fmt::Debug for ShardRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShardRuntime")

@@ -567,13 +567,13 @@ pub(super) async fn canonical_occurrence(
 fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
     {
         metrics::gauge!("session_temporal.persistence.source_projections")
-            .increment((work.source_projections) as f64);
+            .increment(work.source_projections as f64);
         metrics::gauge!("session_temporal.persistence.envelope_parses")
-            .increment((work.envelope_parses) as f64);
+            .increment(work.envelope_parses as f64);
         metrics::gauge!("session_temporal.persistence.projection_output_index_rows")
-            .increment((work.indexed_outputs) as f64);
+            .increment(work.indexed_outputs as f64);
         metrics::gauge!("session_temporal.persistence.projection_output_lookups")
-            .increment((work.output_lookups) as f64);
+            .increment(work.output_lookups as f64);
     }
 }
 

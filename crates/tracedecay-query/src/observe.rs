@@ -78,7 +78,7 @@ pub(crate) fn record_lane<E>(
     match outcome {
         RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
             metrics::gauge!(candidates).set((batch.candidates.len()) as f64);
-            metrics::gauge!(examined).set((batch.coverage.examined) as f64);
+            metrics::gauge!(examined).set(batch.coverage.examined as f64);
             metrics::gauge!(results).set((batch.candidates.len()) as f64);
             Residency::Warm.record(residency);
         }

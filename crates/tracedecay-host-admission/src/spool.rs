@@ -333,7 +333,7 @@ impl HostAdmissionSpool {
             .map(|(source, payload)| self.plan_append(&mut batch, source, payload))
             .collect::<Vec<_>>();
         if batch.records > 0 {
-            metrics::gauge!("usecases.admission.batch_records").set((batch.records) as f64);
+            metrics::gauge!("usecases.admission.batch_records").set(batch.records as f64);
             if let Err(error) = self.publish_batch(&batch) {
                 self.append_recovery_required = true;
                 return planned

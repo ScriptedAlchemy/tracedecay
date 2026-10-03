@@ -665,7 +665,7 @@ impl CodeLexicalArtifactReaderV1 {
         verify_named_path_identity(path, &file)?;
         progress(6, TOTAL_RESTORE_CHECKS);
         crate::observe::Residency::Cold.record("query.artifact.residency");
-        metrics::gauge!("query.artifact.bytes").set((expected_file_size_bytes) as f64);
+        metrics::gauge!("query.artifact.bytes").set(expected_file_size_bytes as f64);
         metrics::gauge!("query.artifact.pages").set(reader.receipt.page_count() as f64);
         Ok(reader)
     }
@@ -1598,7 +1598,7 @@ impl ArtifactQueryMetricsV1 {
 
     #[inline(always)]
     fn rows(&self, rows: u64) {
-        metrics::gauge!("query.artifact.sql.rows_total").increment((rows) as f64);
+        metrics::gauge!("query.artifact.sql.rows_total").increment(rows as f64);
     }
 
     #[inline(always)]
@@ -1615,8 +1615,7 @@ impl ArtifactQueryMetricsV1 {
         self.fullscan_steps
             .set(self.fullscan_steps.get().saturating_add(steps));
 
-        metrics::gauge!("query.artifact.sql.observed_fullscan_steps_total")
-            .increment((steps) as f64);
+        metrics::gauge!("query.artifact.sql.observed_fullscan_steps_total").increment(steps as f64);
 
         Ok(())
     }
@@ -1944,9 +1943,9 @@ impl NgramListBudgetV1 {
     fn report(&self) {
         {
             metrics::gauge!("query.artifact.ngram.query_lists_total")
-                .increment((self.observed_lists) as f64);
+                .increment(self.observed_lists as f64);
             metrics::gauge!("query.artifact.ngram.query_bytes_total")
-                .increment((self.observed_bytes) as f64);
+                .increment(self.observed_bytes as f64);
         }
     }
 }
@@ -2830,7 +2829,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
-        metrics::gauge!("query.lane.fuzzy.expansions_total").increment((expansion_count) as f64);
+        metrics::gauge!("query.lane.fuzzy.expansions_total").increment(expansion_count as f64);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
@@ -3420,7 +3419,7 @@ fn digest_content_addressed_file(
                 .increment((1u64) as f64);
             hash_artifact_file(file, control, |bytes| {
                 metrics::gauge!("query.artifact.digest.content_address_preopen.bytes_total")
-                    .increment((bytes) as f64);
+                    .increment(bytes as f64);
             })
         }
     }
@@ -3438,7 +3437,7 @@ fn digest_retained_artifact_file(
                 .increment((1u64) as f64);
             hash_artifact_file(file, control, |bytes| {
                 metrics::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
-                    .increment((bytes) as f64);
+                    .increment(bytes as f64);
             })
         }
     }
@@ -3668,8 +3667,8 @@ fn configure_reader_window(
         .map_err(sqlite_error)?;
 
     {
-        metrics::gauge!("query.artifact.mmap_bytes").set((sealed_file_size_bytes) as f64);
-        metrics::gauge!("query.artifact.page_cache_bytes").set((page_cache_bytes) as f64);
+        metrics::gauge!("query.artifact.mmap_bytes").set(sealed_file_size_bytes as f64);
+        metrics::gauge!("query.artifact.page_cache_bytes").set(page_cache_bytes as f64);
     }
     Ok(page_cache_bytes)
 }

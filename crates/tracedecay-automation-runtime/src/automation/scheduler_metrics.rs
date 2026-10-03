@@ -99,10 +99,10 @@ impl Drop for DurationGuard {
             let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
             match self.kind {
                 DurationKind::BackendStartup => {
-                    metrics::gauge!("automation.backend.startup_ms").set((ms) as f64);
+                    metrics::gauge!("automation.backend.startup_ms").set(ms as f64);
                 }
                 DurationKind::Run => {
-                    metrics::gauge!("automation.run_ms").set((ms) as f64);
+                    metrics::gauge!("automation.run_ms").set(ms as f64);
                 }
             }
         }

@@ -264,7 +264,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length is invalid",
         ));
     }
-    metrics::gauge!("private_fs.framed_log.read_bytes").set((length) as f64);
+    metrics::gauge!("private_fs.framed_log.read_bytes").set(length as f64);
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {

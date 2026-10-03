@@ -235,10 +235,6 @@ impl CaptureProgressV1 {
         }
     }
 
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     fn publish_at_cadence(&self, observation_count: u64, force: bool) {
         if !force && !Self::cadence_is_due(observation_count) {
             return;
@@ -246,21 +242,17 @@ impl CaptureProgressV1 {
         let candidate_files = self.candidate_files.load(Ordering::Relaxed);
         let processed_files = self.processed_files.load(Ordering::Relaxed);
         let captured_files = self.captured_files.load(Ordering::Relaxed);
-        metrics::gauge!("daemon.code_index.capture.candidate_files").set((candidate_files) as f64);
+        metrics::gauge!("daemon.code_index.capture.candidate_files").set(candidate_files as f64);
         metrics::gauge!("daemon.code_index.capture.candidate_bytes")
             .set((self.candidate_bytes.load(Ordering::Relaxed)) as f64);
-        metrics::gauge!("daemon.code_index.capture.processed_files").set((processed_files) as f64);
+        metrics::gauge!("daemon.code_index.capture.processed_files").set(processed_files as f64);
         metrics::gauge!("daemon.code_index.capture.processed_bytes")
             .set((self.processed_bytes.load(Ordering::Relaxed)) as f64);
-        metrics::gauge!("daemon.code_index.capture.captured_files").set((captured_files) as f64);
+        metrics::gauge!("daemon.code_index.capture.captured_files").set(captured_files as f64);
         metrics::gauge!("daemon.code_index.capture.captured_bytes")
             .set((self.captured_bytes.load(Ordering::Relaxed)) as f64);
     }
 
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     fn cadence_is_due(observation_count: u64) -> bool {
         observation_count != 0 && observation_count.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
     }

@@ -4632,8 +4632,7 @@ fn merge_wake_fits_memory_temp_store(
         .query_row(staged_runs, [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-    metrics::gauge!("query.artifact.finalization.merge.staged_run_bytes")
-        .set((staged_bytes) as f64);
+    metrics::gauge!("query.artifact.finalization.merge.staged_run_bytes").set(staged_bytes as f64);
     Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 
@@ -6658,7 +6657,7 @@ fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
         metrics::gauge!("query.artifact.batch.ngram_shard_rows_total")
             .increment(ngram_shards as f64);
         metrics::gauge!("query.artifact.batch.ngram_documents_total")
-            .increment((ngram_documents) as f64);
+            .increment(ngram_documents as f64);
         metrics::gauge!("query.artifact.batch.ngram_bytes_total").increment(ngram_bytes as f64);
     }
 }
@@ -6697,9 +6696,9 @@ fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
 
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
     {
-        metrics::gauge!("query.artifact.pages").set((progress.next_page_ordinal) as f64);
-        metrics::gauge!("query.artifact.rows").set((progress.completed_chunks) as f64);
-        metrics::gauge!("query.artifact.bytes").set((progress.completed_payload_bytes) as f64);
+        metrics::gauge!("query.artifact.pages").set(progress.next_page_ordinal as f64);
+        metrics::gauge!("query.artifact.rows").set(progress.completed_chunks as f64);
+        metrics::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes as f64);
     }
 }
 

@@ -5,12 +5,12 @@ pub(crate) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 #[inline(always)]
 pub(crate) fn record_snapshot_admissions(count: u64) {
-    metrics::gauge!("session_temporal.observe.snapshot_admissions").increment((count) as f64);
+    metrics::gauge!("session_temporal.observe.snapshot_admissions").increment(count as f64);
 }
 
 #[inline(always)]
 pub(crate) fn record_output_sessions(count: u64) {
-    metrics::gauge!("session_temporal.observe.output_sessions").increment((count) as f64);
+    metrics::gauge!("session_temporal.observe.output_sessions").increment(count as f64);
 }
 
 /// Payload bytes whose integrity proof passed, whether or not they were later
