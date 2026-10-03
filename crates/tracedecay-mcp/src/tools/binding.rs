@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_fact_reads_dispatch_to_their_registered_project() {
+    fn exact_fact_tools_dispatch_to_their_registered_project() {
         for tool_name in [
             "tracedecay_fact_store_search",
             "tracedecay_fact_store_probe",
@@ -1132,16 +1132,6 @@ mod tests {
             "tracedecay_fact_store_list",
             "tracedecay_memory_status",
             "tracedecay_message_search",
-        ] {
-            assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(tool_dispatches_registered_project_reader(tool_name));
-            assert!(!tool_is_selector_bound_effect(tool_name));
-        }
-    }
-
-    #[test]
-    fn exact_fact_effects_keep_the_active_project_authority() {
-        for tool_name in [
             "tracedecay_fact_store_add",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
@@ -1149,10 +1139,9 @@ mod tests {
             "tracedecay_fact_feedback",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(!tool_dispatches_registered_project_reader(tool_name));
             assert!(
-                tool_is_selector_bound_effect(tool_name),
-                "{tool_name} must stay selector-bound so writes are not dispatched into the selected store"
+                tool_dispatches_registered_project_reader(tool_name),
+                "{tool_name} must open the selected project's store"
             );
         }
     }

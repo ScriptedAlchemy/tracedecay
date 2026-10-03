@@ -1714,6 +1714,98 @@ fn graph_tool_project_selector_answers_from_the_selected_registered_project() {
     );
 }
 
+/// A fact write's `project_selector` lands in that registered project's
+/// store, not the project the CLI runs in.
+#[test]
+fn fact_store_project_selector_writes_into_the_selected_registered_project() {
+    let home = TempDir::new().unwrap();
+    let active = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let active_path = canonical_existing_path(active.path());
+    let other_path = canonical_existing_path(other.path());
+    init_committed_git_project_with_cli(&home_path, &active_path);
+    init_committed_git_project_with_cli(&home_path, &other_path);
+    let other_id = default_profile_project_id(&other_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &active_path,
+        "fact_store_add",
+        json!({
+            "content": "Selected beacon: the corpus ships nightly",
+            "category": "decision",
+            "project_selector": { "project_id": other_id }
+        }),
+    );
+    assert!(added, "{body}");
+
+    let decisions = |cwd: &Path| {
+        let (listed, body) = live_tool_json(
+            &home_path,
+            cwd,
+            "fact_store_list",
+            json!({ "category": "decision", "min_trust": 0.0 }),
+        );
+        assert!(listed, "{body}");
+        body["outcome"]["value"]["payload"]["facts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("fact_store_list returned no facts: {body}"))
+            .iter()
+            .map(|projection| projection["fact"]["content"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        decisions(&other_path),
+        vec![json!("Selected beacon: the corpus ships nightly")]
+    );
+    assert_eq!(decisions(&active_path), Vec::<Value>::new());
+}
+
+/// Removing or superseding an unknown fact id is the same typed not-found
+/// refusal, with a failing exit, that getting it is.
+#[test]
+fn fact_store_effects_on_an_unknown_fact_id_refuse_like_get() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &project_path,
+        "fact_store_add",
+        json!({ "content": "Known beacon: builds run on push", "category": "decision" }),
+    );
+    assert!(added, "{body}");
+    let known = body["outcome"]["value"]["payload"]["result"]["fact"]["fact"]["fact_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fact_store_add returned no fact id: {body}"))
+        .to_owned();
+    let mut unknown = known.clone();
+    let last = unknown.pop().expect("fact id is not empty");
+    unknown.push(if last == '0' { '1' } else { '0' });
+
+    for (tool, args) in [
+        ("fact_store_get", json!({ "fact_id": unknown })),
+        ("fact_store_remove", json!({ "fact_id": unknown })),
+        (
+            "fact_store_supersede",
+            json!({ "fact_id": unknown, "superseded_by": known }),
+        ),
+    ] {
+        let (succeeded, body) = live_tool_json(&home_path, &project_path, tool, args);
+        assert!(!succeeded, "{tool} of an unknown fact id exited 0: {body}");
+        assert_eq!(
+            body["problem"]["code"], "not_found_or_not_authorized",
+            "{tool}: {body}"
+        );
+    }
+}
+
 /// Retained memory and LCM calls answer through the daemon's typed owner on
 /// both targets: the profile target from a directory outside any project, and
 /// the project target. `fact_store_related` shares its page shape with
