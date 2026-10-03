@@ -6,6 +6,7 @@ import { OpenAIExtensions, type OpenAIMentionItem } from "@openai/mcp-extensions
 import { z } from "zod";
 import { deepLinkPath, type ViewState } from "../shared/view.js";
 import type { DaemonBridge } from "./bridge.js";
+import { toFailure } from "./serve-client.js";
 import { failureView, projectsView, searchView, symbolView, viewText } from "./view-model.js";
 
 export const UI_RESOURCE_URI = "ui://tracedecay/code-explorer";
@@ -132,7 +133,14 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
       }),
     );
     const items: OpenAIMentionItem[] = [];
-    for (const outcome of perProject) if (outcome.status === "fulfilled") items.push(...outcome.value);
+    const failures: string[] = [];
+    perProject.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled") items.push(...outcome.value);
+      else failures.push(`${projects[index]?.label}: ${toFailure(outcome.reason).message}`);
+    });
+    // The mention result schema is a bare item list, so a tool error is the
+    // only way to say a lookup failed. Partial matches still win.
+    if (items.length === 0 && failures.length > 0) throw new Error(`symbol lookup failed for ${failures.join("; ")}`);
     return { items };
   });
 
