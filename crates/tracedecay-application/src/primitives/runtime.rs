@@ -1527,6 +1527,7 @@ fn test_outcome<T: Serialize>(
             )
         }
         TestPrimitivePortOutcome::Failed { .. } => unavailable(context, operation),
+        TestPrimitivePortOutcome::Refused(refusal) => problem(context, operation, *refusal),
     }
 }
 

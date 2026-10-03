@@ -503,6 +503,7 @@ async fn complexity_ranks_by_lines_fanout_and_fanin() {
     assert_eq!(
         functions_in_kinds,
         json!({
+            "freshness": {"state": "fresh"},
             "formula": FORMULA,
             "note": NOTE,
             "result_count": 0,
@@ -530,6 +531,7 @@ async fn complexity_ranks_by_lines_fanout_and_fanin() {
     assert_eq!(
         absent,
         json!({
+            "freshness": {"state": "fresh"},
             "formula": FORMULA,
             "note": NOTE,
             "result_count": 0,

@@ -304,6 +304,7 @@ async fn dead_code_reports_only_the_uncalled_private_symbols() {
     assert_eq!(
         markdown_without_ids(markdown),
         "\
+freshness: fresh
 **dead_code_count:** 4
 
 ## symbols

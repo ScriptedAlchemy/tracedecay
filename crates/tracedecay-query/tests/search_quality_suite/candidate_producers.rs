@@ -3242,6 +3242,7 @@ fn case_sensitive_quoted_literals_match_reopened_artifacts() {
         let request = ExactLaneRequest {
             control: &ACTIVE_CONTROL,
             literals: authority().parse_literals(&view, &base),
+            path_prefix: None,
             base,
             query_view: &view,
             generation: fixture.metadata.generation.clone(),
@@ -6222,6 +6223,7 @@ fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
     let exact_request = ExactLaneRequest {
         control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&exact_query_view, &base),
+        path_prefix: None,
         base,
         query_view: &exact_query_view,
         generation,
@@ -6299,6 +6301,7 @@ fn exact_candidate_scan_stops_before_the_next_batch_after_cancellation() {
     };
     let mut request = ExactLaneRequest {
         literals: authority.parse_literals(&view, &base),
+        path_prefix: None,
         base,
         query_view: &view,
         generation,
@@ -6556,6 +6559,7 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let exact_request = ExactLaneRequest {
         control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&exact_query_view, &base),
+        path_prefix: None,
         base,
         query_view: &exact_query_view,
         generation,
@@ -6686,6 +6690,7 @@ fn exact_artifact_emits_only_authority_minted_proofs() {
     let request = ExactLaneRequest {
         control: &ACTIVE_CONTROL,
         literals: authority.parse_literals(&query_view, &base),
+        path_prefix: None,
         base,
         query_view: &query_view,
         generation: artifact.metadata.generation.clone(),

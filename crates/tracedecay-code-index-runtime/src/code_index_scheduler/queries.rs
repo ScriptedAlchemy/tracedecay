@@ -35,11 +35,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, FileOccurrenceId,
-    FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, ExactFieldV1,
+    FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -2769,6 +2770,7 @@ fn execute_prepared_exact_query(
     let exact_control = CallableRetrievalExecutionControl::for_request(context.request);
     let lane_request = ExactLaneRequest {
         literals: authority.parse_literals(&query_view, base),
+        path_prefix: request.scope.path_prefix.as_deref(),
         generation: served_generation.clone(),
         budget: base.budget,
         base: base.clone(),
@@ -2787,6 +2789,12 @@ fn execute_prepared_exact_query(
     else {
         return unavailable_for_generation(finished_at, served_generation);
     };
+    // Identifier terms are minted only from definition names, so a complete
+    // lane read still omits every use of the identifier.
+    let definitions_only = lane_request
+        .literals
+        .iter()
+        .any(|literal| literal.field == ExactFieldV1::Identifier);
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
@@ -2796,7 +2804,18 @@ fn execute_prepared_exact_query(
             else {
                 return unavailable(finished_at);
             };
-            outcome
+            match outcome {
+                NativeLaneOutcomeV1::Complete(page) if definitions_only => {
+                    NativeLaneOutcomeV1::Partial {
+                        page,
+                        reason: RetrievalFailure::IncompatibleProjection {
+                            detail: "exact projection indexes identifier definitions, not uses"
+                                .to_owned(),
+                        },
+                    }
+                }
+                outcome => outcome,
+            }
         }
         Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
         Err(_) => return unavailable(finished_at),
@@ -4050,7 +4069,7 @@ mod tests {
             .expect("real mounted artifact admission");
         let active = registry.exact_occurrence(port_context, &request).await;
         assert!(
-            matches!(active, RetrievalPortOutcome::Completed(_)),
+            matches!(&active, RetrievalPortOutcome::Partial(evidence) if evidence.payload.is_some()),
             "{active:?}"
         );
 
@@ -4086,6 +4105,166 @@ mod tests {
             CancellationStage::DuringRead
         );
         registry.shutdown().await;
+    }
+
+    async fn exact_occurrences(
+        files: &[(&str, &str)],
+        literal: &str,
+        path_prefix: Option<&str>,
+    ) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
+        let fixture = GitFixture::new(files);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation = callable_code_operation(CallableCodeOperationKind::ExactOccurrence)
+            .expect("exact operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let request = ExactOccurrenceRequest::new(
+            literal,
+            None,
+            CodeQueryScope::new(generation, path_prefix.map(str::to_owned))
+                .expect("exact generation scope"),
+            query_meta(),
+        )
+        .expect("exact request");
+        let outcome = registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await;
+        registry.shutdown().await;
+        outcome
+    }
+
+    #[tokio::test]
+    async fn exact_identifier_definition_only_page_is_not_complete() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "src/lib.rs",
+                    "mod user;\npub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                ),
+                (
+                    "src/user.rs",
+                    "use crate::shared_probe_target;\n\
+                     pub fn remote_caller() { shared_probe_target(); }\n",
+                ),
+            ],
+            "shared_probe_target",
+            None,
+        )
+        .await;
+        let (RetrievalPortOutcome::Completed(evidence) | RetrievalPortOutcome::Partial(evidence)) =
+            &outcome
+        else {
+            panic!("an exact read over a sealed generation must answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(
+            !page.items.is_empty(),
+            "the definition must match: {page:?}"
+        );
+        // The exact projection indexes identifier definitions only, so the
+        // uses in both files can never be on the page.
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Partial,
+            "a definitions-only page must not claim complete coverage: {evidence:?}"
+        );
+        assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+    }
+
+    #[tokio::test]
+    async fn prefixed_identifier_exact_reads_are_not_complete() {
+        for literal in ["identifier:shared_probe_target", "id:shared_probe_target"] {
+            let outcome = exact_occurrences(
+                &[(
+                    "src/lib.rs",
+                    "pub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                )],
+                literal,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(outcome, RetrievalPortOutcome::Partial(_)),
+                "`{literal}` reads only identifier definitions: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_counts_only_in_scope_matches() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "a/lib.rs",
+                    "pub fn a_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+                (
+                    "b/lib.rs",
+                    "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+            ],
+            "--probe-scope-flag",
+            Some("b"),
+        )
+        .await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("an in-scope flag match is the whole scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        let in_scope = page.items.len() as u64;
+        assert_eq!(page.total, Some(in_scope));
+        assert_eq!(evidence.coverage.eligible, Some(in_scope));
+        assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_finds_matches_ranked_past_the_lane_cap() {
+        let mut files = (0..64)
+            .map(|index| {
+                (
+                    format!("a/m{index}.rs"),
+                    format!("pub fn a_runner_{index}() {{ run(\"--probe-scope-flag\"); }}\n"),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((
+            "b/lib.rs".to_owned(),
+            "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n".to_owned(),
+        ));
+        let files = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let outcome = exact_occurrences(&files, "--probe-scope-flag", Some("b")).await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("out-of-scope matches must not crowd out the scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        assert_eq!(page.total, Some(page.items.len() as u64));
     }
 
     #[test]

@@ -126,11 +126,13 @@ async fn info_tools_read_the_same_symbols_however_large_the_repository_grows() {
     let grown = observe(write_core_and_bulk).await;
 
     let files_in_src = json!({
+        "freshness": {"state": "fresh"},
         "count": 1,
         "layout": "grouped",
         "files": [{"path": "src/marked.rs", "symbols": 2, "bytes": MARKED_RS.len()}],
     });
     let todos = json!({
+        "freshness": {"state": "fresh"},
         "match_count": 1,
         "by_kind": {"TODO": 1},
         "markers": [{
