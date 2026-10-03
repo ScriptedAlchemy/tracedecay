@@ -601,7 +601,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return lease;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -678,7 +677,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return lease;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -868,7 +866,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return database;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_memory(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -951,7 +948,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
             super::RemoteNodeOwnerAdmissionV1::Existing(database) => (database, false, true),
             super::RemoteNodeOwnerAdmissionV1::Opening(mut admission) => {
-                let _mount_observation = super::StoreMountObservationV1::enter();
                 let shard_id = StoreShardIdV1::remote_node(
                     self.identity.brain_id().clone(),
                     self.identity.profile_id().clone(),
@@ -1476,7 +1472,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -1706,7 +1701,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return Ok(database);
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
@@ -1805,7 +1799,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             return Ok(database);
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),

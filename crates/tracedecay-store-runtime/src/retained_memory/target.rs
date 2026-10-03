@@ -3,8 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -45,18 +43,11 @@ pub enum MemoryTargetAccessV1 {
 pub struct RetainedMemoryTargetV1<'a> {
     database: ProjectMemoryDbHandle<'a>,
     owner: FactOwnerV1,
-
-    _observation: RetainedMemoryTargetObservationV1,
 }
 
 impl<'a> RetainedMemoryTargetV1<'a> {
     fn new(database: ProjectMemoryDbHandle<'a>, owner: FactOwnerV1) -> Self {
-        Self {
-            database,
-            owner,
-
-            _observation: RetainedMemoryTargetObservationV1::enter(),
-        }
+        Self { database, owner }
     }
 
     pub fn database(&self) -> &Database {
@@ -65,29 +56,6 @@ impl<'a> RetainedMemoryTargetV1<'a> {
 
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
-    }
-}
-
-static RETAINED_MEMORY_TARGETS_OPEN: AtomicU64 = AtomicU64::new(0);
-
-struct RetainedMemoryTargetObservationV1;
-
-impl RetainedMemoryTargetObservationV1 {
-    fn enter() -> Self {
-        let open = RETAINED_MEMORY_TARGETS_OPEN
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        Self
-    }
-}
-
-impl Drop for RetainedMemoryTargetObservationV1 {
-    fn drop(&mut self) {
-        let _ = RETAINED_MEMORY_TARGETS_OPEN.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |open| open.checked_sub(1),
-        );
     }
 }
 

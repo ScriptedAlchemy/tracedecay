@@ -79,7 +79,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
         if !writable {
-            let _mount_observation = super::StoreMountObservationV1::enter();
             let shard_id = StoreShardIdV1::project(
                 self.identity.brain_id().clone(),
                 self.identity.profile_id().clone(),
@@ -128,7 +127,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 });
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
