@@ -476,39 +476,6 @@ async fn get_selected_project_fact(
     fact.clone()
 }
 
-async fn assert_selected_project_write_denied(
-    route: &ProjectRoute,
-    project_id: &str,
-    content: &str,
-    entity: &str,
-) {
-    let tool = "tracedecay_fact_store_add";
-    let result = call_default_tool(
-        &route.profile,
-        &route.handshake,
-        tool,
-        json!({
-            "content": content,
-            "entities": [entity],
-            "memory_scope": "project",
-            "project_selector": {"project_id": project_id},
-            "format": "json",
-        }),
-    )
-    .await
-    .expect("selected-project write denial transport");
-    assert_eq!(result["isError"], true, "selected-project write succeeded");
-    let problem = tracedecay::daemon::tool_json_payload(&result, tool)
-        .expect("selected-project write denial problem");
-    serde_json::from_value::<tracedecay_contracts::ApplicationProblemEnvelope>(problem.clone())
-        .unwrap_or_else(|error| panic!("invalid selected-project denial envelope: {error}"));
-    assert_eq!(problem["problem"]["kind"], "unsupported");
-    assert_eq!(
-        problem["problem"]["code"],
-        "memory.cross_project_write_unsupported"
-    );
-}
-
 fn telemetry(fact: &Value) -> Value {
     json!({
         "retrieval_count": fact["telemetry"]["retrieval_count"],
@@ -680,8 +647,8 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     const B_ENTITY: &str = "RestartRelationProjectBeta";
     const PROFILE_CONTENT: &str = "Restart profile retains its mounted relation";
     const PROFILE_ENTITY: &str = "RestartRelationProfileOnly";
-    const DENIED_SELECTED_CONTENT: &str = "Selected project writes stay denied";
-    const DENIED_SELECTED_ENTITY: &str = "DeniedSelectedProjectWrite";
+    const SELECTED_CONTENT: &str = "Selected project writes land in the selected store";
+    const SELECTED_ENTITY: &str = "SelectedProjectWrite";
 
     let (environment, project_a) = common::IsolatedHome::new();
     let project_b = environment.scratch().join("project-b");
@@ -821,18 +788,40 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     .await;
     assert_eq!(selected_b["owner"], added_b.owner);
     assert_eq!(selected_b["content"], B_CONTENT);
-    assert_selected_project_write_denied(
-        &first_a,
-        &project_b_id,
-        DENIED_SELECTED_CONTENT,
-        DENIED_SELECTED_ENTITY,
+    let selected_write = added_fact_evidence(
+        &fact_store_payload(
+            &first_a,
+            "add",
+            "add project B fact through A",
+            json!({
+                "content": SELECTED_CONTENT,
+                "category": "project",
+                "entities": [SELECTED_ENTITY],
+                "trust": 0.9,
+                "memory_scope": "project",
+                "project_selector": {"project_id": project_b_id},
+                "source_label": "physical-daemon-restart-acceptance",
+                "format": "json",
+            }),
+        )
+        .await,
+        SELECTED_CONTENT,
+        SELECTED_ENTITY,
+        json!({"kind": "project", "project_id": project_b_id}),
+        "committed",
+    );
+    wait_for_related_fact(
+        &first_b,
+        &selected_write,
+        "project",
+        "selected-project write lands in B",
     )
     .await;
     assert_related_absent(
-        &first_b,
-        DENIED_SELECTED_ENTITY,
+        &first_a,
+        SELECTED_ENTITY,
         "project",
-        "selected-project write denial remains absent from B",
+        "selected-project write stays out of A",
     )
     .await;
     let initial_profile =
