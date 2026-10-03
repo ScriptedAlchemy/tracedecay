@@ -1980,7 +1980,10 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     // issue, and `doctor` exits nonzero on any issue. The index is git-backed,
     // so a non-repository fixture would fail this journey on the fixture's own
     // shape rather than on anything doctor did to the live database.
-    init_committed_git_project_with_cli(&home_path, &project_path);
+    let widened_source: String = (0..1)
+        .map(|i| format!("pub fn widened_{i}(x: u32) -> u32 {{ x + {i} }}\n"))
+        .collect();
+    init_committed_git_project_with_source(&home_path, &project_path, &widened_source);
     let init_returned = std::time::Instant::now();
 
     let data_root = profile_sharded_data_root(
@@ -1988,6 +1991,36 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &default_profile_project_id(&project_path),
     );
     let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let table_counts = || {
+        let tables = std::process::Command::new("sqlite3")
+            .args(["-readonly", db_path.to_str().unwrap()])
+            .arg("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&tables.stdout)
+            .lines()
+            .map(|table| {
+                let count = std::process::Command::new("sqlite3")
+                    .args(["-readonly", db_path.to_str().unwrap()])
+                    .arg(format!("SELECT count(*) FROM \"{table}\";"))
+                    .output()
+                    .unwrap();
+                (
+                    table.to_owned(),
+                    String::from_utf8_lossy(&count.stdout).trim().to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let published = || {
+        std::process::Command::new("sqlite3")
+            .args(["-readonly", db_path.to_str().unwrap()])
+            .arg("SELECT count(*) FROM graph_verified_heads_v1;")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "1")
+            .unwrap_or(false)
+    };
+    let _ = table_counts;
     common::create_runtime().block_on(async {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
@@ -2009,7 +2042,12 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         .unwrap_or(false);
         let mut locked_at = Vec::new();
         let mut attempts = 0u32;
-        while init_returned.elapsed() < Duration::from_millis(1500) {
+        let mut published_at = None;
+        while init_returned.elapsed() < Duration::from_secs(20) {
+            if attempts % 10 == 0 && published() {
+                published_at = Some(init_returned.elapsed().as_millis());
+                break;
+            }
             attempts += 1;
             if let Err(error) = db
                 .execute_write_batch(
@@ -2027,9 +2065,93 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
             }
         }
         eprintln!(
-            "PROBE daemon_authority_lock_held={lock_held} attempts={attempts} locked={} locked_at_ms={:?}",
+            "PROBE daemon_authority_lock_held={lock_held} published_at_ms={published_at:?} attempts={attempts} locked={} locked_at_ms={:?}",
             locked_at.len(),
             &locked_at[..locked_at.len().min(8)]
+        );
+        let quiet_started = init_returned.elapsed().as_millis();
+        let mut published_after_quiet = None;
+        while init_returned.elapsed() < Duration::from_secs(80) {
+            if published() {
+                published_after_quiet = Some(init_returned.elapsed().as_millis());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let logs = std::process::Command::new("grep")
+            .args(["-rhoE", ".{0,160}(database is locked|SQLITE_BUSY|database busy).{0,160}"])
+            .arg(home_path.join(".tracedecay"))
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+            .unwrap_or_default();
+        eprintln!(
+            "PROBE writes stopped at {quiet_started} ms; publication landed at {published_after_quiet:?} ms; daemon lock lines: {}",
+            logs.lines().take(5).collect::<Vec<_>>().join(" || ")
+        );
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let driver = {
+            let stop = stop.clone();
+            let home = home_path.clone();
+            let project = project_path.clone();
+            std::thread::spawn(move || {
+                let mut calls = 0u32;
+                let mut failures = Vec::new();
+                let driver_started = std::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let out = tracedecay_command_with_home(&home)
+                        .current_dir(&project)
+                        .args(["tool", "fact_store_add", "--json", "--args"])
+                        .arg(
+                            serde_json::json!({
+                                "content": format!("probe fact number {calls} about doctor seeding"),
+                                "memory_scope": "project",
+                            })
+                            .to_string(),
+                        )
+                        .output()
+                        .unwrap();
+                    calls += 1;
+                    if !out.status.success() {
+                        failures.push((
+                            driver_started.elapsed().as_millis(),
+                            String::from_utf8_lossy(&out.stderr).replace('\n', " | "),
+                        ));
+                    }
+                }
+                (calls, failures)
+            })
+        };
+        let wal = db_path.with_extension("db-wal");
+        let wal_before = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+        let mut driven_attempts = 0u32;
+        let mut driven_locked = 0u32;
+        let driven_started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        while driven_started.elapsed() < Duration::from_secs(12) {
+            driven_attempts += 1;
+            if let Err(error) = db
+                .execute_write_batch(
+                    "probe",
+                    "CREATE TABLE IF NOT EXISTS td_probe (x); DROP TABLE td_probe;",
+                )
+                .await
+            {
+                let text = format!("{error:?}");
+                if text.contains("locked") || text.contains("busy") {
+                    driven_locked += 1;
+                } else {
+                    panic!("probe: {text}");
+                }
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (calls, failures) = driver.join().unwrap();
+        eprintln!(
+            "PROBE driven: fixture attempts={driven_attempts} locked={driven_locked}; fact_store_add calls={calls} control_failures(<4s)={} driven_failures={} first_driven={:?}; wal {wal_before} -> {}",
+            failures.iter().filter(|(at, _)| *at < 4000).count(),
+            failures.len(),
+            failures.iter().find(|(at, _)| *at >= 4000),
+            std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
         );
         db.execute_write_batch(
             "seed doctor daemon reclaimable pages fixture",
