@@ -269,7 +269,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
     let exact = context
         .exact(
             RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
-            "run_query",
+            &exact_evidence().matched_literals,
             Some(ExactTechnicalTermKindV1::WholeSymbol),
             |path| path.starts_with("src/query/"),
         )
@@ -365,7 +365,7 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
         context
             .exact(
                 RetrieverOutcome::Stale(stale.clone()),
-                "run_query",
+                &exact_evidence().matched_literals,
                 None,
                 |_| true,
             )

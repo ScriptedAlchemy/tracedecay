@@ -2789,7 +2789,7 @@ fn execute_prepared_exact_query(
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
-                native_context.exact(outcome, &request.literal, request.kind, |path| {
+                native_context.exact(outcome, &lane_request.literals, request.kind, |path| {
                     path_is_in_code_query_scope(path, &request.scope)
                 })
             else {
@@ -4175,13 +4175,17 @@ mod tests {
                 panic!("`{literal}` reads only identifier definitions: {outcome:?}");
             };
             let page = evidence.payload.as_ref().expect("exact page");
-            assert_eq!(
+            assert!(
+                !page.items.is_empty(),
+                "`{literal}` finds the definition: {page:?}"
+            );
+            assert!(
                 page.items
                     .iter()
-                    .map(|item| (item.occurrence.path.as_str(), item.matched_literal.as_str()))
-                    .collect::<Vec<_>>(),
-                [("src/lib.rs", "shared_probe_target")],
-                "`{literal}` finds the definition: {page:?}"
+                    .all(|item| item.occurrence.path == "src/lib.rs"
+                        && item.occurrence.span.start_byte == 0
+                        && item.matched_literal == "shared_probe_target"),
+                "`{literal}` matches only the definition, by its bare name: {page:?}"
             );
         }
     }
