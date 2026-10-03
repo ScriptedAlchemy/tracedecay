@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde_json::json;
 use tracedecay::daemon::call_tool;
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+use tracedecay_mcp::application_output::tool_result::tool_result_refusal;
 use tracedecay_project::project::MovedStoreAdoption;
 
 use crate::common::{daemon_socket_path, spawn_tracedecay_daemon, tempdir_or_panic};
@@ -65,7 +66,7 @@ async fn version_skewed_client_cannot_crash_the_daemon() {
     // tools/call dispatch, the poll frame that previously overflowed, and
     // must come back as the daemon's typed refusal, not a dead socket.
     let skewed = projectless_handshake(&profile_root, SKEWED_CLIENT_VERSION, "stale-skewed-client");
-    let refusal = tokio::time::timeout(
+    let result = tokio::time::timeout(
         RESPONSE_TIMEOUT,
         call_tool(
             &socket,
@@ -76,7 +77,9 @@ async fn version_skewed_client_cannot_crash_the_daemon() {
     )
     .await
     .expect("skewed projectless tools/call timed out")
-    .expect_err("a project tool on a projectless connection must be refused");
+    .expect("a settled refusal arrives as a tool result");
+    let refusal = tool_result_refusal(&result)
+        .expect("a project tool on a projectless connection must be refused");
     assert_eq!(
         refusal.project_route_context(),
         Some((

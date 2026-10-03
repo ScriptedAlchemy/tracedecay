@@ -295,6 +295,35 @@ fn successive_edits_reseal_explicit_parent_lineage_as_identity() {
     );
 }
 
+/// The edit moves only a module's signature, so a caller of `Inner.bar` has
+/// no site the edit can move: the module's name moves a lookup only as its
+/// last segment. Its sealed edge still targets the edited file's old `bar`
+/// occurrence and must be re-pointed at the new one.
+#[test]
+fn a_module_signature_edit_repoints_calls_through_the_module() {
+    let inner = |signature: &str| format!("{signature}\n  def self.bar\n    3\n  end\nend\n");
+    fn tree(b: &str) -> Vec<(&str, &str, &str)> {
+        vec![
+            (
+                "lib/a.rb",
+                "ruby",
+                "require_relative \"b\"\ndef run\n  Inner.bar\nend\n",
+            ),
+            ("lib/b.rb", "ruby", b),
+            ("lib/c.rb", "ruby", "C = 1\n"),
+            ("lib/d.rb", "ruby", "D = 1\n"),
+            ("lib/e.rb", "ruby", "E = 1\n"),
+            ("lib/f.rb", "ruby", "F = 1\n"),
+            ("lib/g.rb", "ruby", "G = 1\n"),
+            ("lib/h.rb", "ruby", "H = 1\n"),
+            ("lib/i.rb", "ruby", "I = 1\n"),
+        ]
+    }
+    let before = inner("module Inner");
+    let after = inner("module Inner # moved");
+    assert_sparse_matches_cold(&tree(&before), &tree(&after));
+}
+
 #[test]
 fn typescript_imports_resolve_over_the_parent() {
     let a = "export function helper(): number { return 1; }\n";
@@ -365,6 +394,59 @@ fn import_and_file_set_changes_build_cold() {
         added.decoded().is_some(),
         "a cold build holds its decoded generation"
     );
+}
+
+fn go_tree<'a>(wrong: &'a str, util: &'a str) -> Vec<(&'a str, &'a str, &'a str)> {
+    vec![
+        ("go.mod", "go", "module example.com/m\n"),
+        (
+            "calc/adder.go",
+            "go",
+            "package calc\n\ntype Adder interface {\n\tAdd(a, b int) int\n}\n",
+        ),
+        ("calc/util.go", "go", util),
+        ("calc/wrong.go", "go", wrong),
+        ("calc/a.go", "go", "package calc\n\nfunc A() {}\n"),
+        ("calc/b.go", "go", "package calc\n\nfunc B() {}\n"),
+        ("calc/c.go", "go", "package calc\n\nfunc C() {}\n"),
+        ("calc/d.go", "go", "package calc\n\nfunc D() {}\n"),
+        ("calc/e.go", "go", "package calc\n\nfunc E() {}\n"),
+    ]
+}
+
+const GO_WRONG: &str = "package calc\n\ntype Wrong struct{}\n";
+const GO_UTIL: &str =
+    "package calc\n\nfunc Util() int { return A2() }\n\nfunc A2() int { return 1 }\n";
+
+/// Satisfaction pairs every Go method set with every interface, so an edit
+/// that gives a type the interface's method must seal the new `Implements`
+/// edge, which no reference site in the edited file names.
+#[test]
+fn a_go_method_set_edit_builds_cold_and_seals_satisfaction() {
+    let wrong =
+        "package calc\n\ntype Wrong struct{}\n\nfunc (Wrong) Add(a, b int) int { return a + b }\n";
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    publish(&mut incremental, &go_tree(GO_WRONG, GO_UTIL), 1_100_000);
+    let edited = publish(&mut incremental, &go_tree(wrong, GO_UTIL), 1_200_000);
+    assert_eq!(
+        edited.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::MovesGoMethodSets)
+    );
+    let cold_store = MemorySealedPublicationStoreV1::default();
+    publish(&mut owner(&cold_store), &go_tree(wrong, GO_UTIL), 1_200_000);
+    let sealed = answers(&store);
+    assert!(
+        sealed
+            .edges
+            .iter()
+            .any(|edge| edge.kind == tracedecay_domain::RelationEdgeKindV1::Implements),
+        "Wrong implements Adder"
+    );
+    assert_eq!(sealed, answers(&cold_store));
+
+    let util = format!("{GO_UTIL}// edit\n");
+    assert_sparse_matches_cold(&go_tree(GO_WRONG, GO_UTIL), &go_tree(GO_WRONG, &util));
 }
 
 #[test]

@@ -14,7 +14,7 @@ use tracedecay_domain::{
 
 use super::exact::{ExactLaneEvidence, ExactLiteralV1};
 use super::graph::GraphLaneEvidence;
-use super::lexical::LexicalLaneEvidence;
+use super::lexical::{LexicalLaneEvidence, exact_field_for_kind};
 use super::ports::CodeCandidateBindingV1;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -177,7 +177,7 @@ where
     pub fn exact(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>,
-        admitted_literals: &[ExactLiteralV1],
+        requested_literals: &[ExactLiteralV1],
         expected_kind: Option<ExactTechnicalTermKindV1>,
         path_admitted: impl Fn(&str) -> bool,
     ) -> Result<NativeLaneOutcomeV1<NativeExactRecordV1>, QueryExecutionContractErrorV1> {
@@ -186,19 +186,22 @@ where
             for candidate in &batch.candidates {
                 let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
-                let Some(literal) = evidence
-                    .matched_literals
-                    .iter()
-                    .find(|literal| admitted_literals.contains(literal))
-                else {
-                    continue;
-                };
-                let Some(matched_kind) = evidence
+                let Some((matched_kind, matched_literal)) = evidence
                     .binding
                     .matched_term_kinds
                     .iter()
                     .copied()
-                    .find(|kind| expected_kind.is_none_or(|expected| expected == *kind))
+                    .filter(|kind| expected_kind.is_none_or(|expected| expected == *kind))
+                    .find_map(|kind| {
+                        evidence
+                            .matched_literals
+                            .iter()
+                            .find(|literal| {
+                                literal.field == exact_field_for_kind(kind)
+                                    && requested_literals.contains(literal)
+                            })
+                            .map(|literal| (kind, literal))
+                    })
                 else {
                     continue;
                 };
@@ -208,8 +211,8 @@ where
                     items.push(NativeExactRecordV1 {
                         occurrence,
                         matched_kind,
-                        matched_literal: String::from_utf8(literal.original_bytes.clone())
-                            .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?,
+                        matched_literal: String::from_utf8_lossy(&matched_literal.original_bytes)
+                            .into_owned(),
                     });
                 }
             }

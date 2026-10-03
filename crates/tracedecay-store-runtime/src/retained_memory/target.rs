@@ -5,8 +5,11 @@ use std::sync::Arc;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::{
+    ApplicationProblem, LegalAction, RetainedSurfaceExecutionErrorV1, RetryDirective,
+    SafeDiagnostic,
+};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registry_context_candidate_roots};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
@@ -164,7 +167,19 @@ pub async fn open_project_retained_memory_target(
         ));
     }
     if access == MemoryTargetAccessV1::Write {
-        return denied();
+        return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+            ApplicationProblem::Unsupported {
+                diagnostic: SafeDiagnostic {
+                    code: "memory.cross_project_write_unsupported".to_owned(),
+                    message: "Memory writes target only the served project; a project selector \
+                              naming another project is read-only"
+                        .to_owned(),
+                },
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::CorrectRequest],
+                detail: None,
+            },
+        ));
     }
     open_selected_project_read_only(authority, selected_project_id).await
 }

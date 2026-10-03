@@ -220,6 +220,7 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
                 project_path TEXT NOT NULL,
                 started_at INTEGER,
                 ended_at INTEGER,
+                metadata_json TEXT,
                 PRIMARY KEY(provider, session_id)
             );
             CREATE TABLE lcm_raw_messages (

@@ -4,13 +4,13 @@ use tracedecay_domain::git::repository_state::{
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
 };
 use tracedecay_domain::{
-    GitBlobExpectationV1, GitCommitIdentityV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1,
-    GitIndexCommitIntentV1, GitIndexEntryExpectationV1, GitIndexJournalPhaseV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS,
-    ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    GitBlobExpectationV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1, GitIndexEntryExpectationV1,
+    GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitObjectFormatV1, GitOidV1, GitOperationStateV1, HunkDirectionV1, HunkRefV1,
+    MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS, ManifestDigest, ProjectId, RepositoryId, UtcMicros,
+    WorktreeId,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -100,28 +100,13 @@ fn hunk(preview_id: &GitIndexPreviewId, snapshot_digest: ManifestDigest) -> Hunk
     }
 }
 
-fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: UtcMicros(1_000_000),
-    };
-    GitIndexCommitIntentV1::new(
-        message.to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .expect("commit intent")
-}
-
 #[test]
-fn durable_preview_inputs_bind_bounded_hunks_or_one_exact_commit_intent() {
+fn durable_preview_inputs_bind_bounded_hunks() {
     let repository_snapshot = snapshot();
     let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&repository_snapshot)
         .expect("snapshot digest");
     let preview_id = GitIndexPreviewId::new("git-preview.input.fixture").expect("preview id");
-    let reference = hunk(&preview_id, snapshot_digest);
+    let reference = hunk(&preview_id, snapshot_digest.clone());
     let input = GitIndexPreviewInputV1::new_hunk_selection(
         preview_id.clone(),
         GitIndexTransactionOperationV1::StageHunks,
@@ -134,19 +119,6 @@ fn durable_preview_inputs_bind_bounded_hunks_or_one_exact_commit_intent() {
     input.validate().expect("input remains canonical");
     assert!(!input.is_expired_at(UtcMicros(30_000_009)));
     assert!(input.is_expired_at(UtcMicros(30_000_010)));
-
-    let intent = commit_intent("restart-stable intent\n");
-    let commit = GitIndexPreviewInputV1::new_commit(
-        GitIndexPreviewId::new("git-preview.commit-input.fixture").expect("preview id"),
-        repository_snapshot.clone(),
-        intent.clone(),
-        UtcMicros(20),
-        UtcMicros(30_000_020),
-    )
-    .expect("commit input");
-    commit.validate().expect("commit input remains canonical");
-    assert_eq!(commit.commit_intent.as_ref(), Some(&intent));
-    assert!(commit.hunks.is_empty());
 
     let too_many_preview_id =
         GitIndexPreviewId::new("git-preview.too-many-hunks").expect("preview id");
@@ -170,10 +142,11 @@ fn durable_preview_inputs_bind_bounded_hunks_or_one_exact_commit_intent() {
         "preview inputs must not turn a bounded hunk read into an unbounded durable payload"
     );
     assert!(
-        GitIndexPreviewInputV1::new_commit(
+        GitIndexPreviewInputV1::new_hunk_selection(
             GitIndexPreviewId::new("git-preview.long-lived-input").expect("preview id"),
-            repository_snapshot,
-            intent,
+            GitIndexTransactionOperationV1::StageHunks,
+            repository_snapshot.clone(),
+            vec![hunk(&preview_id, snapshot_digest)],
             UtcMicros(10),
             UtcMicros(30_000_011),
         )
@@ -203,25 +176,6 @@ fn applicable_preview_binds_each_hunk_to_one_immutable_snapshot() {
     )
     .expect("preview is valid");
     preview.validate().expect("preview remains immutable");
-    assert!(preview.commit_intent_digest.is_none());
-    assert_eq!(
-        GitIndexPreviewV1::new_with_commit_intent(
-            preview_id.clone(),
-            GitIndexTransactionOperationV1::StageHunks,
-            snapshot.clone(),
-            snapshot_digest.clone(),
-            vec![reference.clone()],
-            Some(oid('e')),
-            Some(&commit_intent("must not bind to stage\n")),
-            GitIndexPreviewDispositionV1::Applicable,
-            UtcMicros(10),
-            UtcMicros(20),
-        )
-        .unwrap_err()
-        .to_string(),
-        "applicable git index hunk preview is not canonical",
-        "stage previews must reject commit-intent commitments"
-    );
 
     let mut stale = reference;
     stale.snapshot_digest = digest('9');
@@ -259,27 +213,26 @@ fn journal_never_skips_from_prepared_to_committed_or_replays_inspection() {
     let snapshot = snapshot();
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    let intent = commit_intent("phase evidence\n");
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
-        GitIndexPreviewId::new("git-preview.phase-evidence").expect("preview id"),
-        GitIndexTransactionOperationV1::CommitIndex,
+    let preview_id = GitIndexPreviewId::new("git-preview.phase-evidence").expect("preview id");
+    let preview = GitIndexPreviewV1::new(
+        preview_id.clone(),
+        GitIndexTransactionOperationV1::StageHunks,
         snapshot.clone(),
-        snapshot_digest,
-        Vec::new(),
-        snapshot.index.tree_id.clone(),
-        Some(&intent),
+        snapshot_digest.clone(),
+        vec![hunk(&preview_id, snapshot_digest)],
+        Some(oid('e')),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(10),
         UtcMicros(20),
     )
-    .expect("commit preview");
+    .expect("stage preview");
     let mut forged = tracedecay_domain::GitIndexTransactionJournalV1::prepared(
         GitIndexTransactionId::new("git-index-transaction.forged-phase").expect("transaction id"),
         &preview,
         UtcMicros(10),
     )
     .expect("prepared journal");
-    forged.phase = GitIndexJournalPhaseV1::RefCommitted;
+    forged.phase = GitIndexJournalPhaseV1::Verifying;
     assert!(
         forged.validate().is_err(),
         "a phase label without its complete durable epoch chain is not recovery evidence"
@@ -292,47 +245,21 @@ fn restart_recovery_requires_post_boundary_phase_evidence() {
         GitIndexJournalPhaseV1::Prepared,
         GitIndexJournalPhaseV1::NativeApplyStarted,
     ] {
-        assert!(phase.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::StageHunks,
-            GitIndexReceiptOutcomeV1::AbortedNoChange,
-        ));
-        assert!(phase.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::StageHunks,
-            GitIndexReceiptOutcomeV1::NeedsInspection,
-        ));
+        assert!(phase.permits_recovered_outcome(GitIndexReceiptOutcomeV1::AbortedNoChange));
+        assert!(phase.permits_recovered_outcome(GitIndexReceiptOutcomeV1::NeedsInspection));
         assert!(
-            !phase.permits_recovered_outcome(
-                GitIndexTransactionOperationV1::StageHunks,
-                GitIndexReceiptOutcomeV1::Committed,
-            ),
+            !phase.permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed),
             "a candidate tree observed before a durable index phase is coincidence, not proof"
         );
     }
 
     assert!(
-        GitIndexJournalPhaseV1::IndexCommitted.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::StageHunks,
-            GitIndexReceiptOutcomeV1::Committed,
-        )
+        GitIndexJournalPhaseV1::IndexCommitted
+            .permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed,)
     );
     assert!(
-        !GitIndexJournalPhaseV1::IndexCommitted.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::CommitIndex,
-            GitIndexReceiptOutcomeV1::Committed,
-        ),
-        "a commit recovery needs durable ref-boundary evidence"
-    );
-    assert!(
-        GitIndexJournalPhaseV1::RefCommitted.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::CommitIndex,
-            GitIndexReceiptOutcomeV1::Committed,
-        )
-    );
-    assert!(
-        !GitIndexJournalPhaseV1::NeedsInspection.permits_recovered_outcome(
-            GitIndexTransactionOperationV1::CommitIndex,
-            GitIndexReceiptOutcomeV1::Committed,
-        ),
+        !GitIndexJournalPhaseV1::NeedsInspection
+            .permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed,),
         "inspection records must be reconciled under a separate proven-clear path"
     );
 }
@@ -363,7 +290,6 @@ fn committed_receipt_is_integrity_bound_to_its_preview() {
         digest('1'),
         Some(oid('e')),
         Some(oid('a')),
-        None,
         GitIndexReceiptOutcomeV1::Committed,
         UtcMicros(11),
     )
@@ -405,7 +331,6 @@ fn unavailable_terminal_snapshot_is_explicit_and_cannot_claim_commit() {
         None,
         preview.repository_snapshot.index.tree_id.clone(),
         preview.repository_snapshot.head.commit().cloned(),
-        None,
         GitIndexReceiptOutcomeV1::NeedsInspection,
         UtcMicros(11),
     )
@@ -424,183 +349,11 @@ fn unavailable_terminal_snapshot_is_explicit_and_cannot_claim_commit() {
             None,
             Some(oid('e')),
             Some(oid('a')),
-            None,
             GitIndexReceiptOutcomeV1::Committed,
             UtcMicros(11),
         )
         .is_err(),
         "a committed receipt must contain a captured final snapshot"
-    );
-}
-
-#[test]
-fn commit_preview_persists_only_a_digest_bound_to_full_canonical_intent() {
-    let snapshot = snapshot();
-    let snapshot_digest =
-        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    let make_preview = |intent: &GitIndexCommitIntentV1| {
-        GitIndexPreviewV1::new_with_commit_intent(
-            GitIndexPreviewId::new("git-preview.commit-intent.fixture").expect("preview id"),
-            GitIndexTransactionOperationV1::CommitIndex,
-            snapshot.clone(),
-            snapshot_digest.clone(),
-            Vec::new(),
-            snapshot.index.tree_id.clone(),
-            Some(intent),
-            GitIndexPreviewDispositionV1::Applicable,
-            UtcMicros(10),
-            UtcMicros(20),
-        )
-        .expect("commit preview")
-    };
-    assert!(
-        GitIndexPreviewV1::new(
-            GitIndexPreviewId::new("git-preview.commit-without-intent").expect("preview id"),
-            GitIndexTransactionOperationV1::CommitIndex,
-            snapshot.clone(),
-            snapshot_digest.clone(),
-            Vec::new(),
-            snapshot.index.tree_id.clone(),
-            GitIndexPreviewDispositionV1::Applicable,
-            UtcMicros(10),
-            UtcMicros(20),
-        )
-        .is_err(),
-        "applicable commit previews must bind one intent commitment"
-    );
-    let mut sensitive_intent = commit_intent("first sensitive message\n");
-    sensitive_intent.author.name = "Sensitive Author".to_owned();
-    sensitive_intent.author.email = "sensitive-author@example.com".to_owned();
-    sensitive_intent.committer.name = "Sensitive Committer".to_owned();
-    sensitive_intent.committer.email = "sensitive-committer@example.com".to_owned();
-    sensitive_intent.signing_policy = GitIndexSigningPolicyV1::SignatureRequired {
-        key_reference: "sensitive-signing-key".to_owned(),
-    };
-    sensitive_intent
-        .validate()
-        .expect("sensitive intent is valid");
-    let expected_intent_digest = sensitive_intent.compute_digest().expect("intent digest");
-    let first = make_preview(&sensitive_intent);
-    let second_intent = commit_intent("second message\n");
-    let second = make_preview(&second_intent);
-    assert_ne!(first.preview_digest, second.preview_digest);
-    assert_ne!(first, second);
-    assert_eq!(
-        first.commit_intent_digest.as_ref(),
-        Some(&expected_intent_digest)
-    );
-
-    let base = commit_intent("canonical intent\n");
-    let base_digest = base.compute_digest().expect("base intent digest");
-    let mut changed_author = base.clone();
-    changed_author.author.at = UtcMicros(2_000_000);
-    let mut changed_committer = base.clone();
-    changed_committer.committer.email = "other-committer@example.com".to_owned();
-    let mut changed_signing = base;
-    changed_signing.signing_policy = GitIndexSigningPolicyV1::SignatureRequired {
-        key_reference: "other-signing-key".to_owned(),
-    };
-    for changed in [changed_author, changed_committer, changed_signing] {
-        assert_ne!(
-            changed.compute_digest().expect("changed intent digest"),
-            base_digest,
-            "every executable commit-intent field must affect the commitment"
-        );
-    }
-
-    let encoded = serde_json::to_string(&first).expect("serialize preview");
-    for sensitive in [
-        "first sensitive message",
-        "Sensitive Author",
-        "sensitive-author@example.com",
-        "Sensitive Committer",
-        "sensitive-committer@example.com",
-        "sensitive-signing-key",
-    ] {
-        assert!(
-            !encoded.contains(sensitive),
-            "serialized preview leaked {sensitive:?}"
-        );
-    }
-    let decoded: GitIndexPreviewV1 =
-        serde_json::from_str(&encoded).expect("digest-only preview round trip");
-    assert_eq!(decoded, first);
-
-    let mut missing_digest: serde_json::Value =
-        serde_json::from_str(&encoded).expect("preview JSON");
-    missing_digest
-        .as_object_mut()
-        .expect("preview object")
-        .remove("commit_intent_digest");
-    assert!(serde_json::from_value::<GitIndexPreviewV1>(missing_digest).is_err());
-
-    let mut plaintext_legacy: serde_json::Value =
-        serde_json::from_str(&encoded).expect("preview JSON");
-    plaintext_legacy["commit_intent"] =
-        serde_json::to_value(commit_intent("must not deserialize\n")).expect("legacy intent");
-    assert!(serde_json::from_value::<GitIndexPreviewV1>(plaintext_legacy).is_err());
-
-    let mut tampered: serde_json::Value = serde_json::from_str(&encoded).expect("preview JSON");
-    assert!(tampered.get("commit_intent").is_none());
-    tampered["commit_intent_digest"] = serde_json::json!(digest('9'));
-    assert!(serde_json::from_value::<GitIndexPreviewV1>(tampered).is_err());
-}
-
-#[test]
-fn commit_intent_digest_uses_git_second_precision_without_changing_wire_values() {
-    let make_intent = |author_at: i64, committer_at: i64| {
-        GitIndexCommitIntentV1::new(
-            "canonical timestamp intent\n".to_owned(),
-            GitCommitIdentityV1 {
-                name: "TraceDecay Author".to_owned(),
-                email: "author@example.com".to_owned(),
-                at: UtcMicros(author_at),
-            },
-            GitCommitIdentityV1 {
-                name: "TraceDecay Committer".to_owned(),
-                email: "committer@example.com".to_owned(),
-                at: UtcMicros(committer_at),
-            },
-            GitIndexSigningPolicyV1::UnsignedPermitted,
-        )
-        .expect("commit intent")
-    };
-
-    let unaligned = make_intent(1_234_567, 2_999_999);
-    let aligned = make_intent(1_000_000, 2_000_000);
-    assert_eq!(unaligned.author.at, UtcMicros(1_234_567));
-    assert_eq!(unaligned.committer.at, UtcMicros(2_999_999));
-    assert_eq!(
-        unaligned.compute_digest().expect("unaligned digest"),
-        aligned.compute_digest().expect("aligned digest")
-    );
-
-    // Whole-second V1 intents retain their historical digest. Inputs with
-    // subsecond timestamps were already unrecoverable because Git persisted
-    // only whole seconds, so the V1 domain remains the maximal compatibility
-    // surface while newly created intents reconcile correctly.
-    assert_eq!(
-        aligned.compute_digest().expect("legacy aligned digest"),
-        ManifestDigest::new(
-            "sha256:3fcfb47cf5fe4965337c4dfe33b23a84d11394c072e9491e85219bcc950f5b33",
-        )
-        .expect("legacy aligned digest is canonical")
-    );
-    assert_eq!(
-        make_intent(i64::MIN, i64::MAX).compute_digest(),
-        Err(tracedecay_domain::research::DomainError::NonCanonical {
-            field: "git commit identity timestamp",
-        }),
-        "the lower Git second cannot be represented in domain microseconds"
-    );
-    let lowest_exact_seconds = i64::MIN / 1_000_000;
-    let lowest_exact_micros = lowest_exact_seconds
-        .checked_mul(1_000_000)
-        .expect("lowest whole second remains representable");
-    assert!(
-        make_intent(lowest_exact_micros, lowest_exact_micros)
-            .compute_digest()
-            .is_ok()
     );
 }
 
@@ -646,4 +399,54 @@ fn snapshot_without_complete_native_identity_is_read_only() {
     )
     .expect("read-only snapshot");
     assert!(!state.is_mutation_eligible());
+}
+
+fn legacy_fixture(name: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/tests/fixtures/git_index_legacy/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).expect("legacy fixture"))
+        .expect("legacy fixture is JSON")
+}
+
+#[test]
+fn records_stored_before_commit_index_removal_still_decode() {
+    let mut input = legacy_fixture("stage_preview_input");
+    let mut preview = legacy_fixture("stage_preview");
+    let mut receipt = legacy_fixture("stage_receipt");
+
+    let decoded_input: GitIndexPreviewInputV1 =
+        serde_json::from_value(input.clone()).expect("legacy input decodes");
+    let decoded_preview: GitIndexPreviewV1 =
+        serde_json::from_value(preview.clone()).expect("legacy preview decodes");
+    let decoded_receipt: GitIndexTransactionReceiptV1 =
+        serde_json::from_value(receipt.clone()).expect("legacy receipt decodes");
+    assert_eq!(
+        serde_json::json!(decoded_input.compute_input_digest().expect("input digest")),
+        input["input_digest"]
+    );
+    assert_eq!(
+        serde_json::json!(
+            decoded_preview
+                .compute_preview_digest()
+                .expect("preview digest")
+        ),
+        preview["preview_digest"]
+    );
+    assert_eq!(
+        serde_json::json!(
+            decoded_receipt
+                .compute_receipt_digest()
+                .expect("receipt digest")
+        ),
+        receipt["receipt_digest"]
+    );
+
+    input["commit_intent"] = serde_json::json!({ "message": "legacy" });
+    preview["commit_intent_digest"] = serde_json::json!(digest('9'));
+    receipt["created_commit"] = serde_json::json!(oid('9'));
+    assert!(serde_json::from_value::<GitIndexPreviewInputV1>(input).is_err());
+    assert!(serde_json::from_value::<GitIndexPreviewV1>(preview).is_err());
+    assert!(serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt).is_err());
 }

@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemKind, RetainedSurfaceExecutionErrorV1,
+    retained_surface_execution_problem,
+};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store_runtime::retained_memory::{
@@ -122,7 +125,8 @@ async fn selected_project_opens_its_exact_read_only_store_not_the_active_store()
 }
 
 #[tokio::test]
-async fn missing_unenrolled_and_write_selected_targets_share_one_denial() {
+async fn missing_and_unenrolled_targets_share_one_denial_and_cross_project_writes_are_unsupported()
+{
     let (tmp, active, selected, _sibling) = project_pair().await;
     let active_id = project_id(&active);
     let selected_selector = selector(project_id(&selected));
@@ -133,10 +137,27 @@ async fn missing_unenrolled_and_write_selected_targets_share_one_denial() {
     register_project(&active, &unenrolled_id, &unenrolled_root).await;
     let unenrolled_selector = selector(unenrolled_id);
 
-    for (selector, access) in [
-        (&missing_selector, MemoryTargetAccessV1::Read),
-        (&unenrolled_selector, MemoryTargetAccessV1::Read),
-        (&selected_selector, MemoryTargetAccessV1::Write),
+    for (selector, access, expected) in [
+        (
+            &missing_selector,
+            MemoryTargetAccessV1::Read,
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
+        ),
+        (
+            &unenrolled_selector,
+            MemoryTargetAccessV1::Read,
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
+        ),
+        (
+            &selected_selector,
+            MemoryTargetAccessV1::Write,
+            ApplicationProblemKind::Unsupported,
+        ),
+        (
+            &missing_selector,
+            MemoryTargetAccessV1::Write,
+            ApplicationProblemKind::Unsupported,
+        ),
     ] {
         let error = open_project_retained_memory_target(
             &active,
@@ -148,11 +169,15 @@ async fn missing_unenrolled_and_write_selected_targets_share_one_denial() {
         )
         .await
         .err()
-        .expect("target must be denied");
-        assert!(matches!(
-            error,
-            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
-        ));
+        .expect("target must be refused");
+        let problem = retained_surface_execution_problem(error);
+        assert_eq!(problem.kind(), expected, "{problem:?}");
+        if expected == ApplicationProblemKind::Unsupported {
+            let ApplicationProblem::Unsupported { diagnostic, .. } = problem else {
+                unreachable!()
+            };
+            assert_eq!(diagnostic.code, "memory.cross_project_write_unsupported");
+        }
     }
 }
 

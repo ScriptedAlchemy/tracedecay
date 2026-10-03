@@ -16,8 +16,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::{
-    CallableArityV1, ExtractedCallableArityV1, ExtractedCloneBodyV1, ExtractedImportEvidenceV1,
-    ExtractionArtifactV1, ImportNamespaceV1, is_test_framework_call_signature,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedCloneBodyV1, ExtractedGoMethodSetRowV1,
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1,
+    is_test_framework_call_signature,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
@@ -45,7 +46,8 @@ mod artifacts;
 
 pub use artifacts::{
     CodeFileIndexArtifactsV1, CodeIndexCallableArityV1, CodeIndexEdgeAbstentionReasonV1,
-    CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
+    CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1, CodeIndexImportEvidenceV1,
+    CodeIndexUnresolvedReferenceV1,
 };
 
 /// Eligibility of one generation-bound file document for chunk production.
@@ -781,6 +783,34 @@ fn bind_callable_arities(
     bound
 }
 
+/// Bind each extracted Go method-set row to the unique symbol row with its
+/// node id; a row whose node id binds to zero or several symbols is dropped.
+fn bind_go_method_sets(
+    extracted: &[ExtractedGoMethodSetRowV1],
+    symbols: &[SymbolRow],
+) -> Vec<CodeIndexGoMethodSetRowV1> {
+    let mut by_node_id = HashMap::<&str, Option<&SymbolRow>>::new();
+    for symbol in symbols {
+        by_node_id
+            .entry(symbol.node_id.as_str())
+            .and_modify(|unique| *unique = None)
+            .or_insert(Some(symbol));
+    }
+    let mut bound = extracted
+        .iter()
+        .filter_map(|row| {
+            let symbol = (*by_node_id.get(row.node_id.as_str())?)?;
+            Some(CodeIndexGoMethodSetRowV1 {
+                occurrence: symbol.occurrence.clone(),
+                span: symbol.span,
+                row: row.row.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    bound.sort();
+    bound
+}
+
 fn bind_clone_bodies(
     extracted: &[ExtractedCloneBodyV1],
     symbols: &[SymbolRow],
@@ -1216,6 +1246,7 @@ impl DeterministicCodeChunker {
             )
         })?;
         let callable_arities = bind_callable_arities(&artifact.callable_arities, &mut symbol_rows);
+        let go_method_sets = bind_go_method_sets(&artifact.go_method_sets, &symbol_rows);
         let chunks = hotpath::measure_block!("code_index.chunk.build", {
             self.build_chunks(
                 source,
@@ -1281,6 +1312,7 @@ impl DeterministicCodeChunker {
             unresolved_references,
             clone_bodies,
             callable_arities,
+            go_method_sets,
             artifact,
             batch,
         )

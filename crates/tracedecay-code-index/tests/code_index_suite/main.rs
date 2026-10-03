@@ -12,6 +12,7 @@ mod generations;
 mod git_joins;
 mod git_topology_edge_cases;
 mod git_topology_projection;
+mod go_interface_satisfaction;
 mod graph_projection_publication;
 mod ignored_source_admissions;
 mod impact_joins;

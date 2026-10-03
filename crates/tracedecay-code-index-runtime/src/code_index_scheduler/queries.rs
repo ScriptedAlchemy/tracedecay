@@ -2375,23 +2375,32 @@ fn disclose_unresolved_calls<T>(
     outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
     unresolved: &UnresolvedCallerGapsV1,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let reasons = unresolved
+        .exact_target_unavailable
+        .then_some(OmissionReason::Unsupported)
+        .into_iter()
+        .chain(
+            (!unresolved.unmodeled_imports.is_empty()).then_some(OmissionReason::ImportUnmodeled),
+        );
+    disclose_symbol_omissions(outcome, reasons)
+}
+
+/// Marks an answer partial with one symbol omission per reason, when there
+/// is any reason.
+fn disclose_symbol_omissions<T>(
+    outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
+    reasons: impl IntoIterator<Item = OmissionReason>,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let mut reasons = reasons.into_iter().peekable();
     match outcome {
         RetrievalPortOutcome::Completed(mut evidence)
         | RetrievalPortOutcome::Partial(mut evidence)
-            if !unresolved.is_empty() =>
+            if reasons.peek().is_some() =>
         {
             evidence.coverage.completeness = CoverageCompleteness::Partial;
             for domain in &mut evidence.coverage.domains {
                 domain.completeness = CoverageCompleteness::Partial;
             }
-            let reasons = unresolved
-                .exact_target_unavailable
-                .then_some(OmissionReason::Unsupported)
-                .into_iter()
-                .chain(
-                    (!unresolved.unmodeled_imports.is_empty())
-                        .then_some(OmissionReason::ImportUnmodeled),
-                );
             evidence.omissions.extend(reasons.map(|reason| Omission {
                 domain: EvidenceDomain::Symbol,
                 count: 1,
@@ -2905,6 +2914,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                         })
                         .collect(),
                 ),
+                path_prefix: request.scope.path_prefix.as_deref(),
                 fuzzy_budget: request.fuzzy_budget,
                 lexical_profile_revision: ComponentRevision::new(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
@@ -3285,6 +3295,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 targets.truncate(cap);
                 complete = false;
             }
+            let interfaces = targets
+                .iter()
+                .map(|target| target.occurrence.clone())
+                .collect::<Vec<_>>();
+            let Ok(undecided) = prepared
+                .reader
+                .has_undecided_implementors(&interfaces, Arc::clone(&cancellation))
+            else {
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
+            };
             let mut keys = Vec::new();
             for target in targets {
                 if keys.len() >= cap {
@@ -3311,16 +3331,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 keys.truncate(cap);
                 complete = false;
             }
-            finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_implementations",
-                binding,
-                keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "implementations",
-                complete,
+            disclose_symbol_omissions(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_implementations",
+                    binding,
+                    keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "implementations",
+                    complete,
+                ),
+                undecided.then_some(OmissionReason::Unsupported),
             )
         })
     }
@@ -4284,6 +4307,72 @@ mod tests {
             "{page:?}"
         );
         assert_eq!(page.total, Some(page.items.len() as u64));
+    }
+
+    #[tokio::test]
+    async fn phrase_path_scope_finds_matches_ranked_past_the_lane_cap() {
+        let mut files = (0..64)
+            .map(|index| {
+                (
+                    format!("a/m{index}.rs"),
+                    format!(
+                        "pub fn a_runner_{index}() {{ scoped_probe_phrase(); scoped_probe_phrase(); }}\n"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((
+            "b/lib.rs".to_owned(),
+            "pub fn b_runner() { scoped_probe_phrase(); }\n".to_owned(),
+        ));
+        let files = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let fixture = GitFixture::new(&files);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation =
+            callable_code_operation(CallableCodeOperationKind::PhraseSearch).expect("operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+            "scoped_probe_phrase",
+            callable_query_sanitizer_revision(),
+            callable_query_normalization_revision(),
+        )
+        .expect("query");
+        let request = PhraseSearchRequest::new(
+            query,
+            vec!["scoped_probe_phrase".to_owned()],
+            Vec::new(),
+            0,
+            CodeQueryScope::new(generation, Some("b".to_owned())).expect("phrase scope"),
+            query_meta(),
+        )
+        .expect("phrase request");
+        let outcome = registry
+            .phrase_search(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await;
+        registry.shutdown().await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("out-of-scope matches must not crowd out the scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("phrase page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
     }
 
     #[test]

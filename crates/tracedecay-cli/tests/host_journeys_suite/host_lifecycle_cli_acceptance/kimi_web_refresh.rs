@@ -62,6 +62,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    # HTTP/1.0 closes after every response without saying so; closing late
+    # makes a client that reuses the connection send into a closing socket.
+    def finish(self):
+        time.sleep(0.2)
+        super().finish()
+
     def reply(self, status, payload):
         body = json.dumps(payload).encode()
         self.send_response(status)

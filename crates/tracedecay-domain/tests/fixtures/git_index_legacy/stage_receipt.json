@@ -1,0 +1,20 @@
+{
+    "receipt_id": "git-index-receipt.legacy.fixture",
+    "transaction_id": "git-index-transaction.legacy.fixture",
+    "preview_id": "git-preview.legacy.fixture",
+    "operation": "stage_hunks",
+    "old_snapshot_digest": "sha256:da5e8e800f8dd0f11307a71cefaf578dc1f5fe912d22b910ea2914eeb25ac5a4",
+    "final_snapshot_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "final_snapshot_captured": true,
+    "old_index_tree": "cccccccccccccccccccccccccccccccccccccccc",
+    "new_index_tree": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "old_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "new_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "selected_hunk_digests": [
+        "sha256:bc0f2beac44776c7acdb7460e4352fe80e3b6b8f490bed3adc8a0b7931afbc40"
+    ],
+    "created_commit": null,
+    "outcome": "committed",
+    "committed_at": 11,
+    "receipt_digest": "sha256:871e5a8169b943b5d0016599845b0d9614d9c59eefad8be4d65c617168e09bff"
+}

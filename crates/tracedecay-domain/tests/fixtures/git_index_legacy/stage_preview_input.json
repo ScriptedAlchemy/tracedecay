@@ -1,0 +1,80 @@
+{
+    "preview_id": "git-preview.legacy.fixture",
+    "operation": "stage_hunks",
+    "repository_snapshot": {
+        "snapshot_id": "repository.state.v1.579d22e593bb3a25216b59c8c15b9bc5766b6f374f434c070b5f64c1c4c061a4",
+        "project_id": "project.fixture",
+        "repository_id": "repository.fixture",
+        "worktree_id": "worktree.fixture",
+        "observation_epoch": 1,
+        "object_format": "sha1",
+        "git_version": "git version fixture",
+        "adapter_revision": "tracedecay.git-index-adapter.v1",
+        "refs_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "head": {
+            "state": "attached",
+            "branch": "refs/heads/main",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "index": {
+            "checksum": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "tree_id": "cccccccccccccccccccccccccccccccccccccccc",
+            "state": "clean",
+            "unmerged_stage_digest": null
+        },
+        "working_tree": {
+            "state": "tracked_dirty",
+            "tracked_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "untracked_name_digest": null,
+            "ignored_collision_digest": null
+        },
+        "operation_state": "none",
+        "configuration_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "attributes_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sparse_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "submodule_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "filesystem_capabilities_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "captured_at": 1,
+        "coverage": {
+            "degradations": []
+        }
+    },
+    "repository_snapshot_digest": "sha256:da5e8e800f8dd0f11307a71cefaf578dc1f5fe912d22b910ea2914eeb25ac5a4",
+    "hunks": [
+        {
+            "repository": "repository.fixture",
+            "worktree": "worktree.fixture",
+            "direction": "working_tree_to_index",
+            "path": "src/lib.rs",
+            "original_path": null,
+            "expected_base_blob": {
+                "present": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "expected_index_entry": {
+                "blob": {
+                    "present": "cccccccccccccccccccccccccccccccccccccccc"
+                },
+                "mode": "100644",
+                "unmerged_stage": null
+            },
+            "expected_worktree_blob": {
+                "present": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "expected_worktree_mode": "100644",
+            "hunk_header": "@@ -1,1 +1,1 @@",
+            "context_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "patch_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "selected_line_bitmap": [
+                1
+            ],
+            "attributes_digest": null,
+            "preview_id": "git-preview.legacy.fixture",
+            "schema_version": "hunkref.v1",
+            "snapshot_digest": "sha256:da5e8e800f8dd0f11307a71cefaf578dc1f5fe912d22b910ea2914eeb25ac5a4"
+        }
+    ],
+    "commit_intent": null,
+    "created_at": 10,
+    "expires_at": 20,
+    "input_digest": "sha256:6a98f3eb9eed9d5e285b1eeb97067f385adba437113e8a5fc162a278c78966a6"
+}

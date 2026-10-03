@@ -348,14 +348,12 @@ fn assert_tool_error(response: &tracedecay_mcp::JsonRpcResponse, message: &str) 
 }
 
 /// A non-object argument list never reaches the owner's typed parser: the
-/// MCP boundary rejects the call itself.
+/// MCP boundary refuses the call itself.
 fn assert_malformed_call(response: &tracedecay_mcp::JsonRpcResponse, detail: &str) {
-    assert!(response.result.is_none(), "{response:?}");
-    let error = response.error.as_ref().expect("tool error");
     assert_eq!(
-        json!({"code": error.code, "message": error.message, "data": error.data}),
-        crate::support::application_invalid_request_error(TOOL, detail),
-        "{error:?}"
+        crate::support::route_refusal(&serde_json::to_value(response).expect("response")),
+        crate::support::application_invalid_request_error(detail),
+        "{response:?}"
     );
 }
 
