@@ -258,6 +258,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     if (state.page !== "symbol") throw new Error(JSON.stringify(state));
     expect(state.project.project_id).toBe(shippingProjectId);
     expect(state.symbol).toMatchObject({ state: "failed", failure: { kind: "not_found", code: "node_not_found" } });
+    expect(state.impact).toMatchObject({ state: "failed", failure: { kind: "not_found", code: "node_not_found" } });
     expect(state.provenance?.project_root).toBe(shipping.root);
     expect(state.evidence).toBeNull();
     const crossSearch = await waitFor("shipping project search", async () => {

@@ -148,21 +148,30 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
         "a symbol with no dependents is an empty radius, unlike callee: {full}"
     );
 
-    let unknown = impact(
+    let unknown = handle_real_server_tool_call_raw(
         &server,
+        "tracedecay_impact",
         json!({ "node_id": UNKNOWN_NODE_ID, "format": "json" }),
     )
     .await;
     assert_eq!(
-        unknown,
+        unknown["result"]["isError"], true,
+        "an unknown seed is a semantic failure, not an empty radius: {unknown}"
+    );
+    let unknown_text = unknown
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("impact response missing text: {unknown}"));
+    assert_eq!(
+        serde_json::from_str::<Value>(unknown_text).expect("not-found JSON"),
         json!({
             "freshness": {"state": "fresh"},
-            "node_count": 0,
-            "complete": true,
-            "unavailable_fields": ["edge_count"],
-            "nodes": [],
+            "status": "not_found",
+            "reason_code": "node_not_found",
+            "node_id": UNKNOWN_NODE_ID,
+            "message": format!("Node not found: {UNKNOWN_NODE_ID}"),
         }),
-        "an unknown occurrence is empty; callee is not: {full}"
+        "an unknown seed reports not-found like tracedecay_node: {unknown}"
     );
 
     assert_refused(
