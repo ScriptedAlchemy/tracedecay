@@ -212,13 +212,10 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
         request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'a>,
     ) -> tracedecay_graph_query::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
-            let admission = {
-                use tracing::Instrument as _;
-                self.admit_graph_read(request)
-                    .instrument(tracing::trace_span!("daemon.authority.callable_code.admit"))
-                    .await
-            };
-            admission
+            use tracing::Instrument as _;
+            self.admit_graph_read(request)
+                .instrument(tracing::trace_span!("daemon.authority.callable_code.admit"))
+                .await
         })
     }
 }
@@ -255,24 +252,12 @@ pub struct DaemonCallableCodeAuthorization {
 }
 
 impl DaemonCallableCodeAuthorization {
-    async fn route_receipt(
-        &self,
-        context: &RequestContext,
-        operation: &ApplicationOperation,
-        observed_at: UtcMicros,
-    ) -> Result<AuthorityReceipt, ApplicationProblem> {
-        let receipt = self
-            .route_receipt_checked(context, operation, observed_at)
-            .await;
-        receipt
-    }
-
     #[tracing::instrument(
         name = "daemon.authority.callable_code.authorize",
         level = "trace",
         skip_all
     )]
-    async fn route_receipt_checked(
+    async fn route_receipt(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
@@ -322,15 +307,12 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            let receipt = {
-                use tracing::Instrument as _;
-                self.recheck_route(context, operation, admission, observed_at)
-                    .instrument(tracing::trace_span!(
-                        "daemon.authority.callable_code.recheck"
-                    ))
-                    .await
-            };
-            receipt
+            use tracing::Instrument as _;
+            self.recheck_route(context, operation, admission, observed_at)
+                .instrument(tracing::trace_span!(
+                    "daemon.authority.callable_code.recheck"
+                ))
+                .await
         })
     }
 }

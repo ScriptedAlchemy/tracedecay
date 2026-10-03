@@ -15,21 +15,6 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
-/// In-flight accounting for the daemon invocation front door. Entering counts
-/// one request; dropping settles it, so cancellation, panic, and every early
-/// denial path release the in-flight gauge.
-struct InvocationDispatchGaugeGuard;
-
-impl InvocationDispatchGaugeGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for InvocationDispatchGaugeGuard {
-    fn drop(&mut self) {}
-}
-
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
@@ -156,7 +141,6 @@ impl DaemonInvocationService {
     ) -> DaemonInvocationResponse {
         // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
         Box::pin(async move {
-        let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = self.request_cancellations.register(&request_id) else {

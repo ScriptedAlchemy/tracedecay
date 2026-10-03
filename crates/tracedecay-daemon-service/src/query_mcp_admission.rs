@@ -71,7 +71,7 @@ pub fn admit_query_mcp_read(
     scope: &ResolvedScope,
     route_registered: Arc<AtomicBool>,
 ) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
-    let admission = match identity {
+    match identity {
         Some(identity) => admit_query_mcp_read_at(
             identity.brain_id(),
             identity.profile_id(),
@@ -81,12 +81,7 @@ pub fn admit_query_mcp_read(
             route_registered,
         ),
         None => Err(QueryMcpAdmissionUnavailableV1::Unauthenticated),
-    };
-    match &admission {
-        Ok(_) => {}
-        Err(reason) => record_query_admission_refusal(*reason),
     }
-    admission
 }
 
 impl QueryMcpReadAdmissionProviderV1 {
@@ -235,13 +230,7 @@ impl QueryMcpReadAdmissionV1 {
         scope: &ResolvedScope,
         supplied: Option<&code_search::CodeIndexSearchAuthorityV1>,
     ) -> Result<code_search::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1> {
-        let authorized =
-            self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros());
-        match &authorized {
-            Ok(_) => {}
-            Err(reason) => record_query_admission_refusal(*reason),
-        }
-        authorized
+        self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
     #[tracing::instrument(name = "daemon.query_mcp.authorize", level = "trace", skip_all)]

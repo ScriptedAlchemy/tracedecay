@@ -104,19 +104,18 @@ pub async fn record_project_open_adoption_census(db: &RegisteredGlobalDb, projec
         let family = observation.capability.clone();
         // The census enumerated the whole composed catalog, so each family
         // observation is a complete count of its eligible population.
-        match record_adoption_eligibility(db, CoverageStateV1::Known, observation).await {
-            Ok(_) => {}
-            Err(error) => {
-                log_daemon_event(
-                    "adoption_observation",
-                    &[
-                        ("project", project_root.display().to_string()),
-                        ("family", family),
-                        ("outcome", "failed".to_owned()),
-                        ("reason", format!("{error:?}")),
-                    ],
-                );
-            }
+        if let Err(error) =
+            record_adoption_eligibility(db, CoverageStateV1::Known, observation).await
+        {
+            log_daemon_event(
+                "adoption_observation",
+                &[
+                    ("project", project_root.display().to_string()),
+                    ("family", family),
+                    ("outcome", "failed".to_owned()),
+                    ("reason", format!("{error:?}")),
+                ],
+            );
         }
     }
 }

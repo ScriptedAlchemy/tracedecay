@@ -93,27 +93,6 @@ pub fn register_context_scout_lifecycle_authority(
     worktree_id: WorktreeId,
     sessions: &RegisteredGlobalDbLeaseV1,
 ) -> AuthorityRegistrationV1 {
-    let registration = register_context_scout_lifecycle_authority_checked(
-        hook_project_id,
-        hook_worktree_id,
-        project_id,
-        worktree_id,
-        sessions,
-    );
-    // Registration transition counters plus the live-authority gauge. The
-    // gauge moves only on the two transitions that change the registry map
-    // (fresh install here, exact removal in unregister), so it tracks the
-    // map's population exactly.
-    registration
-}
-
-fn register_context_scout_lifecycle_authority_checked(
-    hook_project_id: [u8; 16],
-    hook_worktree_id: [u8; 16],
-    project_id: ProjectId,
-    worktree_id: WorktreeId,
-    sessions: &RegisteredGlobalDbLeaseV1,
-) -> AuthorityRegistrationV1 {
     if hook_project_id == [0; 16] {
         return AuthorityRegistrationV1::Rejected(AuthorityRejectionV1::ZeroHookProjectId);
     }
@@ -418,8 +397,6 @@ async fn lookup_context_scout_lifecycle(
     {
         Ok(address) => ContextScoutLifecycleLookupV1::Resolved(Box::new(address)),
         Err(reason) => {
-            // The bounded per-reason detail already goes to tracing; the
-            // counter records only the fail-closed outcome.
             tracing::debug!(
                 target: "tracedecay::context_scout_lifecycle",
                 reason = reason.as_str(),
