@@ -132,6 +132,20 @@ fn sorted_without_ids(mut payload: Value) -> Value {
     payload
 }
 
+/// The payload reduced to the match list these assertions own. The
+/// freshness envelope (`freshness`, `code_generation`, `coverage`) is
+/// per-call state asserted where the envelope itself is the subject.
+fn match_shape(payload: Value) -> Value {
+    let mut payload = sorted_without_ids(payload);
+    let object = payload
+        .as_object_mut()
+        .expect("exact-symbol payload object");
+    object.remove("freshness");
+    object.remove("code_generation");
+    object.remove("coverage");
+    payload
+}
+
 fn occurrence_ids(payload: &Value) -> Vec<String> {
     payload["matches"]
         .as_array()
@@ -157,7 +171,7 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
     .await;
     let gmres_ids = occurrence_ids(&gmres);
     assert_eq!(
-        sorted_without_ids(gmres),
+        match_shape(gmres),
         json!({
             "name": "gmres",
             "count": 2,
@@ -183,7 +197,7 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
         "not_a_symbol",
     ] {
         assert_eq!(
-            exact_payload(&server, json!({"name": name, "format": "json"})).await,
+            match_shape(exact_payload(&server, json!({"name": name, "format": "json"})).await),
             json!({"name": name, "count": 0, "matches": []}),
             "a non-equal bare name must not match"
         );
@@ -200,7 +214,7 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
 
     let all = exact_payload(&server, json!({"name": "shared_token", "format": "json"})).await;
     assert_eq!(
-        sorted_without_ids(all),
+        match_shape(all),
         json!({
             "name": "shared_token",
             "count": 2,
