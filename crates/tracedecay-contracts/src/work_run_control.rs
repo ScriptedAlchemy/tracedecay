@@ -370,9 +370,6 @@ where
                         &blocked_intervals,
                     )
                     .map_err(storage_problem)?;
-                // Committed fence evidence: how many live attempts one pause
-                // fences and how many workflow-step intervals it opens. Recorded
-                // only after the compare-and-swap publishes.
                 Ok(WorkRunControlTransitionReceiptV1 {
                     control: next,
                     blocked_intervals,
@@ -508,9 +505,6 @@ where
                     .map_err(storage_problem)?;
                 match control {
                     Some(control) if !control.admits_reservation() => {
-                        // The fence working as designed is still work being
-                        // refused; without this counter a paused run's refusals
-                        // are indistinguishable from an idle one.
                         Err(ApplicationProblem::conflict(
                             "application.work-run-control.paused",
                             "The Work run is paused, so no new attempt reservation is admitted.",

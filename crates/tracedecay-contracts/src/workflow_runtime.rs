@@ -350,9 +350,6 @@ pub fn prepare_workflow_fan_out(
             input,
         });
     }
-    // Planned fan-out width beside the plan span: per-child digesting makes
-    // this function's cost linear in width, and the width itself is the
-    // denominator for every downstream census reading.
     Ok(WorkflowFanOutPlan {
         identity,
         operation: step.operation.clone(),

@@ -340,9 +340,6 @@ impl<'a, P: GitHistoricalBlobReadPort> HistoricalGitQueryAdapter<'a, P> {
             }
         }
 
-        // Scan-shape evidence beside the outer wall span: coverage separates
-        // "few large blobs" from "many commits × paths" when the query is slow,
-        // and truncated/capped scans report the exact prefix they observed.
         Ok(HistoricalQueryResultV1 {
             scope: self.scope.clone(),
             evidence,

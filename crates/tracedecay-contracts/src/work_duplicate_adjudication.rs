@@ -222,8 +222,6 @@ where
                 },
             )
             .map_err(storage_problem)?;
-        // Idempotent replays are the interesting half of this decision: a
-        // rising replay share means callers are re-adjudicating settled pairs.
         Ok(outcome)
     }
 
@@ -293,25 +291,13 @@ where
                 &attempts,
             )
             .map_err(storage_problem)?;
-        let read = classify_complete_attempt_relations(
+        Ok(classify_complete_attempt_relations(
             &authority,
             request.work_generation,
             request.topology_generation,
             attempts,
             receipts,
-        );
-        // Bounded per-reason counters: classification refusals are typed
-        // product states, and each reason implicates a different authority
-        // (missing pair matrix, conflicting receipts, unresolved verdicts).
-        match &read {
-            WorkDuplicateAttemptClassificationReadV1::Complete { .. } => {}
-            WorkDuplicateAttemptClassificationReadV1::Unavailable { reason } => match reason {
-                WorkDuplicateClassificationUnavailableReasonV1::MissingPair => {}
-                WorkDuplicateClassificationUnavailableReasonV1::ConflictingPair => {}
-                WorkDuplicateClassificationUnavailableReasonV1::UnresolvedVerdict => {}
-            },
-        }
-        Ok(read)
+        ))
     }
 }
 

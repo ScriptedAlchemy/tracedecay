@@ -133,8 +133,6 @@ pub fn derive_workflow_fan_out_census(
         .values()
         .flat_map(|plan| &plan.children)
         .collect::<Vec<_>>();
-    // Sweep shape beside the outer derive span: planned children set the
-    // matrix size and read attempts bound the evidence actually joined.
     let requested = count(children.len())?;
     let attempts = evidence
         .attempts

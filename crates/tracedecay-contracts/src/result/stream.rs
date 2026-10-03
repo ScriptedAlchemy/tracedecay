@@ -170,9 +170,6 @@ pub enum StreamValidationError {
 /// Validate a bounded event sequence before an adapter renders it.
 #[tracing::instrument(name = "application.result.stream.validate", level = "trace", skip_all)]
 pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidationError> {
-    // This crate holds the stream contract, not a channel endpoint, so the
-    // producing/consuming adapters own the stream instrumentation; here the batch
-    // size and the explicit-loss (gap) rate are the observable facts.
     let mut terminal_seen = false;
     let mut expected = events.first().map(|event| event.sequence);
 

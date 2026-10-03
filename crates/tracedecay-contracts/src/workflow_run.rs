@@ -203,9 +203,6 @@ where
         fan_out_plans: Vec<tracedecay_domain::WorkflowFanOutPlanV1>,
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
-        // One bounded refusal counter across the three pinned digests: any
-        // stale digest means runs are being started against a drifted
-        // policy/configuration/catalog environment.
         if definition.pinned_policy_digest() != &admission.policy_digest {
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
@@ -316,7 +313,7 @@ impl WorkflowArtifactPayload {
     ) -> Result<Self, WorkflowArtifactStoreError> {
         // The decode/verify phase of artifact hydration and persistence: a
         // canonical framed SHA-256 over up to 4 MiB, distinct from the store
-        // I/O around it. The bytes gauge sizes what the digest walked.
+        // I/O around it.
         {
             let _span = tracing::trace_span!("application.workflow.artifact.verify").entered();
             {
