@@ -112,9 +112,6 @@ pub(crate) struct Admission {
 impl Admission {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {
-            // Every store operation reserves here, so this is the lock a
-            // writer fat tail would show up on first. Instrumented at the
-            // construction site so the report keys on this line.
             state: Arc::new(Mutex::new(State {
                 limits,
                 general: Usage::default(),

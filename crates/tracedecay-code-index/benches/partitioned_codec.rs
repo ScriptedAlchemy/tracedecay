@@ -135,7 +135,6 @@ struct Distribution {
 #[derive(Serialize)]
 struct Measurement {
     schema_version: u32,
-    allocation_metric: &'static str,
     corpus_files: usize,
     corpus_bytes: usize,
     replicas: usize,
@@ -157,7 +156,6 @@ struct Measurement {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let count_allocations = std::env::args().any(|argument| argument == "--alloc-count");
     let replicas = env_usize(REPLICAS_ENV, REPLICAS)?;
     let warmups = env_usize(WARMUPS_ENV, WARMUPS)?;
     let measured = env_usize(MEASURED_ENV, MEASURED)?;
@@ -206,8 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         segments_digest.update(bytes);
     }
     let measurement = Measurement {
-        schema_version: 2,
-        allocation_metric: if count_allocations { "count" } else { "bytes" },
+        schema_version: 3,
         corpus_files: sources.len(),
         corpus_bytes,
         replicas,

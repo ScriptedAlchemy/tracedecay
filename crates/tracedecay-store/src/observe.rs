@@ -4,8 +4,8 @@
 //! committed reduction from an exact-duplicate replay or a rejected
 //! compare-and-swap, and that split is exactly what a retry-storm diagnosis
 //! needs. Keys form a closed static vocabulary; no path, ID, digest, or error
-//! content ever becomes a key. Every gauge is a compile-time no-op until the
-//! `metrics` facade and drop when no recorder is installed.
+//! content ever becomes a key. Every update goes through the `metrics` facade
+//! and is dropped when no recorder is installed.
 
 use crate::external_source::{
     SourceCommitApplyOutcomeV1, SourceProjectionApplyOutcomeV1, SourceStoreResult,

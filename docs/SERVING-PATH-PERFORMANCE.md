@@ -328,9 +328,11 @@ request runtime's workers for unbounded stretches", and names projection
 refresh as an open-ended sweep that must stay paced. Measurement contradicts
 both for the *historical* half of that sweep.
 
-Reproduce by attaching `tokio-console` or `perf` to a daemon built with
-`--profile perf` and feature `production`. The numbers below are one
-60-second window on a 96-core host against an isolated
+The per-worker table below came from the Hotpath worker-balance probe, which
+has since been removed. `perf` against a daemon built with `--profile perf`
+and feature `production` still attributes the CPU, but nothing in the tree
+reproduces the per-worker view. The numbers are one 60-second window on a
+96-core host against an isolated
 profile root under `/tmp` with one registered 3,114-file corpus:
 
 ```

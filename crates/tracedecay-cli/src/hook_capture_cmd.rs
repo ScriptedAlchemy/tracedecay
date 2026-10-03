@@ -213,13 +213,6 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     })
 }
 
-#[cfg(test)]
-pub(crate) fn is_hook_protocol_invocation(args: &[OsString]) -> bool {
-    args.get(1)
-        .and_then(|value| value.to_str())
-        .is_some_and(|command| command.starts_with("hook-"))
-}
-
 pub(crate) fn is_native_hook_command(command: &Commands) -> bool {
     matches!(command, Commands::HookPreToolUse) || capture_command_for(command).is_some()
 }

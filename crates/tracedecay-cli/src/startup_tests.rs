@@ -26,25 +26,6 @@ fn parsed_command_profile_label(args: &[&str]) -> String {
 }
 
 #[test]
-fn hook_protocols_are_identified_from_argv_before_dispatch() {
-    let args = |command: &str| {
-        ["tracedecay", command]
-            .into_iter()
-            .map(std::ffi::OsString::from)
-            .collect::<Vec<_>>()
-    };
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-stop"
-    )));
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-codex-stop"
-    )));
-    assert!(!super::hook_capture_cmd::is_hook_protocol_invocation(
-        &args("status")
-    ));
-}
-
-#[test]
 fn command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(
         parsed_command_profile_label(&["daemon", "install-service", "--no-start"]),

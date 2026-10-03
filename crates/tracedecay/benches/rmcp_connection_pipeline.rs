@@ -21,14 +21,10 @@ use tracedecay::daemon::rmcp_benchmark::{
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
-    let mut before_measurement = || {};
-    let measurement = run_rmcp_connection_pipeline(
-        PERSISTENT_MEASURED_REQUESTS,
-        RECONNECT_MEASURED_ROUNDS,
-        &mut before_measurement,
-    )
-    .await
-    .expect("run typed RMCP production connection benchmark");
+    let measurement =
+        run_rmcp_connection_pipeline(PERSISTENT_MEASURED_REQUESTS, RECONNECT_MEASURED_ROUNDS)
+            .await
+            .expect("run typed RMCP production connection benchmark");
 
     let report = json!({"measurement": measurement});
     println!(

@@ -36,15 +36,11 @@ struct Fixture {
 }
 
 fn main() {
-    let report = run_measured_harness();
+    let report = run_harness();
     println!(
         "{}",
         serde_json::to_string_pretty(&report).expect("serialize harness report")
     );
-}
-
-fn run_measured_harness() -> Value {
-    run_harness()
 }
 
 fn wait_until_change_settled(path: &Path) {
