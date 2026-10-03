@@ -420,6 +420,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
             &repository_id,
             &worktree_id,
             latest,
+            None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
@@ -540,6 +541,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             &scope.repository_id,
             &scope.worktree_id,
             latest_a,
+            None,
             replay_a,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
