@@ -412,9 +412,7 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
     assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
 }
 
-/// Watermark key mirrored from `git_correlation::AUTO_BACKFILL_WATERMARK_KEY`
-/// (that const is `pub(crate)`, so integration tests reference the literal).
-const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 
 fn incremental_git(repo: &Path) -> FakeGit {
     FakeGit {
@@ -429,7 +427,7 @@ fn incremental_git(repo: &Path) -> FakeGit {
 
 /// One production convergence pass that must settle without a later failure.
 async fn converge(db: &HostAdmissionTestRuntimeV1, git: &FakeGit) -> BackfillStats {
-    let outcome = db.converge_git_evidence_for_test(git).await.unwrap();
+    let outcome = db.converge_git_evidence_for_test(git, None).await.unwrap();
     assert_eq!(outcome.later_failure, None);
     outcome.pass.backfill
 }
@@ -442,7 +440,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 
     // No pass has run yet, so no watermark is recorded.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
         None
@@ -456,13 +454,12 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
         "both sessions map to the worktree"
     );
 
-    // The watermark advances to the newest session activity: s_switch's last
-    // message at T_BASE + 850.
+    // The frontier advances to the newest ingested message, s_main's m3.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850)
+        Some(3)
     );
 
     // A second pass finds nothing newer than the watermark: no rescans.
@@ -503,11 +500,11 @@ async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
         .unwrap();
     assert!(!drained.deferred, "the two-session history fits one page");
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850),
-        "the production host-admission caller must advance the durable watermark"
+        Some(3),
+        "the production host-admission caller must advance the durable frontier"
     );
     let hits = db
         .git_sessions_for_for_test(
@@ -527,7 +524,7 @@ async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
     );
 }
 
-/// Rowid half of the durable history frontier, mirrored like the watermark.
+/// Rowid half of the durable history frontier.
 const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
 /// A catch-up of thousands of retained sessions converges in one pass that
@@ -549,34 +546,34 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
     .await
     .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
     let project = repo.to_string_lossy().to_string();
+    let mut last_sequence = 0;
     for index in 0..SESSIONS {
         let started = T_BASE + index * 60;
-        assert!(
-            db.upsert_session_for_test(
+        let session_id = format!("catch-up-{index:05}");
+        last_sequence = db
+            .seed_session_messages_for_test(
                 HostAdmissionScope::Project,
-                &session(
-                    &format!("catch-up-{index:05}"),
-                    &project,
-                    started,
-                    started + 30
-                ),
+                &session(&session_id, &project, started, started + 30),
+                &[message(&session_id, &format!("m-{index:05}"), started + 15)],
             )
             .await
-            .unwrap()
-        );
+            .unwrap()[0];
     }
     let scope = ObservationScopeV1::Project { project_id };
 
-    let first = db.converge_git_evidence_for_test(&SystemGit).await.unwrap();
+    let first = db
+        .converge_git_evidence_for_test(&SystemGit, None)
+        .await
+        .unwrap();
     assert_eq!(first.later_failure, None);
     let receipt = first.pass;
     assert_eq!(
         receipt.frontier,
         GitHistoryIndexFrontier {
-            activity_timestamp: T_BASE + 299_970,
+            change_sequence: last_sequence,
             source_rowid: 5_000,
         },
-        "the receipt's frontier is the last session's (activity, rowid)"
+        "the receipt's frontier is the last session's (change sequence, rowid)"
     );
     assert_eq!(receipt.backfill.sessions_scanned, 5_000);
     assert_eq!(receipt.backfill.skipped_git_error, 0);
@@ -588,10 +585,10 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
         "the whole catch-up is one metadata publication"
     );
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 299_970)
+        Some(last_sequence)
     );
     assert_eq!(
         db.git_correlation_meta_for_test(GIT_HISTORY_ROWID_FRONTIER_KEY)
@@ -626,15 +623,15 @@ async fn convergence_resumes_from_the_durable_frontier_after_restart() {
     let (db_tmp, db, project) = open_seeded_db(&repo).await;
     let git = incremental_git(&repo);
 
-    // One pass drains the whole retained history oldest-first: s_main (last
-    // message T_BASE + 200), then s_switch (T_BASE + 850).
+    // One pass drains the whole retained history in ingest order: s_switch
+    // (newest message m2), then s_main (m3).
     let pass1 = converge(&db, &git).await;
     assert_eq!(pass1.sessions_scanned, 2);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850)
+        Some(3)
     );
     let first_commit = main_shas.last().expect("first main commit");
     let first_commit_hits = db
@@ -667,22 +664,22 @@ async fn convergence_resumes_from_the_durable_frontier_after_restart() {
     )
     .await
     .unwrap_or_else(|error| panic!("restart registered sessions runtime: {error}"));
-    assert!(
-        db.upsert_session_for_test(
+    let late_sequence = db
+        .seed_session_messages_for_test(
             HostAdmissionScope::Project,
             &session("s_late", &project, T_BASE + 900, T_BASE + 950),
+            &[message("s_late", "m4", T_BASE + 940)],
         )
         .await
-        .unwrap()
-    );
+        .unwrap()[0];
 
     let pass2 = converge(&db, &git).await;
     assert_eq!(pass2.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 950)
+        Some(late_sequence)
     );
 
     // History fully drained: the next pass has nothing to do.

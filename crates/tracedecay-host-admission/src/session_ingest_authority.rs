@@ -108,6 +108,7 @@ where
                 brain_id,
                 profile_id,
                 project_id,
+                project_root,
                 repository_provenance,
             } => {
                 let authorities = HostAdmissionAuthorities::for_project(
@@ -115,7 +116,8 @@ where
                     profile_id.clone(),
                     project_id.clone(),
                     self.db(),
-                );
+                )
+                .with_project_root(project_root.to_path_buf());
                 match repository_provenance {
                     Some(provenance) => authorities.with_repository_provenance(provenance),
                     None => authorities,

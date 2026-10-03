@@ -250,7 +250,7 @@ impl AgentIntegration for DroidIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mFactory Droid integration\x1b[0m");
+        dc.section("Factory Droid integration");
         let config_path = droid_mcp_config_path(&ctx.home);
         if !config_path.exists() {
             dc.warn(&format!(

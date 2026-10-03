@@ -469,6 +469,9 @@ pub struct LatestCodeTextGenerationV1 {
     /// decoded merely to discover text metadata or source layout.
     pub(super) preopened_source: Arc<ProfiledStdMutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
     pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
+    /// The outgoing owner whose warm graph serves reads, stale, until this
+    /// generation's own graph first warms.
+    pub(super) graph_predecessor: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2298,6 +2301,66 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
+    /// Replacing the serving owner would otherwise refuse every graph read
+    /// while the successor's graph publishes and its catalog warms, though
+    /// the outgoing graph is still resident. A cold outgoing owner passes on
+    /// the warm graph it was itself holding.
+    pub(super) fn hold_outgoing_graph(&self, outgoing: Option<&Self>) {
+        let Some(outgoing) = outgoing.filter(|outgoing| !outgoing.same_text_owner(self)) else {
+            return;
+        };
+        let inherited = outgoing.take_graph_predecessor();
+        let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
+            && matches!(
+                outgoing.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Ready
+            );
+        let held = if serves_warm_graph {
+            Some(outgoing.clone())
+        } else {
+            inherited
+        }
+        .filter(|held| {
+            held.metadata().manifest().generation_id != self.metadata().manifest().generation_id
+        });
+        *self
+            .graph_predecessor
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = held;
+    }
+
+    /// The held predecessor serves only until this generation's graph first
+    /// warms or settles, and only while graphs stay enabled; past that it is
+    /// dropped. A graph turned off by configuration leaves this generation
+    /// `Pending` for good, so readiness alone would hold it forever.
+    pub fn graph_predecessor(&self, graph_activation_enabled: bool) -> Option<Self> {
+        if graph_activation_enabled
+            && matches!(
+                self.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+            )
+        {
+            return self
+                .graph_predecessor
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+        }
+        self.release_graph_predecessor();
+        None
+    }
+
+    pub(super) fn release_graph_predecessor(&self) {
+        drop(self.take_graph_predecessor());
+    }
+
+    fn take_graph_predecessor(&self) -> Option<Self> {
+        self.graph_predecessor
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
     /// Return a graph refused for resident memory to `Pending`, so the next
     /// pass activates it again. Other refusals are configuration or terminal
     /// verdicts and stay.
@@ -2349,13 +2412,19 @@ impl LatestCodeTextGenerationV1 {
     }
 
     pub(super) fn refuse_graph_activation(&self, reason: &'static str) {
-        let mut state = self
-            .graph_activation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+        {
+            let mut state = self
+                .graph_activation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+                return;
+            }
             *state = CodeGraphActivationStateV1::Refused(reason);
         }
+        // A refused graph never serves its predecessor, and a memory refusal
+        // needs the headroom the predecessor's resident graph holds.
+        self.release_graph_predecessor();
     }
 
     fn mark_graph_activation_unavailable(&self, reason: String) {
@@ -2947,9 +3016,45 @@ impl LatestCodeTextGenerationV1 {
     /// both sealed sources cut the same files and at most an eighth of them
     /// changed: only the changed files are decoded and re-encoded. `None`
     /// means a cold build: no retained ancestor with a published artifact, a
-    /// different file roster, a larger change, or an ancestor artifact of
-    /// another layout.
+    /// different file roster, a larger change, or an ancestor that cannot be
+    /// carried. The carry is only an optimisation over the child's own
+    /// source, so any failure but an interruption builds cold: a damaged,
+    /// missing, or foreign ancestor artifact must not fail the child's build
+    /// on every retry while that ancestor stays retained.
     fn carry_parent_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        match self.carry_nearest_ancestor_text_artifact(
+            staging_path,
+            source,
+            metadata,
+            builder_budget,
+            control,
+        ) {
+            Ok(carried) => Ok(carried),
+            Err(error @ (RetrievalPortError::Cancelled | RetrievalPortError::BudgetExceeded)) => {
+                Err(error)
+            }
+            Err(error) => {
+                tracing::info!(
+                    event = "code_text_artifact_parent_not_carried",
+                    generation = %self.metadata.manifest().generation_id,
+                    %error,
+                    "the parent text artifact cannot be carried; building cold"
+                );
+                self.text_artifact_store
+                    .discard_incompatible_staging(staging_path, control)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn carry_nearest_ancestor_text_artifact(
         &self,
         staging_path: &Path,
         source: &mut VerifiedSealedLexicalPageSourceV1,
@@ -2962,7 +3067,7 @@ impl LatestCodeTextGenerationV1 {
         // that superseded its parent before the parent's text sealed carries
         // from the generation before.
         let mut ancestor = self.metadata.manifest().parent_generation.clone();
-        let (parent_id, descriptor, parent_source) = loop {
+        let (descriptor, parent_source) = loop {
             let Some(ancestor_id) = ancestor.take() else {
                 return Ok(None);
             };
@@ -2973,7 +3078,7 @@ impl LatestCodeTextGenerationV1 {
             };
             let ancestor_source = store.open_sealed_source(&identity, control)?;
             if let Some(descriptor) = store.published_descriptor(&ancestor_id)? {
-                break (ancestor_id, descriptor, ancestor_source);
+                break (descriptor, ancestor_source);
             }
             ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
         };
@@ -3001,9 +3106,11 @@ impl LatestCodeTextGenerationV1 {
             let _lock = store.acquire_store_write_lock()?;
             std::fs::File::open(&parent_path).map_err(text_artifact_unavailable)?
         };
-        let carried = CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
+        CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
             staging_path,
             parent_file,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
             metadata.clone(),
             builder_budget,
             source_state_digest,
@@ -3011,21 +3118,9 @@ impl LatestCodeTextGenerationV1 {
             &changed,
             &mut stage_file_pages,
             control,
-        );
-        match carried {
-            Ok(builder) => Ok(Some(builder)),
-            Err(CodeLexicalArtifactErrorV1::Incompatible(reason)) => {
-                tracing::info!(
-                    event = "code_text_artifact_parent_not_carried",
-                    parent_generation = %parent_id,
-                    %reason,
-                    "the parent text artifact cannot be carried; building cold"
-                );
-                store.discard_incompatible_staging(staging_path, control)?;
-                Ok(None)
-            }
-            Err(error) => Err(map_text_artifact_error(error)),
-        }
+        )
+        .map(Some)
+        .map_err(map_text_artifact_error)
     }
 
     /// One claimed head-open pass, run with the slot lock released: reopen
