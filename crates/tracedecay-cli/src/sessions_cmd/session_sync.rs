@@ -189,6 +189,7 @@ pub(super) fn session_sync_poll_state(
                 } else {
                     format!("session_sync_{}", termination_label(termination))
                 };
+                let termination_kind = termination;
                 let termination = termination_label(termination);
                 let detail = if failure_codes.is_empty() {
                     termination
@@ -203,7 +204,7 @@ pub(super) fn session_sync_poll_state(
                 return Err(sync_failed(
                     label,
                     &reason_code,
-                    remaining_work > 0,
+                    termination_retryable(termination_kind, remaining_work),
                     &detail,
                 ));
             }
@@ -242,6 +243,21 @@ fn termination_label(termination: OperationTermination) -> String {
     match serde_json::to_value(termination) {
         Ok(serde_json::Value::String(label)) => label,
         _ => format!("{termination:?}"),
+    }
+}
+
+/// Whether rerunning the same sync can make progress. The owner ends a pass
+/// `Partial` after committing progress with coverage left and `TimedOut` when
+/// its deadline elapses, so a rerun resumes; it ends `Failed` only when
+/// nothing committed, a caller's `Cancelled` stands, and `EffectUnknown`
+/// cannot prove a rerun safe.
+fn termination_retryable(termination: OperationTermination, remaining_work: u64) -> bool {
+    match termination {
+        OperationTermination::Completed | OperationTermination::Partial => remaining_work > 0,
+        OperationTermination::TimedOut | OperationTermination::Unavailable => true,
+        OperationTermination::Failed
+        | OperationTermination::Cancelled
+        | OperationTermination::EffectUnknown => false,
     }
 }
 
@@ -553,6 +569,46 @@ mod tests {
                 "session_sync_partial",
                 true,
                 "session import did not complete successfully (partial: native_transcript_scan_failed; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::Failed,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &["native_transcript_scan_failed"],
+                ),
+                "session_sync_failed",
+                false,
+                "session import did not complete successfully (failed: native_transcript_scan_failed; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::EffectUnknown,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &[],
+                ),
+                "session_sync_effect_unknown",
+                false,
+                "session import did not complete successfully (effect_unknown; remaining work 2)",
+            ),
+            (
+                complete(
+                    OperationTermination::TimedOut,
+                    vec![SessionSyncCoverageV1::Complete],
+                    &[],
+                ),
+                "session_sync_timed_out",
+                true,
+                "session import did not complete successfully (timed_out)",
+            ),
+            (
+                complete(
+                    OperationTermination::Completed,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 4 }],
+                    &[],
+                ),
+                "session_sync_incomplete",
+                true,
+                "session import did not complete successfully (completed; remaining work 4)",
             ),
         ] {
             let error = session_sync_poll_state(SessionSyncSurface::Import, outcome).unwrap_err();
