@@ -27,7 +27,7 @@ pub(in super::super) async fn install_final_schema(
 ) -> Result<(), GitCorrelationError> {
     let schema = format!(
         r#"CREATE TABLE IF NOT EXISTS git_history_index_progress (
-            activity_timestamp INTEGER NOT NULL,
+            change_sequence INTEGER NOT NULL,
             source_rowid INTEGER NOT NULL PRIMARY KEY,
             provider TEXT NOT NULL,
             session_id TEXT NOT NULL,
@@ -213,7 +213,7 @@ impl GitHistoryCursorHeadState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct GitHistoryProgressRow {
     pub key: GitHistoryProgressKey,
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub provider: String,
     pub session_id: String,
     pub project_path: String,
@@ -282,7 +282,7 @@ pub(super) async fn read_progress(
 ) -> Result<Option<GitHistoryProgressRow>, GitCorrelationError> {
     let mut rows = conn
         .query(
-            "SELECT activity_timestamp, source_rowid, provider, session_id,
+            "SELECT change_sequence, source_rowid, provider, session_id,
                     project_path, window_start, window_end, worktree, worktree_identity,
                     git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
                     scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
@@ -306,7 +306,7 @@ pub(super) async fn read_oldest_progress(
 ) -> Result<Option<GitHistoryProgressRow>, GitCorrelationError> {
     let mut rows = conn
         .query(
-            "SELECT activity_timestamp, source_rowid, provider, session_id,
+            "SELECT change_sequence, source_rowid, provider, session_id,
                     project_path, window_start, window_end, worktree, worktree_identity,
                     git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
                     scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
@@ -315,7 +315,7 @@ pub(super) async fn read_oldest_progress(
                     cursor_head_state, cursor_head_branch, cursor_oid, segment_end,
                     segment_tip_oid, segment_cursor, emitted_count, consulted_ref_seal_json
                FROM git_history_index_progress
-              ORDER BY activity_timestamp ASC, source_rowid ASC
+              ORDER BY change_sequence ASC, source_rowid ASC
               LIMIT 1",
             (),
         )
@@ -336,7 +336,7 @@ pub(super) async fn insert_progress(
     let changed = conn
         .execute(
             "INSERT INTO git_history_index_progress (
-                    activity_timestamp, source_rowid, provider, session_id,
+                    change_sequence, source_rowid, provider, session_id,
                     project_path, window_start, window_end, worktree, worktree_identity,
                     git_dir, git_dir_identity, common_dir, common_dir_identity, generation,
                     scan_mode, reflog_path, reflog_byte_offset, reflog_byte_length,
@@ -393,7 +393,7 @@ pub(super) async fn compare_and_swap_progress(
                     segment_cursor = ?13,
                     emitted_count = ?14,
                     consulted_ref_seal_json = ?15
-              WHERE activity_timestamp = ?16
+              WHERE change_sequence = ?16
                 AND source_rowid = ?17
                 AND generation = ?18
                 AND provider = ?19
@@ -488,7 +488,7 @@ pub(super) async fn compare_and_swap_progress(
                 next.segment_cursor,
                 next.emitted_count,
                 &consulted_ref_seal_json,
-                next.activity_timestamp,
+                next.change_sequence,
                 next.key.source_rowid,
                 expected_generation,
                 &next.provider,
@@ -688,7 +688,7 @@ fn progress_from_row(row: &Row) -> Result<GitHistoryProgressRow, GitCorrelationE
         key: GitHistoryProgressKey {
             source_rowid: row.get(1)?,
         },
-        activity_timestamp: row.get(0)?,
+        change_sequence: row.get(0)?,
         provider: row.get(2)?,
         session_id: row.get(3)?,
         project_path: row.get(4)?,
@@ -753,7 +753,7 @@ fn progress_params(
     consulted_ref_seal_json: &str,
 ) -> impl tracedecay_runtime_core::db::engine::IntoParams {
     params![
-        progress.activity_timestamp,
+        progress.change_sequence,
         progress.key.source_rowid,
         &progress.provider,
         &progress.session_id,

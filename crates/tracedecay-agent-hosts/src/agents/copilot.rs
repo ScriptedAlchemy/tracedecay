@@ -77,7 +77,7 @@ impl AgentIntegration for CopilotIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mGitHub Copilot integration\x1b[0m");
+        dc.section("GitHub Copilot integration");
         doctor_check_vscode_settings(dc, &super::vscode_data_dir(&ctx.home), "VS Code");
         doctor_check_vscode_settings(
             dc,
