@@ -2081,6 +2081,12 @@ fn doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
             String::from_utf8_lossy(&output.stdout)
         )
     });
+    for report_line in ["tracedecay doctor v", "Binary: ", "\x1b["] {
+        assert!(
+            !stderr.contains(report_line),
+            "doctor --json must not also write the human report to stderr:\n{stderr}"
+        );
+    }
     (output.status.code(), document, stderr)
 }
 
@@ -2295,6 +2301,14 @@ fn doctor_without_a_daemon_reports_daemon_unavailable_as_pending() {
         json!({"state": "daemon_unavailable"})
     );
     assert_eq!(document["issues"], 0, "{document}");
+    assert!(
+        document["checks"]
+            .as_array()
+            .is_some_and(|checks| checks.iter().any(|check| check["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("Binary: ")))),
+        "the quiet report must still record every check line: {document}"
+    );
 }
 
 #[test]

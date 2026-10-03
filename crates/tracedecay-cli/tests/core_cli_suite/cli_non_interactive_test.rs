@@ -380,6 +380,21 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["sessions", "search", "recovery", "--limit", "3", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "sessions search --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("sessions search --json prints one document");
+    assert_eq!(payload["query"], "recovery", "{payload:#}");
+    assert_eq!(payload["status"], "ok", "{payload:#}");
+    assert!(payload["results"].is_array(), "{payload:#}");
 }
 
 fn poll_git_sync(
@@ -2555,18 +2570,40 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("Default branch: main"),
-        "branch list should read profile-sharded branch metadata\nstderr:\n{stderr}"
+        stdout.contains("Default branch: main"),
+        "branch list should print its listing on stdout\nstdout:\n{stdout}"
     );
     assert!(
-        stderr.contains("feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
-        "branch list should receive the complete explicitly requested branch diagnostics\nstderr:\n{stderr}"
+        stdout.contains("feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
+        "branch list should receive the complete explicitly requested branch diagnostics\nstdout:\n{stdout}"
     );
     assert!(
-        !stderr.contains("No branch tracking configured"),
-        "branch list should not fall back to repo-local metadata\nstderr:\n{stderr}"
+        !stdout.contains("No branch tracking configured"),
+        "branch list should not fall back to repo-local metadata\nstdout:\n{stdout}"
+    );
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["branch", "list", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "branch list --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("branch list --json prints one document");
+    assert_eq!(diagnostics["default_branch"], "main");
+    assert!(
+        diagnostics["branches"]
+            .as_array()
+            .expect("branch diagnostics list branches")
+            .iter()
+            .any(|branch| branch["name"]
+                == "feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
+        "{diagnostics:#}"
     );
 }
 
@@ -2676,20 +2713,20 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     let mut pending = tracedecay_command_without_daemon(home.path(), &project_root);
     pending.args(["branch", "list"]);
     let pending = run_with_timeout(pending, cli_timeout());
-    let pending_stderr = String::from_utf8_lossy(&pending.stderr);
+    let pending_stdout = String::from_utf8_lossy(&pending.stdout);
     assert!(
         pending.status.success(),
-        "branch list must read durable admission\nstdout:\n{}\nstderr:\n{pending_stderr}",
-        String::from_utf8_lossy(&pending.stdout)
+        "branch list must read durable admission\nstdout:\n{pending_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&pending.stderr)
     );
     // The one-file publication may seal before this listing runs, so the
     // admitted branch reads either as pending or as synced, and a synced
     // branch serves only once the daemon switches to it. A synced listing
     // must already rest on sealed provenance; sealing never reverts.
-    let admitted = pending_stderr
+    let admitted = pending_stdout
         .lines()
         .find(|line| line.starts_with("  feature/new "))
-        .unwrap_or_else(|| panic!("admitted branch must be durably listed: {pending_stderr}"));
+        .unwrap_or_else(|| panic!("admitted branch must be durably listed: {pending_stdout}"));
     let listed_pending = admitted.contains("indexing");
     if listed_pending {
         assert!(
@@ -2728,14 +2765,14 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     let mut sealed = tracedecay_command_without_daemon(home.path(), &project_root);
     sealed.args(["branch", "list"]);
     let sealed = run_with_timeout(sealed, cli_timeout());
-    let sealed_stderr = String::from_utf8_lossy(&sealed.stderr);
+    let sealed_stdout = String::from_utf8_lossy(&sealed.stdout);
     assert!(
-        sealed_stderr
+        sealed_stdout
             .lines()
             .any(|line| line.starts_with("  feature/new [current")
                 && !line.contains("indexing")
                 && line.contains(" (from main), synced ")),
-        "a sealed branch must list as synced: {sealed_stderr}"
+        "a sealed branch must list as synced: {sealed_stdout}"
     );
     let entry = meta
         .branches
@@ -2841,13 +2878,13 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
     let mut list = tracedecay_command_without_daemon(home.path(), &project_root);
     list.args(["branch", "list"]);
     let listed = run_with_timeout(list, cli_timeout());
-    let stderr = String::from_utf8_lossy(&listed.stderr);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(
         listed.status.success(),
-        "branch list must reopen persisted branch tracking\nstdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&listed.stdout)
+        "branch list must reopen persisted branch tracking\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&listed.stderr)
     );
-    let branch = stderr
+    let branch = stdout
         .lines()
         .find(|line| line.contains("feature/new"))
         .expect("reopened branch list must retain feature/new");
