@@ -12,9 +12,9 @@ use tracedecay_domain::{
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 
-use super::FileGenerationArtifactsV1;
 use super::helpers::edge_order;
 use super::module_resolution::ModuleImportIndexV1;
+use super::resolution_view::ResolutionFileV1;
 use super::typescript_resolution::split_parent;
 
 #[derive(Default)]
@@ -135,9 +135,12 @@ struct EffectiveV1 {
     open: Option<String>,
 }
 
-pub(super) fn go_satisfaction<T>(files: &[T], modules: &ModuleImportIndexV1<'_>) -> GoSatisfactionV1
+pub(super) fn go_satisfaction<T>(
+    files: &[T],
+    modules: &ModuleImportIndexV1<'_, T>,
+) -> GoSatisfactionV1
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
     let mut method_sets = HashMap::<OwnerV1<'_>, HashSet<MethodKeyV1>>::new();

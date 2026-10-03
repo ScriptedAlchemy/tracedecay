@@ -1003,7 +1003,8 @@ mod tests {
             callback.is_ok(),
             "a callback waited out an acknowledgement barrier"
         );
-        assert_eq!(slow_disk.syncs(), 1);
+        // Only unix fsyncs a directory; Windows has no directory barrier.
+        assert_eq!(slow_disk.syncs(), u64::from(cfg!(unix)));
     }
 
     fn retain(

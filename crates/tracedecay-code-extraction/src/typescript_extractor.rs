@@ -243,6 +243,7 @@ impl TypeScriptExtractor {
             "interface_declaration" => Self::visit_interface(state, node),
             "enum_declaration" => Self::visit_enum(state, node),
             "type_alias_declaration" => Self::visit_type_alias(state, node),
+            "internal_module" | "module" => Self::visit_namespace(state, node),
             "import_statement" => imports::visit_import(state, node),
             "expression_statement" => {
                 // Namespace declarations appear as expression_statement > internal_module.
@@ -277,7 +278,7 @@ impl TypeScriptExtractor {
                         .is_some_and(|call| test_calls::is_test_framework_call(state, call))
             }
             "export_statement" => statement.child_by_field_name("declaration").is_none(),
-            "import_statement" | "comment" => false,
+            "import_statement" | "comment" | "internal_module" | "module" => false,
             kind => !kind.ends_with("declaration"),
         }
     }
@@ -330,6 +331,7 @@ impl TypeScriptExtractor {
                     "interface_declaration" => Self::visit_interface(state, child),
                     "enum_declaration" => Self::visit_enum(state, child),
                     "type_alias_declaration" => Self::visit_type_alias(state, child),
+                    "internal_module" | "module" => Self::visit_namespace(state, child),
                     "lexical_declaration" | "variable_declaration" => {
                         Self::visit_lexical_declaration(state, child, None);
                     }
@@ -1250,9 +1252,18 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Extract a namespace (`internal_module`) declaration.
+    /// Extract a `namespace` (`internal_module`) or `module` declaration.
+    /// `namespace A.B {}` nests `B` in `A`, so it qualifies as `A::B`.
     fn visit_namespace(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
+        let name_node = node.child_by_field_name("name");
+        let mut name = Self::child_name(state, name_node);
+        if name_node.is_some_and(|n| n.kind() == "nested_identifier") {
+            name = name
+                .split('.')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("::");
+        }
         let visibility = if state.in_export {
             Visibility::Pub
         } else {
@@ -1313,7 +1324,9 @@ impl TypeScriptExtractor {
 
         if let Some(body) = find_direct_child_by_kind(node, "statement_block") {
             state.node_stack.push((name, id.clone()));
+            let in_export = std::mem::replace(&mut state.in_export, false);
             Self::visit_children(state, body);
+            state.in_export = in_export;
             state.node_stack.pop();
             // The namespace owns the calls its body runs when it is entered.
             let mut cursor = body.walk();

@@ -14,11 +14,14 @@
 //! logical path and its symbol identity, which an edit to the target file
 //! keeps. Implicit lineage rows say that a symbol continued unchanged from
 //! the prior occurrence of its identity tuple, a pure function of the two
-//! generation ids, that prior occurrence, and the symbol, so the evidence of
-//! a carried file keeps its bytes across generations.
+//! generation ids, that prior occurrence, and the symbol. A file whose every
+//! symbol continued unchanged from itself stores no lineage at all: its
+//! lineage is implied by the generation's prior, so the evidence of a carried
+//! file keeps its bytes across generations, and a file without cross-file
+//! evidence needs no segment.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +50,10 @@ pub(super) struct PersistedFileEvidenceV1 {
     edges: Vec<EdgeRowV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unresolved_calls: Vec<u32>,
+    /// Whether `lineage` is the file's whole lineage. Otherwise every symbol
+    /// of the file continued unchanged from itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    explicit_lineage: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lineage: Vec<PersistedLineageRowV1>,
 }
@@ -65,6 +72,16 @@ enum PersistedLineageRowV1 {
         prior: SymbolOccurrenceId,
     },
     Candidate(Box<SymbolLineageCandidateV1>),
+}
+
+/// One sealed cross-file edge before its target is bound to a generation's
+/// file occurrence.
+pub(super) struct SealedCrossFileEdgeV1 {
+    pub(super) from_occurrence: SymbolOccurrenceId,
+    pub(super) kind: RelationEdgeKindV1,
+    pub(super) evidence_span: SourceSpan,
+    pub(super) target_path: String,
+    pub(super) target_identity: SymbolIdentityDigest,
 }
 
 /// One file's evidence restored onto its generation.
@@ -172,7 +189,15 @@ pub(super) fn compact_file_evidence(
             &edge.to_occurrence,
             "sealed cross-file edge target is not a generation symbol",
         )?;
-        per_file[file].edges.push((from, target, edge));
+        let (target_file, target_local) = target;
+        per_file[file].edges.push((
+            from,
+            (
+                files[target_file].authority.logical_path.as_str(),
+                &rows[target_file].symbol(target_local)?.identity,
+            ),
+            edge,
+        ));
     }
     // `Implements` rows are Go implementor gaps, which no file reference
     // carries; restore re-derives them from the persisted method sets.
@@ -198,20 +223,82 @@ pub(super) fn compact_file_evidence(
         .map(|row| row.evidence.prior_generation.clone());
     let indexed = per_file.into_iter().enumerate().collect::<Vec<_>>();
     let persisted = collect_bounded_ordered(&indexed, |(file, inputs), _worker| {
-        inputs.compact(
-            &rows[*file],
-            &rows,
-            files,
-            prior_generation.as_ref(),
-            current_generation,
-        )
+        inputs.compact(&rows[*file], prior_generation.as_ref(), current_generation)
     })?;
     Ok((prior_generation, persisted))
 }
 
+/// A cross-file edge from one file with its target's logical path and symbol
+/// identity.
+pub(super) type TargetedEdgeV1<'a> = (
+    &'a CanonicalRelationEdgeV1,
+    &'a str,
+    &'a SymbolIdentityDigest,
+);
+
+/// One file's rows from its own evidence: its cross-file edges in canonical
+/// edge order, its call limitations in sorted order, and its lineage in
+/// current-occurrence order. These are the rows [`compact_file_evidence`]
+/// gives the same file inside a whole generation.
+pub(super) fn compact_one_file_evidence(
+    file: &FileGenerationArtifactsV1,
+    edges: &[TargetedEdgeV1<'_>],
+    calls: &[&CodeIndexUnresolvedReferenceV1],
+    lineage: &[&SymbolLineageCandidateV1],
+    prior_generation: Option<&CodeGenerationId>,
+    current_generation: &CodeGenerationId,
+) -> Result<PersistedFileEvidenceV1, CodeIndexProductionErrorV1> {
+    let rows = FileRowsV1::of(file);
+    let locals = rows
+        .symbols
+        .iter()
+        .enumerate()
+        .map(|(local, symbol)| Ok((&symbol.occurrence, position(local)?)))
+        .collect::<Result<HashMap<_, _>, CodeIndexProductionErrorV1>>()?;
+    let local = |occurrence: &SymbolOccurrenceId, message: &str| {
+        locals
+            .get(occurrence)
+            .copied()
+            .ok_or_else(|| contract(message))
+    };
+    let inputs = PerFileInputsV1 {
+        edges: edges
+            .iter()
+            .map(|(edge, path, identity)| {
+                Ok((
+                    local(
+                        &edge.from_occurrence,
+                        "sealed cross-file edge source is not a symbol of its file",
+                    )?,
+                    (*path, *identity),
+                    *edge,
+                ))
+            })
+            .collect::<Result<_, CodeIndexProductionErrorV1>>()?,
+        calls: calls.to_vec(),
+        lineage: lineage
+            .iter()
+            .map(|candidate| {
+                Ok((
+                    local(
+                        &candidate.current_occurrence,
+                        "sealed lineage row names a symbol outside its file",
+                    )?,
+                    *candidate,
+                ))
+            })
+            .collect::<Result<_, CodeIndexProductionErrorV1>>()?,
+    };
+    inputs.compact(&rows, prior_generation, current_generation)
+}
+
 #[derive(Default)]
 struct PerFileInputsV1<'a> {
-    edges: Vec<(u32, (usize, u32), &'a CanonicalRelationEdgeV1)>,
+    edges: Vec<(
+        u32,
+        (&'a str, &'a SymbolIdentityDigest),
+        &'a CanonicalRelationEdgeV1,
+    )>,
     calls: Vec<&'a CodeIndexUnresolvedReferenceV1>,
     lineage: Vec<(u32, &'a SymbolLineageCandidateV1)>,
 }
@@ -220,33 +307,26 @@ impl PerFileInputsV1<'_> {
     fn compact(
         &self,
         file_rows: &FileRowsV1<'_>,
-        rows: &[FileRowsV1<'_>],
-        files: &[Arc<FileGenerationArtifactsV1>],
         prior_generation: Option<&CodeGenerationId>,
         current_generation: &CodeGenerationId,
     ) -> Result<PersistedFileEvidenceV1, CodeIndexProductionErrorV1> {
         let mut persisted = PersistedFileEvidenceV1::default();
-        let mut paths = HashMap::<usize, u32>::new();
-        let mut targets = HashMap::<(usize, u32), u32>::new();
-        for &(from, (target_file, target_local), edge) in &self.edges {
-            let target = match targets.entry((target_file, target_local)) {
+        let mut paths = HashMap::<&str, u32>::new();
+        let mut targets = HashMap::<(&str, &SymbolIdentityDigest), u32>::new();
+        for &(from, (target_path, target_identity), edge) in &self.edges {
+            let target = match targets.entry((target_path, target_identity)) {
                 Entry::Occupied(entry) => *entry.get(),
                 Entry::Vacant(entry) => {
-                    let path = match paths.entry(target_file) {
+                    let path = match paths.entry(target_path) {
                         Entry::Occupied(path) => *path.get(),
                         Entry::Vacant(path) => {
                             let at = position(persisted.target_paths.len())?;
-                            persisted
-                                .target_paths
-                                .push(files[target_file].authority.logical_path.clone());
+                            persisted.target_paths.push(target_path.to_owned());
                             *path.insert(at)
                         }
                     };
                     let at = position(persisted.targets.len())?;
-                    persisted.targets.push((
-                        path,
-                        rows[target_file].symbol(target_local)?.identity.clone(),
-                    ));
+                    persisted.targets.push((path, target_identity.clone()));
                     *entry.insert(at)
                 }
             };
@@ -301,13 +381,124 @@ impl PerFileInputsV1<'_> {
             };
             persisted.lineage.push(row);
         }
+        let identity_lineage = match persisted.lineage.as_slice() {
+            [] => file_rows.symbols.is_empty(),
+            [PersistedLineageRowV1::Unchanged { start: 0, count }] => {
+                usize::try_from(*count).ok() == Some(file_rows.symbols.len())
+            }
+            _ => false,
+        };
+        if prior_generation.is_some() && identity_lineage {
+            persisted.lineage.clear();
+        } else {
+            persisted.explicit_lineage = prior_generation.is_some();
+        }
         Ok(persisted)
     }
 }
 
+/// The lineage a file without explicit rows carries under `prior_generation`:
+/// every symbol continued unchanged from itself.
+pub(super) fn identity_lineage(
+    file: &FileGenerationArtifactsV1,
+    prior_generation: Option<&CodeGenerationId>,
+    current_generation: &CodeGenerationId,
+) -> Result<Vec<SymbolLineageCandidateV1>, CodeIndexProductionErrorV1> {
+    let Some(prior_generation) = prior_generation else {
+        return Ok(Vec::new());
+    };
+    FileRowsV1::of(file)
+        .symbols
+        .into_iter()
+        .map(|symbol| {
+            SymbolLineageCandidateV1::exact_unchanged(
+                prior_generation,
+                current_generation,
+                &symbol.occurrence,
+                symbol,
+            )
+            .map_err(CodeIndexProductionErrorV1::Lineage)
+        })
+        .collect()
+}
+
 impl PersistedFileEvidenceV1 {
     pub(super) fn is_empty(&self) -> bool {
-        self.edges.is_empty() && self.unresolved_calls.is_empty() && self.lineage.is_empty()
+        self.edges.is_empty() && self.unresolved_calls.is_empty() && !self.explicit_lineage
+    }
+
+    pub(super) fn has_explicit_lineage(&self) -> bool {
+        self.explicit_lineage
+    }
+
+    /// The same evidence with every symbol's lineage implicit: what a file
+    /// carried unchanged into a successor generation seals.
+    pub(super) fn with_identity_lineage(mut self) -> Self {
+        self.explicit_lineage = false;
+        self.lineage.clear();
+        self
+    }
+
+    /// Whether a sealed cross-file edge lands in one of `paths`.
+    pub(super) fn targets_any(&self, paths: &HashSet<&str>) -> bool {
+        self.target_paths
+            .iter()
+            .any(|path| paths.contains(path.as_str()))
+    }
+
+    pub(super) fn cross_file_edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// The cross-file edges `file` sealed, in sealed order, each still named
+    /// by its target's logical path and symbol identity.
+    pub(super) fn sealed_edges(
+        &self,
+        file: &FileGenerationArtifactsV1,
+    ) -> Result<Vec<SealedCrossFileEdgeV1>, CodeIndexProductionErrorV1> {
+        let rows = FileRowsV1::of(file);
+        self.edges
+            .iter()
+            .map(|(from, target, kind, start_byte, end_byte)| {
+                let (target_path, target_identity) = usize::try_from(*target)
+                    .ok()
+                    .and_then(|target| self.targets.get(target))
+                    .and_then(|(path, identity)| {
+                        let path = self.target_paths.get(usize::try_from(*path).ok()?)?;
+                        Some((path.clone(), identity.clone()))
+                    })
+                    .ok_or_else(|| contract("sealed cross-file edge names an unknown target"))?;
+                Ok(SealedCrossFileEdgeV1 {
+                    from_occurrence: rows.symbol(*from)?.occurrence.clone(),
+                    kind: *kind,
+                    evidence_span: SourceSpan {
+                        start_byte: *start_byte,
+                        end_byte: *end_byte,
+                    },
+                    target_path,
+                    target_identity,
+                })
+            })
+            .collect()
+    }
+
+    /// The call limitations `file` sealed, in sorted order.
+    pub(super) fn unresolved_calls<'f>(
+        &self,
+        file: &'f FileGenerationArtifactsV1,
+    ) -> Result<Vec<&'f CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1> {
+        let rows = FileRowsV1::of(file);
+        self.unresolved_calls
+            .iter()
+            .map(|call| {
+                usize::try_from(*call)
+                    .ok()
+                    .and_then(|call| rows.references.get(call).copied())
+                    .ok_or_else(|| {
+                        contract("sealed call limitation names a reference outside its file")
+                    })
+            })
+            .collect()
     }
 
     /// The evidence `file` sealed, with edge targets bound to the file each
@@ -360,6 +551,15 @@ impl PersistedFileEvidenceV1 {
                     contract("sealed call limitation names a reference outside its file")
                 })?;
             evidence.unresolved_calls.push(reference.clone());
+        }
+        if !self.explicit_lineage {
+            if !self.lineage.is_empty() {
+                return Err(contract(
+                    "sealed file evidence has lineage rows it does not claim",
+                ));
+            }
+            evidence.lineage = identity_lineage(file, prior_generation, current_generation)?;
+            return Ok(evidence);
         }
         let implicit = |symbol: &LineageSymbolRecordV1, prior: Option<&SymbolOccurrenceId>| {
             let prior_generation = prior_generation.ok_or_else(|| {

@@ -28,6 +28,7 @@ use tracedecay_code_extraction::{CallableArityV1, ImportModuleKindV1, ImportName
 use tracedecay_domain::{NodeKind, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use super::FileGenerationArtifactsV1;
+use super::resolution_view::ResolutionFileV1;
 use super::typescript_resolution::{ImportBindingOutcomeV1, join_normalized, split_parent};
 use crate::chunks::relation_target_kind_is_compatible;
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
@@ -63,11 +64,11 @@ enum TargetV1<'a> {
     Unresolved,
 }
 
-pub(super) struct ModuleImportIndexV1<'a> {
+pub(super) struct ModuleImportIndexV1<'a, T> {
     /// Import-module source paths to their file index.
     sources: HashMap<&'a str, usize>,
-    /// Every sealed file, by index.
-    files: Vec<&'a FileGenerationArtifactsV1>,
+    /// Every sealed file, by index; only import-module sources are read.
+    files: &'a [T],
     /// `(language, directory)` to the source files directly inside it.
     dirs: HashMap<(&'a str, &'a str), Vec<usize>>,
     /// Every symbol by exact qualified name.
@@ -105,14 +106,11 @@ enum PythonModuleV1 {
     Dir(String),
 }
 
-impl<'a> ModuleImportIndexV1<'a> {
-    pub(super) fn new<T>(files: &'a [T]) -> Self
-    where
-        T: AsRef<FileGenerationArtifactsV1>,
-    {
+impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
+    pub(super) fn new(files: &'a [T]) -> Self {
         let mut index = Self {
             sources: HashMap::new(),
-            files: files.iter().map(AsRef::as_ref).collect(),
+            files,
             dirs: HashMap::new(),
             by_qualified: HashMap::new(),
             python_packages: HashSet::new(),
@@ -130,9 +128,8 @@ impl<'a> ModuleImportIndexV1<'a> {
             arities: HashMap::new(),
         };
         for (file_index, file) in files.iter().enumerate() {
-            let file = file.as_ref();
-            if is_module_import_language(file.extraction.language.as_str()) {
-                index.register(file_index, file);
+            if is_module_import_language(file.language()) {
+                index.register(file_index, file.as_ref());
             }
         }
         index
@@ -277,7 +274,7 @@ impl<'a> ModuleImportIndexV1<'a> {
         if reference.kind != RelationEdgeKindV1::Calls {
             return None;
         }
-        let file = self.files[index];
+        let file = self.files[index].as_ref();
         let name = reference.reference_name.as_str();
         let target = match file.extraction.language.as_str() {
             "python" => self.python_call(file, &identifier_path(name, &["."])?),
@@ -322,7 +319,7 @@ impl<'a> ModuleImportIndexV1<'a> {
     ) -> Vec<CodeIndexUnresolvedReferenceV1> {
         references
             .filter(|&(index, reference)| {
-                is_module_import_language(self.files[index].extraction.language.as_str())
+                is_module_import_language(self.files[index].language())
                     && self.is_call_gap(index, reference)
             })
             .map(|(_, reference)| reference.clone())
@@ -347,10 +344,8 @@ impl<'a> ModuleImportIndexV1<'a> {
             ) => false,
             None => {
                 reference.reference_name.contains('.')
-                    || (matches!(
-                        self.files[index].extraction.language.as_str(),
-                        "java" | "ruby"
-                    ) && identifier_path(&reference.reference_name, &["::"]).is_some())
+                    || (matches!(self.files[index].language(), "java" | "ruby")
+                        && identifier_path(&reference.reference_name, &["::"]).is_some())
             }
         }
     }
@@ -468,7 +463,7 @@ impl<'a> ModuleImportIndexV1<'a> {
         }
         let (module_file, dir) = match &module {
             TargetV1::ModuleFile(file_index) => {
-                let path = self.files[*file_index].authority.logical_path.as_str();
+                let path = self.files[*file_index].logical_path();
                 let (dir, file_name) = split_parent(path);
                 (
                     Some(*file_index),
@@ -481,7 +476,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             }
         };
         if let Some(file_index) = module_file {
-            let file = self.files[file_index];
+            let file = self.files[file_index].as_ref();
             let path = file.authority.logical_path.as_str();
             if let Some(found) = self.member(file_index, path, name) {
                 return found;
@@ -499,7 +494,8 @@ impl<'a> ModuleImportIndexV1<'a> {
             }
         }
         if let Some(file_index) = module_file
-            && let Some(found) = self.python_glob_member(self.files[file_index], name, depth + 1)
+            && let Some(found) =
+                self.python_glob_member(self.files[file_index].as_ref(), name, depth + 1)
         {
             return found;
         }
@@ -665,7 +661,7 @@ impl<'a> ModuleImportIndexV1<'a> {
                 package.is_none_or(|package| self.go_packages.get(file_index) == Some(&package))
             })
             .filter_map(|file_index| {
-                let path = self.files[*file_index].authority.logical_path.as_str();
+                let path = self.files[*file_index].logical_path();
                 match self.member(*file_index, path, name)? {
                     TargetV1::Symbol(symbol) if symbol.1.kind == NodeKind::Function.as_str() => {
                         Some(symbol)
@@ -822,11 +818,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             .into_iter()
             .flatten()
             .find_map(|file_index| {
-                match self.member(
-                    *file_index,
-                    self.files[*file_index].authority.logical_path.as_str(),
-                    simple,
-                )? {
+                match self.member(*file_index, self.files[*file_index].logical_path(), simple)? {
                     TargetV1::Symbol(symbol) => Some(symbol),
                     _ => None,
                 }
@@ -872,7 +864,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             return None;
         }
         let constant = constant.join("::");
-        let path = self.files[index].authority.logical_path.as_str();
+        let path = self.files[index].logical_path();
         let nesting = if absolute {
             Vec::new()
         } else {
@@ -898,7 +890,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             let found = loaded
                 .iter()
                 .filter_map(|file_index| {
-                    let path = self.files[*file_index].authority.logical_path.as_str();
+                    let path = self.files[*file_index].logical_path();
                     self.member(*file_index, &format!("{path}::{qualified}"), method)
                 })
                 .collect::<Vec<_>>();
@@ -926,7 +918,7 @@ impl<'a> ModuleImportIndexV1<'a> {
         let mut queue = VecDeque::from([index]);
         let mut unresolved = false;
         while let Some(current) = queue.pop_front() {
-            let file = self.files[current];
+            let file = self.files[current].as_ref();
             let (dir, _) = split_parent(file.authority.logical_path.as_str());
             for row in &file.artifacts.imports {
                 let target = self.ruby_require_target(dir, row);

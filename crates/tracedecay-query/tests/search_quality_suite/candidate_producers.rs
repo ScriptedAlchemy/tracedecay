@@ -15,15 +15,14 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::clones::CloneNormalizationClassV1;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, SealedGenerationSegmentPublicationV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
-    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+    CodeIndexInterruptionV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+    CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
+    SealedGenerationSegmentPublicationV1, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -111,44 +110,6 @@ impl CodeIndexExecutionControlV1 for CancelsAfterChecks {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
-    }
-}
-
-#[derive(Default)]
-struct ArtifactPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for ArtifactPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("artifact publication lock")
-            .get(scope)
-            .map(Arc::clone))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("artifact publication lock");
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
     }
 }
 
@@ -550,20 +511,24 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
     };
     let mut owner = CodeIndexProductionOwnerV1::new(
         config,
-        ArtifactPublicationStore::default(),
+        MemorySealedPublicationStoreV1::default(),
         ArtifactProjectionSink,
     )
     .expect("artifact production owner");
-    let generation = owner
+    let published = owner
         .build_and_publish(request, &ArtifactControl { cancelled: false })
         .expect("production generation");
+    let generation = published
+        .decoded()
+        .expect("a build without a parent runs cold");
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
     let manifest = generation
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -1127,6 +1092,13 @@ fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() 
                 .expect("capture the killed builder's file");
         }
     }
+    #[cfg(windows)]
+    // fs::copy gives the destination the directory's inherited DACL; a real
+    // killed staging file carries the private DACL its creator installed.
+    drop(
+        tracedecay_private_fs::make_private_file(&killed_path)
+            .expect("restore the private DACL on the captured staging"),
+    );
     assert!(
         PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
         "an unsynced append must live in the staging WAL"

@@ -1,13 +1,23 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, OpenCode, and Pi. The Claude, Codex, Cursor, Kimi Code, and
+Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
 OpenCode bundles expose a host-specific MCP server key (`graph` for
 Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode). Pi has no MCP
 route: its extension registers the catalog tools over the CLI bridge. Every
 bundle ships shared workflow skills and host-specific lifecycle hooks. Each hook is a bounded
 daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
+
+The plugin root also carries the portable Agent Plugins manifest pair
+(`plugin.json` + `mcp.json`) that the ChatGPT lifecycle stages into
+`~/.tracedecay/host-bundle-stage/chatgpt/` for ChatGPT's own plugin or
+connector flow. Its `extensions.com.openai` block supplies the OpenAI
+presentation and hook mapping, and `mcp.json` launches both the `graph`
+server (`tracedecay serve`) and the `tracedecay-explorer` MCP App server
+from `chatgpt-extension/`. Codex still reads the `.codex-plugin/plugin.json`
+overlay its own lifecycle deploys. Its rendered MCP configuration includes
+both servers and the same explorer app assets.
 
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the
@@ -47,6 +57,14 @@ never a doubled `tracedecay`.
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.
 - `.lsp.json`: Claude Code's single configured-language TraceDecay LSP bridge.
+- `plugin.json` + `mcp.json`: portable Agent Plugins manifests (ChatGPT and
+  Codex plugin loading). `mcp.json` declares transports explicitly and adds
+  the `tracedecay-explorer` stdio server beside `graph`.
+- `chatgpt-extension/`: the ChatGPT extension (MCP App UI + read-only MCP
+  adapter over `tracedecay serve` and the daemon application API). Commits
+  `embedded/server.mjs` and `embedded/app.html` like the Cursor native
+  extension; `pnpm run check:embedded` guards drift. See
+  `chatgpt-extension/README.md`.
 - `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
   install scope; Claude rewrites the command to the resolved binary path.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
@@ -65,8 +83,8 @@ never a doubled `tracedecay`.
   events reach `tracedecay hook-pi-event`, record analytics under the `pi`
   host, and land that session's `~/.pi/agent/sessions` transcript (or the
   `PI_CODING_AGENT_DIR` one) through the Pi transcript source.
-- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
-  host README files, deployed as `README.md`.
+- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`,
+  `README-chatgpt.md`: host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;
   OpenCode has no plugin-manifest README deploy slot.
 - `README-host-bundles.md`: catalog/lifecycle contract and the host

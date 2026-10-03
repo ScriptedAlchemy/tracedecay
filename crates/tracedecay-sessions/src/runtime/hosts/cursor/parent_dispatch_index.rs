@@ -1000,7 +1000,8 @@ mod tests {
         assert!(stale.is_none());
         assert!(receipt.rescanned_from_zero);
         assert_eq!(
-            receipt.prefix_digest_bytes, 0,
+            receipt.prefix_digest_bytes,
+            commit_proof_bytes(RewriteWitness::NATIVE, original_len),
             "native file replacement must invalidate before prefix validation"
         );
         assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));

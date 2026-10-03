@@ -17,7 +17,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config,
     },
-    support::PartitionedSealV1,
+    support::{PartitionedSealV1, cold_generation},
     typescript_module_resolution::reader,
 };
 
@@ -86,17 +86,14 @@ fn increment(
     Arc<CodeIndexPublishedGenerationV1>,
     Arc<CodeIndexPublishedGenerationV1>,
 ) {
-    let owner = || {
-        CodeIndexProductionOwnerV1::new(
-            config(),
-            SharedPublicationStore::default(),
-            ApplyingProjectionSink,
-        )
-        .expect("production owner")
+    let owner = |store: &SharedPublicationStore| {
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner")
     };
     let paths = |files: &[(String, String)]| files.iter().map(|(path, _)| path.clone()).collect();
     let mut files = fixture_files(Path::new(FIXTURE_ROOT));
-    let mut incremental = owner();
+    let store = SharedPublicationStore::default();
+    let mut incremental = owner(&store);
     incremental
         .build_and_publish(
             fixture_tree_request(tag, 1, &files, &paths(&files)),
@@ -111,18 +108,22 @@ fn increment(
         }
         changed.insert((*path).to_owned());
     }
-    let child = incremental
-        .build_and_publish(
-            fixture_tree_request(tag, 2, &files, &changed),
-            &ActiveControl,
-        )
-        .expect("increment publishes");
-    let cold = owner()
-        .build_and_publish(
-            fixture_tree_request(&format!("{tag}-cold"), 1, &files, &paths(&files)),
-            &ActiveControl,
-        )
-        .expect("cold tree publishes");
+    let child = store.generation(
+        &incremental
+            .build_and_publish(
+                fixture_tree_request(tag, 2, &files, &changed),
+                &ActiveControl,
+            )
+            .expect("increment publishes"),
+    );
+    let cold = cold_generation(
+        &owner(&SharedPublicationStore::default())
+            .build_and_publish(
+                fixture_tree_request(&format!("{tag}-cold"), 1, &files, &paths(&files)),
+                &ActiveControl,
+            )
+            .expect("cold tree publishes"),
+    );
     (child, cold)
 }
 

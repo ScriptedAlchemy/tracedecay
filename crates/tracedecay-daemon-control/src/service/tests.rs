@@ -20,7 +20,9 @@ use super::{
     RestoreSettlement,
 };
 use tracedecay_daemon_protocol::SOCKET_ENV;
-use tracedecay_runtime_core::config::{ProfileRoot, USER_DATA_DIR_ENV};
+use tracedecay_runtime_core::config::ProfileRoot;
+#[cfg(unix)]
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -51,6 +53,7 @@ fn refresh_in_quiesced_window(
 /// The profile a service fixture under `dir` runs for: the default profile
 /// of home `dir/home`, so its unit is `tracedecay.service`, with XDG config
 /// home `dir/config`.
+#[cfg(unix)]
 fn fixture_profile(dir: &std::path::Path) -> ProfileRoot {
     ProfileRoot::under_home(dir.join("home")).with_xdg_config_home(dir.join("config"))
 }
@@ -1202,6 +1205,7 @@ fn systemd_unit_runs_the_profile_that_installed_it() {
     assert!(!default.contains("TRACEDECAY_DATA_DIR"), "{default}");
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_hands_the_memory_budget_to_the_daemon_authority() {
     let profile_dir = tempfile::TempDir::new().expect("profile temp dir");

@@ -26,7 +26,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::id,
+    support::{cold_generation, id},
     typescript_module_resolution::reader,
 };
 
@@ -249,17 +249,19 @@ fn language_for(path: &str) -> &'static str {
 pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPublishedGenerationV1> {
     let files = fixture_files(root);
     let changed = files.iter().map(|(path, _)| path.clone()).collect();
-    CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
+    cold_generation(
+        &CodeIndexProductionOwnerV1::new(
+            config(),
+            SharedPublicationStore::default(),
+            ApplyingProjectionSink,
+        )
+        .expect("production owner")
+        .build_and_publish(
+            fixture_tree_request(tag, 1, &files, &changed),
+            &ActiveControl,
+        )
+        .expect("fixture generation publishes"),
     )
-    .expect("production owner")
-    .build_and_publish(
-        fixture_tree_request(tag, 1, &files, &changed),
-        &ActiveControl,
-    )
-    .expect("fixture generation publishes")
 }
 
 /// A build request for `files` in `round`, with identities derived from `tag`
