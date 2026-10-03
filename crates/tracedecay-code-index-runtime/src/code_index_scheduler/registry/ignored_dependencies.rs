@@ -334,7 +334,7 @@ impl AdmissionFlightOwnerV1 {
 impl Drop for AdmissionFlightOwnerV1 {
     fn drop(&mut self) {
         // The owner is the RAII holder of the in-flight admission slot, so the
-        // gauge cannot leak on cancellation, panic, or shutdown.
+        // slot cannot leak on cancellation, panic, or shutdown.
         if self.finished {
             return;
         }

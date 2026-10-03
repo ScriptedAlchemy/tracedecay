@@ -3777,7 +3777,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        self.capture_admitted_candidate(registry, logical_path, control, None, explicitly_admitted)
+        self.capture_admitted_candidate(registry, logical_path, control, explicitly_admitted)
     }
 
     fn ignored_admission_paths(&self) -> BTreeSet<&str> {
@@ -3792,7 +3792,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         registry: &StaticLanguageRegistry,
         logical_path: &str,
         control: Option<&dyn CodeIndexExecutionControlV1>,
-        progress: Option<&git_tree_capture::CaptureProgressV1>,
         explicitly_admitted: bool,
     ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         let absolute = self.project_root.join(logical_path);
@@ -3814,11 +3813,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_dependencies::read_bounded_snapshot_source(&absolute, control)?
         };
         ignored_dependencies::checkpoint_if_present(control)?;
-        self.capture_candidate_bytes_with_progress(
+        self.capture_candidate_bytes(
             registry,
             logical_path.as_bytes(),
             &raw_bytes,
-            progress,
             explicitly_admitted,
         )
     }
@@ -4048,7 +4046,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             })
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
-        let progress = git_tree_capture::CaptureProgressV1::new();
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
@@ -4064,7 +4061,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                             &registry,
                             logical_path,
                             control,
-                            Some(&progress),
                             admitted_paths.contains(logical_path.as_str()),
                         )
                     })

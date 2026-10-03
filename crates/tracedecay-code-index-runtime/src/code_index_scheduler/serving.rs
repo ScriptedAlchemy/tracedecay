@@ -153,43 +153,20 @@ pub type CodeIndexBuildProgressSlotV1 = Arc<RwLock<CodeIndexBuildProgressSlotSta
 pub(super) struct GenerationTextControlV1 {
     execution: DaemonCodeIndexControlV1,
     retirement_epoch: Arc<AtomicU64>,
-
-    shutting_down: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy)]
-enum GenerationTextCancellationSourceV1 {
-    Shutdown,
-    Superseded,
 }
 
 impl GenerationTextControlV1 {
     pub(super) fn new(shutting_down: Arc<AtomicBool>) -> Self {
         let retirement_epoch = Arc::new(AtomicU64::new(0));
-        let execution = DaemonCodeIndexControlV1::new(
-            Arc::clone(&retirement_epoch),
-            Arc::clone(&shutting_down),
-        );
+        let execution = DaemonCodeIndexControlV1::new(Arc::clone(&retirement_epoch), shutting_down);
         Self {
             execution,
             retirement_epoch,
-
-            shutting_down,
         }
     }
 
     pub(super) fn retire(&self) {
         DaemonCodeIndexControlV1::advance(&self.retirement_epoch);
-    }
-
-    fn cancellation_source(&self) -> Option<GenerationTextCancellationSourceV1> {
-        if self.shutting_down.load(Ordering::Acquire) {
-            Some(GenerationTextCancellationSourceV1::Shutdown)
-        } else if self.execution.is_cancelled() {
-            Some(GenerationTextCancellationSourceV1::Superseded)
-        } else {
-            None
-        }
     }
 }
 
@@ -247,7 +224,6 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 
-        let published_phase = snapshot.phase;
         self.snapshot = Some(Arc::new(snapshot));
 
         true
@@ -1164,10 +1140,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self,
         preferred: NonZeroU64,
         minimum: NonZeroU64,
-    ) -> Result<(u64, u64, u64), RetrievalPortError> {
+    ) -> Result<(u64, u64), RetrievalPortError> {
         let admission_watermark = self.resident_memory.admission_watermark_bytes();
         let headroom = self.resident_memory.headroom_below(admission_watermark);
-        let observed_bytes = headroom.observed_bytes;
         let watermark_headroom = self
             .resident_memory
             .snapshot()
@@ -1182,7 +1157,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             self.resident_memory
                 .wait_for_headroom(minimum.get(), admission_watermark);
         })?;
-        Ok((observed_bytes, watermark_headroom, admitted_bytes))
+        Ok((watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1210,7 +1185,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (observed_bytes, watermark_headroom, admitted_bytes) =
+        let (watermark_headroom, admitted_bytes) =
             match self.text_artifact_admission(preferred, minimum) {
                 Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
                     let released = self
@@ -3008,8 +2983,6 @@ impl LatestCodeTextGenerationV1 {
             preferred_build_memory_budget,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;
-        let (source_batch_pages, source_batch_bytes, _) =
-            text_artifact_source_batch_limits(build_memory_budget);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(

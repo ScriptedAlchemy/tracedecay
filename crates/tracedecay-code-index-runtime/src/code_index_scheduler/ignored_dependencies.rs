@@ -424,8 +424,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// One wall span covers the whole roster verification sweep, it re-reads
-    /// and re-captures every admitted dependency entrypoint, with an entries
-    /// gauge for the roster size. Entries are never individually spanned.
+    /// and re-captures every admitted dependency entrypoint. Entries are never
+    /// individually spanned.
     #[tracing::instrument(
         name = "daemon.code_index.ignored_dependency.roster_verify",
         level = "trace",

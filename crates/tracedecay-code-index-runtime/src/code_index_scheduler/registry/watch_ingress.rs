@@ -49,10 +49,6 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    // Every routing outcome below increments one member of a closed counter
-    // set, so a stalled worktree is diagnosable as "the watcher never fired",
-    // "every frontier bounced Busy", or "the probe kept proving quiet" without
-    // per-frontier logging.
     fn request_for_root_blocking(
         &self,
         identity: &GitRepositoryIdentity,

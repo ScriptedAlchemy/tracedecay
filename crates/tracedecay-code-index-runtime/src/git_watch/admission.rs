@@ -31,8 +31,7 @@ impl GitWatcher {
         project_root: &Path,
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
-        let admission = self.ensure_watching_admission(project_root, config).await;
-        admission
+        self.ensure_watching_admission(project_root, config).await
     }
 
     /// Admission body behind [`Self::ensure_watching_with_config`], separated
@@ -212,7 +211,6 @@ impl GitWatcher {
     }
 
     async fn retry_identity_discovery(&self, project_root: PathBuf, config: SyncConfig) {
-        let _retry_owner = IdentityRetryGaugeGuard::enter();
         let mut backoff = Duration::from_millis(500);
         loop {
             log_daemon_event(
@@ -246,18 +244,4 @@ impl GitWatcher {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retries.remove(&project_root);
     }
-}
-
-/// RAII gauge for live single-flight identity-retry owners so cancellation,
-/// panic, or definitive admission can never leak the count.
-struct IdentityRetryGaugeGuard;
-
-impl IdentityRetryGaugeGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for IdentityRetryGaugeGuard {
-    fn drop(&mut self) {}
 }

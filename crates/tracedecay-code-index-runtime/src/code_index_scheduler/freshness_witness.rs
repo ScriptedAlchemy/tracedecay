@@ -73,8 +73,8 @@ pub fn worktree_stat_sweep(
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
-    // One sweep span plus an entries gauge: the stat walk is O(candidates) and
-    // must never publish one profiler event per file.
+    // One sweep span covers the O(candidates) stat walk. Never emit one
+    // trace event per file.
     let mut buf = Vec::new();
     for candidate in candidate_roster {
         let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {

@@ -84,40 +84,16 @@ enum GenerationResolutionSettlementV1<T> {
     Terminated(code_search::CodeIndexSearchUnavailableReasonV1),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GenerationResolutionTerminalV1 {
-    Ready,
-    Unavailable,
-    Failed,
-}
-
-fn finish_generation_resolution_with<T>(
+fn finish_generation_resolution<T>(
     settlement: GenerationResolutionSettlementV1<T>,
-    observe: impl FnOnce(GenerationResolutionTerminalV1),
 ) -> GenerationResolutionResultV1<T> {
-    let result = match settlement {
+    match settlement {
         GenerationResolutionSettlementV1::Completed(result) => result,
         GenerationResolutionSettlementV1::JoinFailed => {
             Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
         }
         GenerationResolutionSettlementV1::Terminated(reason) => Err(reason),
-    };
-    observe(match &result {
-        Ok(Some(_)) => GenerationResolutionTerminalV1::Ready,
-        Ok(None) => GenerationResolutionTerminalV1::Unavailable,
-        Err(_) => GenerationResolutionTerminalV1::Failed,
-    });
-    result
-}
-
-fn finish_generation_resolution<T>(
-    settlement: GenerationResolutionSettlementV1<T>,
-) -> GenerationResolutionResultV1<T> {
-    finish_generation_resolution_with(settlement, |terminal| match terminal {
-        GenerationResolutionTerminalV1::Ready => {}
-        GenerationResolutionTerminalV1::Unavailable => {}
-        GenerationResolutionTerminalV1::Failed => {}
-    })
+    }
 }
 
 /// Validated once per process. Live query pages and the unavailable
@@ -4108,7 +4084,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_resolution_terminal_projection_records_exactly_one_outcome() {
+    fn generation_resolution_settlement_maps_to_one_result() {
         use code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
         let cases = [
@@ -4116,47 +4092,40 @@ mod tests {
                 "serving hit",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("serving"))),
                 Ok(Some("serving")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "durable ready",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("durable"))),
                 Ok(Some("durable")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "unavailable",
                 GenerationResolutionSettlementV1::Completed(Ok(None)),
                 Ok(None),
-                GenerationResolutionTerminalV1::Unavailable,
             ),
             (
                 "generation error",
                 GenerationResolutionSettlementV1::Completed(Err(Reason::GenerationUnavailable)),
                 Err(Reason::GenerationUnavailable),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "cancellation",
                 GenerationResolutionSettlementV1::Terminated(Reason::Cancelled),
                 Err(Reason::Cancelled),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "join error",
                 GenerationResolutionSettlementV1::JoinFailed,
                 Err(Reason::Internal),
-                GenerationResolutionTerminalV1::Failed,
             ),
         ];
 
-        for (label, settlement, expected_result, expected_terminal) in cases {
-            let mut terminals = Vec::new();
-            let result = finish_generation_resolution_with(settlement, |terminal| {
-                terminals.push(terminal);
-            });
-            assert_eq!(result, expected_result, "{label}");
-            assert_eq!(terminals, vec![expected_terminal], "{label}");
+        for (label, settlement, expected_result) in cases {
+            assert_eq!(
+                finish_generation_resolution(settlement),
+                expected_result,
+                "{label}"
+            );
         }
     }
 

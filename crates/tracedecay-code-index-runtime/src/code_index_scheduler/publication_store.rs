@@ -13,6 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
 use same_file::Handle;
@@ -62,10 +63,6 @@ use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
-
-static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-
-static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 struct SealedGraphBuildAdmissionV1(DaemonCodeIndexPublicationStoreV1);
 
@@ -370,48 +367,6 @@ impl Drop for DecodeLeaseV1<'_> {
     }
 }
 
-struct GenerationDecodeObservationV1;
-
-impl GenerationDecodeObservationV1 {
-    fn enter() -> Self {
-        let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        Self
-    }
-}
-
-impl Drop for GenerationDecodeObservationV1 {
-    fn drop(&mut self) {
-        let _ = CODE_INDEX_GENERATION_DECODES_ACTIVE.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |active| active.checked_sub(1),
-        );
-    }
-}
-
-struct GenerationDecodeWaitObservationV1;
-
-impl GenerationDecodeWaitObservationV1 {
-    fn enter() -> Self {
-        let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        Self
-    }
-}
-
-impl Drop for GenerationDecodeWaitObservationV1 {
-    fn drop(&mut self) {
-        let _ = CODE_INDEX_GENERATION_DECODE_WAITERS.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |waiters| waiters.checked_sub(1),
-        );
-    }
-}
-
 /// Test-only occupation of the active decode barrier. See
 /// [`DaemonCodeIndexPublicationStoreV1::hold_active_decode`].
 #[cfg(test)]
@@ -488,7 +443,7 @@ pub(super) struct GenerationDecodeBudgetV1 {
     pub(super) worktree_id: WorktreeId,
 }
 
-fn publish_graph_build_bound_gauges(bound: &CodeGraphBuildBoundV1) {
+fn log_graph_build_bound(bound: &CodeGraphBuildBoundV1) {
     tracing::info!(
         event = "code_index_graph_build_bound",
         resolve_bytes = bound.resolve_bytes(),
@@ -1973,7 +1928,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 // Another caller already owns this O(store) decode. Park on it
                 // rather than starting a second sweep over the same bytes.
 
-                let _waiting = GenerationDecodeWaitObservationV1::enter();
                 let _parked = {
                     let _span =
                         tracing::trace_span!("code_index.generation.decode.singleflight_wait")
@@ -2044,7 +1998,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
 
-        let _decode = GenerationDecodeObservationV1::enter();
         let expected_digest = ManifestDigest::new(entry.state_digest.clone()).map_err(|error| {
             Self::corruption(format!(
                 "durable code-generation digest is not canonical: {error}"
@@ -2347,7 +2300,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_add(1, Ordering::AcqRel);
 
-                let _waiting = GenerationDecodeWaitObservationV1::enter();
                 let parked = {
                     let _span =
                         tracing::trace_span!("code_index.generation.decode.singleflight_wait")
@@ -2434,7 +2386,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
 
-        let _decode = GenerationDecodeObservationV1::enter();
         let expected_digest =
             ManifestDigest::new(pointer.state_digest.clone()).map_err(|error| {
                 Self::corruption(format!(
@@ -2509,7 +2460,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
         bound: tracedecay_code_index::production::CodeGraphBuildBoundV1,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
-        publish_graph_build_bound_gauges(&bound);
+        log_graph_build_bound(&bound);
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };

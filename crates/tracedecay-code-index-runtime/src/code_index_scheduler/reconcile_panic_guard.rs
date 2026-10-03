@@ -140,8 +140,8 @@ impl ReconcilePanicGuardV1 {
             }
             return true;
         }
-        let suppressed = self.next_attempt_at.is_some_and(|at| now < at);
-        suppressed
+
+        self.next_attempt_at.is_some_and(|at| now < at)
     }
 }
 

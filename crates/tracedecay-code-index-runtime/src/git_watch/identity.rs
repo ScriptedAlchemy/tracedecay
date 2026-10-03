@@ -44,9 +44,7 @@ pub async fn resolve_watch_identity(
     project_root: PathBuf,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> WatchIdentityResolution {
-    let resolution = discover_watch_identity(project_root, cancellation).await;
-
-    resolution
+    discover_watch_identity(project_root, cancellation).await
 }
 
 async fn discover_watch_identity(

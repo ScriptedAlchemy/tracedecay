@@ -322,9 +322,6 @@ where
         cancellation_observed_while_queued: Option<tracedecay_domain::UtcMicros>,
         cancellation_requested: &impl Fn() -> Option<tracedecay_domain::UtcMicros>,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        // Entered only after the repository permit, so this measures serialized
-        // execution in flight, distinct from `daemon.git.tx.queue` wait time.
-        let _in_flight = GitIndexApplyGaugeGuard::enter();
         let idempotency_key = request
             .native_idempotency_key()
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -804,9 +801,6 @@ fn result_from_receipt(
     receipt: GitIndexTransactionReceiptV1,
     execution: OperationReceipt,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-    // Every apply result, fresh, replayed, or inline-recovered, terminates
-    // here exactly once; `replayed_total`/`recovered_total` discriminate the
-    // overlapping populations.
     let (termination, reconciliation) = match receipt.outcome {
         GitIndexReceiptOutcomeV1::Committed => (
             EffectTermination::Completed,
@@ -868,21 +862,6 @@ const fn operation_termination(termination: EffectTermination) -> OperationTermi
         EffectTermination::Partial => OperationTermination::Partial,
         EffectTermination::EffectUnknown => OperationTermination::EffectUnknown,
     }
-}
-
-/// RAII gauge for serialized applies in flight (post repository-permit,
-/// admission through terminal receipt), leak-proof across every early return
-/// and quarantine path.
-struct GitIndexApplyGaugeGuard;
-
-impl GitIndexApplyGaugeGuard {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for GitIndexApplyGaugeGuard {
-    fn drop(&mut self) {}
 }
 
 #[allow(clippy::needless_pass_by_value)]
