@@ -469,6 +469,9 @@ pub struct LatestCodeTextGenerationV1 {
     /// decoded merely to discover text metadata or source layout.
     pub(super) preopened_source: Arc<ProfiledStdMutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
     pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
+    /// The outgoing owner whose warm graph serves reads, stale, until this
+    /// generation's own graph first warms.
+    pub(super) graph_predecessor: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2296,6 +2299,62 @@ impl LatestCodeTextGenerationV1 {
                 reason: error.to_string(),
             },
         }
+    }
+
+    /// Replacing the serving owner would otherwise refuse every graph read
+    /// while the successor's graph publishes and its catalog warms, though
+    /// the outgoing graph is still resident. A cold outgoing owner passes on
+    /// the warm graph it was itself holding.
+    pub(super) fn hold_outgoing_graph(&self, outgoing: Option<&Self>) {
+        let Some(outgoing) = outgoing.filter(|outgoing| !outgoing.same_text_owner(self)) else {
+            return;
+        };
+        let inherited = outgoing.take_graph_predecessor();
+        let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
+            && matches!(
+                outgoing.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Ready
+            );
+        let held = if serves_warm_graph {
+            Some(outgoing.clone())
+        } else {
+            inherited
+        }
+        .filter(|held| {
+            held.metadata().manifest().generation_id != self.metadata().manifest().generation_id
+        });
+        *self
+            .graph_predecessor
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = held;
+    }
+
+    /// The held predecessor serves only until this generation's graph first
+    /// warms or settles; past that it is dropped.
+    pub fn graph_predecessor(&self) -> Option<Self> {
+        if matches!(
+            self.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+        ) {
+            return self
+                .graph_predecessor
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+        }
+        self.release_graph_predecessor();
+        None
+    }
+
+    pub(super) fn release_graph_predecessor(&self) {
+        drop(self.take_graph_predecessor());
+    }
+
+    fn take_graph_predecessor(&self) -> Option<Self> {
+        self.graph_predecessor
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Return a graph refused for resident memory to `Pending`, so the next

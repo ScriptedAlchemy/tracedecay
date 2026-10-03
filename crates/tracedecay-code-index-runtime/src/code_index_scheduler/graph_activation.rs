@@ -750,13 +750,19 @@ impl GraphCancellation for SchedulerGraphCancellation {
 struct PendingInteractiveCatalogWarmV1 {
     store: Arc<CodeGraphProjectionStore>,
     cancellation: Arc<dyn GraphCancellation>,
+    owner: LatestCodeTextGenerationV1,
 }
 
 impl PendingInteractiveCatalogWarmV1 {
+    /// The first warm settles the owner's graph either way, so the
+    /// predecessor it held is released here and never outlives it.
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
-        self.store
-            .warm_interactive_catalog_with_cancellation(self.cancellation)
+        let warmed = self
+            .store
+            .warm_interactive_catalog_with_cancellation(self.cancellation);
+        self.owner.release_graph_predecessor();
+        warmed
     }
 }
 
@@ -807,6 +813,7 @@ impl LatestCodeTextGenerationV1 {
         Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,
             cancellation: graph_cancellation,
+            owner: self.clone(),
         }))
     }
 }
@@ -869,6 +876,7 @@ impl LatestCompleteCodeIndexV1 {
         Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,
             cancellation: graph_cancellation,
+            owner: self.text.clone(),
         }))
     }
 }

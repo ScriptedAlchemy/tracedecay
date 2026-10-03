@@ -1628,10 +1628,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     graph_text = match published_text {
                         Ok(Ok(Ok(Some(published_text)))) => {
-                            *worker_text_generation
+                            let mut serving_text = worker_text_generation
                                 .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(published_text.clone());
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            published_text.hold_outgoing_graph(serving_text.as_ref());
+                            *serving_text = Some(published_text.clone());
+                            drop(serving_text);
                             // The publication broadcast went out before the
                             // successor's owner was installed; waiters that
                             // probed in between must wake now.
