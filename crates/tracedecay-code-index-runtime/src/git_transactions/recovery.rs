@@ -74,7 +74,6 @@ where
 
         if let Some(original_receipt) = &record.terminal_receipt {
             if original_receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection {
-                metrics::gauge!("daemon.git.tx.recovery.replayed_total").increment(1.0);
                 return Ok(original_receipt.clone());
             }
             let proof = self.reconcile_or_quarantine(record, observed_at)?;
@@ -95,7 +94,7 @@ where
                 &record.journal.transaction_id,
                 proof.clone(),
             )?;
-            metrics::gauge!("daemon.git.tx.recovery.recovered_total").increment(1.0);
+
             return Ok(proof);
         }
 
@@ -135,7 +134,6 @@ where
             return Err(GitIndexRecoveryError::Indeterminate);
         }
         if let Ok(stored) = self.store.write_terminal(write) {
-            metrics::gauge!("daemon.git.tx.recovery.recovered_total").increment(1.0);
             Ok(stored)
         } else {
             quarantine(self.store, record)?;
@@ -261,7 +259,6 @@ fn quarantine<S>(
 where
     S: GitIndexTransactionStore,
 {
-    metrics::gauge!("daemon.git.tx.recovery.quarantined_total").increment(1.0);
     store.quarantine_repository(
         &record.journal.repository_id,
         &record.journal.transaction_id,

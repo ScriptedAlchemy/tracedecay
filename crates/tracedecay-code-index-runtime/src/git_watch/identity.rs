@@ -54,18 +54,10 @@ pub async fn resolve_watch_identity(
 /// `resolved` separates discovery churn from healthy admission cost.
 fn record_identity_resolution(resolution: &WatchIdentityResolution) {
     match resolution {
-        WatchIdentityResolution::Ready(_) => {
-            metrics::gauge!("daemon.git.watch.identity.resolved_total").increment(1.0);
-        }
-        WatchIdentityResolution::Cancelled => {
-            metrics::gauge!("daemon.git.watch.identity.cancelled_total").increment(1.0);
-        }
-        WatchIdentityResolution::NotRepository => {
-            metrics::gauge!("daemon.git.watch.identity.not_repository_total").increment(1.0);
-        }
-        WatchIdentityResolution::Unknown => {
-            metrics::gauge!("daemon.git.watch.identity.unknown_total").increment(1.0);
-        }
+        WatchIdentityResolution::Ready(_) => {}
+        WatchIdentityResolution::Cancelled => {}
+        WatchIdentityResolution::NotRepository => {}
+        WatchIdentityResolution::Unknown => {}
     }
 }
 

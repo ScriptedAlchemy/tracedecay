@@ -71,9 +71,7 @@ impl DeterministicDiversity {
                 final_ordinal: ordinal as u32,
             })
             .collect::<Vec<_>>();
-        metrics::gauge!("query.diversity.candidates").set(candidate_count as f64);
-        metrics::gauge!("query.diversity.results").set((ranked.len()) as f64);
-        metrics::gauge!("query.diversity.capped").set((decisions.len()) as f64);
+
         Ok((ranked, decisions))
     }
 }

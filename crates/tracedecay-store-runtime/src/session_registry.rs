@@ -144,8 +144,7 @@ impl StoreMountObservationV1 {
         let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        metrics::gauge!("daemon.session_registry.mount.attempts_total").increment(1.0);
-        metrics::gauge!("daemon.session_registry.mount.in_flight").set(in_flight as f64);
+
         Self
     }
 }
@@ -157,8 +156,6 @@ impl Drop for StoreMountObservationV1 {
             Ordering::Relaxed,
             |in_flight| in_flight.checked_sub(1),
         );
-        metrics::gauge!("daemon.session_registry.mount.in_flight")
-            .set((SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed)) as f64);
     }
 }
 
@@ -2743,7 +2740,6 @@ async fn open_runtime_with_presence(
     let locator = match match_result {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
         LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
             return Err(session_registry_error(
                 operation,
                 format!(
@@ -2793,13 +2789,10 @@ async fn open_runtime_with_presence(
     .await
     {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
-        StoreRuntimeOpenResult::Failed(failure) => {
-            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
-            Err(registry_open_error(
-                "open registered session runtime",
-                failure,
-            ))
-        }
+        StoreRuntimeOpenResult::Failed(failure) => Err(registry_open_error(
+            "open registered session runtime",
+            failure,
+        )),
     }
 }
 

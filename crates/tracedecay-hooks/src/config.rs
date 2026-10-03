@@ -127,16 +127,7 @@ impl HookConfigurationSubscriberV1 {
     ) -> HookConfigurationReadOutcomeV1 {
         let outcome = self.load_current_inner(host, now);
 
-        {
-            metrics::gauge!(match &outcome {
-                HookConfigurationReadOutcomeV1::Bound(_) => "hooks.config.read.bound",
-                HookConfigurationReadOutcomeV1::Missing => "hooks.config.read.missing",
-                HookConfigurationReadOutcomeV1::Stale => "hooks.config.read.stale",
-                HookConfigurationReadOutcomeV1::Corrupted => "hooks.config.read.corrupted",
-                HookConfigurationReadOutcomeV1::Unavailable => "hooks.config.read.unavailable",
-            })
-            .increment(1);
-        }
+        {}
         outcome
     }
 

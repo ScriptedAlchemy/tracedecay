@@ -406,7 +406,7 @@ struct DaemonInvocationClientActivityGuard {
 impl DaemonInvocationClientActivity {
     fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.queued.fetch_add(1, Ordering::AcqRel);
-        metrics::gauge!("daemon.invocation.client.queued").increment(1.0);
+
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::Queued,
@@ -415,7 +415,7 @@ impl DaemonInvocationClientActivity {
 
     fn in_flight(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
-        metrics::gauge!("daemon.invocation.client.in_flight").increment(1.0);
+
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::InFlight,
@@ -436,11 +436,9 @@ impl Drop for DaemonInvocationClientActivityGuard {
         match self.phase {
             DaemonInvocationClientPhase::Queued => {
                 self.activity.queued.fetch_sub(1, Ordering::AcqRel);
-                metrics::gauge!("daemon.invocation.client.queued").increment(-1.0);
             }
             DaemonInvocationClientPhase::InFlight => {
                 self.activity.in_flight.fetch_sub(1, Ordering::AcqRel);
-                metrics::gauge!("daemon.invocation.client.in_flight").increment(-1.0);
             }
         }
     }
@@ -533,7 +531,6 @@ impl Drop for InvocationConnectionLease {
             }
             LeaseDisposition::DiscardOne => {
                 // The leased stream drops with the lease; idle siblings stay.
-                metrics::gauge!("daemon.invocation.client.pool.discarded_total").increment(1.0);
             }
             LeaseDisposition::InvalidatePool => {
                 self.pool
@@ -541,7 +538,6 @@ impl Drop for InvocationConnectionLease {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
-                metrics::gauge!("daemon.invocation.client.pool.invalidated_total").increment(1.0);
             }
         }
         drop(self.permit.take());
@@ -712,7 +708,7 @@ impl DaemonInvocationClient {
             let _span = tracing::trace_span!("daemon.invocation.client.request.encode").entered();
             serde_json::to_string(&request)
         }?;
-        metrics::gauge!("daemon.invocation.client.request.bytes").set(request_json.len() as f64);
+
         tracing::Instrument::instrument(
             async {
                 connection.writer.write_all(request_json.as_bytes()).await?;
@@ -740,7 +736,7 @@ impl DaemonInvocationClient {
                 ),
             });
         };
-        metrics::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
+
         let match_result = {
             let _span = tracing::trace_span!("daemon.invocation.client.response.decode").entered();
             serde_json::from_str(&line)

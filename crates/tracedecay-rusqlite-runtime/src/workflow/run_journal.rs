@@ -220,9 +220,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             }
         });
 
-        if let Ok(page_runs) = u64::try_from(page_run_ids.len()) {
-            metrics::gauge!("rusqlite.workflow.recovery_page.runs").increment(page_runs as f64);
-        }
+        if let Ok(page_runs) = u64::try_from(page_run_ids.len()) {}
         let projections = page_run_ids
             .iter()
             .map(|run_id| history_tx(&transaction, run_id).and_then(|history| rebuild(&history)))

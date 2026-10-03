@@ -162,7 +162,7 @@ fn normalize_codex_observation_inner(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Codex rollouts order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-    metrics::gauge!("capture.codex.record_bytes").increment((range.end() - range.start()) as f64);
+
     let envelope = normalize_codex_record(
         native,
         session_id,
@@ -171,9 +171,7 @@ fn normalize_codex_observation_inner(
         range,
         location,
     );
-    if envelope.is_err() {
-        metrics::gauge!("capture.codex.normalize_failures").increment(1.0);
-    }
+    if envelope.is_err() {}
     envelope
 }
 

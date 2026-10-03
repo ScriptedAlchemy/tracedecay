@@ -529,21 +529,10 @@ pub fn parent_dispatch_model_for_subagent_with_receipt(
 }
 
 pub(super) fn record_dispatch_scan_gauges(receipt: DispatchScanReceipt) {
-    if receipt.bytes_parsed > 0 {
-        metrics::gauge!("sessions.hosts.cursor.dispatch_model_bytes_parsed")
-            .increment(receipt.bytes_parsed as f64);
-    }
-    if receipt.prefix_digest_bytes > 0 {
-        metrics::gauge!("sessions.hosts.cursor.dispatch_model_prefix_digest_bytes")
-            .increment(receipt.prefix_digest_bytes as f64);
-    }
-    if receipt.records_parsed > 0 {
-        metrics::gauge!("sessions.hosts.cursor.dispatch_model_records_parsed")
-            .increment(receipt.records_parsed as f64);
-    }
-    if receipt.rescanned_from_zero {
-        metrics::gauge!("sessions.hosts.cursor.dispatch_model_rescan_from_zero").increment(1.0);
-    }
+    if receipt.bytes_parsed > 0 {}
+    if receipt.prefix_digest_bytes > 0 {}
+    if receipt.records_parsed > 0 {}
+    if receipt.rescanned_from_zero {}
 }
 
 fn scan_parent_delta(

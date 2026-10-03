@@ -344,7 +344,6 @@ async fn write_refusal_and_drain(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     refusal: &tracedecay_daemon_protocol::DaemonHandshakeRefusal,
 ) {
-    metrics::gauge!("daemon.engine.handshake.refused").increment(1.0);
     log_daemon_event(
         "daemon_handshake_refused",
         &[

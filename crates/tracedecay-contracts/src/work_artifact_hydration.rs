@@ -191,8 +191,6 @@ where
         .map_err(storage_problem)?;
 
         {
-            metrics::gauge!("application.work.artifact.hydrate.rows")
-                .set((page.rows.len() as u64) as f64);
             // Declared artifact bytes on the page, from the durable
             // references. This read never materializes payloads, so declared
             // bytes are the only truthful byte figure it can report.
@@ -202,8 +200,6 @@ where
                 .flat_map(|row| &row.artifacts)
                 .map(WorkArtifactRefV1::byte_length)
                 .fold(0u64, u64::saturating_add);
-            metrics::gauge!("application.work.artifact.hydrate.declared_bytes")
-                .set(declared_bytes as f64);
         }
         let returned = u32::try_from(page.rows.len())
             .ok()

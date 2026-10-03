@@ -176,25 +176,11 @@ fn interrupted_report(
 /// are attributed even when the page ends early.
 fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
     match report.completion {
-        UnregisteredSweepCompletionV1::Complete => {
-            metrics::gauge!("maintenance.orphan_stores.unregistered.page_complete_total")
-                .increment(1.0);
-        }
-        UnregisteredSweepCompletionV1::Cancelled => {
-            metrics::gauge!("maintenance.orphan_stores.unregistered.page_cancelled_total")
-                .increment(1.0);
-        }
-        UnregisteredSweepCompletionV1::DeadlineExceeded => {
-            metrics::gauge!("maintenance.orphan_stores.unregistered.page_deadline_total")
-                .increment(1.0);
-        }
+        UnregisteredSweepCompletionV1::Complete => {}
+        UnregisteredSweepCompletionV1::Cancelled => {}
+        UnregisteredSweepCompletionV1::DeadlineExceeded => {}
     }
-    metrics::gauge!("maintenance.orphan_stores.unregistered.collected_total")
-        .increment((report.outcome.collected.len()) as f64);
-    metrics::gauge!("maintenance.orphan_stores.unregistered.failed_total")
-        .increment((report.outcome.errors.len()) as f64);
-    metrics::gauge!("maintenance.orphan_stores.unregistered.reclaimed_bytes_total")
-        .increment(report.outcome.reclaimed_bytes as f64);
+
     report
 }
 

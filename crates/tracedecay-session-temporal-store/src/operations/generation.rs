@@ -319,7 +319,6 @@ pub(super) async fn validate_current_predecessor(
         .await?;
     let mut current_for_identity = Vec::new();
     while let Some(row) = matching.next().await? {
-        metrics::gauge!("session_temporal.publication.predecessor_manifest_rows").increment(1.0);
         let candidate_id: String = row.get(0)?;
         let manifest_raw: String = row.get(1)?;
         let manifest = serde_json::from_str::<super::CanonicalPublicationManifest>(&manifest_raw)

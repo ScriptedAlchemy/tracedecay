@@ -1091,7 +1091,6 @@ struct BackgroundJobGaugeGuard {
 
 impl BackgroundJobGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("background_jobs").increment(1.0);
         Self {
             #[cfg(test)]
             test_counter: None,
@@ -1109,7 +1108,6 @@ impl BackgroundJobGaugeGuard {
 
 impl Drop for BackgroundJobGaugeGuard {
     fn drop(&mut self) {
-        metrics::gauge!("background_jobs").increment(-1.0);
         #[cfg(test)]
         if let Some(counter) = self.test_counter.as_ref() {
             counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);

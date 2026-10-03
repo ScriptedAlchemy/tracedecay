@@ -517,15 +517,7 @@ impl GraphLayeredRowSpill {
         row_sum.merge(delta.row_sum());
         let expected_recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
 
-        {
-            metrics::gauge!("graph_db.sealed_layer.delta_entities")
-                .increment(delta_entity_count as f64);
-            metrics::gauge!("graph_db.sealed_layer.delta_relations")
-                .increment(delta_relation_count as f64);
-            metrics::gauge!("graph_db.sealed_layer.hidden_rows").increment(
-                ((shadowed.hidden.entities.len() + shadowed.hidden.relations.len()) as u64) as f64,
-            );
-        }
+        {}
         Ok(LayeredGraphGeneration {
             identity,
             delta,

@@ -353,7 +353,7 @@ pub fn prepare_workflow_fan_out(
     // Planned fan-out width beside the plan span: per-child digesting makes
     // this function's cost linear in width, and the width itself is the
     // denominator for every downstream census reading.
-    metrics::gauge!("application.workflow.fan_out.children").set((children.len() as u64) as f64);
+
     Ok(WorkflowFanOutPlan {
         identity,
         operation: step.operation.clone(),

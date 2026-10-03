@@ -260,31 +260,7 @@ pub fn finish_synchronous_hook(
     );
 
     {
-        metrics::gauge!(match immediate_state {
-            HookImmediateAdmissionStateV1::Accepted => "hooks.admission.immediate.accepted",
-            HookImmediateAdmissionStateV1::CatchupRequired => {
-                "hooks.admission.immediate.catchup_required"
-            }
-            HookImmediateAdmissionStateV1::Unavailable => "hooks.admission.immediate.unavailable",
-            HookImmediateAdmissionStateV1::TimedOut => "hooks.admission.immediate.timed_out",
-            HookImmediateAdmissionStateV1::Backpressured => {
-                "hooks.admission.immediate.backpressured"
-            }
-        })
-        .increment(1);
-        metrics::gauge!(match guidance {
-            HookGuidanceDispositionV1::Rendered => "hooks.guidance.rendered",
-            HookGuidanceDispositionV1::NotReady => "hooks.guidance.not_ready",
-            HookGuidanceDispositionV1::Paused => "hooks.guidance.paused",
-            HookGuidanceDispositionV1::Disabled => "hooks.guidance.disabled",
-            HookGuidanceDispositionV1::Expired => "hooks.guidance.expired",
-            HookGuidanceDispositionV1::Invalid => "hooks.guidance.invalid",
-            HookGuidanceDispositionV1::DeadlineExceeded => "hooks.guidance.deadline_exceeded",
-        })
-        .increment(1);
-        if deadline_exceeded {
-            metrics::gauge!("hooks.synchronous.deadline_exceeded").increment(1);
-        }
+        if deadline_exceeded {}
     }
 
     Ok(HookSynchronousResultV1 {
@@ -372,14 +348,7 @@ const fn admit_rollback_revision(
     Ok(())
 }
 
-fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {
-    metrics::gauge!(match outcome {
-        HookFeedbackDeliveryOutcomeV1::Delivered => "hooks.feedback.delivered",
-        HookFeedbackDeliveryOutcomeV1::Duplicate => "hooks.feedback.duplicate",
-        HookFeedbackDeliveryOutcomeV1::Unavailable => "hooks.feedback.unavailable",
-    })
-    .increment(1);
-}
+fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {}
 
 #[tracing::instrument(
     name = "hooks.runtime.deliver_feedback_rollback",

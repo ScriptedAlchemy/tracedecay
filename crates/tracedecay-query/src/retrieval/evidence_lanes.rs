@@ -834,16 +834,12 @@ where
     E: LaneEvidenceBinding,
 {
     if let Some(terminal) = control.terminal() {
-        if matches!(terminal, RetrieverOutcome::Cancelled) {
-            metrics::gauge!("query.cancel.count").increment(1u32);
-        }
+        if matches!(terminal, RetrieverOutcome::Cancelled) {}
         return Ok(terminal);
     }
     let outcome = read()?;
     if let Some(terminal) = control.terminal() {
-        if matches!(terminal, RetrieverOutcome::Cancelled) {
-            metrics::gauge!("query.cancel.count").increment(1u32);
-        }
+        if matches!(terminal, RetrieverOutcome::Cancelled) {}
         return Ok(terminal);
     }
     validate_lane_outcome(lane, request, &outcome, evidence_binding_matches)?;

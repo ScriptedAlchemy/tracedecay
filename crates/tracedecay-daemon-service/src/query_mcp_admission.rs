@@ -70,27 +70,13 @@ pub enum QueryMcpAdmissionUnavailableV1 {
 /// key stays compile-time static.
 fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
     match reason {
-        QueryMcpAdmissionUnavailableV1::Unauthenticated => {
-            metrics::gauge!("daemon.query_admission.refused.unauthenticated").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::InvalidGrant => {
-            metrics::gauge!("daemon.query_admission.refused.invalid_grant").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::CapabilityMismatch => {
-            metrics::gauge!("daemon.query_admission.refused.capability_mismatch").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::ScopeMismatch => {
-            metrics::gauge!("daemon.query_admission.refused.scope_mismatch").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::AuthorizationStale => {
-            metrics::gauge!("daemon.query_admission.refused.authorization_stale").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::Expired => {
-            metrics::gauge!("daemon.query_admission.refused.expired").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::Revoked => {
-            metrics::gauge!("daemon.query_admission.refused.revoked").increment(1.0);
-        }
+        QueryMcpAdmissionUnavailableV1::Unauthenticated => {}
+        QueryMcpAdmissionUnavailableV1::InvalidGrant => {}
+        QueryMcpAdmissionUnavailableV1::CapabilityMismatch => {}
+        QueryMcpAdmissionUnavailableV1::ScopeMismatch => {}
+        QueryMcpAdmissionUnavailableV1::AuthorizationStale => {}
+        QueryMcpAdmissionUnavailableV1::Expired => {}
+        QueryMcpAdmissionUnavailableV1::Revoked => {}
     }
 }
 
@@ -112,9 +98,7 @@ pub fn admit_query_mcp_read(
         None => Err(QueryMcpAdmissionUnavailableV1::Unauthenticated),
     };
     match &admission {
-        Ok(_) => {
-            metrics::gauge!("daemon.query_admission.admitted").increment(1.0);
-        }
+        Ok(_) => {}
         Err(reason) => record_query_admission_refusal(*reason),
     }
     admission
@@ -269,9 +253,7 @@ impl QueryMcpReadAdmissionV1 {
         let authorized =
             self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros());
         match &authorized {
-            Ok(_) => {
-                metrics::gauge!("daemon.query_admission.authorized").increment(1.0);
-            }
+            Ok(_) => {}
             Err(reason) => record_query_admission_refusal(*reason),
         }
         authorized

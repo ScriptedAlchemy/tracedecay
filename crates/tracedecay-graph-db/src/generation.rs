@@ -1249,9 +1249,7 @@ impl ManifestDigestPipelineMetrics {
         }
         let current = self.current_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
         self.peak_bytes.fetch_max(current, Ordering::AcqRel);
-        metrics::gauge!("graph_db.generation.manifest_digest.in_flight_bytes").set(current as f64);
-        metrics::gauge!("graph_db.generation.manifest_digest.peak_in_flight_bytes")
-            .set(self.peak_bytes.load(Ordering::Acquire) as f64);
+
         drop(gate);
         Ok(ManifestDigestReservation {
             bytes,
@@ -1294,8 +1292,7 @@ impl Drop for ManifestDigestReservation {
             .current_bytes
             .fetch_sub(self.bytes, Ordering::AcqRel);
         let remaining = prior.saturating_sub(self.bytes);
-        metrics::gauge!("graph_db.generation.manifest_digest.in_flight_bytes")
-            .set(remaining as f64);
+
         self.metrics.reservation_released.notify_all();
     }
 }
@@ -1382,8 +1379,7 @@ fn recovered_generation_digest_and_rows(
         )
         .collect::<Vec<_>>();
     let workers = config.effective_workers(chunks.len())?;
-    metrics::gauge!("graph_db.generation.manifest_digest.effective_workers").set(workers as f64);
-    metrics::gauge!("graph_db.generation.manifest_digest.chunks").set(chunks.len() as f64);
+
     if workers == 1 {
         for chunk in chunks {
             digest_manifest_chunk_serial(chunk, &mut writer, &mut canonical, check)?;
@@ -1510,10 +1506,6 @@ fn digest_manifest_chunks_parallel(
                             drop(reservation);
                         }
                         ManifestDigestChunkEncoding::SerialFallback => {
-                            metrics::gauge!(
-                                "graph_db.generation.manifest_digest.serial_fallback_chunks"
-                            )
-                            .increment(1.0);
                             // The worker buffer is already gone; release its
                             // reservation before the one-row serial buffer grows.
                             drop(reservation);

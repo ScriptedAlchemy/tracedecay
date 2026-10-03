@@ -502,7 +502,6 @@ where
                 Err(GitIndexTransactionPortError::NeedsInspection)
             }
             Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown) | Err(_) => {
-                metrics::gauge!("daemon.git.tx.apply.recovered_total").increment(1.0);
                 let mut recovery_record = (*record).clone();
                 recovery_record.journal = started;
                 let receipt = GitIndexRecoveryCoordinator::new(&self.store, &self.native)
@@ -539,7 +538,6 @@ where
             || current.configuration_digest != request.proof.configuration_digest
             || current.policy_revision != request.authority.policy.revision
         {
-            metrics::gauge!("daemon.git.tx.apply.denied_total").increment(1.0);
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         let decision = self.classifier.evaluate(&GitEffectClassificationInputV1 {
@@ -560,7 +558,6 @@ where
         if decision.disposition == GitEffectDispositionV1::Allow {
             Ok(())
         } else {
-            metrics::gauge!("daemon.git.tx.apply.denied_total").increment(1.0);
             Err(GitIndexTransactionPortError::PolicyDenied)
         }
     }
@@ -706,7 +703,6 @@ fn quarantine_after_admission<S>(
 where
     S: GitIndexTransactionStore,
 {
-    metrics::gauge!("daemon.git.tx.apply.quarantined_total").increment(1.0);
     store
         .quarantine_repository(&preview.repository_snapshot.repository_id, transaction_id)
         .map_err(|_| GitIndexTransactionPortError::NeedsInspection)
@@ -786,7 +782,6 @@ fn replay_result(
     request: &GitIndexApplyRequestV1,
     receipt: &GitIndexTransactionReceiptV1,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-    metrics::gauge!("daemon.git.tx.apply.replayed_total").increment(1.0);
     result_from_receipt(
         request,
         deterministic_effect_id(&receipt.transaction_id)?,
@@ -813,15 +808,9 @@ fn result_from_receipt(
     // here exactly once; `replayed_total`/`recovered_total` discriminate the
     // overlapping populations.
     match receipt.outcome {
-        GitIndexReceiptOutcomeV1::Committed => {
-            metrics::gauge!("daemon.git.tx.apply.committed_total").increment(1.0);
-        }
-        GitIndexReceiptOutcomeV1::AbortedNoChange => {
-            metrics::gauge!("daemon.git.tx.apply.aborted_total").increment(1.0);
-        }
-        GitIndexReceiptOutcomeV1::NeedsInspection => {
-            metrics::gauge!("daemon.git.tx.apply.needs_inspection_total").increment(1.0);
-        }
+        GitIndexReceiptOutcomeV1::Committed => {}
+        GitIndexReceiptOutcomeV1::AbortedNoChange => {}
+        GitIndexReceiptOutcomeV1::NeedsInspection => {}
     }
     let (termination, reconciliation) = match receipt.outcome {
         GitIndexReceiptOutcomeV1::Committed => (
@@ -893,16 +882,12 @@ struct GitIndexApplyGaugeGuard;
 
 impl GitIndexApplyGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("daemon.git.tx.apply.in_flight").increment(1.0);
-        metrics::gauge!("daemon.git.tx.apply.admitted_total").increment(1.0);
         Self
     }
 }
 
 impl Drop for GitIndexApplyGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.git.tx.apply.in_flight").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 #[allow(clippy::needless_pass_by_value)]

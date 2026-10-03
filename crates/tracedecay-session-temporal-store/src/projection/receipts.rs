@@ -1213,30 +1213,19 @@ pub(crate) async fn base_projection_coverage(
 }
 
 #[inline(always)]
-fn record_assertion_validation_probe() {
-    metrics::gauge!("session_temporal.activation.assertion_query_probes").increment(1.0);
-}
+fn record_assertion_validation_probe() {}
 
 #[inline(always)]
 fn record_assertion_history_row(bytes: u64) {
-    {
-        metrics::gauge!("session_temporal.activation.history_rows").increment(1.0);
-        metrics::gauge!("session_temporal.activation.history_row_payload_bytes")
-            .increment(bytes as f64);
-    }
+    {}
 }
 
 #[inline(always)]
-fn record_coverage_query_probe() {
-    metrics::gauge!("session_temporal.coverage.query_probes").increment(1.0);
-}
+fn record_coverage_query_probe() {}
 
 #[inline(always)]
 fn record_coverage_row(bytes: u64) {
-    {
-        metrics::gauge!("session_temporal.coverage.rows").increment(1.0);
-        metrics::gauge!("session_temporal.coverage.row_payload_bytes").increment(bytes as f64);
-    }
+    {}
 }
 
 fn copy_encoding(copy: &LogicalCopyRelation) -> SessionStoreResult<Vec<u8>> {

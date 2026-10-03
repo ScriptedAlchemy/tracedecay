@@ -836,18 +836,12 @@ fn record_success(
         match extraction.disposition {
             ParsedExtractionDisposition::FullDocument => {
                 stats.full_extractions = stats.full_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.full_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::ChangedRegions => {
                 stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.incremental_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::Reset { .. } => {
                 stats.reset_extractions = stats.reset_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.reset_extraction_total").increment(1.0);
             }
         }
         stats.visited_top_level_nodes = stats

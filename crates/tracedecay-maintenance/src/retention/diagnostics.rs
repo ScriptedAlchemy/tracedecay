@@ -76,8 +76,7 @@ pub async fn collect_session_retention_findings(
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    metrics::gauge!("maintenance.diagnostics.session_retention_records_total")
-        .increment((records.len() as u64) as f64);
+
     let mut findings = Vec::with_capacity(records.len());
     for record in records {
         let Ok(finding) =
@@ -196,9 +195,7 @@ async fn collect_unregistered_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    metrics::gauge!("maintenance.diagnostics.unregistered_stores_total").increment(
-        ((report.plan.collect.len() + report.plan.retained_immature.len()) as u64) as f64,
-    );
+
     storage_family_read(
         report
             .plan

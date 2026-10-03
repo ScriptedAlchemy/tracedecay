@@ -137,8 +137,6 @@ where
     pub fn poll_outbound(&mut self) -> Option<&[u8]> {
         let frame = self.outbound.queue.front()?;
         if !self.outbound.in_flight {
-            metrics::gauge!("lsp.outbound.queue_wait_us")
-                .set((frame.queued_at.elapsed().as_micros() as u64) as f64);
             self.outbound.in_flight_since = Some(std::time::Instant::now());
         }
         self.outbound.in_flight = true;
@@ -157,10 +155,7 @@ where
             return false;
         };
         self.outbound.in_flight = false;
-        if let Some(in_flight_since) = self.outbound.in_flight_since.take() {
-            metrics::gauge!("lsp.outbound.ack_wait_us")
-                .set((in_flight_since.elapsed().as_micros() as u64) as f64);
-        }
+        if let Some(in_flight_since) = self.outbound.in_flight_since.take() {}
         self.outbound.queued_bytes = self
             .outbound
             .queued_bytes
@@ -432,10 +427,7 @@ where
     /// Samples the outbound queue after one dispatch/flush cycle. The queue
     /// is session-local and mutated at many sites; a per-cycle sample is the
     /// truthful depth at each pump boundary, not a per-mutation ledger.
-    pub(super) fn observe_outbound_queue(&self) {
-        metrics::gauge!("lsp.outbound.queue_depth").set((self.outbound.queue.len()) as f64);
-        metrics::gauge!("lsp.outbound.queue_bytes").set(self.outbound.queued_bytes as f64);
-    }
+    pub(super) fn observe_outbound_queue(&self) {}
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {
         self.outbound.queue.len() < MAX_ORDINARY_OUTBOUND_MESSAGES

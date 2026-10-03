@@ -518,18 +518,10 @@ pub enum AutomationEffectAdmission {
 /// counters instead of log archaeology.
 pub fn observe_admission_decision(admission: &AutomationEffectAdmission) {
     match admission {
-        AutomationEffectAdmission::Execute(_) => {
-            metrics::gauge!("daemon.effect_admission.admitted_total").increment(1.0);
-        }
-        AutomationEffectAdmission::Replay(_) => {
-            metrics::gauge!("daemon.effect_admission.replayed_total").increment(1.0);
-        }
-        AutomationEffectAdmission::Conflict => {
-            metrics::gauge!("daemon.effect_admission.refused.conflict_total").increment(1.0);
-        }
-        AutomationEffectAdmission::PreAdmissionProblem(_) => {
-            metrics::gauge!("daemon.effect_admission.refused.pre_admission_total").increment(1.0);
-        }
+        AutomationEffectAdmission::Execute(_) => {}
+        AutomationEffectAdmission::Replay(_) => {}
+        AutomationEffectAdmission::Conflict => {}
+        AutomationEffectAdmission::PreAdmissionProblem(_) => {}
     }
 }
 

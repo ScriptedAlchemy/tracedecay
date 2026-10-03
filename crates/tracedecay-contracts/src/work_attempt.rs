@@ -711,8 +711,7 @@ where
             .map_err(storage_problem)?;
         // Items processed by this restart-recovery sweep; the surrounding
         // measure is the sweep's one wall-time authority.
-        metrics::gauge!("application.work.attempt.resume.open_attempts")
-            .set((open.len() as u64) as f64);
+
         let mut recovery_required = Vec::new();
         let mut cancelled = Vec::new();
         for attempt in open {
@@ -1166,7 +1165,6 @@ fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1)
             WorkAttemptStateV1::TimedOut => "application.work.attempt.state.timed_out",
             WorkAttemptStateV1::Cancelled => "application.work.attempt.state.cancelled",
         };
-        metrics::gauge!(entered).increment(1.0);
     };
 }
 

@@ -344,16 +344,14 @@ fn parse_observation_record(
 /// read and rejected, which success-only counters never show.
 fn record_decode_outcome(decoded: bool) {
     if decoded {
-        metrics::gauge!("capture.parse.records").increment(1.0);
     } else {
-        metrics::gauge!("capture.parse.failures").increment(1.0);
     }
 }
 
 fn record_digest(record: &[u8]) -> [u8; 32] {
     // Cumulative decoded bytes across every host pipeline, not a last-record
     // sample, corpus-scale throughput is the quantity being compared.
-    metrics::gauge!("capture.parse.record_bytes").increment((record.len()) as f64);
+
     {
         let _span = tracing::trace_span!("capture.parse.record_digest").entered();
         Sha256::digest(record).into()

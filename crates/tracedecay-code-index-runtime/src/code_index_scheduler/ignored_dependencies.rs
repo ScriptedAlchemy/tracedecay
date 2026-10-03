@@ -435,8 +435,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> bool {
-        metrics::gauge!("daemon.code_index.ignored_dependency.roster_verify.entries")
-            .set((generation.ignored_source_admissions().len() as u64) as f64);
         let registry = StaticLanguageRegistry::new();
         generation
             .ignored_source_admissions()

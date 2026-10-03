@@ -416,7 +416,7 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-        metrics::gauge!("query.fusion.results").set((page.ranked_candidates.len()) as f64);
+
         for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
             candidate.final_ordinal = ordinal as u32;
         }
@@ -475,7 +475,7 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-        metrics::gauge!("query.fusion.results").set((page.ranked_candidates.len()) as f64);
+
         Ok(AuthorizedFederatedRetrievalV1 {
             query_digest,
             composition,

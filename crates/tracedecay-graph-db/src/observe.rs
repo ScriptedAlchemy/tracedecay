@@ -90,12 +90,7 @@ pub(crate) fn record_counts(
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record(nodes, edges, replay_rows, generation_bytes);
 
-    {
-        metrics::gauge!("graph_db.nodes").set(nodes as f64);
-        metrics::gauge!("graph_db.edges").set(edges as f64);
-        metrics::gauge!("graph_db.replay_rows").set(replay_rows as f64);
-        metrics::gauge!("graph_db.generation_bytes").set(generation_bytes as f64);
-    }
+    {}
 }
 
 /// Records how one sealed generation's recovered digest was established.
@@ -115,16 +110,8 @@ pub(crate) fn record_generation_verification(
     {
         use crate::verified_marker::GenerationVerification;
         match outcome {
-            GenerationVerification::VerifiedFresh => {
-                metrics::gauge!("graph_db.generation.verify.marker_hit").increment(1);
-                metrics::gauge!("graph_db.generation.verify.marker_hit_bytes")
-                    .set(canonical_bytes as f64);
-            }
-            GenerationVerification::Reverified => {
-                metrics::gauge!("graph_db.generation.verify.full").increment(1);
-                metrics::gauge!("graph_db.generation.verify.full_bytes")
-                    .set(canonical_bytes as f64);
-            }
+            GenerationVerification::VerifiedFresh => {}
+            GenerationVerification::Reverified => {}
         }
         tracing::trace!(name: "graph_db.generation.verify.outcome", value = ?outcome.as_str());
     }
@@ -145,16 +132,8 @@ pub(crate) fn record_sealed_copy_verification(
     {
         use crate::verified_marker::GenerationVerification;
         match outcome {
-            GenerationVerification::VerifiedFresh => {
-                metrics::gauge!("graph_db.sealed_store.verify.marker_hit").increment(1);
-                metrics::gauge!("graph_db.sealed_store.verify.marker_hit_bytes")
-                    .set(canonical_bytes as f64);
-            }
-            GenerationVerification::Reverified => {
-                metrics::gauge!("graph_db.sealed_store.verify.full").increment(1);
-                metrics::gauge!("graph_db.sealed_store.verify.full_bytes")
-                    .set(canonical_bytes as f64);
-            }
+            GenerationVerification::VerifiedFresh => {}
+            GenerationVerification::Reverified => {}
         }
         tracing::trace!(name: "graph_db.sealed_store.verify.outcome", value = ?outcome.as_str());
     }
@@ -190,16 +169,7 @@ pub(crate) fn record_grafeo_memory(
         database.memory_usage()
     };
     tracing::trace!(name: "graph_db.memory.phase", value = ?phase.as_str());
-    metrics::gauge!("graph_db.memory.total_bytes").set(usage.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.store_bytes").set(usage.store.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.index_bytes").set(usage.indexes.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.mvcc_bytes").set(usage.mvcc.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.cache_bytes").set(usage.caches.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.string_pool_bytes").set(usage.string_pool.total_bytes as f64);
-    metrics::gauge!("graph_db.memory.buffer_budget_bytes")
-        .set(usage.buffer_manager.budget_bytes as f64);
-    metrics::gauge!("graph_db.memory.buffer_allocated_bytes")
-        .set(usage.buffer_manager.allocated_bytes as f64);
+
     // Gauges keep the last census, so a daemon with several resident engines
     // needs each census in the log to attribute retained bytes per container.
     tracing::debug!(

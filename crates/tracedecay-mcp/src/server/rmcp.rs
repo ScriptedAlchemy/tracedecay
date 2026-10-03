@@ -294,15 +294,12 @@ struct RmcpQueueDepthGuard;
 
 impl RmcpQueueDepthGuard {
     fn enter() -> Self {
-        metrics::gauge!("mcp.server.rmcp.queue_depth").increment(1.0);
         Self
     }
 }
 
 impl Drop for RmcpQueueDepthGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("mcp.server.rmcp.queue_depth").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 impl<C> RmcpConnectionAdapter<C>
@@ -359,8 +356,7 @@ where
         let queued = RmcpQueueDepthGuard::enter();
         let request_permit = self.acquire_request_permit().await?;
         drop(queued);
-        metrics::gauge!("mcp.server.rmcp.queue_wait_us")
-            .set((queued_at.elapsed().as_micros() as u64) as f64);
+
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
         // combined resident frame overflows the worker stack in perf-profile

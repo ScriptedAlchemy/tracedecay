@@ -15,7 +15,6 @@ pub struct ReadSnapshot {
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
-        metrics::gauge!("runtime_core.db.snapshots_active").increment(1.0);
         Self {
             runtime: Arc::new(runtime),
         }
@@ -37,9 +36,7 @@ impl ReadSnapshot {
 }
 
 impl Drop for ReadSnapshot {
-    fn drop(&mut self) {
-        metrics::gauge!("runtime_core.db.snapshots_active").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {

@@ -874,7 +874,6 @@ impl Drop for FinalizationTransactionMetricsV1 {
     fn drop(&mut self) {
         if !self.committed {
             // Dropping an uncommitted rusqlite transaction rolls it back.
-            metrics::gauge!("query.artifact.finalization.rollback_total").increment(1.0);
         }
     }
 }
@@ -888,79 +887,32 @@ impl FinalizationWakeMetricsV1 {
     #[inline(always)]
     fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
         match pass {
-            PersistedFinalizationPhaseV1::Statistics => {
-                metrics::gauge!("query.artifact.finalization.statistics_wakes_total")
-                    .increment(1.0);
-            }
-            PersistedFinalizationPhaseV1::Indexes => {
-                metrics::gauge!("query.artifact.finalization.index_wakes_total").increment(1.0);
-            }
-            PersistedFinalizationPhaseV1::Digest => {
-                metrics::gauge!("query.artifact.finalization.digest_pass.authenticated_total")
-                    .increment(1.0);
-            }
+            PersistedFinalizationPhaseV1::Statistics => {}
+            PersistedFinalizationPhaseV1::Indexes => {}
+            PersistedFinalizationPhaseV1::Digest => {}
         };
     }
 
     #[inline(always)]
     fn phase(&self, phase: FinalizationSectionV1) {
         match phase {
-            FinalizationSectionV1::SourcePages => {
-                metrics::gauge!("query.artifact.finalization.phase.source_pages_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::DocumentIntegrity => {
-                metrics::gauge!("query.artifact.finalization.phase.document_integrity_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::Rows => {
-                metrics::gauge!("query.artifact.finalization.phase.rows_total").increment(1.0);
-            }
-            FinalizationSectionV1::TermPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.term_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::ExactPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.exact_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::NgramPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.ngram_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneOccurrences => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_occurrences_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneExactPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_exact_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneBodyPayloads => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneFingerprintPostings => {
-                metrics::gauge!(
-                    "query.artifact.finalization.phase.clone_fingerprint_postings_total"
-                )
-                .increment(1.0);
-            }
-            FinalizationSectionV1::FieldStatistics => {
-                metrics::gauge!("query.artifact.finalization.phase.field_stats_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::Vocabulary => {
-                metrics::gauge!("query.artifact.finalization.phase.vocabulary_total")
-                    .increment(1.0);
-            }
+            FinalizationSectionV1::SourcePages => {}
+            FinalizationSectionV1::DocumentIntegrity => {}
+            FinalizationSectionV1::Rows => {}
+            FinalizationSectionV1::TermPostings => {}
+            FinalizationSectionV1::ExactPostings => {}
+            FinalizationSectionV1::NgramPostings => {}
+            FinalizationSectionV1::CloneOccurrences => {}
+            FinalizationSectionV1::CloneExactPostings => {}
+            FinalizationSectionV1::CloneBodyPayloads => {}
+            FinalizationSectionV1::CloneFingerprintPostings => {}
+            FinalizationSectionV1::FieldStatistics => {}
+            FinalizationSectionV1::Vocabulary => {}
         };
     }
 
     #[inline(always)]
-    fn probe(&self) {
-        metrics::gauge!("query.artifact.finalization.section_probes_total").increment(1.0);
-    }
+    fn probe(&self) {}
 
     #[inline(always)]
     fn add_rows(&mut self, rows: usize) {
@@ -969,10 +921,7 @@ impl FinalizationWakeMetricsV1 {
 }
 
 impl Drop for FinalizationWakeMetricsV1 {
-    fn drop(&mut self) {
-        metrics::gauge!("query.artifact.finalization.wakes_total").increment(1.0);
-        metrics::gauge!("query.artifact.finalization.rows_total").increment(self.rows as f64);
-    }
+    fn drop(&mut self) {}
 }
 
 /// Stable identity of the private staging authority, captured from an exact
@@ -1257,8 +1206,7 @@ impl CodeLexicalArtifactBuilderV1 {
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
         set_triggers_enabled(&connection, true)?;
-        metrics::gauge!("query.artifact.carry.pages_carried")
-            .increment(carried.carried_pages as f64);
+
         tracing::debug!(
             pages = carried.pages,
             re_encoded_pages = carried.re_encoded_pages,
@@ -1544,7 +1492,6 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
 
-        metrics::gauge!("query.artifact.batch.admission_total").increment(1.0);
         let (current, fresh_start) = {
             let _span = tracing::trace_span!("query.artifact.batch.admission").entered();
             {
@@ -1725,21 +1672,18 @@ impl CodeLexicalArtifactBuilderV1 {
                     checkpoint(control)
                 })();
                 if let Err(error) = mutation {
-                    metrics::gauge!("query.artifact.batch.rollbacks_total").increment(1.0);
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.rollback").entered();
                         transaction.rollback().map_err(sqlite_error)
                     }?;
                     return Err(error);
                 }
-                metrics::gauge!("query.artifact.batch.commit_attempts_total").increment(1.0);
+
                 let commit = {
                     let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
                 };
-                if commit.is_ok() {
-                    metrics::gauge!("query.artifact.batch.commit_succeeded_total").increment(1.0);
-                }
+                if commit.is_ok() {}
                 commit
             }
         })?;
@@ -1748,13 +1692,6 @@ impl CodeLexicalArtifactBuilderV1 {
         // cursor once the whole batch has committed.
         let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
 
-        metrics::gauge!("query.artifact.batch.committed_pages_total").increment(pages.len() as f64);
-        metrics::gauge!("query.artifact.batch.committed_chunks_total").increment(
-            pages
-                .iter()
-                .fold(0u64, |total, page| total.saturating_add(page.chunk_count))
-                as f64,
-        );
         record_artifact_progress(&progress);
         Ok(progress)
     }
@@ -2183,8 +2120,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )?;
             crate::observe::Residency::Warm.record("query.artifact.residency");
-            metrics::gauge!("query.artifact.pages").set((receipt.page_count()) as f64);
-            metrics::gauge!("query.artifact.bytes").set((receipt.file_size_bytes()) as f64);
+
             return Ok(receipt);
         }
         Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -4861,7 +4797,7 @@ fn merge_wake_fits_memory_temp_store(
         .query_row(staged_runs, [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-    metrics::gauge!("query.artifact.finalization.merge.staged_run_bytes").set(staged_bytes as f64);
+
     Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 
@@ -6821,15 +6757,10 @@ fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
     {
         match step {
             CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
-                metrics::gauge!("query.artifact.finalization.outcome.pending_total").increment(1.0);
                 crate::observe::Residency::Rebuilding.record("query.artifact.residency");
-                metrics::gauge!("query.artifact.rows").set((*completed_rows) as f64);
             }
             CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
-                metrics::gauge!("query.artifact.finalization.outcome.ready_total").increment(1.0);
                 crate::observe::Residency::Warm.record("query.artifact.residency");
-                metrics::gauge!("query.artifact.pages").set((receipt.page_count()) as f64);
-                metrics::gauge!("query.artifact.bytes").set((receipt.file_size_bytes()) as f64);
             }
         }
     }
@@ -6840,15 +6771,9 @@ fn record_batch_outcome(
 ) {
     {
         match result {
-            Ok(_) => {
-                metrics::gauge!("query.artifact.batch.outcome.committed_total").increment(1.0);
-            }
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {
-                metrics::gauge!("query.artifact.batch.outcome.interrupted_total").increment(1.0);
-            }
-            Err(_) => {
-                metrics::gauge!("query.artifact.batch.outcome.failed_total").increment(1.0);
-            }
+            Ok(_) => {}
+            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {}
+            Err(_) => {}
         }
     }
 }
@@ -6872,16 +6797,6 @@ fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
             .collect::<Vec<_>>();
         scratch.sort_unstable_by(|left, right| right.cmp(left));
         let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
-        metrics::gauge!("query.artifact.batch.prepared_pages_total")
-            .increment((pages.len() as u64) as f64);
-        metrics::gauge!("query.artifact.batch.prepared_documents_total")
-            .increment(documents as f64);
-        metrics::gauge!("query.artifact.batch.source_bytes_total").increment(source_bytes as f64);
-        metrics::gauge!("query.artifact.batch.prepared_bytes_total")
-            .increment(prepared_bytes as f64);
-        metrics::gauge!("query.artifact.batch.active_scratch_bytes_total")
-            .increment(active_scratch as f64);
-        metrics::gauge!("query.artifact.batch.effective_workers").set(effective_workers as f64);
     }
 }
 
@@ -6906,69 +6821,43 @@ fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
             .flat_map(|page| &page.ngram_shards)
             .map(|shard| shard.documents.len())
             .sum::<usize>();
-        metrics::gauge!("query.artifact.batch.posting_rows_total")
-            .increment(relational_postings as f64);
-        metrics::gauge!("query.artifact.batch.ngram_shard_rows_total")
-            .increment(ngram_shards as f64);
-        metrics::gauge!("query.artifact.batch.ngram_documents_total")
-            .increment(ngram_documents as f64);
-        metrics::gauge!("query.artifact.batch.ngram_bytes_total").increment(ngram_bytes as f64);
     }
 }
 
 fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     {
         let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        metrics::gauge!("query.artifact.batch.document_rows_total").increment(rows as f64);
     }
 }
 
 fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
-        metrics::gauge!("query.artifact.batch.receipt_rows_total")
-            .increment((pages.len() as u64) as f64);
-    }
+    {}
 }
 
 fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
     {
         match limit {
-            CodeLexicalArtifactBatchLimitV1::Memory => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.memory_total").increment(1.0);
-            }
-            CodeLexicalArtifactBatchLimitV1::PreparedRows => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total")
-                    .increment(1.0);
-            }
-            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
-                    .increment(1.0);
-            }
+            CodeLexicalArtifactBatchLimitV1::Memory => {}
+            CodeLexicalArtifactBatchLimitV1::PreparedRows => {}
+            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {}
         }
     }
 }
 
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
-    {
-        metrics::gauge!("query.artifact.pages").set(progress.next_page_ordinal as f64);
-        metrics::gauge!("query.artifact.rows").set(progress.completed_chunks as f64);
-        metrics::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes as f64);
-    }
+    {}
 }
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,
     metrics: &mut FinalizationTransactionMetricsV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    metrics::gauge!("query.artifact.finalization.commit_attempts_total").increment(1.0);
     let result = {
         let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
         transaction.commit().map_err(sqlite_error)
     };
     if result.is_ok() {
         metrics.mark_committed();
-
-        metrics::gauge!("query.artifact.finalization.commit_succeeded_total").increment(1.0);
     }
     result
 }

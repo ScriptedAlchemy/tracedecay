@@ -98,15 +98,12 @@ struct SessionTemporalRefreshSupervisorInstrumentation;
 
 impl SessionTemporalRefreshSupervisorInstrumentation {
     fn new() -> Self {
-        metrics::gauge!("session_temporal_refresh_supervisors_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
-    fn drop(&mut self) {
-        metrics::gauge!("session_temporal_refresh_supervisors_active").increment(-1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 impl SessionTemporalRefreshSchedulerEntry {

@@ -1256,18 +1256,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 if text_slice_incomplete {
                     if !graph_activation_enabled {
-                        metrics::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .increment(1.0);
                         continue;
                     }
                     if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
-                        metrics::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .increment(1.0);
                         continue;
                     }
-
-                    metrics::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
-                        .increment(1.0);
                 }
                 let refused_retained_text_metadata = if worker_text_generation
                     .read()
@@ -2618,12 +2611,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "graph activation failed retryably; the sealed generation \
                                      still seats and the next pass retries native graph"
                                 );
-                                metrics::gauge!("daemon.code_index.graph_seat.retry_total")
-                                    .increment(1.0);
-                                metrics::gauge!(
-                                    "daemon.code_index.graph_seat.retry_backoff_micros"
-                                )
-                                .set((retry_delay.as_micros() as u64) as f64);
+
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);

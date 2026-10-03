@@ -38,9 +38,7 @@ pub(crate) fn record_contract_error_class() {
 }
 
 #[inline(always)]
-pub(crate) fn record_response_bytes(len: usize) {
-    metrics::gauge!("api.http.response_bytes").set(len as f64);
-}
+pub(crate) fn record_response_bytes(len: usize) {}
 
 pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     let match_result = {

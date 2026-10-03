@@ -65,7 +65,6 @@ pub(super) fn build_interactive_catalog(
                 })
             }
         }?;
-        metrics::gauge!("code_graph.catalog.pages_scanned").increment(1.0);
 
         if !entities_complete {
             {
@@ -78,8 +77,7 @@ pub(super) fn build_interactive_catalog(
                     )
                 }
             }?;
-            metrics::gauge!("code_graph.catalog.entities_recorded")
-                .increment((page.entities.len() as u64) as f64);
+
             after_entity = page.next_entity;
             entities_complete = after_entity.is_none();
         }
@@ -88,8 +86,7 @@ pub(super) fn build_interactive_catalog(
                 let _span = tracing::trace_span!("code_graph.catalog.record_relations").entered();
                 scan.record_relation_page(&page.relations, cancellation.as_ref())
             }?;
-            metrics::gauge!("code_graph.catalog.relations_recorded")
-                .increment((page.relations.len() as u64) as f64);
+
             after_relation = page.next_relation;
             relations_complete = after_relation.is_none();
         }

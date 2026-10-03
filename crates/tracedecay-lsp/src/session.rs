@@ -462,9 +462,7 @@ impl LspSessionRegistry {
         self.sessions.len()
     }
 
-    fn observe_active_sessions(&self) {
-        metrics::gauge!("lsp.session.active").set((self.sessions.len()) as f64);
-    }
+    fn observe_active_sessions(&self) {}
 
     fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
         if self

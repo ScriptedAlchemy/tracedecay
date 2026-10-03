@@ -441,12 +441,9 @@ pub(crate) fn reserve_shared_jsonl_bytes(
         .memory
         .reserve_process_shared(authority.component, bytes)
         .map(Some)
-        .map_err(|_| {
-            metrics::gauge!("jsonl_shared_backpressure_memory").increment(1.0);
-            TranscriptIngestError::BackgroundResourceUnavailable {
-                provider: "codex",
-                resource,
-            }
+        .map_err(|_| TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "codex",
+            resource,
         })
 }
 
@@ -622,7 +619,6 @@ fn discard_abandoned_shared_jsonl_in_flight(cache: &mut SharedJsonlPageCache) {
         cache.in_flight.remove(&key);
         cache.speculative_in_flight.remove(&key);
     }
-    metrics::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
 }
 
 fn reserve_shared_jsonl_speculative_slot(
@@ -903,40 +899,30 @@ struct SharedJsonlPreparationWaitGuard;
 
 impl SharedJsonlPreparationWaitGuard {
     fn new() -> Self {
-        metrics::gauge!("jsonl_shared_prep_waiting").increment(1.0);
         Self
     }
 }
 
 impl Drop for SharedJsonlPreparationWaitGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("jsonl_shared_prep_waiting").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 struct SharedJsonlPreparationActiveGuard;
 
 impl Drop for SharedJsonlPreparationActiveGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("jsonl_shared_prep_active").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 struct SharedJsonlQueuedPathGuard;
 
 impl SharedJsonlQueuedPathGuard {
     fn new() -> Self {
-        metrics::gauge!("jsonl_shared_generation_paths_queued").increment(1.0);
-        metrics::gauge!("jsonl_shared_generation_paths_total").increment(1.0);
         Self
     }
 }
 
 impl Drop for SharedJsonlQueuedPathGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("jsonl_shared_generation_paths_queued").decrement(1.0);
-        metrics::gauge!("jsonl_shared_generation_paths_completed").increment(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 struct SharedJsonlPreparedBytesGuard {
@@ -951,10 +937,8 @@ impl SharedJsonlPreparedBytesGuard {
             .fetch_add(bytes, Ordering::AcqRel)
             .saturating_add(bytes);
         let previous_peak = SHARED_JSONL_PEAK_PREPARED_BYTES.fetch_max(current, Ordering::AcqRel);
-        metrics::gauge!("jsonl_shared_prepared_bytes_current").increment(bytes as f64);
-        if current > previous_peak {
-            metrics::gauge!("jsonl_shared_prepared_bytes_peak").set(current as f64);
-        }
+
+        if current > previous_peak {}
         Self { bytes }
     }
 }
@@ -962,7 +946,6 @@ impl SharedJsonlPreparedBytesGuard {
 impl Drop for SharedJsonlPreparedBytesGuard {
     fn drop(&mut self) {
         SHARED_JSONL_PREPARED_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::AcqRel);
-        metrics::gauge!("jsonl_shared_prepared_bytes_current").decrement(self.bytes as f64);
     }
 }
 
@@ -1138,13 +1121,12 @@ fn build_shared_jsonl_page_with_frame_limit(
         let _permit = if let Some(permit) = background_cpu.try_acquire() {
             permit
         } else {
-            metrics::gauge!("jsonl_shared_backpressure_cpu").increment(1.0);
             let waiting = SharedJsonlPreparationWaitGuard::new();
             let permit = background_cpu.acquire();
             drop(waiting);
             permit
         };
-        metrics::gauge!("jsonl_shared_prep_active").increment(1.0);
+
         let _active = SharedJsonlPreparationActiveGuard;
         try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
             &path,
@@ -1204,13 +1186,12 @@ fn build_shared_jsonl_page_with_frame_limit(
         let _permit = if let Some(permit) = background_cpu.try_acquire() {
             permit
         } else {
-            metrics::gauge!("jsonl_shared_backpressure_cpu").increment(1.0);
             let waiting = SharedJsonlPreparationWaitGuard::new();
             let permit = background_cpu.acquire();
             drop(waiting);
             permit
         };
-        metrics::gauge!("jsonl_shared_prep_active").increment(1.0);
+
         let _active = SharedJsonlPreparationActiveGuard;
         prepare_frame()
     };
@@ -1226,10 +1207,7 @@ fn build_shared_jsonl_page_with_frame_limit(
             .collect::<TranscriptIngestResult<Vec<_>>>()
     };
     let frames = frames?;
-    if prepare_frames && !frames.is_empty() {
-        metrics::gauge!("jsonl_shared_frames_prepared")
-            .increment(frames.len().min(u32::MAX as usize) as f64);
-    }
+    if prepare_frames && !frames.is_empty() {}
     let retained_container_bytes = std::mem::size_of::<SharedJsonlPage>()
         .saturating_add(std::mem::size_of::<CachedSharedJsonlPage>())
         .saturating_add(std::mem::size_of::<SharedJsonlPageKey>())
@@ -1271,13 +1249,7 @@ fn build_shared_jsonl_page_with_frame_limit(
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
     }
     let prepared_bytes = prepare_frames.then(|| SharedJsonlPreparedBytesGuard::new(retained_bytes));
-    metrics::gauge!("jsonl_shared_page_read_bytes").increment(
-        raw.io
-            .identity_window_bytes
-            .saturating_add(raw.io.prefix_validation_bytes)
-            .saturating_add(raw.io.snapshot_hash_bytes)
-            .saturating_add(raw.io.scan_payload_read_bytes) as f64,
-    );
+
     Ok(Arc::new(SharedJsonlPage {
         frames,
         lazy_preparation: tokio::sync::Mutex::new(()),
@@ -1378,7 +1350,6 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 let _permit = if let Some(permit) = background_cpu.try_acquire() {
                     permit
                 } else {
-                    metrics::gauge!("jsonl_shared_backpressure_cpu").increment(1.0);
                     let waiting = SharedJsonlPreparationWaitGuard::new();
                     let permit = background_cpu
                         .acquire_cancellable(task_cancellation.cancellation_flag())
@@ -1389,7 +1360,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 if task_cancellation.is_cancelled() {
                     return Err(TranscriptIngestError::Cancelled { provider });
                 }
-                metrics::gauge!("jsonl_shared_prep_active").increment(1.0);
+
                 let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
                 enter_shared_jsonl_frame_preparation(
@@ -1453,8 +1424,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     if retained_bytes != 0 {
         lazy_prepared_bytes.push(SharedJsonlPreparedBytesGuard::new(retained_bytes));
     }
-    metrics::gauge!("jsonl_shared_frames_prepared")
-        .increment(prepared_count.min(u32::MAX as usize) as f64);
+
     Ok(())
 }
 
@@ -1595,11 +1565,10 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             }
             let page = Arc::clone(&cached.page);
             cache.pages.push_back(cached);
-            metrics::gauge!("jsonl_shared_page_hits").increment(1.0);
+
             return Ok((page, true));
         }
         if let Some(in_flight) = cache.in_flight.get(&key) {
-            metrics::gauge!("jsonl_shared_page_waits").increment(1.0);
             let notified = Arc::clone(&in_flight.notify).notified_owned();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -1634,7 +1603,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
                 shared_jsonl_speculative_capacity_from(shared_jsonl_max_preparation_capacity()),
             )
         {
-            metrics::gauge!("jsonl_shared_backpressure_memory").increment(1.0);
             return Err(TranscriptIngestError::BackgroundResourceUnavailable {
                 provider: "codex",
                 resource: "shared JSONL speculative preparation capacity",
@@ -1642,12 +1610,11 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         }
         let in_flight = Arc::new(SharedJsonlInFlight::new());
         cache.in_flight.insert(key.clone(), Arc::clone(&in_flight));
-        metrics::gauge!("jsonl_shared_page_misses").increment(1.0);
-        metrics::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
+
         break in_flight;
     };
     let mut in_flight_guard = SharedJsonlInFlightGuard::new(in_flight);
-    metrics::gauge!("jsonl_shared_page_reads").increment(1.0);
+
     if !speculative {
         let mut cache = cache_lock.lock().await;
         let mut index = 0;
@@ -1672,7 +1639,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             let mut cache = cache_lock.lock().await;
             let notify = cache.in_flight.remove(&key);
             cache.speculative_in_flight.remove(&key);
-            metrics::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
+
             in_flight_guard.disarm();
             drop(cache);
             if let Some(notify) = notify {
@@ -1687,7 +1654,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             let mut cache = cache_lock.lock().await;
             let notify = cache.in_flight.remove(&key);
             cache.speculative_in_flight.remove(&key);
-            metrics::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
+
             in_flight_guard.disarm();
             drop(cache);
             if let Some(notify) = notify {
@@ -1719,7 +1686,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
     let mut cache = cache_lock.lock().await;
     let notify = cache.in_flight.remove(&key);
     cache.speculative_in_flight.remove(&key);
-    metrics::gauge!("jsonl_shared_pages_in_flight").set(cache.in_flight.len() as f64);
+
     in_flight_guard.disarm();
     let page = match page {
         Ok(page) => page,
@@ -1760,7 +1727,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             });
         }
     }
-    metrics::gauge!("jsonl_shared_reorder_window_depth").set(cache.pages.len() as f64);
+
     drop(cache);
     if let Some(notify) = notify {
         notify.notify.notify_waiters();
@@ -1805,7 +1772,7 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 if matches!(error, TranscriptIngestError::Cancelled { .. }) {
                     return;
                 }
-                metrics::gauge!("jsonl_shared_generation_retries").increment(1.0);
+
                 tracing::debug!(
                     provider = "codex",
                     error = %error,
@@ -1922,8 +1889,7 @@ impl ActiveAdmission<'_> {
             provider: self.provider,
         })?
         .with_resume_checkpoint(self.file_identity, checkpoint.resume_fingerprint);
-        metrics::gauge!("jsonl_admission_coverage_frames").increment(1.0);
-        metrics::gauge!("jsonl_admission_writer_submits").increment(1.0);
+
         if let Err(outcome) = self
             .admission
             .advance_non_durable_source_cursor(advance, self.cancellation.clone())
@@ -2103,9 +2069,7 @@ impl ActiveAdmission<'_> {
                 Ok(DurableFrameDisposition::Refused)
             }
             Err(outcome) => {
-                if outcome.status == HostAdmissionStatus::Backpressured {
-                    metrics::gauge!("jsonl_admission_backpressure_writer").increment(1.0);
-                }
+                if outcome.status == HostAdmissionStatus::Backpressured {}
                 if is_lost_cursor_cas(&outcome)
                     && self
                         .peer_already_covered(expected_cursor, checkpoint.end_offset)
@@ -2158,9 +2122,7 @@ impl ActiveAdmission<'_> {
         retention_class: &RetentionClass,
     ) -> TranscriptIngestResult<Result<CaptureObservationOutcome, HostAdmissionOutcome>> {
         crate::runtime::pipeline_metrics::record_capture_single();
-        metrics::gauge!("jsonl_admission_batch_frames").increment(1.0);
-        metrics::gauge!("jsonl_admission_batch_bytes").increment(frame.bytes.len() as f64);
-        metrics::gauge!("jsonl_admission_writer_submits").increment(1.0);
+
         let request = self.capture_request(expected_cursor, frame, retention_class)?;
         Ok(self.admission.capture_observation(request).await)
     }
@@ -2184,9 +2146,7 @@ impl ActiveAdmission<'_> {
                 .checked_add(bytes)
                 .ok_or(TranscriptIngestError::InvalidFrameState { provider: "codex" })
         })?;
-        metrics::gauge!("jsonl_admission_batch_frames").increment(frames.len() as f64);
-        metrics::gauge!("jsonl_admission_batch_bytes").increment(batch_bytes as f64);
-        metrics::gauge!("jsonl_admission_writer_submits").increment(1.0);
+
         let mut batch_expected = expected_cursor.clone();
         let mut requests = Vec::with_capacity(frames.len());
         let mut checkpoints = Vec::with_capacity(frames.len());
@@ -2233,9 +2193,7 @@ impl ActiveAdmission<'_> {
                 Ok(())
             }
             Err(outcome) => {
-                if outcome.status == HostAdmissionStatus::Backpressured {
-                    metrics::gauge!("jsonl_admission_backpressure_writer").increment(1.0);
-                }
+                if outcome.status == HostAdmissionStatus::Backpressured {}
                 if let Some(HostAdmissionRecovery::DeterministicContentRefusal) = outcome.recovery {
                     return Err(CaptureWindowError::ContentRefusal);
                 }

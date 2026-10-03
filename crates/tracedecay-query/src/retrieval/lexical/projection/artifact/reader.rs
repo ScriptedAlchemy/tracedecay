@@ -665,8 +665,7 @@ impl CodeLexicalArtifactReaderV1 {
         verify_named_path_identity(path, &file)?;
         progress(6, TOTAL_RESTORE_CHECKS);
         crate::observe::Residency::Cold.record("query.artifact.residency");
-        metrics::gauge!("query.artifact.bytes").set(expected_file_size_bytes as f64);
-        metrics::gauge!("query.artifact.pages").set(reader.receipt.page_count() as f64);
+
         Ok(reader)
     }
 
@@ -722,8 +721,7 @@ impl CodeLexicalArtifactReaderV1 {
         verify_stable_artifact_file_state(&file, &file_state)?;
         verify_named_path_identity(path, &file)?;
         crate::observe::Residency::Warm.record("query.artifact.residency");
-        metrics::gauge!("query.artifact.bytes").set(expected.file_size_bytes() as f64);
-        metrics::gauge!("query.artifact.pages").set(expected.page_count() as f64);
+
         Ok(reader)
     }
 
@@ -1456,7 +1454,6 @@ impl CodeLexicalArtifactReaderV1 {
             }
         }?);
 
-        metrics::gauge!("query.artifact.preface.bytes").set(loaded.retained_bytes() as f64);
         *slot = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -1592,14 +1589,10 @@ impl ArtifactQueryMetricsV1 {
     fn probe(&self) {
         #[cfg(test)]
         self.probes.set(self.probes.get().saturating_add(1));
-
-        metrics::gauge!("query.artifact.sql.probes_total").increment((1u64) as f64);
     }
 
     #[inline(always)]
-    fn rows(&self, rows: u64) {
-        metrics::gauge!("query.artifact.sql.rows_total").increment(rows as f64);
-    }
+    fn rows(&self, rows: u64) {}
 
     #[inline(always)]
     fn observe_statement(
@@ -1614,8 +1607,6 @@ impl ArtifactQueryMetricsV1 {
         #[cfg(test)]
         self.fullscan_steps
             .set(self.fullscan_steps.get().saturating_add(steps));
-
-        metrics::gauge!("query.artifact.sql.observed_fullscan_steps_total").increment(steps as f64);
 
         Ok(())
     }
@@ -1661,7 +1652,7 @@ fn visit_document_ids(
                 visitor(document)?;
             }
             retrieval_checkpoint(control)?;
-            metrics::gauge!("query.stream.rows_total").increment(documents.len() as f64);
+
             Ok(())
         }
     }
@@ -1896,8 +1887,6 @@ fn ngram_document_query(
             }
             let candidates = ngram_bitmap_candidates(connection, &ngrams, metrics)?;
 
-            metrics::gauge!("query.artifact.ngram.query_candidates_total")
-                .increment(candidates.len() as f64);
             Ok(candidates)
         }
     }
@@ -1941,12 +1930,7 @@ impl NgramListBudgetV1 {
 
     #[inline(always)]
     fn report(&self) {
-        {
-            metrics::gauge!("query.artifact.ngram.query_lists_total")
-                .increment(self.observed_lists as f64);
-            metrics::gauge!("query.artifact.ngram.query_bytes_total")
-                .increment(self.observed_bytes as f64);
-        }
+        {}
     }
 }
 
@@ -2829,7 +2813,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
-        metrics::gauge!("query.lane.fuzzy.expansions_total").increment(expansion_count as f64);
+
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
@@ -2861,7 +2845,7 @@ impl<'a> ArtifactQueryV1<'a> {
         self.metrics.observe_statement(&statement)?;
         self.metrics
             .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
-        metrics::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len() as f64);
+
         Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
 
@@ -3414,14 +3398,7 @@ fn digest_content_addressed_file(
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     {
         let _span = tracing::trace_span!("query.artifact.digest.content_address_preopen").entered();
-        {
-            metrics::gauge!("query.artifact.digest.content_address_preopen.passes_total")
-                .increment((1u64) as f64);
-            hash_artifact_file(file, control, |bytes| {
-                metrics::gauge!("query.artifact.digest.content_address_preopen.bytes_total")
-                    .increment(bytes as f64);
-            })
-        }
+        { hash_artifact_file(file, control, |bytes| {}) }
     }
 }
 
@@ -3432,14 +3409,7 @@ fn digest_retained_artifact_file(
     {
         let _span =
             tracing::trace_span!("query.artifact.digest.retained_post_validation").entered();
-        {
-            metrics::gauge!("query.artifact.digest.retained_post_validation.passes_total")
-                .increment((1u64) as f64);
-            hash_artifact_file(file, control, |bytes| {
-                metrics::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
-                    .increment(bytes as f64);
-            })
-        }
+        { hash_artifact_file(file, control, |bytes| {}) }
     }
 }
 
@@ -3666,10 +3636,7 @@ fn configure_reader_window(
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
 
-    {
-        metrics::gauge!("query.artifact.mmap_bytes").set(sealed_file_size_bytes as f64);
-        metrics::gauge!("query.artifact.page_cache_bytes").set(page_cache_bytes as f64);
-    }
+    {}
     Ok(page_cache_bytes)
 }
 

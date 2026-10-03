@@ -305,7 +305,7 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             descriptor.segment_size_bytes,
         )?;
         let canonical = inflate_index_segment(&bytes, descriptor.decoded_size_bytes)?;
-        metrics::gauge!("code_index.sparse.index_bytes_decoded").increment(canonical.len() as f64);
+
         serde_json::from_slice(&canonical)
             .map_err(|error| contract(format!("sealed resolution index decoding failed: {error}")))
     }

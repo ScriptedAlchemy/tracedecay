@@ -568,7 +568,6 @@ impl StoreTelemetrySamplingRegistry {
         let loud = self.loud_retention_this_tick.load(Ordering::Acquire);
         if matches!(outcome, MaintenanceTickOutcome::Retry) && !loud {
             if self.quiet_retry_tick_logged.swap(true, Ordering::AcqRel) {
-                metrics::gauge!("daemon.git.maintenance.retention_quiet_total").increment(1.0);
                 return false;
             }
             return true;

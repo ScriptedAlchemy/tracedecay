@@ -123,32 +123,24 @@ struct ActiveDispatchGaugeGuard;
 
 impl ActiveDispatchGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("mcp.server.dispatch.active").increment(1.0);
-        metrics::gauge!("mcp.server.dispatch.admitted_total").increment(1.0);
         Self
     }
 }
 
 impl Drop for ActiveDispatchGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("mcp.server.dispatch.active").decrement(1.0);
-        metrics::gauge!("mcp.server.dispatch.settled_total").increment(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 struct DispatchAdmissionWaitGuard;
 
 impl DispatchAdmissionWaitGuard {
     fn enter() -> Self {
-        metrics::gauge!("mcp.server.dispatch.admission_waiters").increment(1.0);
         Self
     }
 }
 
 impl Drop for DispatchAdmissionWaitGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("mcp.server.dispatch.admission_waiters").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 struct DispatchCapacityLease {
@@ -209,12 +201,10 @@ impl RetainedDispatchRegistry {
     fn acquire_capacity(&self) -> Result<DispatchCapacityLease> {
         loop {
             if !self.accepting.load(Ordering::Acquire) {
-                metrics::gauge!("mcp.server.dispatch.refused_shutdown_total").increment(1.0);
                 return Err(dispatch_shutdown_error());
             }
             let active = self.active_slots.load(Ordering::Acquire);
             if active >= self.capacity {
-                metrics::gauge!("mcp.server.dispatch.refused_saturated_total").increment(1.0);
                 return Err(dispatch_saturated_error());
             }
             if self
@@ -229,7 +219,7 @@ impl RetainedDispatchRegistry {
                     return Ok(lease);
                 }
                 drop(lease);
-                metrics::gauge!("mcp.server.dispatch.refused_shutdown_total").increment(1.0);
+
                 return Err(dispatch_shutdown_error());
             }
         }
@@ -256,7 +246,7 @@ impl RetainedDispatchRegistry {
         if !self.accepting.load(Ordering::Acquire) {
             // Admission refusals are the signal a saturation diagnosis needs;
             // count them alongside the admitted/settled lifecycle gauges.
-            metrics::gauge!("mcp.server.dispatch.refused_shutdown_total").increment(1.0);
+
             return Err(dispatch_shutdown_error());
         }
 
@@ -725,7 +715,6 @@ fn effect_unknown_error(
     settlement: DispatchSettlement,
     cause: &str,
 ) -> TraceDecayError {
-    metrics::gauge!("mcp.server.dispatch.effect_unknown_total").increment(1.0);
     TraceDecayError::project_route(
         "tool_dispatch_effect_unknown",
         false,
@@ -743,7 +732,7 @@ pub fn dispatch_cancelled_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "cancellation");
     }
-    metrics::gauge!("mcp.server.dispatch.cancelled_total").increment(1.0);
+
     TraceDecayError::project_route(
         "tool_dispatch_cancelled",
         true,
@@ -761,7 +750,7 @@ fn dispatch_deadline_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "its absolute deadline");
     }
-    metrics::gauge!("mcp.server.dispatch.deadline_total").increment(1.0);
+
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,

@@ -88,22 +88,7 @@ pub fn capture_native_event_for_replay(
         wait_budget,
     );
 
-    {
-        metrics::gauge!(match outcome {
-            NativeHookCaptureOutcomeV1::AdmissionTimedOut =>
-                "hooks.capture.outcome.admission_timed_out",
-            NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
-            NativeHookCaptureOutcomeV1::Unsupported => "hooks.capture.outcome.unsupported",
-            NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
-            NativeHookCaptureOutcomeV1::Rejected => "hooks.capture.outcome.rejected",
-            NativeHookCaptureOutcomeV1::Full => "hooks.capture.outcome.full",
-            NativeHookCaptureOutcomeV1::ResetRequired(_) => "hooks.capture.outcome.reset_required",
-            NativeHookCaptureOutcomeV1::Unavailable(_) => "hooks.capture.outcome.unavailable",
-            NativeHookCaptureOutcomeV1::ScopeUnavailable =>
-                "hooks.capture.outcome.scope_unavailable",
-        })
-        .increment(1);
-    }
+    {}
     outcome
 }
 

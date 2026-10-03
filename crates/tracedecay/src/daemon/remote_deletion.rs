@@ -82,21 +82,11 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
 /// visible in counters, not only in per-request receipts.
 fn observe_remote_deletion_receipt(receipt: &RemoteDeletionReceipt) {
     match receipt.status {
-        RemoteDeletionStatus::Deleted => {
-            metrics::gauge!("daemon.remote.deletion.deleted_total").increment(1.0);
-        }
-        RemoteDeletionStatus::Settling => {
-            metrics::gauge!("daemon.remote.deletion.settling_total").increment(1.0);
-        }
-        RemoteDeletionStatus::Partial => {
-            metrics::gauge!("daemon.remote.deletion.partial_total").increment(1.0);
-        }
-        RemoteDeletionStatus::Denied => {
-            metrics::gauge!("daemon.remote.deletion.denied_total").increment(1.0);
-        }
-        RemoteDeletionStatus::Failed => {
-            metrics::gauge!("daemon.remote.deletion.failed_total").increment(1.0);
-        }
+        RemoteDeletionStatus::Deleted => {}
+        RemoteDeletionStatus::Settling => {}
+        RemoteDeletionStatus::Partial => {}
+        RemoteDeletionStatus::Denied => {}
+        RemoteDeletionStatus::Failed => {}
     }
 }
 

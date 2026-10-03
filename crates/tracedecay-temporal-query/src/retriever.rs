@@ -424,8 +424,7 @@ pub async fn hydrate_temporal_candidate_export(
     check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
-    metrics::gauge!("temporal_query.candidates.hydrated").set((hydrated.len()) as f64);
-    metrics::gauge!("temporal_query.context.assembled").set((context.bundle.records.len()) as f64);
+
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),

@@ -323,7 +323,6 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         match reconcile_project_memory_graph_pass(&db, None).await {
             Ok(_) => true,
             Err(error) => {
-                metrics::gauge!("runtime_core.memory_graph.pass_failures").increment(1.0);
                 tracing::warn!(
                     error_kind = reconciliation_error_kind(&error),
                     "project memory graph reconciliation remains pending"
@@ -376,10 +375,7 @@ async fn reconcile_project_memory_graph_pass(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let loaded = load_source(db, &owner, read_control, Some(db)).await?;
-    metrics::gauge!("runtime_core.memory_graph.source_entities")
-        .set(loaded.source.entities.len() as f64);
-    metrics::gauge!("runtime_core.memory_graph.source_relations")
-        .set(loaded.source.relations.len() as f64);
+
     let watermark = source_watermark(&owner, &loaded.source, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());
@@ -514,7 +510,6 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
     match reconcile_project_memory_graph_pass(&db, None).await {
         Ok(_) => {}
         Err(error) => {
-            metrics::gauge!("runtime_core.memory_graph.pass_failures").increment(1.0);
             tracing::warn!(
                 error_kind = reconciliation_error_kind(&error),
                 "project memory graph publication after write remains pending"

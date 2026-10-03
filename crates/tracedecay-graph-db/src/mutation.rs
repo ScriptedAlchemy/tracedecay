@@ -190,7 +190,6 @@ fn apply_in_transaction(
                         && stored.projection == batch.projection
                         && stored.entity == *entity
                     {
-                        metrics::gauge!("graph_db.mutation.reused_entities_total").increment(1.0);
                     } else {
                         replace_entity(session, stored, entity, batch, check)?;
                     }
@@ -219,7 +218,6 @@ fn apply_in_transaction(
                         && stored.source == from
                         && stored.target == to
                     {
-                        metrics::gauge!("graph_db.mutation.reused_relations_total").increment(1.0);
                         continue;
                     }
                     delete_relation(session, stored, batch, check)?;

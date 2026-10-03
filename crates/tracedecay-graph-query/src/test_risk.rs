@@ -345,9 +345,7 @@ pub fn verified_test_evidence(
             MAX_TEST_RISK_RELATIONS,
         )?
     };
-    metrics::gauge!("graph.health.test_risk.symbols_total")
-        .increment((symbols.len() as u64) as f64);
-    metrics::gauge!("graph.health.test_risk.edges_total").increment((edges.len() as u64) as f64);
+
     let mut calls = Vec::new();
     let mut test_annotated = HashSet::new();
     for edge in edges {

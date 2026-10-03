@@ -628,7 +628,6 @@ impl MaintenanceCoordinator {
             return MaintenanceTickOutcome::Retry;
         };
         let Some(_background_cpu) = background_cpu.try_acquire() else {
-            metrics::gauge!("daemon.maintenance.background_cpu_deferred_total").increment(1.0);
             return MaintenanceTickOutcome::Retry;
         };
         administration
@@ -969,11 +968,10 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
     let Some((sample, state)) = pressure.sample_and_publish() else {
         return;
     };
-    metrics::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes as f64);
+
     // The gauge keeps its name: admission may publish the larger cgroup
     // committed figure, which is not this process's unreclaimable set.
-    metrics::gauge!("daemon.process.unreclaimable_resident_bytes")
-        .set(sample.unreclaimable_bytes as f64);
+
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log

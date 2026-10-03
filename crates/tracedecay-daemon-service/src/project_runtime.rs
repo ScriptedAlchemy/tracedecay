@@ -784,7 +784,7 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
             }
         }
         drop(fences);
-        metrics::gauge!("daemon.service.request_in_flight").increment(-1.0);
+
         self.registry.signal_reservation_changed();
     }
 }

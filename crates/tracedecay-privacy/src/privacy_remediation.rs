@@ -166,7 +166,6 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
     }
     match memory.await {
         Ok(receipt) => {
-            metrics::gauge!("daemon.privacy.remediation.memory_completed_total").increment(1.0);
             tracing::info!(
                 event = "project_memory_privacy_remediation",
                 project = %project,
@@ -180,7 +179,6 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
             );
         }
         Err(error) => {
-            metrics::gauge!("daemon.privacy.remediation.memory_failed_total").increment(1.0);
             tracing::warn!(
                 event = "project_memory_privacy_remediation_failed",
                 project = %project,
@@ -197,9 +195,7 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
         return;
     }
     match lcm.await {
-        Ok(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent) => {
-            metrics::gauge!("daemon.privacy.remediation.lcm_current_total").increment(1.0);
-        }
+        Ok(PrivacyLcmRemediationOutcomeV1::AlreadyCurrent) => {}
         Ok(PrivacyLcmRemediationOutcomeV1::Completed {
             detector_revision,
             scanned_rows,
@@ -208,7 +204,6 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
             protected_rows,
             unavailable_payload_rows,
         }) => {
-            metrics::gauge!("daemon.privacy.remediation.lcm_completed_total").increment(1.0);
             tracing::info!(
                 event = "lcm_privacy_remediation",
                 project = %project,
@@ -221,7 +216,6 @@ pub async fn run_at_rest_privacy_remediation<Memory, Lcm, MemoryError, LcmError>
             );
         }
         Err(error) => {
-            metrics::gauge!("daemon.privacy.remediation.lcm_failed_total").increment(1.0);
             tracing::warn!(
                 event = "lcm_privacy_remediation_failed",
                 project = %project,

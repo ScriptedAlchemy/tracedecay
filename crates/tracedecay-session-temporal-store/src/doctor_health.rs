@@ -1242,19 +1242,13 @@ fn unavailable_report_with_detail(
 }
 
 #[inline(always)]
-fn record_session_doctor_cache_hit() {
-    metrics::gauge!("session_temporal.doctor.cache_hits").increment(1.0);
-}
+fn record_session_doctor_cache_hit() {}
 
 #[inline(always)]
-fn record_session_doctor_cache_miss() {
-    metrics::gauge!("session_temporal.doctor.cache_misses").increment(1.0);
-}
+fn record_session_doctor_cache_miss() {}
 
 #[inline(always)]
-fn record_session_doctor_check() {
-    metrics::gauge!("session_temporal.doctor.checks").increment(1.0);
-}
+fn record_session_doctor_check() {}
 
 #[cfg(test)]
 mod cache_tests {

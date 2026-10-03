@@ -157,7 +157,7 @@ impl SpoolLeaseHoldObservationV1 {
         let held = SPOOL_LEASES_HELD
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        metrics::gauge!("hooks.spool.lease.held").set(held as f64);
+
         Some(Self {
             acquired: std::time::Instant::now(),
         })
@@ -169,10 +169,6 @@ impl Drop for SpoolLeaseHoldObservationV1 {
         let _ = SPOOL_LEASES_HELD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
             held.checked_sub(1)
         });
-        metrics::gauge!("hooks.spool.lease.held")
-            .set((SPOOL_LEASES_HELD.load(Ordering::Relaxed)) as f64);
-        metrics::gauge!("hooks.spool.lease.hold_micros")
-            .set((u64::try_from(self.acquired.elapsed().as_micros()).unwrap_or(u64::MAX)) as f64);
     }
 }
 
@@ -481,8 +477,7 @@ impl HookSpoolV1 {
 
             _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
-        metrics::gauge!("hooks.spool.pending.frame_count").set(report.pending_records);
-        metrics::gauge!("hooks.spool.pending.bytes").set(report.pending_bytes as f64);
+
         Ok((spool, report))
     }
 
@@ -631,11 +626,7 @@ impl HookSpoolV1 {
             }
         }
 
-        if observing() {
-            metrics::gauge!("hooks.spool.append.frame_bytes").set(frame_len as f64);
-            metrics::gauge!("hooks.spool.pending.frame_count").set((self.pending.len()) as f64);
-            metrics::gauge!("hooks.spool.pending.bytes").set((self.pending_bytes()) as f64);
-        }
+        if observing() {}
         Ok(record)
     }
 
@@ -740,10 +731,6 @@ impl HookSpoolV1 {
                 .map(|record| now.0.saturating_sub(record.queued_at.0))
                 .max()
                 .unwrap_or(0);
-            metrics::gauge!("hooks.spool.replay.batch_count").set((batches.len()) as f64);
-            metrics::gauge!("hooks.spool.replay.frame_count").set(frame_count as f64);
-            metrics::gauge!("hooks.spool.replay.frame_bytes").set(frame_bytes as f64);
-            metrics::gauge!("hooks.spool.queue_wait_micros").set(queue_wait_micros as f64);
         }
         Ok(batches)
     }
@@ -782,7 +769,7 @@ impl HookSpoolV1 {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let expired = self.hydrate_many(&indices)?;
-        metrics::gauge!("hooks.spool.expired.frame_count").set((expired.len()) as f64);
+
         Ok(expired)
     }
 
@@ -876,17 +863,7 @@ impl HookSpoolV1 {
             for (framed_len, queued_at, disposition) in settled {
                 // A tombstone is a delivery that expired or was refused, not a
                 // success; the disposition mix keeps those failures visible.
-                metrics::gauge!(match disposition {
-                    HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
-                    HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
-                })
-                .increment(1);
-                metrics::gauge!("hooks.spool.ack.frame_bytes").set((u64::from(framed_len)) as f64);
-                metrics::gauge!("hooks.spool.queue_wait_micros")
-                    .set((now.0.saturating_sub(queued_at.0)) as f64);
             }
-            metrics::gauge!("hooks.spool.pending.frame_count").set((self.pending.len()) as f64);
-            metrics::gauge!("hooks.spool.pending.bytes").set((self.pending_bytes()) as f64);
         }
         // Reclaim rewrites every remaining frame, so draining N records must
         // not rewrite the file once per acknowledgement (O(N^2) bytes).
@@ -965,7 +942,6 @@ impl HookSpoolV1 {
             }
         })?;
         if self.observed_records_revision != revision || sequences(&self.pending) != reclaimed {
-            metrics::gauge!("hooks.spool.compact.raced").increment(1);
             return Ok(());
         }
         staged.publish().map_err(|_| HookSpoolError::Io)?;
@@ -983,8 +959,7 @@ impl HookSpoolV1 {
         self.records_prefix = records_prefix;
         self.checkpoint = Some(checkpoint);
         self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
-        metrics::gauge!("hooks.spool.compact.frame_count").set((self.pending.len()) as f64);
-        metrics::gauge!("hooks.spool.compact.bytes").set(self.physical_len as f64);
+
         Ok(())
     }
 

@@ -624,26 +624,14 @@ fn observe_session_outcome(
     disposition: &LcmSummaryConvergenceDisposition,
     summary_nodes_created: usize,
 ) {
-    metrics::gauge!("daemon.lcm.summary_convergence.sessions").increment(1.0);
-    if summary_nodes_created > 0 {
-        metrics::gauge!("daemon.lcm.summary_convergence.summary_nodes")
-            .increment(summary_nodes_created.min(u32::MAX as usize) as f64);
-    }
+    if summary_nodes_created > 0 {}
     match disposition {
         LcmSummaryConvergenceDisposition::Preparing
         | LcmSummaryConvergenceDisposition::Summarized => {}
-        LcmSummaryConvergenceDisposition::Current => {
-            metrics::gauge!("daemon.lcm.summary_convergence.current").increment(1.0);
-        }
-        LcmSummaryConvergenceDisposition::Pending { .. } => {
-            metrics::gauge!("daemon.lcm.summary_convergence.pending").increment(1.0);
-        }
-        LcmSummaryConvergenceDisposition::Retryable { .. } => {
-            metrics::gauge!("daemon.lcm.summary_convergence.retryable").increment(1.0);
-        }
-        LcmSummaryConvergenceDisposition::Permanent { .. } => {
-            metrics::gauge!("daemon.lcm.summary_convergence.permanent").increment(1.0);
-        }
+        LcmSummaryConvergenceDisposition::Current => {}
+        LcmSummaryConvergenceDisposition::Pending { .. } => {}
+        LcmSummaryConvergenceDisposition::Retryable { .. } => {}
+        LcmSummaryConvergenceDisposition::Permanent { .. } => {}
     }
 }
 

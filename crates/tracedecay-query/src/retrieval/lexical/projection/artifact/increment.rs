@@ -295,12 +295,7 @@ pub(super) fn carry_parent_rows(
     }))?;
     let new_pages: Vec<&PreparedCodeLexicalArtifactPageV1> =
         changed.iter().flat_map(|file| &file.pages).collect();
-    metrics::gauge!("query.artifact.carry.document_growth").set(
-        documents
-            .growth
-            .last()
-            .map_or(0, |growth| growth.unsigned_abs()) as f64,
-    );
+
     {
         let _span = tracing::trace_span!("query.artifact.carry.row_dictionary").entered();
         carry_row_dictionary(transaction, metadata, &parent_pages, &changed, control)
@@ -339,8 +334,7 @@ pub(super) fn carry_parent_rows(
         .query_row("SELECT COUNT(*) FROM row_chunks", [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let re_encoded_pages = new_pages.len() as u64;
-    metrics::gauge!("query.artifact.carry.pages_encoded").increment(re_encoded_pages as f64);
-    metrics::gauge!("query.artifact.carry.files_re_encoded").increment(changed.len() as f64);
+
     Ok(CarriedRowsV1 {
         pages: page_count,
         documents: u64::try_from(documents).map_err(contract_number)?,

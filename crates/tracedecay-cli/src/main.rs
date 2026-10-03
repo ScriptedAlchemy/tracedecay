@@ -549,14 +549,12 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     {
         // Process-level runtime shape only. Request, project-server, history,
         // and projection gauges belong on those authorities, not bootstrap.
-        metrics::gauge!("tokio_worker_threads").set(worker_threads as f64);
-        metrics::gauge!("tokio_blocking_threads").set(blocking_threads as f64);
+
         let command_family = cli.command.as_ref().map_or("none", |command| {
             CommandFamily::for_command(command).as_profile_label()
         });
         tracing::trace!(name: "process_command_family", value = ?command_family);
         tracing::trace!(name: "cli.command.name", value = ?command_name.as_str());
-        metrics::gauge!("process_in_command").set(1);
     }
     let foreground_daemon = matches!(
         cli.command.as_ref(),
@@ -573,7 +571,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         ))
     };
 
-    metrics::gauge!("process_in_command").set(0);
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
     // so bound teardown after the command's own graceful shutdown completes.

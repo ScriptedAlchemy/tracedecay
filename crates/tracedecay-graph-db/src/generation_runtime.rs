@@ -1066,7 +1066,6 @@ impl GraphDb {
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
-        metrics::gauge!("graph_db.generation.page_apply.bytes").set(page.live_bytes() as f64);
         let (idempotency_key, input_digest) =
             generation_stage_page_receipt(identity, expected, page)?;
         self.run_gated_batch(

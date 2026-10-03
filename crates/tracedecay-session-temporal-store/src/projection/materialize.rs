@@ -361,10 +361,7 @@ pub(super) struct OccurrenceMaterializationWork {
 }
 
 #[inline(always)]
-fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
-    metrics::gauge!("session_temporal.occurrence_materialization.envelope_parses")
-        .increment(work.envelope_parses as f64);
-}
+fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {}
 
 pub(super) fn derived_temporal_assertion_id(
     subject_anchor_id: &tracedecay_domain::RetrievalAnchorId,
@@ -632,10 +629,7 @@ pub(super) struct RelationDerivationWork {
 }
 
 #[inline(always)]
-fn record_relation_derivation_work(work: RelationDerivationWork) {
-    metrics::gauge!("session_temporal.relation_derivation.envelope_parses")
-        .increment(work.envelope_parses as f64);
-}
+fn record_relation_derivation_work(work: RelationDerivationWork) {}
 
 #[tracing::instrument(
     name = "session_temporal.projection.candidate_parent",
@@ -838,17 +832,11 @@ pub async fn canonical_parent_message_resolver(
 }
 
 #[inline(always)]
-fn record_parent_resolver_probe() {
-    metrics::gauge!("session_temporal.parent_resolver.query_probes").increment(1.0);
-}
+fn record_parent_resolver_probe() {}
 
 #[inline(always)]
 fn record_parent_resolver_row(bytes: u64) {
-    {
-        metrics::gauge!("session_temporal.parent_resolver.rows").increment(1.0);
-        metrics::gauge!("session_temporal.parent_resolver.row_payload_bytes")
-            .increment(bytes as f64);
-    }
+    {}
 }
 
 impl ParentMessageResolver {

@@ -183,9 +183,7 @@ impl Drop for WorkerPoolCoordinationGuard<'_> {
     fn drop(&mut self) {
         if let Some(started) = self.started {
             let _ = decrement_if_positive(&WORKERS_POOL_COORDINATION);
-            metrics::gauge!("code_index_worker_pool_coordination_micros").increment(
-                (u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)) as f64,
-            );
+
             refresh_worker_gauges();
         }
         #[cfg(test)]
@@ -198,65 +196,45 @@ fn refresh_worker_gauges() {
     let coordinating = WORKERS_POOL_COORDINATION.load(Ordering::Relaxed);
     let cpu = active.saturating_sub(coordinating);
     let workers = crate::parallelism::indexing_workers();
-    metrics::gauge!("code_index_workers_busy").set(active as f64);
-    metrics::gauge!("code_index_workers_cpu").set(cpu as f64);
-    metrics::gauge!("code_index_workers_pool_coordination").set(coordinating as f64);
-    metrics::gauge!("code_index_worker_count").set(workers as f64);
+
     let utilization = if workers == 0 {
         0.0
     } else {
         (cpu as f64) * 100.0 / workers as f64
     };
-    metrics::gauge!("code_index_worker_utilization_pct").set(utilization);
 }
 
 #[inline(always)]
-fn refresh_queue_gauge() {
-    metrics::gauge!("code_index_queue_depth").set((PENDING_WORK.load(Ordering::Relaxed)) as f64);
-}
+fn refresh_queue_gauge() {}
 
 #[inline(always)]
 pub(crate) fn record_files(count: usize) {
-    {
-        metrics::gauge!("code_index_files").set(count as f64);
-    }
+    {}
 }
 
 /// Carries a caller-computed total so this helper never re-walks sources.
 #[inline(always)]
-pub(crate) fn record_source_bytes(bytes: u64) {
-    metrics::gauge!("code_index_source_bytes").set(bytes as f64);
-}
+pub(crate) fn record_source_bytes(bytes: u64) {}
 
 #[inline(always)]
 pub(crate) fn add_parse_bytes(bytes: u64) {
-    {
-        metrics::gauge!("code_index_parse_bytes").increment(bytes as f64);
-    }
+    {}
 }
 
 #[inline(always)]
 pub(crate) fn add_reused_parses(count: u64) {
-    {
-        metrics::gauge!("code_index_reused_parses").increment(count as f64);
-    }
+    {}
 }
 
 #[inline(always)]
-pub(crate) fn record_symbols(count: u64) {
-    metrics::gauge!("code_index_symbols").set(count as f64);
-}
+pub(crate) fn record_symbols(count: u64) {}
 
 #[inline(always)]
-pub(crate) fn record_relations(count: u64) {
-    metrics::gauge!("code_index_relations").set(count as f64);
-}
+pub(crate) fn record_relations(count: u64) {}
 
 #[inline(always)]
 pub(crate) fn record_pages(count: u64) {
-    {
-        metrics::gauge!("code_index_pages").set(count as f64);
-    }
+    {}
 }
 
 /// Start of one production-owner generation build. The matching observation
@@ -272,10 +250,7 @@ pub(crate) fn start_build_to_queryable() -> BuildToQueryableStart {
 
 #[inline(always)]
 pub(crate) fn record_build_to_queryable(started: BuildToQueryableStart) {
-    {
-        metrics::gauge!("code_index_build_to_queryable_micros")
-            .set(started.0.elapsed().as_micros() as f64);
-    }
+    {}
 }
 
 #[inline(always)]

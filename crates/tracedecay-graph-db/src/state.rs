@@ -1039,7 +1039,7 @@ pub(crate) fn labeled_projection_nodes(
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
     };
-    metrics::gauge!("graph_db.projection.labeled_nodes.candidates").set((candidates.len()) as f64);
+
     let nodes = {
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.filter").entered();
         {
@@ -1053,7 +1053,7 @@ pub(crate) fn labeled_projection_nodes(
                 .collect::<Vec<_>>()
         }
     };
-    metrics::gauge!("graph_db.projection.labeled_nodes.results").set((nodes.len()) as f64);
+
     Ok(nodes)
 }
 
@@ -1086,7 +1086,7 @@ fn labeled_projection_nodes_checked(
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
     };
-    metrics::gauge!("graph_db.projection.labeled_nodes.candidates").set((candidates.len()) as f64);
+
     check()?;
     require_generation_capacity(
         if label == ENTITY_LABEL {
@@ -1121,7 +1121,7 @@ fn labeled_projection_nodes_checked(
             }
         }
     };
-    metrics::gauge!("graph_db.projection.labeled_nodes.results").set((nodes.len()) as f64);
+
     check()?;
     Ok(nodes)
 }

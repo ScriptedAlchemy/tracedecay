@@ -141,7 +141,6 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                         SessionRetrievalServiceOutcome::Cancelled
                     }
                     outcome = self.retrieve_admitted(context, query) => outcome,
@@ -234,15 +233,12 @@ struct SessionRetrievalInFlightObservation;
 
 impl SessionRetrievalInFlightObservation {
     fn begin() -> Self {
-        metrics::gauge!("daemon.session_retrieval.in_flight").increment(1.0);
         Self
     }
 }
 
 impl Drop for SessionRetrievalInFlightObservation {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.session_retrieval.in_flight").increment(-1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
@@ -382,7 +378,6 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                     LcmDescribeServiceOutcome::Cancelled
                 }
                 outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
@@ -412,7 +407,6 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                     LcmExpandServiceOutcome::Cancelled
                 }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
@@ -577,16 +571,10 @@ fn counted_admitted_session_binding(
 ) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
     let binding = build_admitted_session_binding(root, retrieval_configuration, context, budgets);
     match &binding {
-        Ok(_) => {
-            metrics::gauge!("daemon.session_retrieval.admitted").increment(1.0);
-        }
+        Ok(_) => {}
         Err(outcome) => match outcome.as_ref() {
-            SessionRetrievalServiceOutcome::WrongScope => {
-                metrics::gauge!("daemon.session_retrieval.refused.wrong_scope").increment(1.0);
-            }
-            _ => {
-                metrics::gauge!("daemon.session_retrieval.refused.unavailable").increment(1.0);
-            }
+            SessionRetrievalServiceOutcome::WrongScope => {}
+            _ => {}
         },
     }
     binding

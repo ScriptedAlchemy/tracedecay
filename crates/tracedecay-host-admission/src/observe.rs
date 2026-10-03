@@ -5,11 +5,7 @@
 //! paths, or session identifiers as labels.
 
 #[inline]
-pub(crate) fn admission_capture_frames(frames: usize) {
-    metrics::gauge!("usecases.admission.capture_frames").set(frames as f64);
-}
+pub(crate) fn admission_capture_frames(frames: usize) {}
 
 #[inline]
-pub(crate) fn admission_persist_frames(frames: usize) {
-    metrics::gauge!("usecases.admission.persist_frames").set(frames as f64);
-}
+pub(crate) fn admission_persist_frames(frames: usize) {}

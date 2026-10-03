@@ -566,7 +566,6 @@ impl SessionTemporalHydrationBackend<'_> {
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        metrics::gauge!("session_temporal.hydration").increment(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -587,7 +586,6 @@ impl SessionTemporalHydrationBackend<'_> {
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<BoundedPayload, HydrationError> {
-        metrics::gauge!("session_temporal.hydration").increment(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {

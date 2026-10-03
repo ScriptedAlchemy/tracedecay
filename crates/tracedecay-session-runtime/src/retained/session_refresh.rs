@@ -66,12 +66,8 @@ pub fn admitted_session_refresh_command(
     // refresh execution stays visible in profiles.
     match &admitted {
         Ok(_) => {}
-        Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {
-            metrics::gauge!("daemon.retained.session.refresh_admit.denied").increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.retained.session.refresh_admit.refused").increment(1.0);
-        }
+        Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {}
+        Err(_) => {}
     }
     admitted
 }

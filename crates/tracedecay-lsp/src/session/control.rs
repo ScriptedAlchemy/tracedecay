@@ -253,7 +253,7 @@ impl LspSessionControl {
                 deadline_at_ms,
             },
         );
-        metrics::gauge!("lsp.session.requests.pending").increment(1.0);
+
         RequestAdmission::Accepted
     }
 
@@ -265,7 +265,7 @@ impl LspSessionControl {
             return CancellationOutcome::AlreadyCancelled;
         }
         request.state = PendingState::Cancelled;
-        metrics::gauge!("lsp.session.requests.cancelled_total").increment(1.0);
+
         CancellationOutcome::Accepted
     }
 
@@ -297,19 +297,14 @@ impl LspSessionControl {
                 expired.push(id.clone());
             }
         }
-        if !expired.is_empty() {
-            metrics::gauge!("lsp.session.requests.timed_out_total")
-                .increment((expired.len() as u64) as f64);
-        }
+        if !expired.is_empty() {}
         expired
     }
 
     #[tracing::instrument(name = "lsp_session_complete_request", level = "trace", skip_all)]
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         let removed = self.pending.remove(id).map(|request| request.state);
-        if removed.is_some() {
-            metrics::gauge!("lsp.session.requests.pending").decrement(1.0);
-        }
+        if removed.is_some() {}
         let disposition = match removed {
             Some(PendingState::Active) => CompletionDisposition::Publish,
             Some(PendingState::Cancelled) => CompletionDisposition::SuppressCancelled,
@@ -317,9 +312,7 @@ impl LspSessionControl {
             Some(PendingState::TimedOut) => CompletionDisposition::SuppressTimedOut,
             None => CompletionDisposition::UnknownRequest,
         };
-        if disposition.failure().is_some() {
-            metrics::gauge!("lsp.session.requests.suppressed_total").increment(1.0);
-        }
+        if disposition.failure().is_some() {}
         disposition
     }
 
@@ -483,10 +476,7 @@ impl LspSessionControl {
     /// Releases this session's remaining share of the process-wide in-flight
     /// request gauge before the pending set is discarded wholesale.
     fn release_pending_gauge(&self) {
-        if !self.pending.is_empty() {
-            metrics::gauge!("lsp.session.requests.pending")
-                .decrement((self.pending.len() as u64) as f64);
-        }
+        if !self.pending.is_empty() {}
     }
 }
 

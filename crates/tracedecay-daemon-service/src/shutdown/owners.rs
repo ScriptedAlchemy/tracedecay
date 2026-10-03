@@ -194,15 +194,12 @@ pub struct DrainingGauge {
 
 impl DrainingGauge {
     pub fn arm(key: &'static str) -> Self {
-        metrics::gauge!(key).increment(1.0);
         Self { key }
     }
 }
 
 impl Drop for DrainingGauge {
-    fn drop(&mut self) {
-        metrics::gauge!(self.key).decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 /// One prepared owner: its original ordinal, name, cancellation-time panic
@@ -323,15 +320,9 @@ async fn join_shutdown_phase(
             // the shutdown plan, recorded so a post-deadline report names the
             // straggler without replaying the receipt.
             match &status {
-                ShutdownStatus::Clean => {
-                    metrics::gauge!("daemon.shutdown.owner.clean_total").increment(1.0);
-                }
-                ShutdownStatus::Failed(_) => {
-                    metrics::gauge!("daemon.shutdown.owner.failed_total").increment(1.0);
-                }
+                ShutdownStatus::Clean => {}
+                ShutdownStatus::Failed(_) => {}
                 ShutdownStatus::TimedOut => {
-                    metrics::gauge!("daemon.shutdown.owner.timed_out_total").increment(1.0);
-
                     tracing::trace!(name: "daemon.shutdown.straggler.owner", value = ?name);
                 }
             }

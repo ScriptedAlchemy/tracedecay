@@ -365,8 +365,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // semaphore's FIFO queue. Only then advertise idle so an
                         // observer cannot release permits before this worker is
                         // registered to receive one.
-                        metrics::gauge!("session_temporal_refresh_history_admission_deferrals")
-                            .increment(1.0);
+
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
                         let permit = tokio::select! {
@@ -593,7 +592,6 @@ struct SessionTemporalRefreshWorkerInstrumentation<'a> {
 
 impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
     fn new(state: &'a SessionTemporalRefreshWakeState) -> Self {
-        metrics::gauge!("session_temporal_refresh_workers_active").increment(1.0);
         Self { state }
     }
 }
@@ -601,7 +599,6 @@ impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
 impl Drop for SessionTemporalRefreshWorkerInstrumentation<'_> {
     fn drop(&mut self) {
         stop_worker(self.state);
-        metrics::gauge!("session_temporal_refresh_workers_active").increment(-1.0);
     }
 }
 
@@ -619,10 +616,7 @@ macro_rules! increment_outcome {
 }
 
 fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_retry: bool) {
-    metrics::gauge!("session_temporal_refresh_passes").increment(1.0);
-    if no_progress_retry {
-        metrics::gauge!("session_temporal_refresh_no_progress_passes").increment(1.0);
-    }
+    if no_progress_retry {}
     increment_outcome!("session_temporal_refresh_begun", report.begun);
     increment_outcome!("session_temporal_refresh_joined", report.joined);
     increment_outcome!(
@@ -649,17 +643,10 @@ fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_re
 
 fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
     match class {
-        SessionTemporalRefreshRetryClass::Storage => {
-            metrics::gauge!("session_temporal_refresh_storage_retries").increment(1.0);
-        }
-        SessionTemporalRefreshRetryClass::Projector => {
-            metrics::gauge!("session_temporal_refresh_projector_retries").increment(1.0);
-        }
-        SessionTemporalRefreshRetryClass::Deadline => {
-            metrics::gauge!("session_temporal_refresh_deadline_retries").increment(1.0);
-        }
+        SessionTemporalRefreshRetryClass::Storage => {}
+        SessionTemporalRefreshRetryClass::Projector => {}
+        SessionTemporalRefreshRetryClass::Deadline => {}
     }
-    metrics::gauge!("session_temporal_refresh_last_retry_attempt").set(attempt);
 }
 
 /// Runs one historical ingest pass under the daemon-wide bounded admission.
@@ -682,8 +669,6 @@ async fn session_history_refresh(
     match history {
         Some(history) => {
             let Ok(_permit) = admission.try_acquire() else {
-                metrics::gauge!("session_temporal_refresh_history_admission_deferrals")
-                    .increment(1.0);
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
                         reason_code: HISTORY_ADMISSION_SATURATED_REASON,

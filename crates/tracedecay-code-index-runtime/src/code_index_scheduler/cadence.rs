@@ -403,32 +403,16 @@ impl CodeIndexCadenceTelemetryV1 {
 /// stays in the ring's truthful percentile model rather than a profiler gauge.
 fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
     match receipt.trigger {
-        CodeIndexCadenceTriggerV1::Mount => {
-            metrics::gauge!("daemon.code_index.cadence.wake.mount_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::HookHint => {
-            metrics::gauge!("daemon.code_index.cadence.wake.hook_hint_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::Overflow => {
-            metrics::gauge!("daemon.code_index.cadence.wake.overflow_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::GitWatcher => {
-            metrics::gauge!("daemon.code_index.cadence.wake.git_watcher_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::QueryAdmission => {
-            metrics::gauge!("daemon.code_index.cadence.wake.query_admission_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::BusyFollowUp => {
-            metrics::gauge!("daemon.code_index.cadence.wake.busy_follow_up_total").increment(1.0);
-        }
-        CodeIndexCadenceTriggerV1::MemoryHeadroom => {
-            metrics::gauge!("daemon.code_index.cadence.wake.memory_headroom_total").increment(1.0);
-        }
+        CodeIndexCadenceTriggerV1::Mount => {}
+        CodeIndexCadenceTriggerV1::HookHint => {}
+        CodeIndexCadenceTriggerV1::Overflow => {}
+        CodeIndexCadenceTriggerV1::GitWatcher => {}
+        CodeIndexCadenceTriggerV1::QueryAdmission => {}
+        CodeIndexCadenceTriggerV1::BusyFollowUp => {}
+        CodeIndexCadenceTriggerV1::MemoryHeadroom => {}
     }
     if receipt.is_noop() {
-        metrics::gauge!("daemon.code_index.cadence.reconcile.noop_total").increment(1.0);
     } else {
-        metrics::gauge!("daemon.code_index.cadence.reconcile.published_total").increment(1.0);
     }
 }
 

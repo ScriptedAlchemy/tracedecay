@@ -355,7 +355,6 @@ where
                 ));
             }
             Err(RetrievalPortError::Cancelled) => {
-                metrics::gauge!("query.cancel.count").increment(1u32);
                 return Ok(RetrieverOutcome::Cancelled);
             }
             Err(error) => return Err(error),

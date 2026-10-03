@@ -23,28 +23,19 @@ struct MaintenanceLifecycleInstrumentation;
 impl MaintenanceLifecycleInstrumentation {
     fn new() -> Self {
         let active = MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-        metrics::gauge!("daemon_maintenance_futures_active").set(active as f64);
+
         Self
     }
 
     fn record_outcome(&self, outcome: MaintenanceTickOutcome) {
         match outcome {
-            MaintenanceTickOutcome::Complete => {
-                metrics::gauge!("daemon_maintenance_outcome_complete").increment(1.0);
-            }
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
-                metrics::gauge!("daemon_maintenance_outcome_code_generation_progress")
-                    .increment(1.0);
-            }
-            MaintenanceTickOutcome::Retry => {
-                metrics::gauge!("daemon_maintenance_outcome_retry").increment(1.0);
-            }
+            MaintenanceTickOutcome::Complete => {}
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {}
+            MaintenanceTickOutcome::Retry => {}
         }
     }
 
-    fn record_cancellation(&self) {
-        metrics::gauge!("daemon_maintenance_outcome_cancelled").increment(1.0);
-    }
+    fn record_cancellation(&self) {}
 }
 
 impl Drop for MaintenanceLifecycleInstrumentation {
@@ -52,7 +43,6 @@ impl Drop for MaintenanceLifecycleInstrumentation {
         let active = MAINTENANCE_FUTURES_ACTIVE
             .fetch_sub(1, Ordering::SeqCst)
             .saturating_sub(1);
-        metrics::gauge!("daemon_maintenance_futures_active").set(active as f64);
     }
 }
 
@@ -63,12 +53,8 @@ struct MaintenancePhaseInstrumentation {
 impl MaintenancePhaseInstrumentation {
     fn new(continuation: Option<MaintenanceContinuation>) -> Self {
         match continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                metrics::gauge!("daemon_maintenance_phase_code_generation_active").increment(1.0);
-            }
-            None => {
-                metrics::gauge!("daemon_maintenance_phase_full_tick_active").increment(1.0);
-            }
+            Some(MaintenanceContinuation::CodeGenerationRetention) => {}
+            None => {}
         }
         Self { continuation }
     }
@@ -77,12 +63,8 @@ impl MaintenancePhaseInstrumentation {
 impl Drop for MaintenancePhaseInstrumentation {
     fn drop(&mut self) {
         match self.continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                metrics::gauge!("daemon_maintenance_phase_code_generation_active").increment(-1.0);
-            }
-            None => {
-                metrics::gauge!("daemon_maintenance_phase_full_tick_active").increment(-1.0);
-            }
+            Some(MaintenanceContinuation::CodeGenerationRetention) => {}
+            None => {}
         }
     }
 }

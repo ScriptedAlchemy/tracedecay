@@ -180,15 +180,12 @@ struct HookReplaySweepObservation;
 
 impl HookReplaySweepObservation {
     fn begin() -> Self {
-        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for HookReplaySweepObservation {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(-1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 #[tracing::instrument(name = "daemon.hook_replay.sweep", level = "trace", skip_all)]

@@ -350,10 +350,7 @@ pub async fn publish(
 /// the slowest subscriber, and the current subscriber count. Keys are static
 /// capability names; every gauge is emitted through the `metrics` facade.
 #[inline]
-fn observe_publish(queue_depth: usize, subscribers: usize) {
-    metrics::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    metrics::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
-}
+fn observe_publish(queue_depth: usize, subscribers: usize) {}
 
 pub async fn replay_after(
     db: &RegisteredGlobalDb,

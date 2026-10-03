@@ -33,11 +33,9 @@ pub fn normalize_observation(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Kimi records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-    metrics::gauge!("capture.kimi.record_bytes").increment((range.end() - range.start()) as f64);
+
     let envelope = normalize_kimi_record(native, session_id, stable_record_id, range);
-    if envelope.is_err() {
-        metrics::gauge!("capture.kimi.normalize_failures").increment(1.0);
-    }
+    if envelope.is_err() {}
     envelope
 }
 

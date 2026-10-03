@@ -109,15 +109,6 @@ fn observing() -> bool {
 fn record_file_dims(operation: &'static str, language: &str, source_bytes: usize) {
     let family = language_family(language);
     let bucket = file_byte_bucket(source_bytes);
-    metrics::gauge!(
-        "code_extraction.file_calls",
-        "operation" => operation,
-        "family" => family,
-        "bucket" => bucket
-    )
-    .increment(1.0);
-    metrics::gauge!("code_extraction.file_bytes", "operation" => operation, "family" => family)
-        .increment(source_bytes as f64);
 }
 
 /// Accumulate one file operation's inclusive time into the closed family
@@ -127,8 +118,6 @@ fn record_file_dims(operation: &'static str, language: &str, source_bytes: usize
 /// `traverse_file` span; on the retained path it is pure walk.
 fn record_family_nanos(operation: &'static str, language: &str, nanos: f64) {
     let family = language_family(language);
-    metrics::gauge!("code_extraction.file_nanos", "operation" => operation, "family" => family)
-        .increment(nanos);
 }
 
 /// Closed per-file parse outcome recorded by [`measure_parse_file`].
@@ -182,21 +171,9 @@ pub(crate) fn measure_parse_file<T>(
             ParseFileOutcome::Parsed {
                 root_children,
                 has_syntax_errors,
-            } => {
-                metrics::gauge!("code_extraction.parse.root_children")
-                    .increment(root_children as f64);
-                if has_syntax_errors {
-                    metrics::gauge!("code_extraction.parse.syntax_error_trees").increment(1.0);
-                }
-            }
-            ParseFileOutcome::TimedOut => {
-                metrics::gauge!("code_extraction.parse_failures").increment(1.0);
-                metrics::gauge!("code_extraction.parse_failures.timeout").increment(1.0);
-            }
-            ParseFileOutcome::NoTree => {
-                metrics::gauge!("code_extraction.parse_failures").increment(1.0);
-                metrics::gauge!("code_extraction.parse_failures.no_tree").increment(1.0);
-            }
+            } => if has_syntax_errors {},
+            ParseFileOutcome::TimedOut => {}
+            ParseFileOutcome::NoTree => {}
         }
         result
     }
@@ -222,11 +199,7 @@ pub(crate) fn measure_extract_file<T>(
         };
         record_family_nanos("traverse", language, started.elapsed().as_nanos() as f64);
         let counts = counts(&result);
-        metrics::gauge!("code_extraction.extract.nodes").increment(counts.nodes as f64);
-        metrics::gauge!("code_extraction.extract.edges").increment(counts.edges as f64);
-        metrics::gauge!("code_extraction.extract.unresolved_refs")
-            .increment(counts.unresolved_refs as f64);
-        metrics::gauge!("code_extraction.extract.imports").increment(counts.imports as f64);
+
         result
     }
 }
@@ -236,7 +209,6 @@ pub(crate) fn measure_extract_file<T>(
 #[inline]
 pub(crate) fn measure_markdown_composite_fallback<T>(f: impl FnOnce() -> T) -> T {
     {
-        metrics::gauge!("code_extraction.markdown_composite_fallback_calls").increment(1.0);
         {
             let _span =
                 tracing::trace_span!("code_extraction.markdown_composite_fallback").entered();
@@ -308,25 +280,19 @@ pub(crate) fn measure_change_ranges<T>(f: impl FnOnce() -> T) -> T {
 /// Count a grammar-table lookup that found no bundled grammar.
 #[inline]
 pub(crate) fn record_grammar_lookup_miss() {
-    {
-        metrics::gauge!("code_extraction.grammar.lookup_miss").increment(1.0);
-    }
+    {}
 }
 
 /// Count a bundled grammar that Tree-sitter's `set_language` rejected.
 #[inline]
 pub(crate) fn record_grammar_rejected() {
-    {
-        metrics::gauge!("code_extraction.grammar.rejected").increment(1.0);
-    }
+    {}
 }
 
 /// Count a registry dispatch that found no extractor for the file extension.
 #[inline]
 pub(crate) fn record_dispatch_no_extractor() {
-    {
-        metrics::gauge!("code_extraction.dispatch.no_extractor").increment(1.0);
-    }
+    {}
 }
 
 /// Attribute retained-parser tree reuse. A reset- or initial-dominated mix
@@ -335,18 +301,10 @@ pub(crate) fn record_dispatch_no_extractor() {
 pub(crate) fn record_retained_parse_reuse(reuse: ParseReuse) {
     {
         match reuse {
-            ParseReuse::Initial => {
-                metrics::gauge!("code_extraction.retained.parse.initial").increment(1.0);
-            }
-            ParseReuse::Incremental => {
-                metrics::gauge!("code_extraction.retained.parse.incremental").increment(1.0);
-            }
-            ParseReuse::Noop => {
-                metrics::gauge!("code_extraction.retained.parse.noop").increment(1.0);
-            }
-            ParseReuse::Reset { .. } => {
-                metrics::gauge!("code_extraction.retained.parse.reset").increment(1.0);
-            }
+            ParseReuse::Initial => {}
+            ParseReuse::Incremental => {}
+            ParseReuse::Noop => {}
+            ParseReuse::Reset { .. } => {}
         }
     }
 }
@@ -367,25 +325,12 @@ pub(crate) enum RetainedParseAbstention {
 #[inline]
 pub(crate) fn record_retained_parse_abstention(reason: RetainedParseAbstention) {
     {
-        metrics::gauge!("code_extraction.retained.abstentions").increment(1.0);
         match reason {
-            RetainedParseAbstention::SourceTooLarge => {
-                metrics::gauge!("code_extraction.retained.abstain.source_too_large").increment(1.0);
-            }
-            RetainedParseAbstention::PreparedSourceMismatch => {
-                metrics::gauge!("code_extraction.retained.abstain.prepared_source_mismatch")
-                    .increment(1.0);
-            }
-            RetainedParseAbstention::InvalidEdit => {
-                metrics::gauge!("code_extraction.retained.abstain.invalid_edit").increment(1.0);
-            }
-            RetainedParseAbstention::IdentityMismatch => {
-                metrics::gauge!("code_extraction.retained.abstain.identity_mismatch")
-                    .increment(1.0);
-            }
-            RetainedParseAbstention::StaleReport => {
-                metrics::gauge!("code_extraction.retained.abstain.stale_report").increment(1.0);
-            }
+            RetainedParseAbstention::SourceTooLarge => {}
+            RetainedParseAbstention::PreparedSourceMismatch => {}
+            RetainedParseAbstention::InvalidEdit => {}
+            RetainedParseAbstention::IdentityMismatch => {}
+            RetainedParseAbstention::StaleReport => {}
         };
     }
 }
@@ -397,31 +342,14 @@ pub(crate) fn record_retained_parse_abstention(reason: RetainedParseAbstention) 
 #[inline]
 pub(crate) fn record_extraction_reset(reason: ParsedExtractionResetReason) {
     {
-        metrics::gauge!("code_extraction.extract.resets").increment(1.0);
         match reason {
-            ParsedExtractionResetReason::ChangedRootIdentity => {
-                metrics::gauge!("code_extraction.extract.reset.changed_root_identity")
-                    .increment(1.0);
-            }
-            ParsedExtractionResetReason::CompositeGrammar => {
-                metrics::gauge!("code_extraction.extract.reset.composite_grammar").increment(1.0);
-            }
-            ParsedExtractionResetReason::FullReplacement => {
-                metrics::gauge!("code_extraction.extract.reset.full_replacement").increment(1.0);
-            }
-            ParsedExtractionResetReason::LanguageChanged => {
-                metrics::gauge!("code_extraction.extract.reset.language_changed").increment(1.0);
-            }
-            ParsedExtractionResetReason::MissingPriorExtraction => {
-                metrics::gauge!("code_extraction.extract.reset.missing_prior_extraction")
-                    .increment(1.0);
-            }
-            ParsedExtractionResetReason::MultilineEdit => {
-                metrics::gauge!("code_extraction.extract.reset.multiline_edit").increment(1.0);
-            }
-            ParsedExtractionResetReason::PartialParse => {
-                metrics::gauge!("code_extraction.extract.reset.partial_parse").increment(1.0);
-            }
+            ParsedExtractionResetReason::ChangedRootIdentity => {}
+            ParsedExtractionResetReason::CompositeGrammar => {}
+            ParsedExtractionResetReason::FullReplacement => {}
+            ParsedExtractionResetReason::LanguageChanged => {}
+            ParsedExtractionResetReason::MissingPriorExtraction => {}
+            ParsedExtractionResetReason::MultilineEdit => {}
+            ParsedExtractionResetReason::PartialParse => {}
         };
     }
 }

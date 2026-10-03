@@ -135,9 +135,7 @@ pub fn derive_workflow_fan_out_census(
         .collect::<Vec<_>>();
     // Sweep shape beside the outer derive span: planned children set the
     // matrix size and read attempts bound the evidence actually joined.
-    metrics::gauge!("application.workflow.census.children").set((children.len() as u64) as f64);
-    metrics::gauge!("application.workflow.census.attempts")
-        .set((evidence.attempts.len() as u64) as f64);
+
     let requested = count(children.len())?;
     let attempts = evidence
         .attempts

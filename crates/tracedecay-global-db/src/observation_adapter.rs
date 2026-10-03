@@ -865,14 +865,10 @@ fn record_observation_snapshot_probe() {
         target: "tracedecay::observation_snapshot_query",
         "query observation batch snapshot"
     );
-
-    metrics::gauge!("global_db.observation_batch.snapshot_query_probes").increment(1.0);
 }
 
 #[inline(always)]
-fn record_observation_snapshot_row() {
-    metrics::gauge!("global_db.observation_batch.snapshot_rows").increment(1.0);
-}
+fn record_observation_snapshot_row() {}
 
 impl ObservationPreflightSnapshot {
     fn admission_refusal(

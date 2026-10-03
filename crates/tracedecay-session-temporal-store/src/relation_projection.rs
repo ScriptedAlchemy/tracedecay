@@ -1193,9 +1193,7 @@ async fn latest_occurrence(
 }
 
 #[inline(always)]
-fn record_relation_reconstruction() {
-    metrics::gauge!("session_temporal.relations.full_reconstructions").increment(1.0);
-}
+fn record_relation_reconstruction() {}
 
 /// Logical copies a candidate generation introduced, or every copy of the
 /// generation when an introduced occurrence precedes the base's last instant.

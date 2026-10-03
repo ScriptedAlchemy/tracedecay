@@ -280,7 +280,7 @@ impl Drop for AutomationReservationClaim {
         // Each claim incremented the in-flight gauge exactly once at
         // acquisition; dropping the owner (settled, abandoned, panicked, or
         // cancelled) is the one release point.
-        metrics::gauge!("daemon.automation.effect.in_flight").decrement(1.0);
+
         let mut claims = reservation_claims_guard();
         if claims
             .get(&self.path)
@@ -314,7 +314,7 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
     }
     let token = Arc::new(ReservationClaimState::default());
     claims.insert(path.to_path_buf(), Arc::downgrade(&token));
-    metrics::gauge!("daemon.automation.effect.in_flight").increment(1.0);
+
     Ok(AutomationReservationClaim {
         path: path.to_path_buf(),
         token,

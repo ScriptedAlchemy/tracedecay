@@ -341,7 +341,6 @@ impl SparseBuildV1<'_> {
             return Ok(Err(CodeIndexColdBuildReasonV1::MovesNameLookups));
         }
         lexical_page_source::checkpoint(control)?;
-        metrics::gauge!("code_index.sparse.edited_files").set(edited.len() as f64);
 
         let generation_id = manifest.generation_id.clone();
         let parent_id = parent.manifest().generation_id.clone();
@@ -477,7 +476,7 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-        metrics::gauge!("code_index.sparse.segments_written").set(segments.len() as f64);
+
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);

@@ -1049,7 +1049,7 @@ impl GraphDbRegistry {
                         // Same-identity attach against a mounted (or still
                         // materializing) runtime: no native open runs, so a
                         // profile can separate these hits from full opens.
-                        metrics::gauge!("graph_db.registry.attach.already_mounted").increment(1.0);
+
                         return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
@@ -1122,9 +1122,7 @@ impl GraphDbRegistry {
             }
         };
         if matches!(open_mode, OwnerOpenMode::Eager) {
-            metrics::gauge!("graph_db.registry.attach.full_open").increment(1.0);
         } else {
-            metrics::gauge!("graph_db.registry.attach.lazy").increment(1.0);
         }
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth

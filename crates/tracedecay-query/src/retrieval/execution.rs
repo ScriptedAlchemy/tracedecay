@@ -313,12 +313,8 @@ where
         if let Ok(ref outcome) = translated {
             match outcome {
                 NativeLaneOutcomeV1::Complete(page) | NativeLaneOutcomeV1::Partial { page, .. } => {
-                    metrics::gauge!("query.stream.results").set((page.items.len()) as f64);
-                    metrics::gauge!("query.stream.rows").set(page.coverage.examined as f64);
                 }
-                NativeLaneOutcomeV1::Cancelled => {
-                    metrics::gauge!("query.cancel.count").increment(1u32);
-                }
+                NativeLaneOutcomeV1::Cancelled => {}
                 NativeLaneOutcomeV1::Stale(_) => {
                     crate::observe::Residency::Rebuilding.record("query.stream.residency");
                 }

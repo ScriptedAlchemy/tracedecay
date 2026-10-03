@@ -281,7 +281,6 @@ impl HookDeliveryReceiptSpoolV1 {
         match try_lock_result {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
-                metrics::gauge!("hooks.delivery.lock.contended").increment(1);
                 if wait_budget.is_zero() {
                     return Err(HookDeliverySpoolError::Busy);
                 }
@@ -391,7 +390,7 @@ impl HookDeliveryReceiptSpoolV1 {
             }
             receipts.push(receipt);
         }
-        metrics::gauge!("hooks.delivery.pending.count").set((receipts.len()) as f64);
+
         Ok(receipts)
     }
 
@@ -501,7 +500,6 @@ impl HookDeliveryReceiptWriterV1 {
         let root = self.root.as_path();
         receipt.validate()?;
         if let Some(existing) = retained(root, receipt)? {
-            metrics::gauge!("hooks.delivery.append.deduplicated").increment(1);
             return Ok(HookDeliveryRetentionV1::AlreadyRetained(existing));
         }
         let bytes =
@@ -509,7 +507,7 @@ impl HookDeliveryReceiptWriterV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-        metrics::gauge!("hooks.delivery.append.bytes").set((bytes.len()) as f64);
+
         let staged = {
             let _span = tracing::trace_span!("hooks.delivery.fsync.stage").entered();
             stage(root, receipt.receipt_id, &bytes)
@@ -524,7 +522,6 @@ impl HookDeliveryReceiptWriterV1 {
         match lock_until(&publish, Instant::now() + self.wait_budget) {
             Ok(()) => {}
             Err(LockAdmissionError::TimedOut) => {
-                metrics::gauge!("hooks.delivery.staged_for_adoption").increment(1);
                 let ready = staged
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -587,7 +584,6 @@ fn publish_staged(
     let outcome = match retained(root, receipt) {
         Ok(Some(existing)) => Ok(HookDeliveryRetentionV1::AlreadyRetained(existing)),
         Ok(None) if receipt_names(root)?.len() >= MAX_PENDING_RECEIPTS => {
-            metrics::gauge!("hooks.delivery.refused.full").increment(1);
             Err(HookDeliverySpoolError::Full)
         }
         Ok(None) => {

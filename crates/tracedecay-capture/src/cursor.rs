@@ -46,7 +46,7 @@ pub fn normalize_cursor_observation_with_message_id(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Cursor transcript records order by file bytes, so the range length is
     // the source record's byte length. Failures are counted, never hidden.
-    metrics::gauge!("capture.cursor.record_bytes").increment((range.end() - range.start()) as f64);
+
     let envelope = normalize_cursor_record(
         native,
         session_id,
@@ -56,9 +56,7 @@ pub fn normalize_cursor_observation_with_message_id(
         agent_id,
         parent_agent_id,
     );
-    if envelope.is_err() {
-        metrics::gauge!("capture.cursor.normalize_failures").increment(1.0);
-    }
+    if envelope.is_err() {}
     envelope
 }
 

@@ -205,8 +205,6 @@ pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
         return;
     }
     let store = database.graph_store();
-    metrics::gauge!("graph_db.generation.open.nodes").set((store.node_count()) as f64);
-    metrics::gauge!("graph_db.generation.open.edges").set((store.edge_count()) as f64);
 }
 
 /// Checkpoints sidecar-WAL history that a successful open replayed into the

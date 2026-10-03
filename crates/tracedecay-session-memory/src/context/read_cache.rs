@@ -91,7 +91,6 @@ pub async fn get(
     // row, `stale` is a row evicted by an mtime mismatch. Both force the
     // caller to recompute, but only stale implies the file changed.
     let Some(row) = row else {
-        metrics::gauge!("usecases.context.read_cache.misses").increment(1.0);
         return Ok(None);
     };
 
@@ -101,7 +100,6 @@ pub async fn get(
     })?;
 
     if cached_mtime != current_mtime_ns {
-        metrics::gauge!("usecases.context.read_cache.stale").increment(1.0);
         return Ok(None);
     }
 
@@ -114,7 +112,6 @@ pub async fn get(
         operation: "read_cache::get".to_string(),
     })?;
 
-    metrics::gauge!("usecases.context.read_cache.hits").increment(1.0);
     Ok(Some(CachedRead {
         mtime_ns: cached_mtime,
         digest,

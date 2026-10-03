@@ -28,7 +28,7 @@ pub fn snapshot_native_payload(message: KiroSnapshotMessage<'_>) -> Value {
     // Kiro snapshots come from a database, not a byte-ranged file; the message
     // text is the corpus-scale payload, so its length is the bytes gauge.
     // Composition is infallible, so entries are the snapshot span's call count.
-    metrics::gauge!("capture.kiro.snapshot_text_bytes").increment((message.text.len()) as f64);
+
     snapshot_kiro_record(message)
 }
 

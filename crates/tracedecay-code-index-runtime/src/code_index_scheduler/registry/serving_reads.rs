@@ -323,7 +323,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .0
                         .saturating_sub(progress.last_progress_micros)
                         .max(0);
-                    metrics::gauge!("daemon.code_index.dashboard.progress_age_micros").set((u64::try_from(age_micros).unwrap_or(u64::MAX)) as f64);
+
                 }
                 progress
                 }

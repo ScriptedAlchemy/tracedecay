@@ -328,7 +328,7 @@ impl StoreRuntimeRegistry {
                 .entry(key)
                 .or_default()
                 .insert(token);
-            metrics::gauge!("runtime_core.registry.profile_pins").increment(1.0);
+
             return ProfileAuthorityPinResult::Pinned(ProfileAuthorityPin {
                 inner: Arc::new(ProfileAuthorityPinToken {
                     registry: self.clone(),
@@ -361,7 +361,7 @@ impl StoreRuntimeRegistry {
         if !tokens.remove(&token) {
             return;
         }
-        metrics::gauge!("runtime_core.registry.profile_pins").decrement(1.0);
+
         if tokens.is_empty() {
             state.profile_pin_tokens.remove(&key);
         }

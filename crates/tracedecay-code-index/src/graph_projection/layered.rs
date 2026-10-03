@@ -146,14 +146,7 @@ pub fn build_layered_code_graph_rows(
         ..report
     };
 
-    {
-        metrics::gauge!("code_index.graph.layered.delta_entities")
-            .increment(report.delta_rows.0 as f64);
-        metrics::gauge!("code_index.graph.layered.delta_relations")
-            .increment(report.delta_rows.1 as f64);
-        metrics::gauge!("code_index.graph.layered.files_reused")
-            .increment(report.reused_files as f64);
-    }
+    {}
     Ok(Ok(CodeGraphLayeredBuildV1 { generation, report }))
 }
 

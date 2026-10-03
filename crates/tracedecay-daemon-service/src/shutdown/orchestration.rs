@@ -174,7 +174,7 @@ impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
         // Coordinator-level failures never reach the per-phase counters, so
         // they are recorded here or the waste is invisible to profiling.
-        metrics::gauge!("daemon.shutdown.coordinator.failed_total").increment(1.0);
+
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -184,7 +184,6 @@ impl DaemonShutdownReceipt {
     }
 
     fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
-        metrics::gauge!("daemon.shutdown.coordinator.timed_out_total").increment(1.0);
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
@@ -477,9 +476,7 @@ async fn run_daemon_shutdown(
     // cooperatively before the drain deadline; forced means the deadline
     // expired and the abort/join path did the draining.
     if in_flight.is_clean() {
-        metrics::gauge!("daemon.shutdown.client_drain.graceful_total").increment(1.0);
     } else {
-        metrics::gauge!("daemon.shutdown.client_drain.forced_total").increment(1.0);
     }
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (maintenance, session sync, invocation, ...).
@@ -596,9 +593,7 @@ async fn run_daemon_shutdown(
         && receipt.background.unfinished().is_empty()
         && receipt.project_servers.is_clean()
     {
-        metrics::gauge!("daemon.shutdown.outcome.graceful_total").increment(1.0);
     } else {
-        metrics::gauge!("daemon.shutdown.outcome.forced_total").increment(1.0);
     }
     receipt
 }

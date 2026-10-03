@@ -238,7 +238,7 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
-        metrics::gauge!("runtime_core.registry.runtimes_ready").decrement(1.0);
+
         outcome
     }
 }

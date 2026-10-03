@@ -582,7 +582,6 @@ impl CodexDiscoveryHub {
                 converged: HashMap::new(),
             },
         );
-        metrics::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
     pub fn deregister(&self, consumer: &str) {
@@ -621,7 +620,6 @@ impl CodexDiscoveryHub {
                 }
             }
         }
-        metrics::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
     pub(crate) async fn discover(
@@ -687,7 +685,6 @@ impl CodexDiscoveryHub {
                         None => consumer_state.source_key = Some(source_key.clone()),
                     }
                     if let Some(awaiting) = &consumer_state.awaiting_ack {
-                        metrics::gauge!("codex_discovery_generation_retries").increment(1.0);
                         return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
                             &awaiting.pass,
                         )));
@@ -792,7 +789,6 @@ impl CodexDiscoveryHub {
                     }
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
-                        metrics::gauge!("codex_discovery_scanner_waits").increment(1.0);
                         inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
@@ -809,9 +805,7 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     };
                     index.scanning = true;
-                    if start_probe {
-                        metrics::gauge!("codex_discovery_validation_passes").increment(1.0);
-                    }
+                    if start_probe {}
                     CodexDiscoveryWork::Replay {
                         source_key,
                         state,
@@ -855,7 +849,6 @@ impl CodexDiscoveryHub {
                         continue;
                     }
                     if inner.discovery_scanning {
-                        metrics::gauge!("codex_discovery_scanner_waits").increment(1.0);
                         inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
@@ -900,10 +893,7 @@ impl CodexDiscoveryHub {
                 pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
                     &pass.report.paths,
                 )));
-                metrics::gauge!("codex_discovery_pending_paths")
-                    .set(pass.report.paths.len() as f64);
-                metrics::gauge!("codex_discovery_pending_bytes")
-                    .set(pass.report.bytes_charged as f64);
+
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -1075,9 +1065,7 @@ impl CodexDiscoveryHub {
             .consumers
             .get(consumer)
             .is_some_and(|state| state.holds_converged(path, witness));
-        if converged {
-            metrics::gauge!("codex_discovery_converged_skips").increment(1.0);
-        }
+        if converged {}
         converged
     }
 
@@ -1130,7 +1118,6 @@ impl CodexDiscoveryHub {
         let Some(reservation) =
             reserve_shared_jsonl_bytes(charge, "converged transcript index capacity")?
         else {
-            metrics::gauge!("codex_discovery_converged_unrecorded").increment(1.0);
             return Ok(());
         };
         state
@@ -1825,7 +1812,6 @@ impl CodexSource {
         if let Some(pending) = &state.pending {
             let mut valid = true;
             for source in &pending.sources {
-                metrics::gauge!("codex_discovery_pending_revalidations").increment(1.0);
                 let metadata = match std::fs::metadata(&source.path) {
                     Ok(metadata) => metadata,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1855,7 +1841,7 @@ impl CodexSource {
                 }
                 return Ok(pass);
             }
-            metrics::gauge!("codex_discovery_pending_revalidation_misses").increment(1.0);
+
             state.reset(self);
         }
         let work_limit = bounds.max_files.max(1);
@@ -1990,9 +1976,7 @@ impl CodexSource {
             state.reset_for(self, frontier.is_complete());
         }
         if state.scan.as_ref().is_some_and(|scan| scan.validation) {
-            metrics::gauge!("codex_discovery_validation_passes").increment(1.0);
         } else {
-            metrics::gauge!("codex_discovery_emit_passes").increment(1.0);
         }
         let pass = retained_scan_step(self, state, bounds, frontier)?;
         let sources = pass.selected_sources.clone();

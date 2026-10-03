@@ -30,15 +30,12 @@ struct ResponseLeaseGaugeGuard;
 
 impl ResponseLeaseGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("mcp.server.response_leases_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for ResponseLeaseGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("mcp.server.response_leases_active").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 impl SelectedProjectResponseLease {

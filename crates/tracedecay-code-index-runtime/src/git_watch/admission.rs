@@ -150,8 +150,7 @@ impl GitWatcher {
                     WorktreeRegistration::Capacity => return GitWatcherAdmission::Capacity,
                     WorktreeRegistration::Retired => {
                         projects.remove(&common_dir);
-                        metrics::gauge!("daemon.git.watch.repositories.watched")
-                            .set((projects.len()) as f64);
+
                         drop(admission);
                         join_retired_repository_state(&state).await;
                         drop(projects);
@@ -176,7 +175,7 @@ impl GitWatcher {
             let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
             state.retain_task(handle);
             projects.insert(common_dir.clone(), Arc::clone(&state));
-            metrics::gauge!("daemon.git.watch.repositories.watched").set((projects.len()) as f64);
+
             #[cfg(test)]
             self.inner.lifecycle_receipts.record_repository();
             log_daemon_event(
@@ -231,7 +230,7 @@ impl GitWatcher {
                 () = self.inner.cancellation.cancelled() => break,
                 () = tokio::time::sleep(backoff) => {}
             }
-            metrics::gauge!("daemon.git.watch.identity_retry.attempts_total").increment(1.0);
+
             match self
                 .ensure_watching_with_config(&project_root, &config)
                 .await
@@ -258,28 +257,13 @@ impl GitWatcher {
 /// shutdown races without recording repository paths.
 fn record_admission_outcome(admission: GitWatcherAdmission) {
     match admission {
-        GitWatcherAdmission::Ready => {
-            metrics::gauge!("daemon.git.watch.admission.ready_total").increment(1.0);
-        }
-        GitWatcherAdmission::Disabled => {
-            metrics::gauge!("daemon.git.watch.admission.disabled_total").increment(1.0);
-        }
-        GitWatcherAdmission::LinkedWorktreeDisabled => {
-            metrics::gauge!("daemon.git.watch.admission.linked_worktree_disabled_total")
-                .increment(1.0);
-        }
-        GitWatcherAdmission::ShuttingDown => {
-            metrics::gauge!("daemon.git.watch.admission.shutting_down_total").increment(1.0);
-        }
-        GitWatcherAdmission::Capacity => {
-            metrics::gauge!("daemon.git.watch.admission.capacity_total").increment(1.0);
-        }
-        GitWatcherAdmission::NotRepository => {
-            metrics::gauge!("daemon.git.watch.admission.not_repository_total").increment(1.0);
-        }
-        GitWatcherAdmission::IdentityUnavailable => {
-            metrics::gauge!("daemon.git.watch.admission.identity_unavailable_total").increment(1.0);
-        }
+        GitWatcherAdmission::Ready => {}
+        GitWatcherAdmission::Disabled => {}
+        GitWatcherAdmission::LinkedWorktreeDisabled => {}
+        GitWatcherAdmission::ShuttingDown => {}
+        GitWatcherAdmission::Capacity => {}
+        GitWatcherAdmission::NotRepository => {}
+        GitWatcherAdmission::IdentityUnavailable => {}
     }
 }
 
@@ -289,13 +273,10 @@ struct IdentityRetryGaugeGuard;
 
 impl IdentityRetryGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("daemon.git.watch.identity_retry.active").increment(1.0);
         Self
     }
 }
 
 impl Drop for IdentityRetryGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.git.watch.identity_retry.active").decrement(1.0);
-    }
+    fn drop(&mut self) {}
 }

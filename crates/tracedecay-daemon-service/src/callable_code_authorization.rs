@@ -229,49 +229,19 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
 /// key stays compile-time static.
 fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
     match admission {
-        Ok(_) => {
-            metrics::gauge!("daemon.code_authorization.admit.admitted").increment(1.0);
-        }
-        Err(CodeGraphReadError::MissingRegistry) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.missing_registry")
-                .increment(1.0);
-        }
-        Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.unavailable").increment(1.0);
-        }
-        Err(CodeGraphReadError::Rewarming { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.rewarming").increment(1.0);
-        }
-        Err(CodeGraphReadError::ResetRequired { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.reset_required")
-                .increment(1.0);
-        }
-        Err(CodeGraphReadError::Stale { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.stale").increment(1.0);
-        }
-        Err(CodeGraphReadError::Cancelled) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.cancelled").increment(1.0);
-        }
-        Err(CodeGraphReadError::TimedOut) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.timed_out").increment(1.0);
-        }
-        Err(CodeGraphReadError::BudgetExhausted { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.budget_exhausted")
-                .increment(1.0);
-        }
-        Err(CodeGraphReadError::Denied) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.denied").increment(1.0);
-        }
-        Err(CodeGraphReadError::InvalidRequest { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.invalid_request")
-                .increment(1.0);
-        }
-        Err(CodeGraphReadError::Corrupt { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.corrupt").increment(1.0);
-        }
-        Err(CodeGraphReadError::Parked { .. }) => {
-            metrics::gauge!("daemon.code_authorization.admit.refused.parked").increment(1.0);
-        }
+        Ok(_) => {}
+        Err(CodeGraphReadError::MissingRegistry) => {}
+        Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {}
+        Err(CodeGraphReadError::Rewarming { .. }) => {}
+        Err(CodeGraphReadError::ResetRequired { .. }) => {}
+        Err(CodeGraphReadError::Stale { .. }) => {}
+        Err(CodeGraphReadError::Cancelled) => {}
+        Err(CodeGraphReadError::TimedOut) => {}
+        Err(CodeGraphReadError::BudgetExhausted { .. }) => {}
+        Err(CodeGraphReadError::Denied) => {}
+        Err(CodeGraphReadError::InvalidRequest { .. }) => {}
+        Err(CodeGraphReadError::Corrupt { .. }) => {}
+        Err(CodeGraphReadError::Parked { .. }) => {}
     }
 }
 
@@ -317,12 +287,8 @@ impl DaemonCallableCodeAuthorization {
             .route_receipt_checked(context, operation, observed_at)
             .await;
         match &receipt {
-            Ok(_) => {
-                metrics::gauge!("daemon.code_authorization.authorize.granted").increment(1.0);
-            }
-            Err(_) => {
-                metrics::gauge!("daemon.code_authorization.authorize.refused").increment(1.0);
-            }
+            Ok(_) => {}
+            Err(_) => {}
         }
         receipt
     }
@@ -391,12 +357,8 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
                     .await
             };
             match &receipt {
-                Ok(_) => {
-                    metrics::gauge!("daemon.code_authorization.recheck.granted").increment(1.0);
-                }
-                Err(_) => {
-                    metrics::gauge!("daemon.code_authorization.recheck.refused").increment(1.0);
-                }
+                Ok(_) => {}
+                Err(_) => {}
             }
             receipt
         })

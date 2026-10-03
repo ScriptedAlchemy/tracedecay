@@ -49,7 +49,6 @@ pub(super) fn encode_spool_payload(
 /// Writes one frame without syncing it, even into a new records file;
 /// [`super::HookSpoolV1::commit`] makes it and the file's name durable.
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
-    metrics::gauge!("hooks.spool.append.frame_bytes").set((frame.len()) as f64);
     append_unsynced(path, frame)
         .map(|_| ())
         .map_err(|_| HookSpoolError::Io)
@@ -153,9 +152,7 @@ pub(super) fn scan_records_from(
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-    metrics::gauge!("hooks.spool.scan.frame_count").set(scanned_records);
-    metrics::gauge!("hooks.spool.scan.bytes")
-        .set((physical_len.saturating_sub(validated_end)) as f64);
+
     Ok(ScanResult {
         records,
         valid_end: offset,
@@ -228,7 +225,7 @@ pub(super) fn encode_frame(
     frame.extend_from_slice(payload);
     let checksum = frame_checksum(&frame);
     frame.extend_from_slice(&checksum);
-    metrics::gauge!("hooks.spool.encode.frame_bytes").set((frame.len()) as f64);
+
     Ok(frame)
 }
 

@@ -214,9 +214,7 @@ impl DaemonInvocationState {
         // runtime either by capacity quiescence (reopenable) or by terminal
         // remote-deletion retirement.
         if reopenable {
-            metrics::gauge!("daemon.invocation_state.transition.quiesce_total").increment(1.0);
         } else {
-            metrics::gauge!("daemon.invocation_state.transition.retire_total").increment(1.0);
         }
         let retirement_kind = if reopenable {
             "capacity-retired"
@@ -228,8 +226,6 @@ impl DaemonInvocationState {
             .retire_project_roots(project_roots)
             .await
         {
-            metrics::gauge!("daemon.invocation_state.drain.code_index_refused_total")
-                .increment(1.0);
             return Err(TraceDecayError::Config {
                 message: format!(
                     "code-index workers for {retirement_kind} project '{}' did not drain",
@@ -248,7 +244,7 @@ impl DaemonInvocationState {
                     )
                     .await
                     .ok_or_else(|| {
-                        metrics::gauge!("daemon.invocation_state.drain.owners_refused_total").increment(1.0);
+
                         TraceDecayError::Config {
                             message: format!(
                                 "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -268,8 +264,6 @@ impl DaemonInvocationState {
                 )
                 .await
             {
-                metrics::gauge!("daemon.invocation_state.drain.owners_refused_total")
-                    .increment(1.0);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -384,8 +378,7 @@ impl DaemonInvocationState {
                 reason = "missing project-root .git control path",
                 "project root is not a git repository; code index disabled"
             );
-            metrics::gauge!("daemon.invocation_state.code_index_mount.skipped_total")
-                .increment(1.0);
+
             return Ok(());
         }
         let canonical_project_root = canonical_existing_identity(project_root)
@@ -403,12 +396,8 @@ impl DaemonInvocationState {
                 index_paths,
             )
             .await
-            .map_err(|error| {
-                metrics::gauge!("daemon.invocation_state.code_index_mount.failed_total")
-                    .increment(1.0);
-                TraceDecayError::Config {
-                    message: format!("code-index scheduler could not be mounted: {error}"),
-                }
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("code-index scheduler could not be mounted: {error}"),
             })?;
         // The deferred code-index mount runs after the project-open delivery
         // mount that owns the producer; an absent producer leaves the
@@ -548,8 +537,7 @@ impl DaemonInvocationState {
         // Items-processed: the multi_root_execute span is inclusive over every
         // admitted root, so per-request root counts are what divide its wall
         // time into per-root service demand.
-        metrics::gauge!("daemon.invocation_state.multi_root_roots_total")
-            .increment((scope_set.roots().len() as u64) as f64);
+
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
@@ -1074,7 +1062,7 @@ impl DaemonInvocationState {
         // Counts cancel *requests*, not distinct transitions: the owner's
         // synchronous cancel side is intentionally idempotent, and a repeat
         // request after a coordinator retry is itself worth observing.
-        metrics::gauge!("daemon.invocation_state.cancel_admissions_total").increment(1.0);
+
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
         // Code-index workers only observe `shutting_down` / closed admission
@@ -1128,7 +1116,6 @@ impl DaemonInvocationState {
         let expired = self.service.expire_all().await;
         step("invocation_service_expired");
         if !expired {
-            metrics::gauge!("daemon.invocation_state.shutdown_incomplete_total").increment(1.0);
             ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
         } else if schedulers_timed_out {
             ShutdownStatus::TimedOut

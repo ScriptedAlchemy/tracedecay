@@ -72,11 +72,8 @@ pub fn normalize_observation(
     session_id: &str,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    metrics::gauge!("capture.pi.record_bytes").increment((range.end() - range.start()) as f64);
     let envelope = normalize_pi_entry(native, session_id, range);
-    if envelope.is_err() {
-        metrics::gauge!("capture.pi.normalize_failures").increment(1.0);
-    }
+    if envelope.is_err() {}
     envelope
 }
 

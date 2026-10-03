@@ -174,12 +174,7 @@ impl MaintenanceReaperRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn publish_counts(state: &MaintenanceReaperRegistryState) {
-        metrics::gauge!("daemon.branch_admin.retirement_reapers.pending")
-            .set((state.pending.values().copied().sum::<usize>() as u64) as f64);
-        metrics::gauge!("daemon.branch_admin.retirement_reapers.active")
-            .set((state.reapers.len() as u64) as f64);
-    }
+    fn publish_counts(state: &MaintenanceReaperRegistryState) {}
 
     fn reserve(self: &Arc<Self>, owner: &ProjectServerKey) -> Option<MaintenanceReaperReservation> {
         let mut state = self.state();

@@ -82,8 +82,7 @@ fn read_graph_evidence(
     check_request_control(request, control.as_ref())?;
     let batch = project_graph_batch(reader, request, control.as_ref(), raw)?;
     check_request_control(request, control.as_ref())?;
-    metrics::gauge!("query.graph.project.candidates").set((batch.candidates.len()) as f64);
-    metrics::gauge!("query.graph.project.examined").set(batch.coverage.examined as f64);
+
     Ok(RetrieverOutcome::Complete(batch))
 }
 

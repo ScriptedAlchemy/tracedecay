@@ -1588,12 +1588,7 @@ impl GraphDb {
 
     fn publish_sealed_generation_census(&self) {
         let census = self.sealed_generation_census();
-        metrics::gauge!("graph_db.sealed_store.retained").set(census.retained as f64);
-        metrics::gauge!("graph_db.sealed_store.resident").set(census.resident as f64);
-        metrics::gauge!("graph_db.sealed_store.retained_canonical_bytes")
-            .set(census.retained_canonical_bytes as f64);
-        metrics::gauge!("graph_db.sealed_store.resident_canonical_bytes")
-            .set(census.resident_canonical_bytes as f64);
+
         tracing::debug!(
             event = "graph_sealed_generation_census",
             retained = census.retained,
@@ -1872,7 +1867,6 @@ fn build_sealed_container(
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
-    metrics::gauge!("code_index.seal.encode.effective_workers").set(1);
     let physical_namespace = identity.physical_namespace()?;
     let mut sealed = SealedCompactRows::new(staging)?;
     let (entity_count, relation_count, dependency_namespaces_written) = {
@@ -1980,7 +1974,7 @@ fn push_manifest_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-    metrics::gauge!("code_index.seal.encode.effective_workers").set(workers as f64);
+
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();
         {
@@ -2101,7 +2095,7 @@ fn push_spilled_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-    metrics::gauge!("code_index.seal.encode.effective_workers").set(workers as f64);
+
     let (entity_count, relation_count) = spilled.row_counts();
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();

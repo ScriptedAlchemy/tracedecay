@@ -46,14 +46,12 @@ where
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
-        metrics::gauge!("daemon.project.open.refused.draining").increment(1.0);
         return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
             "daemon is draining before project warm-up".to_string(),
         ));
     }
     tasks.start_cancellable(route, move |cancellation| async move {
         let Some(activity) = lifecycle.try_enter() else {
-            metrics::gauge!("daemon.project.open.refused.draining").increment(1.0);
             return Err(TraceDecayError::Config {
                 message: "daemon is draining before project warm-up".to_string(),
             });

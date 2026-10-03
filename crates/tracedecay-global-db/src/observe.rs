@@ -5,11 +5,7 @@
 //! call site; they never fabricate scan, sort, or transaction work.
 
 #[inline(always)]
-pub(crate) fn record_snapshot_admissions(count: u64) {
-    metrics::gauge!("global_db.snapshot_admissions").increment(count as f64);
-}
+pub(crate) fn record_snapshot_admissions(count: u64) {}
 
 #[inline(always)]
-pub(crate) fn record_transaction_rows(count: u64) {
-    metrics::gauge!("global_db.transaction_rows").increment(count as f64);
-}
+pub(crate) fn record_transaction_rows(count: u64) {}

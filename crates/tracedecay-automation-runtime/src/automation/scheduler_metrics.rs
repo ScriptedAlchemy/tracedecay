@@ -26,11 +26,7 @@ const STATE_COOLDOWN: &str = "cooldown";
 
 const STATE_SKIP: &str = "skip";
 
-fn publish_queue_gauges() {
-    metrics::gauge!("automation.queued").set((QUEUED.load(Ordering::Relaxed)) as f64);
-    metrics::gauge!("automation.running").set((RUNNING.load(Ordering::Relaxed)) as f64);
-    metrics::gauge!("automation.cooldown").set((COOLDOWN.load(Ordering::Relaxed)) as f64);
-}
+fn publish_queue_gauges() {}
 
 /// Holds `automation.running` for the lifetime of one orchestration run.
 pub(crate) struct RunningGuard;
@@ -98,12 +94,8 @@ impl Drop for DurationGuard {
         {
             let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
             match self.kind {
-                DurationKind::BackendStartup => {
-                    metrics::gauge!("automation.backend.startup_ms").set(ms as f64);
-                }
-                DurationKind::Run => {
-                    metrics::gauge!("automation.run_ms").set(ms as f64);
-                }
+                DurationKind::BackendStartup => {}
+                DurationKind::Run => {}
             }
         }
     }
@@ -116,15 +108,9 @@ impl Drop for DurationGuard {
 pub(crate) fn observe_run_terminal(_status: AutomationRunStatus) {
     {
         match _status {
-            AutomationRunStatus::Succeeded => {
-                metrics::gauge!("automation.runs.succeeded_total").increment(1.0);
-            }
-            AutomationRunStatus::Failed => {
-                metrics::gauge!("automation.runs.failed_total").increment(1.0);
-            }
-            AutomationRunStatus::Skipped => {
-                metrics::gauge!("automation.runs.skipped_total").increment(1.0);
-            }
+            AutomationRunStatus::Succeeded => {}
+            AutomationRunStatus::Failed => {}
+            AutomationRunStatus::Skipped => {}
             // Non-terminal statuses never reach terminal-record construction.
             AutomationRunStatus::Queued | AutomationRunStatus::Running => {}
         }
@@ -135,22 +121,14 @@ pub(crate) fn observe_run_terminal(_status: AutomationRunStatus) {
 /// A new variant fails compilation until it chooses a counter.
 fn count_skip_reason(reason: AutomationSkipReasonV1) {
     match reason {
-        AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {
-            metrics::gauge!("automation.skips.lock_total").increment(1.0);
-        }
-        AutomationSkipReasonV1::SchedulerCooldownActive => {
-            metrics::gauge!("automation.skips.cooldown_total").increment(1.0);
-        }
+        AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {}
+        AutomationSkipReasonV1::SchedulerCooldownActive => {}
         AutomationSkipReasonV1::SchedulerIntervalNotElapsed
         | AutomationSkipReasonV1::SchedulerCronNotDue
         | AutomationSkipReasonV1::SchedulerIdleWindowActive
         | AutomationSkipReasonV1::SchedulerScheduleManual
-        | AutomationSkipReasonV1::SchedulerPaused => {
-            metrics::gauge!("automation.skips.not_due_total").increment(1.0);
-        }
-        AutomationSkipReasonV1::NoNewSessionActivity => {
-            metrics::gauge!("automation.skips.no_activity_total").increment(1.0);
-        }
+        | AutomationSkipReasonV1::SchedulerPaused => {}
+        AutomationSkipReasonV1::NoNewSessionActivity => {}
         AutomationSkipReasonV1::AutomationDisabled
         | AutomationSkipReasonV1::DelegatedHostMode
         | AutomationSkipReasonV1::BackendDisabled
@@ -160,18 +138,12 @@ fn count_skip_reason(reason: AutomationSkipReasonV1) {
         | AutomationSkipReasonV1::SkillWriterDisabled
         | AutomationSkipReasonV1::CombinedReviewDisabled
         | AutomationSkipReasonV1::UserJobDisabled
-        | AutomationSkipReasonV1::JobCommandsDisabled => {
-            metrics::gauge!("automation.skips.disabled_total").increment(1.0);
-        }
+        | AutomationSkipReasonV1::JobCommandsDisabled => {}
         AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed
         | AutomationSkipReasonV1::BackendIdentitySuppressed
-        | AutomationSkipReasonV1::SchedulerNonRetryableFailure => {
-            metrics::gauge!("automation.skips.suppressed_total").increment(1.0);
-        }
+        | AutomationSkipReasonV1::SchedulerNonRetryableFailure => {}
         AutomationSkipReasonV1::SchedulerHistoryInvalid
-        | AutomationSkipReasonV1::SchedulerScheduleInvalid => {
-            metrics::gauge!("automation.skips.invalid_total").increment(1.0);
-        }
+        | AutomationSkipReasonV1::SchedulerScheduleInvalid => {}
         AutomationSkipReasonV1::SimilarityAuthorityUnavailable
         | AutomationSkipReasonV1::PartialCoverageNoCandidates
         | AutomationSkipReasonV1::NothingToReview
@@ -187,16 +159,13 @@ fn count_skip_reason(reason: AutomationSkipReasonV1) {
         | AutomationSkipReasonV1::SessionEvidenceBudgetExhausted
         | AutomationSkipReasonV1::SessionEvidenceTimedOut
         | AutomationSkipReasonV1::SessionEvidenceCancelled
-        | AutomationSkipReasonV1::NoSessionEvidence => {
-            metrics::gauge!("automation.skips.other_total").increment(1.0);
-        }
+        | AutomationSkipReasonV1::NoSessionEvidence => {}
     }
 }
 
 #[inline]
 pub(crate) fn observe_due() {
     {
-        metrics::gauge!("automation.due_total").increment(1.0);
         tracing::trace!(name: "automation.schedule_state", value = ?STATE_DUE);
         QUEUED.store(1, Ordering::Relaxed);
         COOLDOWN.store(0, Ordering::Relaxed);

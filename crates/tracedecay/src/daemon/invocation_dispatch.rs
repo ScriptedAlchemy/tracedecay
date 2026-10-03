@@ -24,7 +24,6 @@ fn record_project_open_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    metrics::gauge!("daemon.invocation.route.project_open_failed_total").increment(1.0);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -39,7 +38,6 @@ fn record_project_route_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    metrics::gauge!("daemon.invocation.route.project_route_failed_total").increment(1.0);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -51,7 +49,6 @@ fn record_project_route_refusal(
 }
 
 fn record_admitted_root_refusal(operation: &str) {
-    metrics::gauge!("daemon.invocation.route.admitted_root_failed_total").increment(1.0);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",

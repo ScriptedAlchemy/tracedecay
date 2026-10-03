@@ -67,7 +67,6 @@ pub(crate) fn add(name: &'static str, delta: u64) {
         if delta == 0 {
             return;
         }
-        metrics::gauge!(name).increment(delta as f64);
     };
 }
 

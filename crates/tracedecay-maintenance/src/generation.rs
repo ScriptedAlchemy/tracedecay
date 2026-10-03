@@ -138,12 +138,9 @@ fn finalize_generation_outcome(
     cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
-        metrics::gauge!("daemon.maintenance.generation.cancelled_total").increment(1.0);
         MaintenanceTickOutcome::Retry
     } else {
-        if matches!(outcome, MaintenanceTickOutcome::Retry) {
-            metrics::gauge!("daemon.maintenance.generation.retry_total").increment(1.0);
-        }
+        if matches!(outcome, MaintenanceTickOutcome::Retry) {}
         outcome
     }
 }

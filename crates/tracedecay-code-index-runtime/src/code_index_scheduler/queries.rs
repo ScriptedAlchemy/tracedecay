@@ -114,15 +114,9 @@ fn finish_generation_resolution<T>(
     settlement: GenerationResolutionSettlementV1<T>,
 ) -> GenerationResolutionResultV1<T> {
     finish_generation_resolution_with(settlement, |terminal| match terminal {
-        GenerationResolutionTerminalV1::Ready => {
-            metrics::gauge!("query.generation.resolve.outcome.ready_total").increment(1.0);
-        }
-        GenerationResolutionTerminalV1::Unavailable => {
-            metrics::gauge!("query.generation.resolve.outcome.unavailable_total").increment(1.0);
-        }
-        GenerationResolutionTerminalV1::Failed => {
-            metrics::gauge!("query.generation.resolve.outcome.failed_total").increment(1.0);
-        }
+        GenerationResolutionTerminalV1::Ready => {}
+        GenerationResolutionTerminalV1::Unavailable => {}
+        GenerationResolutionTerminalV1::Failed => {}
     })
 }
 
@@ -220,7 +214,6 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
-        metrics::gauge!("query.generation.resolve.attempts_total").increment(1.0);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -265,11 +258,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
-                metrics::gauge!("query.generation.resolve.serving_hit_total").increment(1.0);
                 return Ok(Some(generation));
             }
 
-            metrics::gauge!("query.generation.resolve.durable_load_total").increment(1.0);
             let scheduler = {
                 let _span =
                     tracing::trace_span!("query.generation.resolve.scheduler_wait").entered();

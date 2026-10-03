@@ -557,10 +557,8 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     let peer_full_close = self.peer_fully_closed_after_eof();
                     tokio::select! {
                         () = peer_full_close => {
-                            metrics::gauge!("daemon.broker.eof_peer_close_total").increment(1.0);
                         }
                         () = settled => {
-                            metrics::gauge!("daemon.broker.eof_settled_close_total").increment(1.0);
                         }
                     }
                     return None;

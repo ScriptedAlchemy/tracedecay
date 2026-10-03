@@ -173,7 +173,7 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
     // This crate holds the stream contract, not a channel endpoint, so the
     // producing/consuming adapters own the stream instrumentation; here the batch
     // size and the explicit-loss (gap) rate are the observable facts.
-    metrics::gauge!("application.result.stream.validate.events").set((events.len() as u64) as f64);
+
     let mut terminal_seen = false;
     let mut expected = events.first().map(|event| event.sequence);
 
@@ -196,7 +196,6 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
             continue;
         }
         if let StreamEventKind::Gap(gap) = &event.kind {
-            metrics::gauge!("application.result.stream.validate.gaps").increment(1.0);
             if event.sequence != gap.first_missing_sequence {
                 return Err(StreamValidationError::InvalidGap(
                     "event sequence does not match the first missing sequence".to_owned(),

@@ -132,7 +132,7 @@ where
 {
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-    metrics::gauge!("retirement_pending").increment(1.0);
+
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,
@@ -162,29 +162,22 @@ struct ProjectServerRetirementFinalizer {
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
         match &status {
-            ProjectServerRetirementStatus::Clean => {
-                metrics::gauge!("daemon.branch_admin.retirement.clean_total").increment(1.0);
-            }
-            ProjectServerRetirementStatus::Failed(_) => {
-                metrics::gauge!("daemon.branch_admin.retirement.failed_total").increment(1.0);
-            }
+            ProjectServerRetirementStatus::Clean => {}
+            ProjectServerRetirementStatus::Failed(_) => {}
             ProjectServerRetirementStatus::Pending => {}
         }
         self.completion.send_replace(status);
         self.terminal = true;
-        metrics::gauge!("retirement_pending").increment(-1.0);
     }
 }
 
 impl Drop for ProjectServerRetirementFinalizer {
     fn drop(&mut self) {
         if !self.terminal {
-            metrics::gauge!("daemon.branch_admin.retirement.abandoned_total").increment(1.0);
             self.completion
                 .send_replace(ProjectServerRetirementStatus::Failed(
                     "retirement tracking task ended without a terminal receipt".to_owned(),
                 ));
-            metrics::gauge!("retirement_pending").increment(-1.0);
         }
     }
 }
@@ -226,7 +219,7 @@ fn track_project_server_retirement_after_admission(
     });
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-    metrics::gauge!("retirement_pending").increment(1.0);
+
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,

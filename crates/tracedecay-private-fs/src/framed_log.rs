@@ -264,7 +264,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length is invalid",
         ));
     }
-    metrics::gauge!("private_fs.framed_log.read_bytes").set(length as f64);
+
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {
@@ -754,7 +754,6 @@ pub fn atomic_write_prepared(
     prepare: impl FnOnce(&Path) -> io::Result<()>,
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<()> {
-    metrics::gauge!("private_fs.framed_log.write_bytes").set((bytes.len()) as f64);
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
@@ -821,7 +820,7 @@ where
         verify_displaced,
         verify_published,
     } = callbacks;
-    metrics::gauge!("private_fs.framed_log.write_bytes").set((bytes.len()) as f64);
+
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let published_existing = std::cell::Cell::new(false);
@@ -969,7 +968,6 @@ pub fn append_durable(
     frame: &[u8],
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<u64> {
-    metrics::gauge!("private_fs.framed_log.write_bytes").set((frame.len()) as f64);
     tighten_existing_file(path)?;
     let (mut output, created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
@@ -990,7 +988,6 @@ pub fn append_durable(
     skip_all
 )]
 pub fn append_unsynced(path: &Path, frame: &[u8]) -> io::Result<u64> {
-    metrics::gauge!("private_fs.framed_log.write_bytes").set((frame.len()) as f64);
     tighten_existing_file(path)?;
     let (mut output, _created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;

@@ -381,8 +381,7 @@ impl ShardRuntime {
             .runtime_leases
             .insert(lease.lease_id.clone(), lease.clone());
         state.touch();
-        metrics::gauge!("runtime_core.registry.runtime_leases").increment(1.0);
-        metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
+
         Ok(lease)
     }
 
@@ -392,8 +391,6 @@ impl ShardRuntime {
         let released = state.runtime_leases.remove(lease_id).is_some();
         if released {
             state.touch();
-            metrics::gauge!("runtime_core.registry.runtime_leases").decrement(1.0);
-            metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
         }
         released
     }
@@ -503,8 +500,7 @@ impl ShardRuntime {
         runtime: std::sync::Arc<Self>,
     ) -> Result<ShardRuntimeClientLifetimeLease, ShardRuntimeError> {
         let token = runtime.register_lifetime_lease(ShardRuntimeResource::Client)?;
-        metrics::gauge!("runtime_core.registry.client_leases").increment(1.0);
-        metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
+
         Ok(ShardRuntimeClientLifetimeLease {
             inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
                 runtime,
@@ -664,8 +660,6 @@ impl ShardRuntimeState {
         let released = before - self.runtime_leases.len();
         if released > 0 {
             let count = released as f64;
-            metrics::gauge!("runtime_core.registry.runtime_leases").decrement(count);
-            metrics::gauge!("runtime_core.registry.lease_releases").increment(count);
         }
         released
     }
@@ -787,21 +781,10 @@ impl ShardRuntimeState {
                 counter: counter_name,
             })?;
         match kind {
-            ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
-                metrics::gauge!("runtime_core.registry.reader_leases").increment(1.0);
-                metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
-            }
-            ShardRuntimeLeaseKind::Snapshot => {
-                metrics::gauge!("runtime_core.registry.snapshot_leases").increment(1.0);
-                metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
-            }
-            ShardRuntimeLeaseKind::Client => {
-                metrics::gauge!("runtime_core.registry.client_leases").increment(1.0);
-                metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
-            }
-            ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
-                metrics::gauge!("runtime_core.registry.lease_acquires").increment(1.0);
-            }
+            ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {}
+            ShardRuntimeLeaseKind::Snapshot => {}
+            ShardRuntimeLeaseKind::Client => {}
+            ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {}
         }
         Ok(())
     }
@@ -812,21 +795,10 @@ impl ShardRuntimeState {
         if let Some(next) = counter.checked_sub(1) {
             *counter = next;
             match kind {
-                ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {
-                    metrics::gauge!("runtime_core.registry.reader_leases").decrement(1.0);
-                    metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
-                }
-                ShardRuntimeLeaseKind::Snapshot => {
-                    metrics::gauge!("runtime_core.registry.snapshot_leases").decrement(1.0);
-                    metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
-                }
-                ShardRuntimeLeaseKind::Client => {
-                    metrics::gauge!("runtime_core.registry.client_leases").decrement(1.0);
-                    metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
-                }
-                ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {
-                    metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
-                }
+                ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {}
+                ShardRuntimeLeaseKind::Snapshot => {}
+                ShardRuntimeLeaseKind::Client => {}
+                ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {}
             }
         } else {
             debug_assert!(false, "attempted to release absent {counter_name}");
@@ -929,10 +901,7 @@ impl ShardRuntimeLifetimeLeaseToken {
         }
         self.runtime
             .release_lifetime_lease(self.resource, self.token);
-        if self.resource == ShardRuntimeResource::Client {
-            metrics::gauge!("runtime_core.registry.client_leases").decrement(1.0);
-            metrics::gauge!("runtime_core.registry.lease_releases").increment(1.0);
-        }
+        if self.resource == ShardRuntimeResource::Client {}
         true
     }
 }

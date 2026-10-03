@@ -373,7 +373,7 @@ impl ProjectFeedbackObservationSinkV1 {
         // Enqueue-side losses (queue full, sink closed, delivery assignment
         // refused) are the waste being diagnosed; count them even though the
         // durable drop tally also travels inside later envelopes.
-        metrics::gauge!("usecases.feedback.observations_dropped").increment(1.0);
+
         saturating_add(&self.dropped_count, 1);
     }
 

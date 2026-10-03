@@ -453,15 +453,9 @@ fn run_combined_scheduler_effect_inner<'a>(
             }
         };
         match outcome {
-            CombinedEffectOutcome::Completed => {
-                metrics::gauge!("daemon.scheduler.combined_effect.completed_total").increment(1.0);
-            }
-            CombinedEffectOutcome::Handled => {
-                metrics::gauge!("daemon.scheduler.combined_effect.handled_total").increment(1.0);
-            }
-            CombinedEffectOutcome::Deferred => {
-                metrics::gauge!("daemon.scheduler.combined_effect.deferred_total").increment(1.0);
-            }
+            CombinedEffectOutcome::Completed => {}
+            CombinedEffectOutcome::Handled => {}
+            CombinedEffectOutcome::Deferred => {}
         }
         outcome
     })

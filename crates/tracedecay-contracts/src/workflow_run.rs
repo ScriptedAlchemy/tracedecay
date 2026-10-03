@@ -208,15 +208,12 @@ where
         // stale digest means runs are being started against a drifted
         // policy/configuration/catalog environment.
         if definition.pinned_policy_digest() != &admission.policy_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
         if definition.pinned_configuration_digest() != &admission.configuration_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::ConfigurationDigestMismatch);
         }
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
         let event = WorkflowRunEvent::admitted_with_fan_out(
@@ -278,7 +275,6 @@ fn observe_run_status_entered(projection: &WorkflowRunProjection) {
             WorkflowRunStatus::Failed => "application.workflow.run.status.failed",
             WorkflowRunStatus::Cancelled => "application.workflow.run.status.cancelled",
         };
-        metrics::gauge!(entered).increment(1.0);
     }
 }
 
@@ -347,8 +343,7 @@ impl WorkflowArtifactPayload {
                 if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
                     return Err(WorkflowArtifactStoreError::Oversized);
                 }
-                metrics::gauge!("application.workflow.artifact.verify.bytes")
-                    .set((bytes.len() as u64) as f64);
+
                 if bytes.len() as u64 != artifact.byte_length()
                     || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
                 {

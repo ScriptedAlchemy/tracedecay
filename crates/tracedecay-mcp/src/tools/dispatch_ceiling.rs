@@ -91,7 +91,7 @@ pub fn tool_dispatch_deadline_error(
 ) -> TraceDecayError {
     // A firing ceiling is a defect signal upstream; count every occurrence so
     // profiling sees the refusals, not only the successful dispatches.
-    metrics::gauge!("mcp.tool_call.dispatch_deadline_total").increment(1.0);
+
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,

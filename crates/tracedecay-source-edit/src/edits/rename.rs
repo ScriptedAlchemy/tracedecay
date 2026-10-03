@@ -275,35 +275,32 @@ pub(crate) async fn rename_symbol(
     dry_run: bool,
 ) -> Result<RenameResult> {
     let identity = preview_id(binding, new_name)?;
-    let refused = |message: String, kind: RenameHazardKindV1| {
-        metrics::gauge!("edits.rename.refused_total").increment(1.0);
-        RenameResult {
-            success: false,
-            preview_id: Some(identity.clone()),
-            preview_digest: None,
-            plan_digest: None,
-            repository_revision: None,
-            graph_revision: None,
-            symbol: binding.qualified_name.clone(),
-            old_name: binding.old_name.clone(),
-            new_name: new_name.to_owned(),
-            files: Vec::new(),
-            reference_count: 0,
-            sites: Vec::new(),
-            dispositions: RenameDispositionCountsV1::default(),
-            hazards: vec![RenameHazardV1 {
-                kind,
-                blocking: true,
-                message: message.clone(),
-                site_id: None,
-            }],
-            protected_values: Vec::new(),
-            impact: RenameImpactV1::default(),
-            dry_run,
-            rolled_back: false,
-            diff: None,
-            message,
-        }
+    let refused = |message: String, kind: RenameHazardKindV1| RenameResult {
+        success: false,
+        preview_id: Some(identity.clone()),
+        preview_digest: None,
+        plan_digest: None,
+        repository_revision: None,
+        graph_revision: None,
+        symbol: binding.qualified_name.clone(),
+        old_name: binding.old_name.clone(),
+        new_name: new_name.to_owned(),
+        files: Vec::new(),
+        reference_count: 0,
+        sites: Vec::new(),
+        dispositions: RenameDispositionCountsV1::default(),
+        hazards: vec![RenameHazardV1 {
+            kind,
+            blocking: true,
+            message: message.clone(),
+            site_id: None,
+        }],
+        protected_values: Vec::new(),
+        impact: RenameImpactV1::default(),
+        dry_run,
+        rolled_back: false,
+        diff: None,
+        message,
     };
 
     if !is_valid_identifier(new_name, &binding.file)
@@ -666,7 +663,6 @@ pub(crate) async fn rename_symbol(
             }
         }
     };
-    metrics::gauge!("edits.rename.sites_examined_total").increment((sites.len() as u64) as f64);
 
     planned.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     sites.sort_by(|left, right| {
@@ -746,7 +742,6 @@ pub(crate) async fn rename_symbol(
         });
     }
     if hazards.iter().any(|hazard| hazard.blocking) {
-        metrics::gauge!("edits.rename.blocked_total").increment(1.0);
         return Ok(RenameResult {
             success: false,
             preview_id: Some(identity),

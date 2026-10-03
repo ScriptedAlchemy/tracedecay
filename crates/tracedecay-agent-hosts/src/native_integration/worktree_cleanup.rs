@@ -494,30 +494,13 @@ fn record_worktree_removal_outcome(
     removal: &Result<WorktreeCleanupRemovalV1, WorktreeContractError>,
 ) {
     match removal {
-        Ok(WorktreeCleanupRemovalV1::Removed { .. }) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.removed").increment(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::AlreadyRemoved { .. }) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.already_removed")
-                .increment(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Denied) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.denied").increment(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Stale) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.stale").increment(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::DurabilityUncertain) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.durability_uncertain")
-                .increment(1.0);
-        }
-        Ok(WorktreeCleanupRemovalV1::Unavailable) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.unavailable").increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.native_integration.worktree_remove.contract_error")
-                .increment(1.0);
-        }
+        Ok(WorktreeCleanupRemovalV1::Removed { .. }) => {}
+        Ok(WorktreeCleanupRemovalV1::AlreadyRemoved { .. }) => {}
+        Ok(WorktreeCleanupRemovalV1::Denied) => {}
+        Ok(WorktreeCleanupRemovalV1::Stale) => {}
+        Ok(WorktreeCleanupRemovalV1::DurabilityUncertain) => {}
+        Ok(WorktreeCleanupRemovalV1::Unavailable) => {}
+        Err(_) => {}
     }
 }
 
@@ -528,31 +511,13 @@ fn record_worktree_reconciliation_outcome(
     reconciliation: &Result<WorktreeCleanupReconciliationV1, WorktreeContractError>,
 ) {
     match reconciliation {
-        Ok(WorktreeCleanupReconciliationV1::Removed { .. }) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.removed").increment(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::StillPresent) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.still_present")
-                .increment(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::DurabilityUncertain) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.durability_uncertain")
-                .increment(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Stale) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.stale").increment(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Denied) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.denied").increment(1.0);
-        }
-        Ok(WorktreeCleanupReconciliationV1::Unavailable) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.unavailable")
-                .increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.native_integration.worktree_reconcile.contract_error")
-                .increment(1.0);
-        }
+        Ok(WorktreeCleanupReconciliationV1::Removed { .. }) => {}
+        Ok(WorktreeCleanupReconciliationV1::StillPresent) => {}
+        Ok(WorktreeCleanupReconciliationV1::DurabilityUncertain) => {}
+        Ok(WorktreeCleanupReconciliationV1::Stale) => {}
+        Ok(WorktreeCleanupReconciliationV1::Denied) => {}
+        Ok(WorktreeCleanupReconciliationV1::Unavailable) => {}
+        Err(_) => {}
     }
 }
 

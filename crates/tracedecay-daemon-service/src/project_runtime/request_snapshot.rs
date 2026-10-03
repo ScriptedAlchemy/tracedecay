@@ -81,7 +81,6 @@ impl ProjectRuntimeRegistryV1 {
         let candidate_roots = super::candidate_request_roots(project_root, canonical_root);
         let mut fences = self.lock_root_fences();
         if self.closed.load(Ordering::Acquire) {
-            metrics::gauge!("daemon.service.request_admission.closed_total").increment(1.0);
             tracing::warn!(
                 event = "project_request_admission",
                 outcome = "unavailable",
@@ -91,7 +90,6 @@ impl ProjectRuntimeRegistryV1 {
             return None;
         }
         if candidate_roots.iter().any(|root| fences.contains(root)) {
-            metrics::gauge!("daemon.service.request_admission.fenced_total").increment(1.0);
             tracing::warn!(
                 event = "project_request_admission",
                 outcome = "unavailable",
@@ -111,8 +109,6 @@ impl ProjectRuntimeRegistryV1 {
                     AdmittedProjectRuntimeV1::capture(runtime),
                 ),
                 ProjectRuntimeResolutionV1::Missing => {
-                    metrics::gauge!("daemon.service.request_admission.runtime_missing_total")
-                        .increment(1.0);
                     tracing::warn!(
                         event = "project_request_admission",
                         outcome = "unavailable",
@@ -122,8 +118,6 @@ impl ProjectRuntimeRegistryV1 {
                     return None;
                 }
                 ProjectRuntimeResolutionV1::Ambiguous => {
-                    metrics::gauge!("daemon.service.request_admission.runtime_ambiguous_total")
-                        .increment(1.0);
                     tracing::warn!(
                         event = "project_request_admission",
                         outcome = "unavailable",
@@ -134,7 +128,6 @@ impl ProjectRuntimeRegistryV1 {
                 }
             };
         if fences.contains(&resolved_root) {
-            metrics::gauge!("daemon.service.request_admission.fenced_total").increment(1.0);
             tracing::warn!(
                 event = "project_request_admission",
                 outcome = "unavailable",
@@ -149,7 +142,6 @@ impl ProjectRuntimeRegistryV1 {
                 .get(root)
                 .is_some_and(|count| *count == usize::MAX)
         }) {
-            metrics::gauge!("daemon.service.request_admission.lease_overflow_total").increment(1.0);
             tracing::warn!(
                 event = "project_request_admission",
                 outcome = "unavailable",
@@ -165,7 +157,7 @@ impl ProjectRuntimeRegistryV1 {
         }
         drop(runtimes);
         drop(fences);
-        metrics::gauge!("daemon.service.request_in_flight").increment(1.0);
+
         Some(ProjectRuntimeRequestLeaseV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),

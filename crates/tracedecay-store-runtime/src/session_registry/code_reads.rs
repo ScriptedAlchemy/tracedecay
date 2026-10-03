@@ -56,14 +56,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                             ));
                         }
 
-                        metrics::gauge!("daemon.store.project_graph.mount_reuse_total")
-                            .increment(1.0);
                         return Ok(database);
                     }
                     true
                 }
                 Some(super::ProjectRuntimeOwnerStateV1::Opening) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -76,7 +73,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | super::ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(state.unavailable_route_error());
                 }
                 None => false,

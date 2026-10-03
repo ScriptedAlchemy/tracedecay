@@ -403,8 +403,7 @@ pub(crate) fn retain_bounded_generation_index_accounted(
             survives
         });
     }
-    metrics::gauge!("code_index.retention.generation_index.accounting_visits")
-        .set(accounting_visits as f64);
+
     GenerationIndexRetentionSweepV1 {
         removed: original_len.saturating_sub(entries.len()),
         accounting_visits,

@@ -22,17 +22,12 @@ struct InvocationDispatchGaugeGuard;
 
 impl InvocationDispatchGaugeGuard {
     fn enter() -> Self {
-        metrics::gauge!("daemon.service.invocation.active").increment(1.0);
-        metrics::gauge!("daemon.service.invocation.requests_total").increment(1.0);
         Self
     }
 }
 
 impl Drop for InvocationDispatchGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.service.invocation.active").decrement(1.0);
-        metrics::gauge!("daemon.service.invocation.settled_total").increment(1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 /// Counts a request the front door denied before any payload handler ran.
@@ -40,24 +35,12 @@ impl Drop for InvocationDispatchGaugeGuard {
 /// key is static and bounded.
 fn observe_front_door_denial(problem: DaemonInvocationProblem) {
     match problem {
-        DaemonInvocationProblem::InvalidRequest => {
-            metrics::gauge!("daemon.service.invocation.denied.invalid_request").increment(1.0);
-        }
-        DaemonInvocationProblem::UnsupportedRevision => {
-            metrics::gauge!("daemon.service.invocation.denied.unsupported_revision").increment(1.0);
-        }
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            metrics::gauge!("daemon.service.invocation.denied.not_authorized").increment(1.0);
-        }
-        DaemonInvocationProblem::ResetRequired => {
-            metrics::gauge!("daemon.service.invocation.denied.reset_required").increment(1.0);
-        }
-        DaemonInvocationProblem::ApplicationContractViolation => {
-            metrics::gauge!("daemon.service.invocation.denied.contract_violation").increment(1.0);
-        }
-        DaemonInvocationProblem::Unavailable => {
-            metrics::gauge!("daemon.service.invocation.denied.unavailable").increment(1.0);
-        }
+        DaemonInvocationProblem::InvalidRequest => {}
+        DaemonInvocationProblem::UnsupportedRevision => {}
+        DaemonInvocationProblem::NotFoundOrNotAuthorized => {}
+        DaemonInvocationProblem::ResetRequired => {}
+        DaemonInvocationProblem::ApplicationContractViolation => {}
+        DaemonInvocationProblem::Unavailable => {}
     }
 }
 

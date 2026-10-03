@@ -219,7 +219,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                                 )
                             }
                             HydrationPreflightOutcomeV1::Cancelled => {
-                                metrics::gauge!("query.cancel.count").increment(1u32);
                                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
                             }
                             HydrationPreflightOutcomeV1::Ready { estimated_bytes } => {
@@ -256,8 +255,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 outcome,
             });
         }
-        metrics::gauge!("query.hydrate.results").set((results.len()) as f64);
-        metrics::gauge!("query.hydrate.bytes").set(bytes_hydrated as f64);
+
         Ok(HydrationPageV1 { results, receipts })
     }
 
@@ -317,7 +315,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
             }
             HydrationReadOutcomeV1::Cancelled => {
-                metrics::gauge!("query.cancel.count").increment(1u32);
                 HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
             }
         })
@@ -330,7 +327,6 @@ fn prework_unavailable(
     bytes_hydrated: u64,
 ) -> Option<HydrationUnavailableV1> {
     if control.is_cancelled() {
-        metrics::gauge!("query.cancel.count").increment(1u32);
         return Some(HydrationUnavailableV1::Cancelled);
     }
     if bytes_hydrated >= budget.max_hydration_bytes {

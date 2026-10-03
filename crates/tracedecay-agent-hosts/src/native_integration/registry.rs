@@ -263,10 +263,7 @@ impl DaemonNativeIntegrationOwner {
         })
         .await
         .map_err(|_| NativeIntegrationPortError::Unavailable)?
-        .inspect(|reconciled| {
-            metrics::gauge!("daemon.native_integration.worktree_recovered")
-                .increment(*reconciled as f64);
-        })
+        .inspect(|reconciled| {})
     }
 
     pub fn authorized_scope_set(
@@ -391,9 +388,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         let owner = self
             .ensure_registered(database, target, observed_at, analysis)
             .await;
-        if owner.is_err() {
-            metrics::gauge!("daemon.native_integration.ensure.failed").increment(1.0);
-        }
+        if owner.is_err() {}
         owner
     }
 
@@ -479,7 +474,6 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
-            metrics::gauge!("daemon.native_integration.ensure.reused").increment(1.0);
             return Ok(owner);
         }
 
@@ -491,7 +485,6 @@ impl DaemonNativeIntegrationServiceRegistry {
             .existing(&database_path, &repository_root, &project_id)
             .await?
         {
-            metrics::gauge!("daemon.native_integration.ensure.reused").increment(1.0);
             return Ok(owner);
         }
 
@@ -602,7 +595,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                 owner: owner.clone(),
             },
         );
-        metrics::gauge!("daemon.native_integration.ensure.mounted").increment(1.0);
+
         Ok(owner)
     }
 

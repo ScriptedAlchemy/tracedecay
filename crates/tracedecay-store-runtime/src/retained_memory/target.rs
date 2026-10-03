@@ -77,8 +77,7 @@ impl RetainedMemoryTargetObservationV1 {
         let open = RETAINED_MEMORY_TARGETS_OPEN
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        metrics::gauge!("daemon.retained.memory.target.opened_total").increment(1.0);
-        metrics::gauge!("daemon.retained.memory.target.open").set(open as f64);
+
         Self
     }
 }
@@ -90,8 +89,6 @@ impl Drop for RetainedMemoryTargetObservationV1 {
             Ordering::Relaxed,
             |open| open.checked_sub(1),
         );
-        metrics::gauge!("daemon.retained.memory.target.open")
-            .set((RETAINED_MEMORY_TARGETS_OPEN.load(Ordering::Relaxed)) as f64);
     }
 }
 

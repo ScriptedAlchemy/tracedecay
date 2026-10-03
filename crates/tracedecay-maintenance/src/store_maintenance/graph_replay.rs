@@ -48,7 +48,7 @@ pub fn defer_graph_replay_pool_busy(
     project_root: &Path,
 ) -> super::CodeGenerationRetentionOutcomeV1 {
     observations.record_graph_replay_release_unhealthy(project_root);
-    metrics::gauge!("daemon.git.maintenance.replay_pool_busy_total").increment(1.0);
+
     log_code_generation_retention_degraded(observations, "graph_replay_pool_busy");
     super::CodeGenerationRetentionOutcomeV1::Failed
 }
@@ -154,7 +154,6 @@ pub async fn reconcile_graph_replay_releases(
     // arming failure was already reported; skips stay quiet on the log and
     // visible on the gauge.
     if !observations.graph_replay_release_attempt_admitted(project_root) {
-        metrics::gauge!("daemon.git.maintenance.replay_release_deferred_total").increment(1.0);
         return ReconcileOutcome::Deferred;
     }
     let staging_cursor = observations.graph_staging_release_cursor(project_root);

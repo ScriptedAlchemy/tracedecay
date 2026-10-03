@@ -105,19 +105,10 @@ pub fn register_context_scout_lifecycle_authority(
     // (fresh install here, exact removal in unregister), so it tracks the
     // map's population exactly.
     match registration {
-        AuthorityRegistrationV1::Registered => {
-            metrics::gauge!("daemon.context_scout.authority.registered").increment(1.0);
-            metrics::gauge!("daemon.context_scout.authority.active").increment(1.0);
-        }
-        AuthorityRegistrationV1::AlreadyRegistered => {
-            metrics::gauge!("daemon.context_scout.authority.already_registered").increment(1.0);
-        }
-        AuthorityRegistrationV1::Conflict => {
-            metrics::gauge!("daemon.context_scout.authority.conflict").increment(1.0);
-        }
-        AuthorityRegistrationV1::Rejected(_) => {
-            metrics::gauge!("daemon.context_scout.authority.rejected").increment(1.0);
-        }
+        AuthorityRegistrationV1::Registered => {}
+        AuthorityRegistrationV1::AlreadyRegistered => {}
+        AuthorityRegistrationV1::Conflict => {}
+        AuthorityRegistrationV1::Rejected(_) => {}
     }
     registration
 }
@@ -195,8 +186,7 @@ pub fn unregister_context_scout_lifecycle_authority(
         .is_some_and(|existing| existing.sessions.shares_client_with(sessions))
     {
         authorities.remove(&key);
-        metrics::gauge!("daemon.context_scout.authority.unregistered").increment(1.0);
-        metrics::gauge!("daemon.context_scout.authority.active").increment(-1.0);
+
         return true;
     }
     false
@@ -433,14 +423,11 @@ async fn lookup_context_scout_lifecycle(
     )
     .await
     {
-        Ok(address) => {
-            metrics::gauge!("daemon.context_scout.lookup.resolved").increment(1.0);
-            ContextScoutLifecycleLookupV1::Resolved(Box::new(address))
-        }
+        Ok(address) => ContextScoutLifecycleLookupV1::Resolved(Box::new(address)),
         Err(reason) => {
             // The bounded per-reason detail already goes to tracing; the
             // counter records only the fail-closed outcome.
-            metrics::gauge!("daemon.context_scout.lookup.unresolved").increment(1.0);
+
             tracing::debug!(
                 target: "tracedecay::context_scout_lifecycle",
                 reason = reason.as_str(),

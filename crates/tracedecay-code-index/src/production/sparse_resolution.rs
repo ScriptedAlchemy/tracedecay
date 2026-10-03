@@ -446,7 +446,7 @@ pub(super) fn resolve_edit(
     .into_iter()
     .flatten()
     .collect::<BTreeSet<_>>();
-    metrics::gauge!("code_index.sparse.dependents_repointed").set(dependents.len() as f64);
+
     let candidates = edited_indices
         .iter()
         .chain(&referencing)
@@ -493,12 +493,6 @@ pub(super) fn resolve_edit(
         )
         .collect::<HashSet<_>>();
     let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
-    metrics::gauge!("code_index.sparse.references_resolved").set(
-        selection
-            .iter()
-            .map(|(_, picks)| picks.len())
-            .sum::<usize>() as f64,
-    );
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.

@@ -137,7 +137,7 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
         })?;
         facts.push(fact);
     }
-    metrics::gauge!("runtime_core.memory.query_rows").increment(facts.len() as f64);
+
     Ok(facts)
 }
 
@@ -1050,9 +1050,7 @@ impl DatabaseFactStore<'_> {
         })
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        if outcome.is_err() {
-            metrics::gauge!("runtime_core.memory.commit_failures").increment(1.0);
-        }
+        if outcome.is_err() {}
         outcome
     }
 }

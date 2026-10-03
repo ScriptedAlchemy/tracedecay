@@ -406,27 +406,13 @@ pub async fn lcm_session_boundary_for_test(
 /// outcome so classifying a retained page never copies its response payload.
 fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
     match result {
-        Ok(response) if response.retry_status.is_some() => {
-            metrics::gauge!("daemon.lcm.compress.deferred").increment(1.0);
-        }
-        Ok(response) if response.status == "needs_summary" => {
-            metrics::gauge!("daemon.lcm.compress.needs_summary").increment(1.0);
-        }
-        Ok(response) if response.summary_nodes_created > 0 => {
-            metrics::gauge!("daemon.lcm.compress.committed").increment(1.0);
-        }
-        Ok(_) => {
-            metrics::gauge!("daemon.lcm.compress.noop").increment(1.0);
-        }
-        Err(LcmError::Cancelled) => {
-            metrics::gauge!("daemon.lcm.compress.cancelled").increment(1.0);
-        }
-        Err(LcmError::DeadlineExceeded) => {
-            metrics::gauge!("daemon.lcm.compress.deadline").increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.lcm.compress.failed").increment(1.0);
-        }
+        Ok(response) if response.retry_status.is_some() => {}
+        Ok(response) if response.status == "needs_summary" => {}
+        Ok(response) if response.summary_nodes_created > 0 => {}
+        Ok(_) => {}
+        Err(LcmError::Cancelled) => {}
+        Err(LcmError::DeadlineExceeded) => {}
+        Err(_) => {}
     }
 }
 

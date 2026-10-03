@@ -108,15 +108,12 @@ struct ProjectOpenActiveObservationV1;
 
 impl ProjectOpenActiveObservationV1 {
     fn enter() -> Self {
-        metrics::gauge!("daemon.project.open.active").increment(1.0);
         Self
     }
 }
 
 impl Drop for ProjectOpenActiveObservationV1 {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.project.open.active").increment(-1.0);
-    }
+    fn drop(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -601,13 +598,11 @@ impl ProjectOpenTasks {
         let mut registry = self.lock_registry();
         registry.prune(now);
         if registry.closed_profiles.contains(&route.profile_root) {
-            metrics::gauge!("daemon.project.open.refused.profile_closed").increment(1.0);
             return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
                 "project open denied: authenticated profile was remotely deleted".to_owned(),
             ));
         }
         if let Some(entry) = registry.retiring.get(&route) {
-            metrics::gauge!("daemon.project.open.joined.retiring").increment(1.0);
             return ProjectOpenTaskClaim::InFlight(entry.state.clone());
         }
         if let Some(entry) = registry.routes.get(&route) {
@@ -621,21 +616,17 @@ impl ProjectOpenTasks {
                 ProjectOpenTaskState::Failed(failure)
                     if finished && failure.is_stale_for(&route) =>
                 {
-                    metrics::gauge!("daemon.project.open.refusal_stale_dropped").increment(1.0);
                     registry.routes.remove(&route);
                 }
                 ProjectOpenTaskState::Failed(failure) => {
-                    metrics::gauge!("daemon.project.open.refused.cached_failure").increment(1.0);
                     return ProjectOpenTaskClaim::Failed(failure);
                 }
                 ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
-                    metrics::gauge!("daemon.project.open.joined.inflight").increment(1.0);
                     return ProjectOpenTaskClaim::InFlight(receiver);
                 }
             }
         }
         if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
-            metrics::gauge!("daemon.project.open.refused.saturated").increment(1.0);
             return ProjectOpenTaskClaim::Saturated;
         }
 
@@ -650,15 +641,10 @@ impl ProjectOpenTasks {
                 let _active = ProjectOpenActiveObservationV1::enter();
                 let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
                 let state = match open(task_cancellation).await {
-                    Ok(()) => {
-                        metrics::gauge!("daemon.project.open.outcome.ready").increment(1.0);
-                        ProjectOpenTaskState::Ready
-                    }
+                    Ok(()) => ProjectOpenTaskState::Ready,
                     Err(error) => {
                         if outcome_cancellation.is_cancelled() {
-                            metrics::gauge!("daemon.project.open.outcome.cancelled").increment(1.0);
                         } else {
-                            metrics::gauge!("daemon.project.open.outcome.failed").increment(1.0);
                         }
                         ProjectOpenTaskState::Failed(ProjectOpenFailure::recorded_for_route(
                             &error,
