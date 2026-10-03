@@ -93,7 +93,8 @@ pub use lexical_page_source::{
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
-    VerifiedSealedTextGenerationMetadataV1,
+    VerifiedSealedTextGenerationMetadataV1, advance_import_dictionary_digest,
+    initial_import_dictionary_digest,
 };
 mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
