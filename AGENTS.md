@@ -95,9 +95,9 @@ unauthorized external action after completing independent, authorized work.
   the pinned toolchain, `cd / && cargo +<toolchain> update -w --manifest-path
   <repo>/Cargo.toml` (`-p <crate>` for a targeted bump), then run
   `pnpm install`. Inside the checkout `cargo update` refuses the vendored git
-  sources and `cargo add` sees only vendored crates. A fork the workspace
-  consumes directly (grafeo) is a `git` + `rev` entry in
-  `[workspace.dependencies]`; `[patch.crates-io]` is only for forks that
+  sources and `cargo add` sees only vendored crates. A fork only workspace
+  members consume is a plain `git` + `rev` dependency (grafeo in
+  `[workspace.dependencies]`); `[patch.crates-io]` is only for forks that
   crates.io dependents must also resolve to. To bump one, edit `rev` on every
   crate from that repository, refresh the lock with `-p` for each, and run
   `pnpm install`: pnpm vendors every source Cargo.lock names, git included,
