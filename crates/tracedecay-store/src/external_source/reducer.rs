@@ -8,8 +8,7 @@ pub fn apply_source_commit(
     current: Option<&SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
-    let outcome = reduce_source_commit(current.cloned(), commit);
-    outcome
+    reduce_source_commit(current.cloned(), commit)
 }
 
 /// Applies a commit while consuming the writer actor's verified state.
@@ -25,8 +24,7 @@ pub fn apply_source_commit_owned(
     current: Option<SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
-    let outcome = reduce_source_commit(current, commit);
-    outcome
+    reduce_source_commit(current, commit)
 }
 
 #[tracing::instrument(
