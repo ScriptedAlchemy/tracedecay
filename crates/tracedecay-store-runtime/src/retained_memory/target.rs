@@ -171,8 +171,8 @@ pub async fn open_project_retained_memory_target(
             ApplicationProblem::Unsupported {
                 diagnostic: SafeDiagnostic {
                     code: "memory.cross_project_write_unsupported".to_owned(),
-                    message: "Memory writes target only the served project; a project selector \
-                              naming another project is read-only"
+                    message: "This route writes memory only for its served project; send \
+                              another project's write through that project's route"
                         .to_owned(),
                 },
                 retry: RetryDirective::Never,
