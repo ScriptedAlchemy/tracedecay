@@ -1789,11 +1789,11 @@ mod tests {
         let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
 
         let pooled = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
-        assert_eq!(pooled.row_counts(), (1602, 1600));
+        assert_eq!(pooled.row_counts(), (4018, 4008));
         let canonical = generations_root.join(fixture.pool_manifest.file_name().unwrap());
         std::fs::rename(&fixture.pool_manifest, &canonical).unwrap();
         let canonical_only = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
-        assert_eq!(canonical_only.row_counts(), (1602, 1600));
+        assert_eq!(canonical_only.row_counts(), (4018, 4008));
         std::fs::remove_file(&canonical).unwrap();
         assert!(matches!(
             hydrate(&provider, &owner, &source, &two_second_check()),
@@ -1916,13 +1916,14 @@ mod tests {
         generation: CodeGenerationId,
     }
 
-    /// 1,600 functions named `{prefix}_{index}` whose bodies apply
+    /// 4,000 functions named `{prefix}_{index}` whose bodies apply
     /// `operator`. A clean generation's evidence is implied by its own
-    /// symbols and chunks and fits one page; a successor that changes every
-    /// body keeps one whole lineage row per function, which spans several.
+    /// symbols and chunks and fits one page; a sparse successor that changes
+    /// every body keeps one whole lineage row per function, which spans
+    /// several.
     fn multi_page_evidence_source(prefix: &str, operator: char) -> String {
         let mut source = String::new();
-        for index in 0..1_600 {
+        for index in 0..4_000 {
             writeln!(
                 source,
                 "pub fn {prefix}_{index}(value: usize) -> usize {{ value {operator} {index} }}"
@@ -1933,7 +1934,10 @@ mod tests {
     }
 
     /// Publish a successor of the fixture's clean generation that changes
-    /// every function body, so the active generation's evidence spans pages.
+    /// every function body of `src/lib.rs` and no other file, so the active
+    /// generation seals sparsely and its evidence spans pages. Padding the
+    /// project past the changed-file share keeps this successor off the cold
+    /// rebuild path, whose compacted request cannot span evidence pages.
     fn publish_multi_page_evidence(
         project_root: &Path,
         prefix: &str,
@@ -1965,6 +1969,13 @@ mod tests {
             multi_page_evidence_source("partitioned_fixture", '+'),
         )
         .unwrap();
+        for pad in 0..8 {
+            std::fs::write(
+                project_root.join("src").join(format!("pad_{pad}.rs")),
+                format!("pub fn pad_{pad}(value: usize) -> usize {{ value + {pad} }}\n"),
+            )
+            .unwrap();
+        }
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "partitioned fixture"]);
         let project_id = ProjectId::new(format!("project.manifest-{label}")).unwrap();
