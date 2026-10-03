@@ -2374,23 +2374,32 @@ fn disclose_unresolved_calls<T>(
     outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
     unresolved: &UnresolvedCallerGapsV1,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let reasons = unresolved
+        .exact_target_unavailable
+        .then_some(OmissionReason::Unsupported)
+        .into_iter()
+        .chain(
+            (!unresolved.unmodeled_imports.is_empty()).then_some(OmissionReason::ImportUnmodeled),
+        );
+    disclose_symbol_omissions(outcome, reasons)
+}
+
+/// Marks an answer partial with one symbol omission per reason, when there
+/// is any reason.
+fn disclose_symbol_omissions<T>(
+    outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
+    reasons: impl IntoIterator<Item = OmissionReason>,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let mut reasons = reasons.into_iter().peekable();
     match outcome {
         RetrievalPortOutcome::Completed(mut evidence)
         | RetrievalPortOutcome::Partial(mut evidence)
-            if !unresolved.is_empty() =>
+            if reasons.peek().is_some() =>
         {
             evidence.coverage.completeness = CoverageCompleteness::Partial;
             for domain in &mut evidence.coverage.domains {
                 domain.completeness = CoverageCompleteness::Partial;
             }
-            let reasons = unresolved
-                .exact_target_unavailable
-                .then_some(OmissionReason::Unsupported)
-                .into_iter()
-                .chain(
-                    (!unresolved.unmodeled_imports.is_empty())
-                        .then_some(OmissionReason::ImportUnmodeled),
-                );
             evidence.omissions.extend(reasons.map(|reason| Omission {
                 domain: EvidenceDomain::Symbol,
                 count: 1,
@@ -3266,6 +3275,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 targets.truncate(cap);
                 complete = false;
             }
+            let interfaces = targets
+                .iter()
+                .map(|target| target.occurrence.clone())
+                .collect::<Vec<_>>();
+            let Ok(undecided) = prepared
+                .reader
+                .has_undecided_implementors(&interfaces, Arc::clone(&cancellation))
+            else {
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
+            };
             let mut keys = Vec::new();
             for target in targets {
                 if keys.len() >= cap {
@@ -3292,16 +3311,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 keys.truncate(cap);
                 complete = false;
             }
-            finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_implementations",
-                binding,
-                keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "implementations",
-                complete,
+            disclose_symbol_omissions(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_implementations",
+                    binding,
+                    keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "implementations",
+                    complete,
+                ),
+                undecided.then_some(OmissionReason::Unsupported),
             )
         })
     }
