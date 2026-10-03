@@ -7,8 +7,9 @@
 //! vocabularies so success-only totals cannot hide waste. Per-family
 //! `*_nanos` gauges accumulate inclusive aggregate service demand (parallel
 //! workers overlap); the span totals remain the timing authority.
-//! The feature-off path calls the underlying operation directly and does not
-//! derive dimensions or count output collections.
+//! No metrics recorder is installed outside profiling sessions, so with TRACE
+//! disabled the per-file measures call the operation directly and neither
+//! read the clock, derive dimensions, nor count output collections.
 
 use crate::extraction_artifact::ExtractionArtifactV1;
 use crate::incremental::ParseReuse;
@@ -97,16 +98,26 @@ pub(crate) fn file_byte_bucket(bytes: usize) -> &'static str {
     }
 }
 
+#[inline(always)]
+fn observing() -> bool {
+    tracing::level_enabled!(tracing::Level::TRACE)
+}
+
 /// Count one file operation (`parse` or `traverse`) under the closed family
-/// and byte-bucket vocabularies. Both labels come from bounded tables, so the
-/// derived gauge names cannot grow with path, dialect, or exact file size.
-fn record_file_dims(operation: &str, language: &str, source_bytes: usize) {
-    metrics::gauge!(format!("code_extraction.{operation}_calls")).increment(1.0);
-    metrics::gauge!(format!("code_extraction.{operation}_bytes")).increment(source_bytes as f64);
+/// and byte-bucket vocabularies. Every label comes from a bounded table, so
+/// series cannot grow with path, dialect, or exact file size.
+fn record_file_dims(operation: &'static str, language: &str, source_bytes: usize) {
     let family = language_family(language);
-    metrics::gauge!(format!("code_extraction.{operation}_calls.{family}")).increment(1.0);
     let bucket = file_byte_bucket(source_bytes);
-    metrics::gauge!(format!("code_extraction.{operation}_calls.{bucket}")).increment(1.0);
+    metrics::gauge!(
+        "code_extraction.file_calls",
+        "operation" => operation,
+        "family" => family,
+        "bucket" => bucket
+    )
+    .increment(1.0);
+    metrics::gauge!("code_extraction.file_bytes", "operation" => operation, "family" => family)
+        .increment(source_bytes as f64);
 }
 
 /// Accumulate one file operation's inclusive time into the closed family
@@ -114,9 +125,10 @@ fn record_file_dims(operation: &str, language: &str, source_bytes: usize) {
 /// not wall time; the span totals remain the timing authority. On the batch
 /// traverse path this includes the nested parse, mirroring the inclusive
 /// `traverse_file` span; on the retained path it is pure walk.
-fn record_family_nanos(operation: &str, language: &str, nanos: f64) {
+fn record_family_nanos(operation: &'static str, language: &str, nanos: f64) {
     let family = language_family(language);
-    metrics::gauge!(format!("code_extraction.{operation}_nanos.{family}")).increment(nanos);
+    metrics::gauge!("code_extraction.file_nanos", "operation" => operation, "family" => family)
+        .increment(nanos);
 }
 
 /// Closed per-file parse outcome recorded by [`measure_parse_file`].
@@ -124,9 +136,6 @@ fn record_family_nanos(operation: &str, language: &str, nanos: f64) {
 pub(crate) enum ParseFileOutcome {
     /// Tree-sitter produced a tree. `has_syntax_errors` marks recovered
     /// grammar errors, which force downstream full re-extraction.
-    // Feature-off, classification closures are compiled but never invoked,
-    // so only the feature-on recorder reads these fields.
-    #[allow(dead_code)]
     Parsed {
         root_children: usize,
         has_syntax_errors: bool,
@@ -158,6 +167,9 @@ pub(crate) fn measure_parse_file<T>(
     f: impl FnOnce() -> T,
     outcome: impl FnOnce(&T) -> ParseFileOutcome,
 ) -> T {
+    if !observing() {
+        return f();
+    }
     {
         record_file_dims("parse", language, source_bytes);
         let started = Instant::now();
@@ -198,6 +210,9 @@ pub(crate) fn measure_extract_file<T>(
     f: impl FnOnce() -> T,
     counts: impl FnOnce(&T) -> ExtractOutputCounts,
 ) -> T {
+    if !observing() {
+        return f();
+    }
     {
         record_file_dims("traverse", language, source_bytes);
         let started = Instant::now();
