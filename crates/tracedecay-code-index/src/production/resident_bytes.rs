@@ -206,9 +206,9 @@ fn go_method_set_heap_bytes(row: &CodeIndexGoMethodSetRowV1) -> usize {
             ))
     }
     let row_bytes = match &row.row {
-        GoMethodSetRowV1::Receiver { type_name, method } => {
-            type_name.capacity().saturating_add(signature_bytes(method))
-        }
+        GoMethodSetRowV1::Receiver {
+            type_name, method, ..
+        } => type_name.capacity().saturating_add(signature_bytes(method)),
         GoMethodSetRowV1::InterfaceMethod { method } => signature_bytes(method),
         GoMethodSetRowV1::Embeds { embedded } | GoMethodSetRowV1::Promotes { embedded } => {
             type_bytes(embedded)
@@ -216,8 +216,7 @@ fn go_method_set_heap_bytes(row: &CodeIndexGoMethodSetRowV1) -> usize {
         GoMethodSetRowV1::Field { name } => name.capacity(),
         GoMethodSetRowV1::GenericInterface
         | GoMethodSetRowV1::EmptyInterface
-        | GoMethodSetRowV1::NamedType
-        | GoMethodSetRowV1::GenericType => 0,
+        | GoMethodSetRowV1::NamedType => 0,
     };
     row.occurrence.as_str().len().saturating_add(row_bytes)
 }

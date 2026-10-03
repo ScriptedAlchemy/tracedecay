@@ -437,6 +437,36 @@ fn go_external_embedding_makes_same_depth_promotions_uncertain() {
 }
 
 #[test]
+fn go_generic_type_decides_methods_whose_signature_ignores_its_type_parameters() {
+    let (child, cold) = increment(
+        "go-sat-generic-fixed",
+        &[(
+            "gen/gen.go",
+            "package gen\n\ntype U int\n\ntype Namer interface {\n\tName() string\n}\n\ntype Getter interface {\n\tGet() U\n}\n\ntype Box[T any] struct{ v T }\n\nfunc (b *Box[T]) Name() string { return \"box\" }\n\ntype Cell[T any] struct{}\n\nfunc (c Cell[U]) Get() U {\n\tvar v U\n\treturn v\n}\n",
+        )],
+    );
+    for generation in [&child, &cold] {
+        let edges = implements(generation);
+        assert!(
+            edges.contains(&edge("gen/gen.go::Box", "gen/gen.go::Namer")),
+            "Box[T].Name() string is the same for every T: {edges:?}"
+        );
+        assert!(
+            !undecided(generation, "gen/gen.go::Namer"),
+            "Box's fixed-signature method decides Namer"
+        );
+        assert!(
+            !edges.contains(&edge("gen/gen.go::Cell", "gen/gen.go::Getter")),
+            "Cell[U].Get returns the receiver's type parameter, not gen.U: {edges:?}"
+        );
+        assert!(
+            undecided(generation, "gen/gen.go::Getter"),
+            "Cell's Get depends on its renamed type parameter, so Getter stays undecided"
+        );
+    }
+}
+
+#[test]
 fn go_instantiated_generic_embedding_is_undecided_not_matched() {
     let (child, cold) = increment(
         "go-sat-generic-embed",

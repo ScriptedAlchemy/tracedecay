@@ -558,6 +558,7 @@ func (Simple) Log(format string, args ...any) {}
                         params: vec![vec![text("int")], vec![text("int")]],
                         results: vec![vec![text("int")], vec![text("error")]],
                     },
+                    generic: false,
                 },
             ),
             (
@@ -569,6 +570,7 @@ func (Simple) Log(format string, args ...any) {}
                         params: vec![vec![text("string")], vec![text("..."), text("any")]],
                         results: vec![],
                     },
+                    generic: false,
                 },
             ),
             ("Simple".to_owned(), GoMethodSetRowV1::NamedType),
@@ -639,6 +641,41 @@ func (l *List[T]) Len() int { return len(l.items) }
     );
     let result = GoExtractor.extract_artifact("gen/list.go", source).result;
     assert_eq!(edge_pairs(&result, EdgeKind::Receives), [("Len", "List")]);
+}
+
+#[test]
+fn test_go_receiver_marks_methods_whose_signature_names_its_type_parameters() {
+    use tracedecay_code_extraction::GoMethodSetRowV1;
+    let rows = go_method_set_rows(
+        r#"package gen
+
+type T int
+
+type List[T any] struct{}
+
+func (l *List[T]) Len() int { return 0 }
+func (l List[U]) First() U { var v U; return v }
+func (l List[U]) Each(f func(U) bool) {}
+func (l List[U]) Base() T { return 0 }
+"#,
+    );
+    let generic = rows
+        .iter()
+        .filter_map(|(name, row)| match row {
+            GoMethodSetRowV1::Receiver { generic, .. } => Some((name.as_str(), *generic)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generic,
+        [
+            ("Base", false),
+            ("Each", true),
+            ("First", true),
+            ("Len", false)
+        ],
+        "the receiver's own parameter names decide, not the type declaration's"
+    );
 }
 
 #[test]
@@ -735,7 +772,6 @@ type Many = []Base
         [
             ("Base".to_owned(), GoMethodSetRowV1::NamedType),
             ("List".to_owned(), GoMethodSetRowV1::NamedType),
-            ("List".to_owned(), GoMethodSetRowV1::GenericType),
             ("Many".to_owned(), GoMethodSetRowV1::NamedType),
             ("Ptr".to_owned(), GoMethodSetRowV1::NamedType),
             ("Same".to_owned(), GoMethodSetRowV1::NamedType),

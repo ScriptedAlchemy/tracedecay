@@ -158,8 +158,8 @@ type OwnerV1<'a> = (&'a str, &'a str);
 struct EffectiveV1<'a> {
     methods: HashSet<MethodKeyV1>,
     /// Names found where the walk cannot decide which method, if any, they
-    /// select: beside an embedding the project cannot see, or declared by a
-    /// generic type whose signatures depend on its type arguments.
+    /// select: beside an embedding the project cannot see, or declared with
+    /// a signature that depends on its receiver's type arguments.
     loose: HashSet<NameV1<'a>>,
     /// Whether an embedding the project cannot see may supply more methods.
     open: bool,
@@ -183,10 +183,9 @@ where
         })
         .collect::<Vec<_>>();
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
-    let mut method_sets = HashMap::<OwnerV1<'_>, HashSet<MethodKeyV1>>::new();
+    let mut method_sets = HashMap::<OwnerV1<'_>, HashMap<MethodKeyV1, bool>>::new();
     let mut promotes = HashMap::<OwnerV1<'_>, Vec<PromotedV1>>::new();
     let mut fields = HashMap::<OwnerV1<'_>, Vec<NameV1<'_>>>::new();
-    let mut generic = HashSet::<OwnerV1<'_>>::new();
     let mut interfaces = Vec::<InterfaceV1<'_>>::new();
     let mut interface_rows = HashMap::<&SymbolOccurrenceId, usize>::new();
     let mut interface_names = HashMap::<(&str, &str), Vec<usize>>::new();
@@ -228,10 +227,6 @@ where
                         .push((&bound.occurrence, bound.span));
                     continue;
                 }
-                GoMethodSetRowV1::GenericType => {
-                    generic.insert(owner);
-                    continue;
-                }
                 GoMethodSetRowV1::Field { name } => {
                     let exported = name.chars().next().is_some_and(char::is_uppercase);
                     fields
@@ -240,11 +235,15 @@ where
                         .push((name.as_str(), (!exported).then_some(scope)));
                     continue;
                 }
-                GoMethodSetRowV1::Receiver { type_name, method } => {
+                GoMethodSetRowV1::Receiver {
+                    type_name,
+                    method,
+                    generic,
+                } => {
                     method_sets
                         .entry((scope, type_name.as_str()))
                         .or_default()
-                        .insert(go_file.method_key(method));
+                        .insert(go_file.method_key(method), *generic);
                     continue;
                 }
                 GoMethodSetRowV1::Promotes { embedded } => {
@@ -287,7 +286,6 @@ where
                 // `expand` reports an interface without methods as a gap.
                 GoMethodSetRowV1::EmptyInterface
                 | GoMethodSetRowV1::NamedType
-                | GoMethodSetRowV1::GenericType
                 | GoMethodSetRowV1::Field { .. }
                 | GoMethodSetRowV1::Receiver { .. }
                 | GoMethodSetRowV1::Promotes { .. } => {}
@@ -327,7 +325,6 @@ where
         promotes: &promotes,
         own: &method_sets,
         fields: &fields,
-        generic: &generic,
         error: &error,
     };
     let effective = owners
@@ -466,9 +463,8 @@ struct PromotionV1<'a> {
     interface_names: &'a HashMap<OwnerV1<'a>, Vec<usize>>,
     expansions: &'a [ExpandedV1],
     promotes: &'a HashMap<OwnerV1<'a>, Vec<PromotedV1>>,
-    own: &'a HashMap<OwnerV1<'a>, HashSet<MethodKeyV1>>,
+    own: &'a HashMap<OwnerV1<'a>, HashMap<MethodKeyV1, bool>>,
     fields: &'a HashMap<OwnerV1<'a>, Vec<NameV1<'a>>>,
-    generic: &'a HashSet<OwnerV1<'a>>,
     error: &'a MethodKeyV1,
 }
 
@@ -491,7 +487,8 @@ impl<'a> PromotionV1<'a> {
         let mut depth = 0_usize;
         while !level.is_empty() {
             // Each name with its method (none for a field), the paths
-            // reaching it, and whether a generic type declares it.
+            // reaching it, and whether its signature depends on its
+            // receiver's type arguments.
             let mut found = HashMap::<NameV1<'a>, (Option<&'a MethodKeyV1>, usize, bool)>::new();
             let mut next = BTreeMap::new();
             for (reached, paths) in level {
@@ -513,15 +510,14 @@ impl<'a> PromotionV1<'a> {
                                     }
                                 }
                             }
-                            let generic = self.generic.contains(&named);
-                            if generic {
+                            let own = self.own.get(&named).into_iter().flatten();
+                            if own.clone().any(|(_, generic)| *generic) {
                                 reason.get_or_insert_with(|| named.1.to_owned());
                             }
                             let fields = self.fields.get(&named).into_iter().flatten();
-                            let own = self.own.get(&named).into_iter().flatten();
-                            Box::new(fields.map(|name| (*name, None, false)).chain(
-                                own.map(move |method| (name_of(method), Some(method), generic)),
-                            ))
+                            Box::new(fields.map(|name| (*name, None, false)).chain(own.map(
+                                |(method, generic)| (name_of(method), Some(method), *generic),
+                            )))
                         }
                         ReachedV1::Interface(index) => Box::new(
                             self.expansions[index]

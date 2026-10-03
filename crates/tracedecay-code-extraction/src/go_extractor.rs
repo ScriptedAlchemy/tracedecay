@@ -512,12 +512,17 @@ impl GoExtractor {
             });
         }
 
-        if let Some(type_name) = Self::extract_receiver(state, node, &id) {
+        if let Some((type_name, type_params)) = Self::extract_receiver(state, node, &id) {
+            let method = Self::method_signature(state, node);
+            let generic = method.params.iter().chain(&method.results).flatten().any(
+                |token| matches!(token, GoTypeTokenV1::Local(name) if type_params.contains(name)),
+            );
             method_sets.push(ExtractedGoMethodSetRowV1 {
                 node_id: id.clone(),
                 row: GoMethodSetRowV1::Receiver {
                     type_name,
-                    method: Self::method_signature(state, node),
+                    method,
+                    generic,
                 },
             });
         }
@@ -562,7 +567,6 @@ impl GoExtractor {
             |n| state.node_text(n).to_string(),
         );
 
-        let first = method_sets.len();
         // Check what type is being defined.
         if let Some(struct_type) = find_direct_child_by_kind(spec_node, "struct_type") {
             Self::visit_struct(state, method_sets, &name, struct_type, decl_node);
@@ -572,17 +576,6 @@ impl GoExtractor {
             // A plain type definition (e.g., `type Foo int`) that is not a type alias.
             // Treat it like a type alias for graph purposes.
             Self::visit_named_type(state, method_sets, &name, decl_node);
-        }
-        if spec_node.child_by_field_name("type_parameters").is_some()
-            && let Some(named) = method_sets
-                .get(first)
-                .filter(|named| named.row == GoMethodSetRowV1::NamedType)
-        {
-            let node_id = named.node_id.clone();
-            method_sets.push(ExtractedGoMethodSetRowV1 {
-                node_id,
-                row: GoMethodSetRowV1::GenericType,
-            });
         }
     }
 
@@ -1347,12 +1340,13 @@ impl GoExtractor {
     }
 
     /// Extract the receiver type from a `method_declaration`, create a
-    /// Receives edge, and return the receiver's type name.
+    /// Receives edge, and return the receiver's type name and type-parameter
+    /// names.
     fn extract_receiver(
         state: &mut ExtractionState,
         node: TsNode<'_>,
         method_id: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<String>)> {
         let mut receiver = None;
         // The first parameter_list child is the receiver.
         let mut cursor = node.walk();
@@ -1364,7 +1358,7 @@ impl GoExtractor {
                     // Extract the type name from the parameter_declaration inside.
                     if let Some(param) = find_direct_child_by_kind(child, "parameter_declaration") {
                         receiver = Self::extract_receiver_type_name(state, param);
-                        if let Some(type_name) = receiver.clone() {
+                        if let Some((type_name, _)) = receiver.clone() {
                             let line = child.start_position().row as u32;
                             let column = child.start_position().column as u32;
                             // Create an unresolved Receives reference.
@@ -1405,17 +1399,30 @@ impl GoExtractor {
         receiver
     }
 
-    /// Extract the type name from a receiver `parameter_declaration`:
-    /// `c Circle`, `c *Circle`, `l List[T]`, and `l *List[T]`.
-    fn extract_receiver_type_name(state: &ExtractionState, param: TsNode<'_>) -> Option<String> {
+    /// Extract the type name and the type-parameter names from a receiver
+    /// `parameter_declaration`: `c Circle`, `c *Circle`, `l List[T]`, and
+    /// `l *List[U]`. A receiver may rename its type's parameters.
+    fn extract_receiver_type_name(
+        state: &ExtractionState,
+        param: TsNode<'_>,
+    ) -> Option<(String, Vec<String>)> {
         let mut ty = param.child_by_field_name("type")?;
         if ty.kind() == "pointer_type" {
             ty = ty.named_child(0)?;
         }
+        let mut type_params = Vec::new();
         if ty.kind() == "generic_type" {
+            if let Some(arguments) = ty.child_by_field_name("type_arguments") {
+                let mut cursor = arguments.walk();
+                type_params.extend(
+                    arguments
+                        .named_children(&mut cursor)
+                        .map(|argument| state.node_text(argument).to_string()),
+                );
+            }
             ty = ty.child_by_field_name("type")?;
         }
-        (ty.kind() == "type_identifier").then(|| state.node_text(ty).to_string())
+        (ty.kind() == "type_identifier").then(|| (state.node_text(ty).to_string(), type_params))
     }
 
     /// The name, parameter types, and result types of a `method_declaration`

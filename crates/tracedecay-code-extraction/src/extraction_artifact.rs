@@ -354,6 +354,10 @@ pub enum GoMethodSetRowV1 {
     Receiver {
         type_name: String,
         method: GoMethodSignatureV1,
+        /// Whether `method`'s parameter or result types name one of the
+        /// receiver's type parameters. Such a signature changes with the
+        /// type arguments, a substitution the seal does not make.
+        generic: bool,
     },
     /// A method spec inside an interface body.
     InterfaceMethod { method: GoMethodSignatureV1 },
@@ -374,9 +378,6 @@ pub enum GoMethodSetRowV1 {
     /// A struct field's name, embedded or not. It hides deeper promoted
     /// names.
     Field { name: String },
-    /// A `NamedType` declared with a type parameter list. Its method
-    /// signatures need a type-argument substitution the seal does not make.
-    GenericType,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -384,8 +385,8 @@ pub enum GoMethodSetRowV1 {
 pub struct ExtractedGoMethodSetRowV1 {
     /// The declaring node: the `StructMethod`, the `InterfaceType` (for
     /// `InterfaceMethod`, `Embeds`, `GenericInterface`, `EmptyInterface`),
-    /// or the `Struct` / `TypeAlias` node (for `NamedType`, `GenericType`,
-    /// `Field`, and `Promotes`).
+    /// or the `Struct` / `TypeAlias` node (for `NamedType`, `Field`, and
+    /// `Promotes`).
     pub node_id: String,
     pub row: GoMethodSetRowV1,
 }
