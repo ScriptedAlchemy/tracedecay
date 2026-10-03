@@ -660,3 +660,31 @@ fn copy_producing_commands_are_unknown_beside_their_surviving_siblings() {
         Commands::Remote { .. }
     ));
 }
+
+#[test]
+fn query_commands_accept_json_output() {
+    assert!(matches!(
+        parse_command(&[
+            "sessions",
+            "sync-status",
+            "--idempotency-key",
+            "k",
+            "--json"
+        ]),
+        Commands::Sessions {
+            action: crate::cli::SessionsAction::SyncStatus { json: true, .. }
+        }
+    ));
+    assert!(matches!(
+        parse_command(&["sessions", "search", "query", "--json"]),
+        Commands::Sessions {
+            action: crate::cli::SessionsAction::Search(ref args)
+        } if args.json
+    ));
+    assert!(matches!(
+        parse_command(&["branch", "list", "--json"]),
+        Commands::Branch {
+            action: crate::cli::BranchAction::List { json: true, .. }
+        }
+    ));
+}

@@ -125,7 +125,7 @@ impl AgentIntegration for OpenCodeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mOpenCode integration\x1b[0m");
+        dc.section("OpenCode integration");
         doctor_check_config(dc, &ctx.home, &ctx.profile);
         doctor_check_prompt(dc, &ctx.home, &ctx.profile);
         doctor_check_plugin(dc, &ctx.home, &ctx.profile);

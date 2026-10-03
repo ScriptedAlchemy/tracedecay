@@ -51,7 +51,7 @@ impl AgentIntegration for DevinIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mDevin integration\x1b[0m");
+        dc.section("Devin integration");
         doctor_check_devin_registration(
             dc,
             &devin_mcp_config_path(&ctx.home),

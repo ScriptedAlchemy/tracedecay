@@ -121,7 +121,7 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
+        dc.section("Claude Code integration");
         doctor_check_plugin(dc, &ctx.home);
         doctor_check_permissions_json(dc, &ctx.home);
         super::doctor_check_managed_skill_prompt_indexes(
@@ -1196,7 +1196,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
 
 /// Report local project config without rewriting host-owned files.
 fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
-    eprintln!("\n\x1b[1mLocal config\x1b[0m");
+    dc.section("Local config");
     let mcp_json_path = project_path.join(".mcp.json");
     let local_settings_path = project_path.join(".claude").join("settings.local.json");
     let local_paths = [mcp_json_path, local_settings_path];
