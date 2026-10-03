@@ -452,7 +452,7 @@ fn step_wf_activate(suffix: &str) -> PrimeStep {
         inject: Vec::new(),
         tool: "tracedecay_workflow_activate_definition",
         args: wf_activate_args(suffix),
-        capture: &[("digany:revision", "wf_rev")],
+        capture: &[("digpath:payload:revision", "wf_rev")],
     }
 }
 

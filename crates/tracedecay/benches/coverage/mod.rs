@@ -1600,6 +1600,20 @@ async fn call_transient(
 /// `<field> expected sha256:<hex>` repair hints published by
 /// `workflow_validate_definition` denials — mirrors the suite's
 /// `_WORKFLOW_PIN_MISMATCH` contract.
+/// A `sha256:`-prefixed manifest digest is exactly 71 chars — the "sha256:"
+/// scheme is not itself hexadecimal, so it is sliced, not scanned.
+fn digest_at(message: &str, pos: usize) -> Option<String> {
+    let digest: String = message[pos..].chars().take(71).collect();
+    if digest.len() == 71
+        && digest.starts_with("sha256:")
+        && digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        Some(digest)
+    } else {
+        None
+    }
+}
+
 fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, Value>) -> bool {
     let mut found = false;
     let mut all = Vec::new();
@@ -1628,12 +1642,7 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
             let Some(expect_pos) = message.find("expected sha256:") else {
                 continue;
             };
-            let digest = &message[expect_pos + "expected ".len()..];
-            let digest: String = digest
-                .chars()
-                .take_while(|c| c.is_ascii_hexdigit() || *c == ':')
-                .collect();
-            if digest.len() == 71 {
+            if let Some(digest) = digest_at(message, expect_pos + "expected ".len()) {
                 pins.insert(field.to_owned(), Value::String(digest));
                 found = true;
             }
@@ -1643,12 +1652,8 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
             let field = message[..expect_pos]
                 .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .next();
-            let digest = &message[expect_pos + " expected ".len()..];
-            let digest: String = digest
-                .chars()
-                .take_while(|c| c.is_ascii_hexdigit() || *c == ':')
-                .collect();
-            if let (Some(field), true) = (field, digest.len() == 71)
+            let digest = digest_at(message, expect_pos + " expected ".len());
+            if let (Some(field), Some(digest)) = (field, digest)
                 && field.starts_with("pinned_")
                 && field.ends_with("_digest")
             {
@@ -2369,7 +2374,9 @@ async fn seed_work(
                 json!({
                     "definition_id": definition_id,
                     "definition_version": attempt,
-                    "expected_revision": attempt,
+                    // Each version's disposition starts at revision 1 after
+                    // register; the number is not the definition_version.
+                    "expected_revision": 1,
                     "format": "json",
                 }),
             )
@@ -2390,10 +2397,28 @@ async fn seed_work(
                     }
                     activated = dig(&resp, "problem").is_none();
                     activated_version = attempt;
+                    if !activated {
+                        seeds.skipped.push(format!(
+                            "workflow seed: activate v{attempt} denied: {}",
+                            dig(&resp, "code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                        ));
+                    }
                     break;
                 }
-                Err(_) => break,
+                Err(error) => {
+                    seeds.skipped.push(format!(
+                        "workflow seed: activate v{attempt} transport-failed: {error}"
+                    ));
+                    break;
+                }
             }
+        }
+        if !activated {
+            seeds.skipped.push(String::from(
+                "workflow seed: activation never landed; definition keeps unrepaired pins",
+            ));
         }
         work.definition = definition.clone();
         work.definition_id = definition_id.clone();
