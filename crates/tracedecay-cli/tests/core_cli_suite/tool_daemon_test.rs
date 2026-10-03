@@ -1991,6 +1991,29 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
             .expect("open graph database");
+        // TEMP PROBE (not for commit): count writer-lock contention from the live init daemon.
+        let mut locked = 0u32;
+        let started = std::time::Instant::now();
+        let mut attempts = 0u32;
+        while started.elapsed() < Duration::from_secs(3) {
+            attempts += 1;
+            if let Err(error) = db
+                .execute_write_batch(
+                    "probe",
+                    "CREATE TABLE IF NOT EXISTS td_probe (x); DROP TABLE td_probe;",
+                )
+                .await
+            {
+                let text = format!("{error:?}");
+                if text.contains("locked") {
+                    locked += 1;
+                } else {
+                    panic!("probe: {text}");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        eprintln!("PROBE attempts={attempts} locked={locked}");
         db.execute_write_batch(
             "seed doctor daemon reclaimable pages fixture",
             "CREATE TABLE doctor_daemon_probe (payload BLOB);\
