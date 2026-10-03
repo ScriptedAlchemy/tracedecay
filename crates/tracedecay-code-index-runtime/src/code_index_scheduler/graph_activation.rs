@@ -757,15 +757,20 @@ struct PendingInteractiveCatalogWarmV1 {
     /// layered generation carries instead of scanning its projection.
     predecessor: Option<Arc<CodeGraphProjectionStore>>,
     cancellation: Arc<dyn GraphCancellation>,
+    owner: LatestCodeTextGenerationV1,
 }
 
 impl PendingInteractiveCatalogWarmV1 {
+    /// The first warm settles the owner's graph either way, so the
+    /// predecessor it held is released here and never outlives it.
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
-        self.store.warm_interactive_catalog_with_cancellation(
+        let warmed = self.store.warm_interactive_catalog_with_cancellation(
             self.predecessor.as_deref(),
             self.cancellation,
-        )
+        );
+        self.owner.release_graph_predecessor();
+        warmed
     }
 }
 
@@ -818,6 +823,7 @@ impl LatestCodeTextGenerationV1 {
             store,
             predecessor: None,
             cancellation: graph_cancellation,
+            owner: self.clone(),
         }))
     }
 }
@@ -882,6 +888,7 @@ impl LatestCompleteCodeIndexV1 {
             store,
             predecessor,
             cancellation: graph_cancellation,
+            owner: self.text.clone(),
         }))
     }
 }
