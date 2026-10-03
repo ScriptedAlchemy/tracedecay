@@ -52,14 +52,22 @@ pub(super) async fn run_sync_status(
         AdminCliSurfaceRequestV1::SessionsSyncStatus { idempotency_key },
     )
     .await?;
+    println!("{}", sync_status_output(&project_root, outcome, json)?);
+    Ok(())
+}
+
+fn sync_status_output(
+    project_root: &Path,
+    outcome: AdminCliSessionSyncV1,
+    json: bool,
+) -> tracedecay_domain::errors::Result<String> {
     let receipt = json.then(|| outcome.clone());
     let state = session_sync_poll_state(SessionSyncSurface::Status, outcome)?;
     if let Some(receipt) = receipt {
-        println!("{}", serde_json::to_string_pretty(&receipt)?);
-        return Ok(());
+        return Ok(serde_json::to_string_pretty(&receipt)?);
     }
-    match state {
-        SessionSyncPollState::Pending { operation_id, .. } => println!(
+    Ok(match state {
+        SessionSyncPollState::Pending { operation_id, .. } => format!(
             "session sync is still running ({}); no cancellation was requested",
             operation_id.as_str()
         ),
@@ -67,21 +75,17 @@ pub(super) async fn run_sync_status(
             operation_id,
             idempotency_key,
             remaining_work,
-        } => println!(
-            "{}",
-            session_sync_deferred_report(
-                &project_root,
-                "session sync",
-                operation_id.as_str(),
-                idempotency_key.as_str(),
-                remaining_work,
-            )
+        } => session_sync_deferred_report(
+            project_root,
+            "session sync",
+            operation_id.as_str(),
+            idempotency_key.as_str(),
+            remaining_work,
         ),
         SessionSyncPollState::Completed { operation_id } => {
-            println!("session sync completed ({})", operation_id.as_str());
+            format!("session sync completed ({})", operation_id.as_str())
         }
-    }
-    Ok(())
+    })
 }
 
 #[derive(Debug)]
@@ -373,14 +377,19 @@ mod tests {
 
     use tracedecay_contracts::retrieval::AdminCliSessionSyncV1;
     use tracedecay_contracts::session_sync::{
-        SessionSyncCoverageV1, SessionSyncSourceCoverageV1, SessionSyncStatsV1,
+        SessionGitSyncV1, SessionSyncCommandV1, SessionSyncCompletionReceiptV1,
+        SessionSyncCoverageV1, SessionSyncJournalStatusV1, SessionSyncJournalV1,
+        SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncSourceCoverageV1, SessionSyncStatsV1,
+        SessionTranscriptImportV1,
     };
-    use tracedecay_contracts::{IdempotencyKey, OperationTermination, RequestId};
-    use tracedecay_domain::UtcMicros;
+    use tracedecay_contracts::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
+    };
+    use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
 
     use super::{
         SessionSyncPollState, SessionSyncSurface, session_sync_deferred_report,
-        session_sync_poll_state, session_sync_timeout_message,
+        session_sync_poll_state, session_sync_timeout_message, sync_status_output,
     };
 
     fn complete(
@@ -539,6 +548,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn journaled_partial_receipt(command: SessionSyncCommandV1) -> AdminCliSessionSyncV1 {
+        let request = SessionSyncRequestV1::new(
+            RequestId::new("session-sync.fixture").unwrap(),
+            IdempotencyKey::new("session-sync.fixture").unwrap(),
+            SessionSyncScopeV1::new(
+                ProjectId::new("project.fixture").unwrap(),
+                UserProfileId::new("profile.fixture").unwrap(),
+            ),
+            Deadline::new(UtcMicros(200)).unwrap(),
+            CancellationSignal::active("session-sync.fixture").unwrap(),
+            command,
+        );
+        let mut journal = SessionSyncJournalV1::queued(&request, UtcMicros(10));
+        journal.status = SessionSyncJournalStatusV1::Complete;
+        journal.completion = Some(SessionSyncCompletionReceiptV1 {
+            admission: journal.admission.clone(),
+            coalesced_primary: None,
+            completed_at: UtcMicros(20),
+            termination: OperationTermination::Partial,
+            stats: SessionSyncStatsV1::default(),
+            coverage: vec![SessionSyncSourceCoverageV1 {
+                store_scope: "git".to_owned(),
+                coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+            }],
+            source_frontiers: Vec::new(),
+            failure_codes: Vec::new(),
+        });
+        journal.outcome().into()
+    }
+
+    #[test]
+    fn sync_status_rejects_a_git_sync_receipt_with_remaining_sessions() {
+        let git_sync =
+            SessionSyncCommandV1::SynchronizeGit(SessionGitSyncV1::new(0, 1, false).unwrap());
+        for json in [false, true] {
+            let error = sync_status_output(
+                Path::new("/repo"),
+                journaled_partial_receipt(git_sync),
+                json,
+            )
+            .expect_err("git sync schedules no background catch-up");
+
+            assert_eq!(
+                error.to_string(),
+                "config error: session sync did not complete successfully \
+                 (partial; remaining work 1)"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_status_reports_a_journaled_deferred_import() {
+        let import =
+            SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts());
+
+        let report =
+            sync_status_output(Path::new("/repo"), journaled_partial_receipt(import), false)
+                .unwrap();
+
+        assert!(report.contains("continues in the background"));
     }
 
     #[test]
