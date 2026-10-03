@@ -2220,7 +2220,6 @@ where
         }?;
         let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes)?;
         crate::observe::record_generation_state("queryable");
-
         Ok(published)
     }
 

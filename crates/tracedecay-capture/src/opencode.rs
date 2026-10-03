@@ -24,7 +24,6 @@ pub fn normalize_observation(
     // is no truthful record-bytes gauge here; entries are the normalize span's
     // call count. Failures are counted, never hidden.
     let envelope = normalize_opencode_record(native, session_id, stable_record_id, range);
-
     envelope
 }
 

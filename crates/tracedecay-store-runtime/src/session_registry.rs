@@ -144,7 +144,6 @@ impl StoreMountObservationV1 {
         let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-
         Self
     }
 }

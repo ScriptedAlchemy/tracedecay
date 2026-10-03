@@ -2611,7 +2611,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "graph activation failed retryably; the sealed generation \
                                      still seats and the next pass retries native graph"
                                 );
-
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);

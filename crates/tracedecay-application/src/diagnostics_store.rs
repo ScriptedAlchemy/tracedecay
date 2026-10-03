@@ -969,7 +969,6 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .records_for_generation(generation)
             .await
             .map_err(|error| port_error("diagnostics_for_generation", error))?;
-
         Ok(records)
     }
 
@@ -982,7 +981,6 @@ impl DiagnosticStore for DiagnosticsStore<'_> {
             .current_records(generation)
             .await
             .map_err(|error| port_error("current_diagnostics", error))?;
-
         Ok(records)
     }
 

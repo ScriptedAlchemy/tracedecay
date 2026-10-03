@@ -388,7 +388,6 @@ impl DaemonNativeIntegrationServiceRegistry {
         let owner = self
             .ensure_registered(database, target, observed_at, analysis)
             .await;
-
         owner
     }
 
@@ -595,7 +594,6 @@ impl DaemonNativeIntegrationServiceRegistry {
                 owner: owner.clone(),
             },
         );
-
         Ok(owner)
     }
 

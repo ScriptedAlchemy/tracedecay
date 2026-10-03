@@ -405,7 +405,6 @@ impl HookAdmissionLedgerV1 {
             dropped_overflow_records,
             truncated_tail_bytes,
         };
-
         Ok((ledger, report))
     }
 
@@ -477,7 +476,6 @@ impl HookAdmissionLedgerV1 {
             ),
             &mut frames,
         )?;
-
         self.append(&frames)?;
         let order = self.next_order;
         self.next_order = self.next_order.saturating_add(1);
@@ -492,7 +490,6 @@ impl HookAdmissionLedgerV1 {
         if let Some((work, _)) = work {
             self.insert_pending_work(identity, work.clone())?;
         }
-
         self.compact_if_sparse()?;
         Ok(self.staged(HookAdmissionDecisionV1::Admitted, order, false))
     }
@@ -563,7 +560,6 @@ impl HookAdmissionLedgerV1 {
         if removed > 0 {
             self.rewrite()?;
         }
-
         Ok(removed)
     }
 
@@ -851,7 +847,6 @@ impl HookAdmissionLedgerV1 {
             }
         }
         self.next_order = ordered.len() as u64;
-
         let path = log_path(&self.root);
         let mut state = self
             .log

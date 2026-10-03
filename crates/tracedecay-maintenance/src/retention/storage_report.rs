@@ -590,7 +590,6 @@ pub async fn build_storage_report_page_from_registered_global_db(
     })
     .await
     .map_err(|error| report_error("join storage directory page", error))??;
-
     let project_ids = directory_page
         .directories
         .iter()

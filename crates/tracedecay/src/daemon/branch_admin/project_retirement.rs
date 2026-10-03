@@ -132,7 +132,6 @@ where
 {
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,
@@ -214,7 +213,6 @@ fn track_project_server_retirement_after_admission(
     });
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,

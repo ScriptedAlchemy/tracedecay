@@ -1049,7 +1049,6 @@ impl GraphDbRegistry {
                         // Same-identity attach against a mounted (or still
                         // materializing) runtime: no native open runs, so a
                         // profile can separate these hits from full opens.
-
                         return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
@@ -1121,7 +1120,6 @@ impl GraphDbRegistry {
                 }
             }
         };
-
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
         // has overwritten it.

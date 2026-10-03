@@ -251,7 +251,6 @@ impl McpDispatchCatalogV1 {
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
         let fingerprint = CatalogDigest::from_manifest_digest(fingerprint)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
-
         Ok(Self {
             contracts: by_name,
             fingerprint,
@@ -268,7 +267,6 @@ impl McpDispatchCatalogV1 {
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
         let contract = self.contracts.get(tool_name);
-
         contract
     }
 

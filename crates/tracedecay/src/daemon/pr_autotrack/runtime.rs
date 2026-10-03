@@ -203,7 +203,6 @@ async fn poll_project(
         Ok(Ok(discovery)) => {
             // Sweep volume: every PR head this poll examined, including the
             // fork heads it refused to track.
-
             discovery
         }
         Ok(Err(reason)) => {

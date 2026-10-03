@@ -82,7 +82,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     require_contiguous_checkpoint(conn, batch).await?;
 
     persist_occurrences(conn, batch, control).await?;
-
     for copy in batch.copies() {
         checkpoint_relation_rebuild_control(control)?;
         validate_copy(conn, batch, copy).await?;

@@ -58,7 +58,6 @@ impl CodexContextState {
                 Err(read) => return (Self::from_meta(meta), read),
             };
         store_prior_context(path, generation, before_offset, state.clone());
-
         (state, read)
     }
 

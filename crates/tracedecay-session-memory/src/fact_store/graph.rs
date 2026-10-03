@@ -375,7 +375,6 @@ async fn reconcile_project_memory_graph_pass(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let loaded = load_source(db, &owner, read_control, Some(db)).await?;
-
     let watermark = source_watermark(&owner, &loaded.source, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());

@@ -43,7 +43,6 @@ pub(super) fn encode_meta(meta: &HookSpoolMetaV1) -> Result<Vec<u8>, HookSpoolEr
     if bytes.len() > MAX_META_BYTES {
         return Err(HookSpoolError::MetadataCorrupted);
     }
-
     Ok(bytes)
 }
 

@@ -1136,7 +1136,6 @@ fn build_shared_jsonl_page_with_frame_limit(
             .collect::<TranscriptIngestResult<Vec<_>>>()
     };
     let frames = frames?;
-
     let retained_container_bytes = std::mem::size_of::<SharedJsonlPage>()
         .saturating_add(std::mem::size_of::<CachedSharedJsonlPage>())
         .saturating_add(std::mem::size_of::<SharedJsonlPageKey>())
@@ -1177,7 +1176,6 @@ fn build_shared_jsonl_page_with_frame_limit(
             .shrink_to(retained_bytes)
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
     }
-
     Ok(Arc::new(SharedJsonlPage {
         frames,
         lazy_preparation: tokio::sync::Mutex::new(()),
@@ -1283,7 +1281,6 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 if task_cancellation.is_cancelled() {
                     return Err(TranscriptIngestError::Cancelled { provider });
                 }
-
                 #[cfg(test)]
                 enter_shared_jsonl_frame_preparation(
                     preparation_file_identity,
@@ -1305,7 +1302,6 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-
     let newly_prepared_bytes = prepared.iter().fold(0_u64, |total, (_, prepared)| {
         total.saturating_add(
             prepared
@@ -1472,7 +1468,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             }
             let page = Arc::clone(&cached.page);
             cache.pages.push_back(cached);
-
             return Ok((page, true));
         }
         if let Some(in_flight) = cache.in_flight.get(&key) {
@@ -1517,11 +1512,9 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         }
         let in_flight = Arc::new(SharedJsonlInFlight::new());
         cache.in_flight.insert(key.clone(), Arc::clone(&in_flight));
-
         break in_flight;
     };
     let mut in_flight_guard = SharedJsonlInFlightGuard::new(in_flight);
-
     if !speculative {
         let mut cache = cache_lock.lock().await;
         let mut index = 0;
@@ -1546,7 +1539,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             let mut cache = cache_lock.lock().await;
             let notify = cache.in_flight.remove(&key);
             cache.speculative_in_flight.remove(&key);
-
             in_flight_guard.disarm();
             drop(cache);
             if let Some(notify) = notify {
@@ -1561,7 +1553,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             let mut cache = cache_lock.lock().await;
             let notify = cache.in_flight.remove(&key);
             cache.speculative_in_flight.remove(&key);
-
             in_flight_guard.disarm();
             drop(cache);
             if let Some(notify) = notify {
@@ -1593,7 +1584,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
     let mut cache = cache_lock.lock().await;
     let notify = cache.in_flight.remove(&key);
     cache.speculative_in_flight.remove(&key);
-
     in_flight_guard.disarm();
     let page = match page {
         Ok(page) => page,
@@ -1634,7 +1624,6 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             });
         }
     }
-
     drop(cache);
     if let Some(notify) = notify {
         notify.notify.notify_waiters();
@@ -1677,7 +1666,6 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 if matches!(error, TranscriptIngestError::Cancelled { .. }) {
                     return;
                 }
-
                 tracing::debug!(
                     provider = "codex",
                     error = %error,
@@ -1794,7 +1782,6 @@ impl ActiveAdmission<'_> {
             provider: self.provider,
         })?
         .with_resume_checkpoint(self.file_identity, checkpoint.resume_fingerprint);
-
         if let Err(outcome) = self
             .admission
             .advance_non_durable_source_cursor(advance, self.cancellation.clone())
@@ -2040,7 +2027,6 @@ impl ActiveAdmission<'_> {
         if frames.is_empty() {
             return Ok(());
         }
-
         let mut batch_expected = expected_cursor.clone();
         let mut requests = Vec::with_capacity(frames.len());
         let mut checkpoints = Vec::with_capacity(frames.len());
@@ -2499,7 +2485,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                             active
                                 .advance_coverage(expected_cursor, checkpoint, reason, None)
                                 .await?;
-
                             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                             if before_decode {
                                 progress.frames_rejected_before_decode =
@@ -2573,7 +2558,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                     None,
                 )
                 .await?;
-
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
         if active.cancellation.is_cancelled() {
@@ -2658,7 +2642,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 active
                     .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                     .await?;
-
                 progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                 if before_decode {
                     progress.frames_rejected_before_decode =
@@ -2765,7 +2748,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                     None,
                 )
                 .await?;
-
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
     } else {
@@ -2799,7 +2781,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         records_retired,
         "transcript admission batch finished"
     );
-
     progress.covered_through = expected_cursor
         .as_ref()
         .map_or(0, ObservationSourceCursorV1::position);

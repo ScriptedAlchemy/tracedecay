@@ -74,7 +74,6 @@ pub(super) fn write_events(
         )
         .map_err(storage)?;
     }
-
     sync_directory(&root)
 }
 
@@ -228,7 +227,6 @@ pub fn code_generation_graph_replay_release_page(
         (&left.receipt_digest, &left.generation.generation_id)
             .cmp(&(&right.receipt_digest, &right.generation.generation_id))
     });
-
     Ok(CodeGenerationGraphReplayReleasePageV1 {
         releases,
         continuation,
@@ -311,6 +309,5 @@ pub fn complete_code_generation_graph_replay_release(
     release: &CodeGenerationGraphReplayReleaseV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     std::fs::remove_file(release_path(store_root, release)?).map_err(storage)?;
-
     sync_directory(&store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
 }

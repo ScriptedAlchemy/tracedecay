@@ -1239,7 +1239,6 @@ impl DaemonCodeTextArtifactStoreV1 {
             )
         })?;
         let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
-
         let mut reservation = self
             .resident_memory
             .reserve(
@@ -2695,7 +2694,6 @@ impl LatestCodeTextGenerationV1 {
                 other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
             })?;
         let result = self.advance_text_serving_inner(maximum_work, control);
-
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,
@@ -2882,7 +2880,6 @@ impl LatestCodeTextGenerationV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
             return Ok(None);
         };
-
         let ready_progress =
             self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
         self.install_artifact_owners(reader, reader_reservation)?;
@@ -3013,7 +3010,6 @@ impl LatestCodeTextGenerationV1 {
         )?;
         let (source_batch_pages, source_batch_bytes, _) =
             text_artifact_source_batch_limits(build_memory_budget);
-
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(

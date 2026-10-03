@@ -1205,7 +1205,6 @@ fn scan_run_ledger_task_summary(
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
         return Ok(TaskSummaryScan::Summary(summary));
     }
-
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
     while let Some(line) = rows.next_span()? {

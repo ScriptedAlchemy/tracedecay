@@ -309,7 +309,6 @@ impl LspSessionRegistry {
                 control: LspSessionControl::default(),
             },
         );
-
         Ok(access)
     }
 
@@ -333,7 +332,6 @@ impl LspSessionRegistry {
             if let Some(mut expired) = self.sessions.remove(access.session_id()) {
                 expired.control.expire();
             }
-
             return Err(LspEndpointError::SessionExpired);
         }
         self.sessions
@@ -388,7 +386,6 @@ impl LspSessionRegistry {
             .remove(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.control.expire();
-
         Ok(())
     }
 
@@ -453,7 +450,6 @@ impl LspSessionRegistry {
         }
         self.sessions
             .retain(|_, session| session.expires_at_ms > now_ms);
-
         expired.len()
     }
 

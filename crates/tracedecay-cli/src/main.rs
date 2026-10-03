@@ -549,7 +549,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     {
         // Process-level runtime shape only. Request, project-server, history,
         // and projection gauges belong on those authorities, not bootstrap.
-
         let command_family = cli.command.as_ref().map_or("none", |command| {
             CommandFamily::for_command(command).as_profile_label()
         });

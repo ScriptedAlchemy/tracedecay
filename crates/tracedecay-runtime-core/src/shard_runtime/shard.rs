@@ -381,7 +381,6 @@ impl ShardRuntime {
             .runtime_leases
             .insert(lease.lease_id.clone(), lease.clone());
         state.touch();
-
         Ok(lease)
     }
 
@@ -500,7 +499,6 @@ impl ShardRuntime {
         runtime: std::sync::Arc<Self>,
     ) -> Result<ShardRuntimeClientLifetimeLease, ShardRuntimeError> {
         let token = runtime.register_lifetime_lease(ShardRuntimeResource::Client)?;
-
         Ok(ShardRuntimeClientLifetimeLease {
             inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
                 runtime,
@@ -658,7 +656,6 @@ impl ShardRuntimeState {
         self.runtime_leases
             .retain(|_, lease| !lease.is_expired_at(now));
         let released = before - self.runtime_leases.len();
-
         released
     }
 
@@ -778,7 +775,6 @@ impl ShardRuntimeState {
             .ok_or(ShardRuntimeError::CounterOverflow {
                 counter: counter_name,
             })?;
-
         Ok(())
     }
 
@@ -888,7 +884,6 @@ impl ShardRuntimeLifetimeLeaseToken {
         }
         self.runtime
             .release_lifetime_lease(self.resource, self.token);
-
         true
     }
 }

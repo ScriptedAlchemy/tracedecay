@@ -1249,7 +1249,6 @@ impl ManifestDigestPipelineMetrics {
         }
         let current = self.current_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
         self.peak_bytes.fetch_max(current, Ordering::AcqRel);
-
         drop(gate);
         Ok(ManifestDigestReservation {
             bytes,
@@ -1290,7 +1289,6 @@ impl Drop for ManifestDigestReservation {
         self.metrics
             .current_bytes
             .fetch_sub(self.bytes, Ordering::AcqRel);
-
         self.metrics.reservation_released.notify_all();
     }
 }
@@ -1377,7 +1375,6 @@ fn recovered_generation_digest_and_rows(
         )
         .collect::<Vec<_>>();
     let workers = config.effective_workers(chunks.len())?;
-
     if workers == 1 {
         for chunk in chunks {
             digest_manifest_chunk_serial(chunk, &mut writer, &mut canonical, check)?;

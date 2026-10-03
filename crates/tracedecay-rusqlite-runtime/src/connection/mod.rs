@@ -832,7 +832,6 @@ impl WriterPageCache {
             .authorizer(Some(authorize_writer))
             .map_err(|source| policy("restore writer authorizer", source))?;
         resized.map_err(|source| policy("page cache size", source))?;
-
         self.fitted_schema_version = Some(schema_version);
         Ok(())
     }

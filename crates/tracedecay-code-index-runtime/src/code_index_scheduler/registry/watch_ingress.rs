@@ -95,7 +95,6 @@ impl CodeIndexSchedulerRegistryV1 {
         if verdict == FreshnessProbeVerdictV1::Current {
             return GitStateChangeRequestV1::Accepted;
         }
-
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::GitWatcher);
         // Only a ladder that proved movement carries observed source change.
         // A mount no pass has verified yet has no baseline to move from: its

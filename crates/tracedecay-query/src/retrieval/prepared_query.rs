@@ -319,7 +319,6 @@ impl PreparedQueryV1 {
         } else {
             (None, None)
         };
-
         Ok(PreparedQueryPageV1 {
             items: materialize(candidates, start, end)?,
             total,

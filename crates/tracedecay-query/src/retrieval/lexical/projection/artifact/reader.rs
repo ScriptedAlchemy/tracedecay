@@ -664,7 +664,6 @@ impl CodeLexicalArtifactReaderV1 {
         verify_named_path_identity(path, &file)?;
         progress(6, TOTAL_RESTORE_CHECKS);
         crate::observe::Residency::Cold.record("query.artifact.residency");
-
         Ok(reader)
     }
 
@@ -720,7 +719,6 @@ impl CodeLexicalArtifactReaderV1 {
         verify_stable_artifact_file_state(&file, &file_state)?;
         verify_named_path_identity(path, &file)?;
         crate::observe::Residency::Warm.record("query.artifact.residency");
-
         Ok(reader)
     }
 
@@ -1635,7 +1633,6 @@ fn visit_document_ids(
                 visitor(document)?;
             }
             retrieval_checkpoint(control)?;
-
             Ok(())
         }
     }
@@ -1693,7 +1690,6 @@ fn visit_lexical_rows(
                     .map_err(map_query_sql_error)?;
                 metrics.observe_statement(&statement)?;
             }
-
             Ok(())
         }
     }
@@ -1986,7 +1982,6 @@ fn ngram_bitmap_candidates(
             break;
         }
     }
-
     Ok(candidates.unwrap_or_default())
 }
 
@@ -2478,7 +2473,6 @@ impl<'a> ArtifactQueryV1<'a> {
                     );
                 }
                 retrieval_checkpoint(control)?;
-
                 Ok((
                     ranked
                         .into_sorted_vec()
@@ -2782,7 +2776,6 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         let mut by_query = BTreeMap::<String, BTreeSet<String>>::new();
-
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -2791,7 +2784,6 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
-
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
@@ -2821,7 +2813,6 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-
         Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
 
@@ -2857,7 +2848,6 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut postings = RequestTermPostingsV1::default();
         if !terms.is_empty() {

@@ -552,18 +552,15 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
-
     let eligible =
         u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     let excluded = examined
         .checked_sub(eligible)
         .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
-
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
-
     let mut deduplicated_anchors = BTreeSet::new();
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
 
@@ -575,7 +572,6 @@ pub async fn execute_temporal_candidate_export(
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
-
     let next_position = if strict_population.is_some() {
         None
     } else if window_has_more {

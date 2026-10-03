@@ -382,7 +382,6 @@ where
             return;
         }
         self.poll_diagnostic_refreshes();
-
         while self.has_outbound_capacity(MAX_PUBLICATION_BYTES) {
             let Some(scheduled) = self.diagnostics.debounce.take_next_due(now_ms) else {
                 break;

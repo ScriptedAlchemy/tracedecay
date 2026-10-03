@@ -69,7 +69,6 @@ impl OverflowRoster {
         if self.entries.len() >= bound {
             // The repository loses coverage entirely until the next handshake.
             // Dropped evidence must be counted, not only retained successes.
-
             return OverflowAdmission::RosterFull;
         }
         let due = next_due(now, &config);
@@ -81,7 +80,6 @@ impl OverflowRoster {
                 due,
             },
         );
-
         OverflowAdmission::Covered
     }
 
@@ -170,7 +168,6 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
     };
     // Coalesced batch size per backstop pass, so a profile separates roster
     // pressure from the per-root admission and scheduler-ingress cost below.
-
     for (root, identity, config) in due {
         if watcher.inner.cancellation.is_cancelled() {
             return;
@@ -183,7 +180,6 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&root);
-
                 log_daemon_event(
                     "git_watch_overflow_recovered",
                     &[("project", root.display().to_string())],

@@ -99,7 +99,6 @@ impl ReconcilePanicGuardV1 {
             self.next_attempt_at = None;
             return ReconcilePanicDecisionV1::Quarantine;
         }
-
         let delay = self.backoff;
         self.next_attempt_at = Some(now + delay);
         self.backoff = self
@@ -139,11 +138,9 @@ impl ReconcilePanicGuardV1 {
                 self.next_attempt_at = None;
                 return false;
             }
-
             return true;
         }
         let suppressed = self.next_attempt_at.is_some_and(|at| now < at);
-
         suppressed
     }
 }
@@ -327,7 +324,6 @@ impl ReconcileCapacityRetryV1 {
         if self.consecutive >= MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 {
             return None;
         }
-
         self.consecutive = self.consecutive.saturating_add(1);
         let delay = self.backoff;
         self.backoff = self

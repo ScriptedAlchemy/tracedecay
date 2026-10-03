@@ -1588,7 +1588,6 @@ impl GraphDb {
 
     fn publish_sealed_generation_census(&self) {
         let census = self.sealed_generation_census();
-
         tracing::debug!(
             event = "graph_sealed_generation_census",
             retained = census.retained,
@@ -1974,7 +1973,6 @@ fn push_manifest_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();
         {
@@ -2095,7 +2093,6 @@ fn push_spilled_rows(
         .map(|_| rayon::current_num_threads())
         .unwrap_or(1);
     let row_window = workers.max(1).saturating_mul(512);
-
     let (entity_count, relation_count) = spilled.row_counts();
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();

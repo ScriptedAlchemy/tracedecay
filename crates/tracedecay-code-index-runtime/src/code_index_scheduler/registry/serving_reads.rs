@@ -323,7 +323,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         .0
                         .saturating_sub(progress.last_progress_micros)
                         .max(0);
-
                 }
                 progress
                 }

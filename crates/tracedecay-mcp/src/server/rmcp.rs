@@ -356,7 +356,6 @@ where
         let queued = RmcpQueueDepthGuard::enter();
         let request_permit = self.acquire_request_permit().await?;
         drop(queued);
-
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
         // combined resident frame overflows the worker stack in perf-profile

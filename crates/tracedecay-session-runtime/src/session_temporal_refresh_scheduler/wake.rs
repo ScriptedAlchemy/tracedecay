@@ -214,13 +214,11 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn take_dirty(&self) -> bool {
         let dirty = self.dirty.swap(false, Ordering::AcqRel);
-
         dirty
     }
 
     pub fn take_historical_dirty(&self) -> bool {
         let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
-
         dirty
     }
 
@@ -523,7 +521,6 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-
         telemetry.durable_backlog = backlog;
     }
 
@@ -546,7 +543,6 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-
         telemetry.queued_backlog = backlog;
     }
 
@@ -679,7 +675,6 @@ impl SessionTemporalRefreshWakeState {
         if !telemetry.depths_published {
             return;
         }
-
         telemetry.depths_published = false;
     }
 

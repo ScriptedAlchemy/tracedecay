@@ -104,7 +104,6 @@ impl DaemonLcmEffectService {
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let result = self.compress_phases(request).await;
-
         result
     }
 
@@ -116,7 +115,6 @@ impl DaemonLcmEffectService {
         let result = self
             .compress_retained_phases(request, convergence_candidate)
             .await;
-
         result
     }
 

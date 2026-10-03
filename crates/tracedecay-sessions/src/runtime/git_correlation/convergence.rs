@@ -113,7 +113,6 @@ where
     };
     GitCorrelationWriteTxn::commit(transaction).await?;
     stats.frontier_advanced = frontier != backfill.start;
-
     Ok(GitEvidencePassOutcome {
         pass: GitEvidencePass {
             backfill: stats,

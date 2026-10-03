@@ -264,7 +264,6 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length is invalid",
         ));
     }
-
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {
@@ -820,7 +819,6 @@ where
         verify_displaced,
         verify_published,
     } = callbacks;
-
     validate_regular_or_missing(destination)?;
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let published_existing = std::cell::Cell::new(false);

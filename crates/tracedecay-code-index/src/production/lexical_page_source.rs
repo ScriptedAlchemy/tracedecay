@@ -1678,7 +1678,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
                 }
-
                 self.accept_cursor(staged.cursor);
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
@@ -1800,7 +1799,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 }
                 let accepted_cursor = pages[accepted_page_count - 1].next_cursor().clone();
                 pages.truncate(accepted_page_count);
-
                 self.accept_cursor(accepted_cursor);
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
             }

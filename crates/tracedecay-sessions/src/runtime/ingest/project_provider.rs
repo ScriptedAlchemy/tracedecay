@@ -416,7 +416,6 @@ impl<'a> ProjectProviderRun<'a> {
         {
             hub.acknowledge(consumer);
         }
-
         outcome
     }
 

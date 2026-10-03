@@ -682,7 +682,6 @@ impl<'a> HostAdmissionFacade<'a> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
-
         let provider = first.provider().to_owned();
         let scope = first.scope().clone();
         self.authorities.validate_scope(&scope)?;
@@ -806,7 +805,6 @@ impl<'a> HostAdmissionFacade<'a> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-
         self.authorities.validate_scope(scope)?;
         for write in &writes {
             if write.observation().source().provider().as_str() != provider

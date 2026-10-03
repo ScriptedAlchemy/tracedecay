@@ -390,7 +390,6 @@ impl HookDeliveryReceiptSpoolV1 {
             }
             receipts.push(receipt);
         }
-
         Ok(receipts)
     }
 
@@ -507,7 +506,6 @@ impl HookDeliveryReceiptWriterV1 {
         if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
             return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-
         let staged = {
             let _span = tracing::trace_span!("hooks.delivery.fsync.stage").entered();
             stage(root, receipt.receipt_id, &bytes)

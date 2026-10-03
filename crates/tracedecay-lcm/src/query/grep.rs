@@ -92,7 +92,6 @@ pub async fn grep(
     sort_hits(&mut hits, request.sort);
     let capped_sessions = rerank_grep_hits(&mut hits, request.sort, request.scope);
     hits.truncate(limit);
-
     Ok(LcmGrepOutcome {
         hits,
         capped_sessions,

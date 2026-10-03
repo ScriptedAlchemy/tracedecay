@@ -20,7 +20,6 @@ pub(super) fn read_generation_format_revision(
     let mut file = File::open(path).map_err(deferred_if_absent)?;
     let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
     let bytes_read = file.read(&mut prefix).map_err(storage)?;
-
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -50,7 +49,6 @@ pub(super) fn read_generation_metadata(
         if bytes_read == 0 {
             break;
         }
-
         if verification == GenerationDigestVerificationV1::Full {
             hasher.update(&buffer[..bytes_read]);
         }

@@ -305,7 +305,6 @@ impl CodeIndexActivationV1 {
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
-
             return false;
         };
         let project_root = self.project_root.clone();
@@ -323,13 +322,11 @@ impl CodeIndexActivationV1 {
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-
                     return;
                 }
                 let mounted = mount().await;
                 if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-
                     // The retained failure publishes only once the attempt
                     // has fully settled: a waiter that reads the flag while
                     // `mount_in_progress` still holds is observing a retry
@@ -348,7 +345,6 @@ impl CodeIndexActivationV1 {
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-
                     return;
                 }
                 let batch = {
@@ -356,7 +352,6 @@ impl CodeIndexActivationV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.store(ACTIVATION_MOUNTED, Ordering::Release);
-
                     pending.take()
                 };
                 if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {

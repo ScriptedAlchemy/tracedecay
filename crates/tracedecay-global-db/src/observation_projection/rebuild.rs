@@ -233,7 +233,6 @@ pub async fn project_queued_observations(
         }
     }
     let has_more = projection_queue_has_items(&transaction).await?;
-
     transaction
         .commit()
         .await

@@ -398,7 +398,6 @@ impl CatalogSnapshotV1 {
             protocol_revision,
             negotiated_features,
         );
-
         resolved
     }
 
@@ -504,7 +503,6 @@ impl CatalogSnapshotV1 {
                 left.operation().as_str().cmp(right.operation().as_str())
             });
         }
-
         visible
     }
 }

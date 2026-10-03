@@ -255,7 +255,6 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
                 outcome,
             });
         }
-
         Ok(HydrationPageV1 { results, receipts })
     }
 

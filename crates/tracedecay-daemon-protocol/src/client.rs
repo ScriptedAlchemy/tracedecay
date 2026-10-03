@@ -406,7 +406,6 @@ struct DaemonInvocationClientActivityGuard {
 impl DaemonInvocationClientActivity {
     fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.queued.fetch_add(1, Ordering::AcqRel);
-
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::Queued,
@@ -415,7 +414,6 @@ impl DaemonInvocationClientActivity {
 
     fn in_flight(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
-
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::InFlight,
@@ -708,7 +706,6 @@ impl DaemonInvocationClient {
             let _span = tracing::trace_span!("daemon.invocation.client.request.encode").entered();
             serde_json::to_string(&request)
         }?;
-
         tracing::Instrument::instrument(
             async {
                 connection.writer.write_all(request_json.as_bytes()).await?;
@@ -736,7 +733,6 @@ impl DaemonInvocationClient {
                 ),
             });
         };
-
         let match_result = {
             let _span = tracing::trace_span!("daemon.invocation.client.response.decode").entered();
             serde_json::from_str(&line)

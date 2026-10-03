@@ -446,7 +446,6 @@ pub(super) fn resolve_edit(
     .into_iter()
     .flatten()
     .collect::<BTreeSet<_>>();
-
     let candidates = edited_indices
         .iter()
         .chain(&referencing)

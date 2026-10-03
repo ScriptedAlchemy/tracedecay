@@ -32,10 +32,8 @@ pub fn normalize_observation(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Vibe records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-
     let envelope =
         normalize_vibe_record(native, session_id, model, location, stable_record_id, range);
-
     envelope
 }
 

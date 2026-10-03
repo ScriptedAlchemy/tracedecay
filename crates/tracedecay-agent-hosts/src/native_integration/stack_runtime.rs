@@ -920,7 +920,6 @@ impl DaemonGitHubStackRuntimeV1 {
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
         let outcome = self.preflight_via_circuit(request, cancellation);
-
         outcome
     }
 

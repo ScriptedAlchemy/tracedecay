@@ -218,7 +218,6 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
                     .instrument(tracing::trace_span!("daemon.authority.callable_code.admit"))
                     .await
             };
-
             admission
         })
     }
@@ -265,7 +264,6 @@ impl DaemonCallableCodeAuthorization {
         let receipt = self
             .route_receipt_checked(context, operation, observed_at)
             .await;
-
         receipt
     }
 
@@ -332,7 +330,6 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
                     ))
                     .await
             };
-
             receipt
         })
     }

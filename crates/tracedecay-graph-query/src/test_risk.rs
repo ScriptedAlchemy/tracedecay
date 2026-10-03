@@ -345,7 +345,6 @@ pub fn verified_test_evidence(
             MAX_TEST_RISK_RELATIONS,
         )?
     };
-
     let mut calls = Vec::new();
     let mut test_annotated = HashSet::new();
     for edge in edges {

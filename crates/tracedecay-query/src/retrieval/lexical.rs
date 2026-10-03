@@ -122,7 +122,6 @@ pub(crate) fn admit_candidate_sources<S>(
         admitted_documents = next;
         admitted.push(source);
     }
-
     admitted
 }
 

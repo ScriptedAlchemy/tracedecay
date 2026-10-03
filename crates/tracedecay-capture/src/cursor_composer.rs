@@ -54,7 +54,6 @@ pub fn normalize_cursor_composer_observation_with_message_id(
         range,
         position,
     );
-
     envelope
 }
 
@@ -403,7 +402,6 @@ pub fn normalize_cursor_composer_envelope_observation(
         range,
         position,
     );
-
     envelope
 }
 

@@ -894,7 +894,6 @@ impl Worker {
             command.settle(Err(error));
             return;
         }
-
         self.checkpoint_blockers.await_released_snapshots();
         let (snapshot_blockers, kind, authority, reply) = command.into_parts();
         let result = match kind {

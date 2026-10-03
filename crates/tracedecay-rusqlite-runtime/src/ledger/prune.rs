@@ -98,6 +98,5 @@ pub(super) fn prune_superseded(
             MAX_PRUNED_ROWS_PER_COMMIT,
         ],
     )?;
-
     Ok(pruned)
 }

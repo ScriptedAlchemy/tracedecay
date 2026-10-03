@@ -491,7 +491,6 @@ impl StoreRuntimeRegistry {
         };
         drop(state);
         drop(evicting);
-
         Ok(proof)
     }
 }

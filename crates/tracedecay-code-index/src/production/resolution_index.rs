@@ -305,7 +305,6 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             descriptor.segment_size_bytes,
         )?;
         let canonical = inflate_index_segment(&bytes, descriptor.decoded_size_bytes)?;
-
         serde_json::from_slice(&canonical)
             .map_err(|error| contract(format!("sealed resolution index decoding failed: {error}")))
     }

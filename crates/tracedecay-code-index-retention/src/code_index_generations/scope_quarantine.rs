@@ -236,7 +236,6 @@ impl ScopeQuarantineAuthority {
             }
         }
         self.source_handles.clear();
-
         Ok(())
     }
 
@@ -302,7 +301,6 @@ impl ScopeQuarantineAuthority {
                 }
             }
         }
-
         self.remove_empty_stage()
     }
 

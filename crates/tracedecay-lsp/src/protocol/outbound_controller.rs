@@ -132,7 +132,6 @@ where
     /// frame. It cannot fetch arbitrary daemon socket data.
     pub fn poll_outbound(&mut self) -> Option<&[u8]> {
         let frame = self.outbound.queue.front()?;
-
         self.outbound.in_flight = true;
         Some(frame.payload.as_slice())
     }

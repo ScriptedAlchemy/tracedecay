@@ -968,10 +968,8 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
     let Some((sample, state)) = pressure.sample_and_publish() else {
         return;
     };
-
     // The gauge keeps its name: admission may publish the larger cgroup
     // committed figure, which is not this process's unreclaimable set.
-
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log

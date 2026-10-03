@@ -37,7 +37,6 @@ pub(super) async fn extend_derived_evidence(
     let session_id = batch.session_id();
     let occurrences =
         load_introduced_occurrence_refs(conn, session_id, generation, control).await?;
-
     let Some(first) = occurrences.first() else {
         return Ok(());
     };
@@ -46,7 +45,6 @@ pub(super) async fn extend_derived_evidence(
         span_max_members: SESSION_DERIVED_SPAN_MAX_MEMBERS_V1,
     };
     let extension = extend_session_evidence(session_id, tail.as_ref(), &occurrences, &policy)?;
-
     for record in &extension.records {
         checkpoint_relation_rebuild_control(control)?;
         persist_derived_record(conn, session_id, generation, record).await?;

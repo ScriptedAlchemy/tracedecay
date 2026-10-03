@@ -1192,7 +1192,6 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
     };
-
     try_stream_new_jsonl_raw_from_file(
         path,
         file,
@@ -2041,7 +2040,6 @@ fn try_stream_new_jsonl_raw_from_file(
         }
     })();
     io.scan_payload_read_bytes = scan_payload_reads.get();
-
     result.map(|mut raw| {
         raw.io = io;
         raw

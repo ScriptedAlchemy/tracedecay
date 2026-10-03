@@ -253,7 +253,6 @@ impl SessionTemporalProjectionBatchReceiptV1 {
                 });
             }
         }
-
         Ok(Self {
             session_id: batch.session_id().clone(),
             generation: batch.generation(),

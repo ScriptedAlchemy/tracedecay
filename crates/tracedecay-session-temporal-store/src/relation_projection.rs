@@ -226,7 +226,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -360,7 +359,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
             }
         }
-
         let snapshot = self
             .read_snapshot()
             .await

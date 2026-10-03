@@ -173,7 +173,6 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
     // This crate holds the stream contract, not a channel endpoint, so the
     // producing/consuming adapters own the stream instrumentation; here the batch
     // size and the explicit-loss (gap) rate are the observable facts.
-
     let mut terminal_seen = false;
     let mut expected = events.first().map(|event| event.sequence);
 

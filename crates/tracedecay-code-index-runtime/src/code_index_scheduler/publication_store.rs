@@ -377,7 +377,6 @@ impl GenerationDecodeObservationV1 {
         let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-
         Self
     }
 }
@@ -399,7 +398,6 @@ impl GenerationDecodeWaitObservationV1 {
         let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-
         Self
     }
 }
@@ -2142,7 +2140,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 state.active_epoch = state.active_epoch.wrapping_add(1);
             }
             self.active_encoded_bytes.store(0, Ordering::Release);
-
             released
         };
         drop(released);
@@ -2481,7 +2478,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let encoded_bytes = metadata.len();
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
-
         Ok(Some(Arc::new(generation)))
     }
 

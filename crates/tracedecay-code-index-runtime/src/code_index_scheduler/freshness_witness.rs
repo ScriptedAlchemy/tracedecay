@@ -75,7 +75,6 @@ pub fn worktree_stat_sweep(
     let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
     // One sweep span plus an entries gauge: the stat walk is O(candidates) and
     // must never publish one profiler event per file.
-
     let mut buf = Vec::new();
     for candidate in candidate_roster {
         let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {
@@ -635,7 +634,6 @@ impl SourceSweepCacheV1 {
         .flatten()
         .collect::<Vec<_>>();
         stats.candidates = present.len();
-
         let present_paths = present
             .iter()
             .map(|(candidate, _)| candidate.logical_path.as_str())
@@ -661,7 +659,6 @@ impl SourceSweepCacheV1 {
             }
         }
         stats.hashed = unvouched.len();
-
         let derive = |candidate: &StatCandidateV1| {
             if shutting_down.load(Ordering::Acquire) {
                 CandidateContentV1::Unreadable

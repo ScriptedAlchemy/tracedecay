@@ -416,7 +416,6 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-
         for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
             candidate.final_ordinal = ordinal as u32;
         }
@@ -475,7 +474,6 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-
         Ok(AuthorizedFederatedRetrievalV1 {
             query_digest,
             composition,

@@ -162,7 +162,6 @@ fn normalize_codex_observation_inner(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Codex rollouts order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-
     let envelope = normalize_codex_record(
         native,
         session_id,
@@ -171,7 +170,6 @@ fn normalize_codex_observation_inner(
         range,
         location,
     );
-
     envelope
 }
 

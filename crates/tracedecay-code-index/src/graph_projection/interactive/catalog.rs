@@ -77,7 +77,6 @@ pub(super) fn build_interactive_catalog(
                     )
                 }
             }?;
-
             after_entity = page.next_entity;
             entities_complete = after_entity.is_none();
         }
@@ -86,7 +85,6 @@ pub(super) fn build_interactive_catalog(
                 let _span = tracing::trace_span!("code_graph.catalog.record_relations").entered();
                 scan.record_relation_page(&page.relations, cancellation.as_ref())
             }?;
-
             after_relation = page.next_relation;
             relations_complete = after_relation.is_none();
         }

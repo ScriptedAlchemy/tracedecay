@@ -412,7 +412,6 @@ async fn process_candidate(
             bounded.bytes_scanned,
         ));
     }
-
     Ok(session_result(
         candidate,
         disposition,

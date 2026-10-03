@@ -77,7 +77,6 @@ impl RetainedMemoryTargetObservationV1 {
         let open = RETAINED_MEMORY_TARGETS_OPEN
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-
         Self
     }
 }

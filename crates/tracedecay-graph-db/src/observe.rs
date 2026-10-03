@@ -159,7 +159,6 @@ pub(crate) fn record_grafeo_memory(
         database.memory_usage()
     };
     tracing::trace!(name: "graph_db.memory.phase", value = ?phase.as_str());
-
     // A daemon with several resident engines needs each census in the log to
     // attribute retained bytes per container.
     tracing::debug!(

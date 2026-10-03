@@ -601,7 +601,6 @@ impl StoreRuntimeRegistry {
 
         if !blockers.is_empty() {
             drop(state);
-
             return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                 blockers, targets,
             ));
@@ -650,7 +649,6 @@ impl StoreRuntimeRegistry {
                     retry_targets.extend(targets);
                     blockers.push(blocker);
                     drop(state);
-
                     return StoreRuntimeRetirementResult::Blocked(
                         StoreRuntimeRetirementRefusal::new(blockers, retry_targets),
                     );
@@ -679,7 +677,6 @@ impl StoreRuntimeRegistry {
                     .into_iter()
                     .map(|retirement| retirement.target)
                     .collect();
-
                 return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                     blockers, targets,
                 ));
@@ -694,7 +691,6 @@ impl StoreRuntimeRegistry {
                 }),
             );
         }
-
         StoreRuntimeRetirementResult::Reserved(StoreRuntimeRetirementReservation {
             registry: self.clone(),
             pending,
@@ -801,7 +797,6 @@ impl StoreRuntimeRegistry {
                 .target
                 .remove_graph_owner_attachment_after_store_close(self, &mut state)?;
             state.entries.remove(&retirement.key);
-
             if retirement.key.is_profile()
                 && state
                     .profile_authorities
@@ -874,10 +869,8 @@ impl StoreRuntimeRetirementReservation {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
-
         let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
-
         Ok(targets)
     }
 
@@ -896,7 +889,6 @@ impl StoreRuntimeRetirementReservation {
         if let Some(message) = self.registry.begin_retirement_commit(&mut self.pending)? {
             let pending = std::mem::take(&mut self.pending);
             self.armed = false;
-
             let mut outcomes = Vec::with_capacity(pending.len());
             for mut retirement in pending {
                 let target = retirement.target.outcome_target();

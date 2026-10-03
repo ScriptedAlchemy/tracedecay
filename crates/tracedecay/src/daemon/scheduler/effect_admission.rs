@@ -98,7 +98,6 @@ fn log_scheduler_schedule_skip(
 ) {
     // Not-due/disabled tasks never reach durable admission; without this
     // counter a silent schedule skip is indistinguishable from a lost tick.
-
     let mut fields = super::scheduler_project_task_fields(project_path, task);
     fields.extend([
         ("outcome", "skipped".to_owned()),

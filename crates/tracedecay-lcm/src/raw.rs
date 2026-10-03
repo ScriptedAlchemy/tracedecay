@@ -155,7 +155,6 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 #[tracing::instrument(name = "sessions.lcm.raw.verify_row", level = "trace", skip_all)]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let verified = decode_verified_raw_message(row);
-
     verified
 }
 

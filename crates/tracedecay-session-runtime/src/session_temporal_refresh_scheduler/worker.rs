@@ -365,7 +365,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // semaphore's FIFO queue. Only then advertise idle so an
                         // observer cannot release permits before this worker is
                         // registered to receive one.
-
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
                         let permit = tokio::select! {
@@ -476,7 +475,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     error = report.last_error.as_deref(),
                     "session temporal refresh pass will retry"
                 );
-
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
                 let retry_delay = session_refresh_retry_delay(class, retry_attempt);
@@ -714,7 +712,6 @@ pub async fn process_refresh_begin_requests(
             Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
-
                 break;
             }
             Err(_) => {

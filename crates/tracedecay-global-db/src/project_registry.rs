@@ -765,7 +765,6 @@ impl RegisteredGlobalDb {
                 reason,
             ));
         }
-
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
@@ -953,7 +952,6 @@ impl RegisteredGlobalDb {
         project_id: &str,
     ) -> tracedecay_domain::errors::Result<ProjectAliasRecord> {
         const OPERATION: &str = "upsert project alias";
-
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let transaction = self
             .begin_write_transaction()
@@ -1025,7 +1023,6 @@ impl RegisteredGlobalDb {
         upsert: StoreInstanceUpsert,
     ) -> tracedecay_domain::errors::Result<StoreInstanceRecord> {
         const OPERATION: &str = "upsert store instance";
-
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1105,7 +1102,6 @@ impl RegisteredGlobalDb {
         upsert: GraphScopeUpsert,
     ) -> tracedecay_domain::errors::Result<GraphScopeRecord> {
         const OPERATION: &str = "upsert graph scope";
-
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1182,7 +1178,6 @@ impl RegisteredGlobalDb {
         upsert: StoreArtifactUpsert,
     ) -> tracedecay_domain::errors::Result<StoreArtifactRecord> {
         const OPERATION: &str = "upsert store artifact";
-
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1771,7 +1766,6 @@ impl RegisteredGlobalDb {
         if project_ids.is_empty() {
             return Ok(0);
         }
-
         let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_ids.chunks(CHUNK) {
@@ -1805,7 +1799,6 @@ impl RegisteredGlobalDb {
         project_path: &Path,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "delete registered project ledger row";
-
         let transaction = self.begin_write_transaction().await?;
         let deleted = transaction
             .execute(
@@ -1836,7 +1829,6 @@ impl RegisteredGlobalDb {
         if project_paths.is_empty() {
             return Ok(0);
         }
-
         let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_paths.chunks(CHUNK) {
@@ -2051,7 +2043,6 @@ impl RegisteredGlobalDb {
         plan: &RegistryReapPlan,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "apply registry reap";
-
         let transaction = self
             .begin_write_transaction()
             .await

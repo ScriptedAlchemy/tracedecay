@@ -94,7 +94,6 @@ where
                 &record.journal.transaction_id,
                 proof.clone(),
             )?;
-
             return Ok(proof);
         }
 

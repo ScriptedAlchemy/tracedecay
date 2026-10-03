@@ -804,7 +804,6 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     };
                     index.scanning = true;
-
                     CodexDiscoveryWork::Replay {
                         source_key,
                         state,
@@ -892,7 +891,6 @@ impl CodexDiscoveryHub {
                 pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
                     &pass.report.paths,
                 )));
-
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -1064,7 +1062,6 @@ impl CodexDiscoveryHub {
             .consumers
             .get(consumer)
             .is_some_and(|state| state.holds_converged(path, witness));
-
         converged
     }
 
@@ -1840,7 +1837,6 @@ impl CodexSource {
                 }
                 return Ok(pass);
             }
-
             state.reset(self);
         }
         let work_limit = bounds.max_files.max(1);
@@ -1974,7 +1970,6 @@ impl CodexSource {
         if state.scan.is_none() {
             state.reset_for(self, frontier.is_complete());
         }
-
         let pass = retained_scan_step(self, state, bounds, frontier)?;
         let sources = pass.selected_sources.clone();
         state.pending = Some(CodexPendingPass {

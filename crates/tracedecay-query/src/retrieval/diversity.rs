@@ -70,7 +70,6 @@ impl DeterministicDiversity {
                 final_ordinal: ordinal as u32,
             })
             .collect::<Vec<_>>();
-
         Ok((ranked, decisions))
     }
 }

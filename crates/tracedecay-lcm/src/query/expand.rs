@@ -20,7 +20,6 @@ pub async fn expand(
             .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
             let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
             let content = raw.content.clone();
-
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -52,7 +51,6 @@ pub async fn expand(
             } else {
                 externalized_ref.clone()
             };
-
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -79,7 +77,6 @@ pub async fn expand(
                 request.source_limit,
             );
             let summary_sources = slice_summary_sources(sources, request.content_slice);
-
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
@@ -117,7 +114,6 @@ pub async fn expand(
                     || expansion.offset.saturating_add(expansion.char_count)
                         < expansion.total_char_count,
             };
-
             Ok(LcmExpandResponse {
                 kind: "external_payload".to_string(),
                 content: expansion.content,

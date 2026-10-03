@@ -711,7 +711,6 @@ where
             .map_err(storage_problem)?;
         // Items processed by this restart-recovery sweep; the surrounding
         // measure is the sweep's one wall-time authority.
-
         let mut recovery_required = Vec::new();
         let mut cancelled = Vec::new();
         for attempt in open {
@@ -1129,7 +1128,6 @@ where
                 evidence,
             )
             .map_err(storage_problem)?;
-
         Ok(())
     }
 }

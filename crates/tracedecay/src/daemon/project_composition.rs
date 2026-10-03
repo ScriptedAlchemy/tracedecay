@@ -156,7 +156,6 @@ async fn release_one_idle_project_server_before_open(
             drop(capacity_admission);
             released
         });
-
     drop(retirement_admission);
     completion
         .wait()
@@ -1068,7 +1067,6 @@ impl ProjectOpenInputs<'_> {
         // retirement handoff. Release admission before the remaining
         // project-open awaits.
         drop(retirement_admission);
-
         Ok(CoreRouteBinding { resolved, inserted })
     }
 

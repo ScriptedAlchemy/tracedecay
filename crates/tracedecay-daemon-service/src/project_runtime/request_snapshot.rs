@@ -157,7 +157,6 @@ impl ProjectRuntimeRegistryV1 {
         }
         drop(runtimes);
         drop(fences);
-
         Some(ProjectRuntimeRequestLeaseV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),

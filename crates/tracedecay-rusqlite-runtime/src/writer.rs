@@ -738,18 +738,15 @@ impl PersistentWriter {
         }
 
         self.telemetry.offered();
-
         let permit = match self.admission.reserve(&request.envelope().metadata) {
             Ok(permit) => permit,
             Err(scope) => {
                 self.telemetry.shed();
-
                 return Ok(settlement::saturation(&request, scope));
             }
         };
         let bytes = request.envelope().metadata.admission_bytes;
         self.telemetry.admitted(bytes);
-
         let (reply, response) = oneshot::channel();
         let accepted = AcceptedRequest::new(request.clone(), probe, authority, reply, permit);
         let send_result = {

@@ -190,7 +190,6 @@ where
     let Some(binding) = binding.filter(|binding| binding.project_id == project_id) else {
         // Without a current binding for this project nothing can be
         // reauthorized. Records stay durable and pending; a later pass retries.
-
         pass.binding_unavailable = true;
         return Ok(pass);
     };
@@ -202,11 +201,9 @@ where
             u16::try_from(batch.records.len()).map_err(|_| HookSpoolError::ReplayBatchExceeded)?;
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             spool.release_replay_claim(batch.claim_id)?;
-
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
-
         replay_batches.push((batch.records, record_count));
     }
 

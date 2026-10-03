@@ -102,7 +102,6 @@ impl DeterministicDedupe {
             }
             index = end;
         }
-
         Ok((candidates, decisions))
     }
 
@@ -193,7 +192,6 @@ impl DeterministicDedupe {
                 None => survivors.push(candidate),
             }
         }
-
         Ok((survivors, decisions))
     }
 }

@@ -184,7 +184,6 @@ const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
 #[inline]
 fn observe_cancel(is_cancelled: &dyn Fn() -> bool) -> bool {
     let cancelled = is_cancelled();
-
     cancelled
 }
 
@@ -401,7 +400,6 @@ pub(crate) fn retain_bounded_generation_index_accounted(
             survives
         });
     }
-
     GenerationIndexRetentionSweepV1 {
         removed: original_len.saturating_sub(entries.len()),
         accounting_visits,
@@ -1296,7 +1294,6 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         if (self.is_cancelled)() {
             self.cancelled = true;
-
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "generation segment mark cancelled",
@@ -1304,7 +1301,6 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
         }
         let read = self.file.read(buffer)?;
         self.hasher.update(&buffer[..read]);
-
         Ok(read)
     }
 }
@@ -1899,7 +1895,6 @@ fn recover_code_generation_retention_cancellable(
         &graph_replay_release::queued_release_receipt_digests(store_root)?,
     )?;
     receipt_store::prune_receipts(store_root, &TEXT_ARTIFACT_RECEIPT_STORE, &BTreeSet::new())?;
-
     Ok(())
 }
 

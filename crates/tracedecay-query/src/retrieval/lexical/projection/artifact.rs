@@ -281,7 +281,6 @@ fn open_builder_connection(
             "SQLite granted {effective_sorter_workers} lexical sorter workers above the canonical {requested_sorter_workers} auxiliary-worker bound"
         )));
     }
-
     // SQLite disables sorter helpers when temporary b-trees are memory-only.
     // FILE still uses the admitted page cache while allowing parallel PMA
     // generation and merge for corpus-wide CREATE INDEX statements.
@@ -293,7 +292,6 @@ fn open_builder_connection(
             if temp_store_file { "FILE" } else { "MEMORY" },
         )
         .map_err(sqlite_error)?;
-
     Ok(connection)
 }
 
@@ -391,7 +389,6 @@ fn with_builder_sorter_cpu_admission<T>(
     operation: impl FnOnce() -> T,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
     let admitted_units = builder_sorter_cpu_units(connection)?;
-
     Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
 }
 

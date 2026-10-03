@@ -163,7 +163,6 @@ impl LspSessionControl {
 
     pub fn exit(&mut self) -> Result<(), LifecycleError> {
         self.transition(SessionLifecycle::Shutdown, SessionLifecycle::Exited, "exit")?;
-
         self.pending.clear();
         self.publications.clear();
         self.publication_payload_digests.clear();
@@ -210,7 +209,6 @@ impl LspSessionControl {
     pub fn expire(&mut self) {
         self.lifecycle = SessionLifecycle::Expired;
         self.detached_from = None;
-
         self.pending.clear();
         self.publications.clear();
         self.publication_payload_digests.clear();
@@ -253,7 +251,6 @@ impl LspSessionControl {
                 deadline_at_ms,
             },
         );
-
         RequestAdmission::Accepted
     }
 
@@ -265,7 +262,6 @@ impl LspSessionControl {
             return CancellationOutcome::AlreadyCancelled;
         }
         request.state = PendingState::Cancelled;
-
         CancellationOutcome::Accepted
     }
 
@@ -297,14 +293,12 @@ impl LspSessionControl {
                 expired.push(id.clone());
             }
         }
-
         expired
     }
 
     #[tracing::instrument(name = "lsp_session_complete_request", level = "trace", skip_all)]
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         let removed = self.pending.remove(id).map(|request| request.state);
-
         let disposition = match removed {
             Some(PendingState::Active) => CompletionDisposition::Publish,
             Some(PendingState::Cancelled) => CompletionDisposition::SuppressCancelled,
@@ -312,7 +306,6 @@ impl LspSessionControl {
             Some(PendingState::TimedOut) => CompletionDisposition::SuppressTimedOut,
             None => CompletionDisposition::UnknownRequest,
         };
-
         disposition
     }
 

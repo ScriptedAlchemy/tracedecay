@@ -286,7 +286,6 @@ impl StoreRuntimeRegistry {
                     Err(failure) => return StoreRuntimeOpenBegin::Rejected(failure),
                 }
             };
-
             state.entries.insert(
                 key.clone(),
                 RegistryEntry::Opening(OpeningRuntime {
@@ -445,7 +444,6 @@ impl StoreRuntimeRegistry {
         );
         if still_opening {
             state.entries.remove(key);
-
             updates.send_replace(OpenState::Failed(failure));
         }
     }
@@ -714,7 +712,6 @@ impl OpenAttemptGuard {
                             self.key.clone(),
                             RegistryEntry::Ready(ReadyRuntime { owner }),
                         );
-
                         self.updates.send_replace(OpenState::Published);
                     }
                     Err(failure) => self.fail(&mut state, failure),
@@ -727,7 +724,6 @@ impl OpenAttemptGuard {
 
     fn fail(&self, state: &mut RegistryState, failure: StoreRuntimeRegistryFailure) {
         state.entries.remove(&self.key);
-
         self.updates.send_replace(OpenState::Failed(failure));
     }
 }

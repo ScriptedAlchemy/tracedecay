@@ -506,7 +506,6 @@ fn page_from_bounded_records(
                 .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
         })
         .flatten();
-
     DiagnosticPage {
         records,
         total,

@@ -133,7 +133,6 @@ impl GlobalDbNativeIntegrationStore<'_> {
             let payload = text(&row, 0, "pending cleanup transaction payload")?;
             pending.push(decode(&payload)?);
         }
-
         if pending.len()
             > usize::try_from(limit).map_err(NativeIntegrationStoreError::unavailable)?
         {

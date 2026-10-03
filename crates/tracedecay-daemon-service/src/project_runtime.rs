@@ -784,7 +784,6 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
             }
         }
         drop(fences);
-
         self.registry.signal_reservation_changed();
     }
 }

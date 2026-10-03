@@ -126,7 +126,6 @@ pub async fn run_maintenance_loop<F, Fut>(
         if cancellation.is_cancelled() {
             break;
         }
-
         continuation = outcome.continuation();
         deadline = cadence.finish(CadenceInstant::now(), outcome);
     }

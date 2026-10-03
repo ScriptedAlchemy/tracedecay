@@ -137,7 +137,6 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
         })?;
         facts.push(fact);
     }
-
     Ok(facts)
 }
 
@@ -1050,7 +1049,6 @@ impl DatabaseFactStore<'_> {
         })
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-
         outcome
     }
 }

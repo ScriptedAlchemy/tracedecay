@@ -432,7 +432,6 @@ impl HookSpoolV1 {
             recovery_required: false,
             uncommitted: None,
         };
-
         Ok((spool, report))
     }
 
@@ -707,7 +706,6 @@ impl HookSpoolV1 {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let expired = self.hydrate_many(&indices)?;
-
         Ok(expired)
     }
 
@@ -881,7 +879,6 @@ impl HookSpoolV1 {
         self.records_prefix = records_prefix;
         self.checkpoint = Some(checkpoint);
         self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
-
         Ok(())
     }
 

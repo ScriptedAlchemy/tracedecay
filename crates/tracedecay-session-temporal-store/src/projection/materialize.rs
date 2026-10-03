@@ -176,7 +176,6 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     }
 
     let all_occurrences = materialize_effect_occurrences(conn, &effects, item_count).await?;
-
     let mut parents = candidate_parent_message_resolver(
         conn,
         recovery.session_id(),
@@ -207,7 +206,6 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
             &parents,
         )
         .await?;
-
         let effect_items = effect_occurrences
             .len()
             .saturating_add(effect_copies.len())
@@ -623,7 +621,6 @@ async fn candidate_parent_message_resolver(
     }
     let encoded_ids =
         serde_json::to_string(&message_ids).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-
     let mut rows = conn
         .query(
             "SELECT requested.value,
@@ -663,7 +660,6 @@ async fn candidate_parent_message_resolver(
         let Some(occurrence_id) = occurrence_id else {
             continue;
         };
-
         resolver.register(&message_id, &occurrence_id);
     }
     Ok(resolver)
@@ -692,7 +688,6 @@ pub async fn canonical_parent_message_resolver(
         if let Some(control) = control {
             checkpoint_relation_rebuild_control(control)?;
         }
-
         let mut rows = conn
             .query(
                 &format!(
@@ -750,7 +745,6 @@ pub async fn canonical_parent_message_resolver(
                 ));
             }
             let encoded: String = row.get(1).map_err(|error| storage(operation, error))?;
-
             let observation: tracedecay_domain::DurableObservationV1 =
                 serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
             let envelope = if retain_canonical_outputs {

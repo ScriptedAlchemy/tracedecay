@@ -237,7 +237,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-
     let mut required = BTreeSet::new();
     while let Some(row) = rows
         .next()
@@ -251,7 +250,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         let anchor_json = row
             .get::<String>(1)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-
         let observation: tracedecay_domain::DurableObservationV1 =
             serde_json::from_str(&observation_json)
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
@@ -321,7 +319,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-
     while let Some(row) = rows
         .next()
         .await
@@ -992,7 +989,6 @@ async fn fold_coverage_rows(
         let mut after = (0_i64, 0_i64);
         loop {
             checkpoint_relation_rebuild_control(control)?;
-
             let mut page = conn
                 .query(
                     &sql,
@@ -1021,7 +1017,6 @@ async fn fold_coverage_rows(
                     row.get::<i64>(2)
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                 );
-
                 match rows {
                     CoverageRows::Superseded => digest.remove(encoded.as_bytes())?,
                     CoverageRows::Visible | CoverageRows::Introduced => {

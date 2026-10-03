@@ -346,7 +346,6 @@ pub(crate) fn run_writer_command(
             let Some(completion) = completion else {
                 return DeferredReply::none();
             };
-
             let (cleanup, terminal) = completion.finish(connection);
             if cleanup.is_err() {
                 shutdown_requested.store(true, Ordering::Release);

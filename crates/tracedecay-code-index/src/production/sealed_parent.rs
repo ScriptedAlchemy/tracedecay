@@ -202,7 +202,6 @@ impl SealedParentGenerationV1 {
             &bytes,
             &mut restored,
         )?;
-
         restore_file_pages(vec![page])?
             .pop()
             .ok_or_else(|| contract("sealed file segment restored no file"))

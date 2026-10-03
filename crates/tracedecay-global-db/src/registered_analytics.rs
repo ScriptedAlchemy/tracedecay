@@ -212,7 +212,6 @@ impl RegisteredGlobalDb {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1214,7 +1213,6 @@ async fn settle_prepared_owner_facts(
             Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
     }
     insert_settled_outbox_rows(transaction, &rows).await?;
-
     Ok(())
 }
 

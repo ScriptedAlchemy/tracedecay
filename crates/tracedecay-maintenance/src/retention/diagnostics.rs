@@ -76,7 +76,6 @@ pub async fn collect_session_retention_findings(
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-
     let mut findings = Vec::with_capacity(records.len());
     for record in records {
         let Ok(finding) =
@@ -195,7 +194,6 @@ async fn collect_unregistered_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-
     storage_family_read(
         report
             .plan

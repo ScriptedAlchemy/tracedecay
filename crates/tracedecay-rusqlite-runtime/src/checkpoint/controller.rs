@@ -196,7 +196,6 @@ impl WriterCheckpointController {
             }
         };
         let elapsed = started.elapsed();
-
         let (decision, hard_drain_required) = checkpoint_decision(
             report,
             mode,

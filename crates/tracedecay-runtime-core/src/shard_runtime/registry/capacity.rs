@@ -238,7 +238,6 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
-
         outcome
     }
 }

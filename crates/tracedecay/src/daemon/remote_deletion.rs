@@ -227,7 +227,6 @@ pub(super) async fn dispatch_remote_deletion(
         },
         Err(receipt) => receipt,
     };
-
     if receipt.tombstone_recorded
         && let Some(target) = receipt.target
     {

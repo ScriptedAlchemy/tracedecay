@@ -219,7 +219,6 @@ impl RetainedDispatchRegistry {
                     return Ok(lease);
                 }
                 drop(lease);
-
                 return Err(dispatch_shutdown_error());
             }
         }
@@ -246,7 +245,6 @@ impl RetainedDispatchRegistry {
         if !self.accepting.load(Ordering::Acquire) {
             // Admission refusals are the signal a saturation diagnosis needs;
             // count them alongside the admitted/settled lifecycle gauges.
-
             return Err(dispatch_shutdown_error());
         }
 
@@ -732,7 +730,6 @@ pub fn dispatch_cancelled_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "cancellation");
     }
-
     TraceDecayError::project_route(
         "tool_dispatch_cancelled",
         true,
@@ -750,7 +747,6 @@ fn dispatch_deadline_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "its absolute deadline");
     }
-
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,

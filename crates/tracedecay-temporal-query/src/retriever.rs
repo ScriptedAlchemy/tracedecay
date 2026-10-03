@@ -424,7 +424,6 @@ pub async fn hydrate_temporal_candidate_export(
     check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
-
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),

@@ -580,7 +580,6 @@ pub fn install_worker_plan(
     )?;
     if let Some(existing) = WORKER_RUNTIME.get() {
         compare_installed_plan(&existing.0.plan, &requested)?;
-
         return Ok(existing.0.installed_plan());
     }
     let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
@@ -590,7 +589,6 @@ pub fn install_worker_plan(
         .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
             message: "worker runtime installation did not settle".to_owned(),
         })?;
-
     Ok(installed)
 }
 

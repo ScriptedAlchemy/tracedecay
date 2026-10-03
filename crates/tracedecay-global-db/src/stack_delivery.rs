@@ -549,7 +549,6 @@ impl RegisteredGlobalDb {
                 return Err("GitHub stack signal identity conflict".to_owned());
             }
             let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-
             transaction
                 .rollback()
                 .await
@@ -606,7 +605,6 @@ impl RegisteredGlobalDb {
                 .map_err(|error| format!("append GitHub stack delivery recipient: {error}"))?;
         }
         let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-
         let saturated = deferred_count > 0;
         transaction
             .commit()

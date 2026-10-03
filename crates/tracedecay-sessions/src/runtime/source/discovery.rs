@@ -207,7 +207,6 @@ impl WalkState<'_> {
         if depth > self.max_depth {
             return;
         }
-
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };

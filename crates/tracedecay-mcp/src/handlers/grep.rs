@@ -161,7 +161,6 @@ pub fn render_grep(
     };
     // Grep aggregates more raw content than any other search tool; the encoded
     // payload size explains transport pressure that timing alone cannot.
-
     Ok(text_tool_result(&text, Vec::new()))
 }
 

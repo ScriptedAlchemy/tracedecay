@@ -467,7 +467,6 @@ where
         stats.spans_written = written.spans_changed;
         stats.commits_attributed = written.commits_changed;
     }
-
     Ok(stats)
 }
 

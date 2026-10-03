@@ -79,7 +79,6 @@ pub fn build_execution_topology_daily_rollup(
 ) -> Result<ExecutionTopologyRollupBuildV1, ExecutionTopologyRollupBuildErrorV1> {
     // Items processed by this daily sweep; the surrounding measure is the
     // sweep's one wall-time authority and this sizes what it reduced.
-
     let fragment = build_execution_topology_rollup_fragment(
         authorized_scope_ref,
         exact_day_horizon,

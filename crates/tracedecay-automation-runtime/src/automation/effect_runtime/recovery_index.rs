@@ -82,7 +82,6 @@ pub async fn prepare_reserved_automation_effect_recovery(
     })??;
     if indexed.is_empty() {
         let report = reset_report(reset_journals);
-
         return Ok(AutomationEffectRecoveryPreparation::Complete(report));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(

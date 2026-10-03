@@ -723,7 +723,6 @@ pub(super) fn emit_code_graph_rows(
             let row_window = crate::parallelism::indexing_workers()
                 .max(1)
                 .saturating_mul(512);
-
             for window in occurrences.chunks(row_window) {
                 check()?;
                 let identities = collect_graph_rows_ordered(window, symbol_entity_id)?;

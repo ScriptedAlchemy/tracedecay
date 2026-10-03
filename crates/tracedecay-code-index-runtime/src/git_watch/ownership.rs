@@ -218,7 +218,6 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         let mut projects = inner.projects.lock().await;
         projects.drain().map(|(_, state)| state).collect()
     };
-
     for state in states {
         state.retire();
         if let Some(handle) = state.take_task() {
@@ -264,7 +263,6 @@ pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
             retired.push(state);
         }
     }
-
     drop(projects);
     for state in retired {
         join_retired_repository_state(&state).await;

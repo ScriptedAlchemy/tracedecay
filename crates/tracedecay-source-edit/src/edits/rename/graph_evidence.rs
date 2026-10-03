@@ -392,7 +392,6 @@ pub(super) fn load(
     if looks_like_test(target_path, &target_metadata.simple_name) {
         affected_tests.insert(target_path.to_owned());
     }
-
     let graph_revision = {
         let _span = tracing::trace_span!("edits.rename.evidence_digest").entered();
         {

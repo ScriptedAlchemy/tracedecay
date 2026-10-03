@@ -60,7 +60,6 @@ pub(crate) fn open_recovered_database(
             }
         })
     }?;
-
     if let Err(error) = validate_or_initialize_format(&recovered, reopen) {
         return close_recovered_after_error("validate recovered graph format", recovered, error);
     }

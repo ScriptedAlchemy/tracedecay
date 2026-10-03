@@ -501,7 +501,6 @@ impl RetainedParseDocument {
             }
             self.identity = next_identity;
             self.state_epoch = self.state_epoch.saturating_add(1);
-
             return Ok(ParseReport {
                 reuse: ParseReuse::Noop,
                 completeness: completeness_for(&self.tree, None, None),

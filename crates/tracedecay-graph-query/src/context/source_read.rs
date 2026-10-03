@@ -133,7 +133,6 @@ pub async fn read_source(
             })?,
         }
     };
-
     let context = source_symbol_context(
         reader,
         cancellation,

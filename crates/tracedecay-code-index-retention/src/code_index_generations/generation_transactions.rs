@@ -150,7 +150,6 @@ pub(super) fn stage_collectable_generations(
             Ok(())
         })?;
     }
-
     Ok(())
 }
 
@@ -260,7 +259,6 @@ impl GraphReplayPoolLockV1 {
     fn wait_for_exclusive(deadline: Instant) {
         #[cfg(test)]
         GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(waits.get() + 1));
-
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return;
@@ -618,7 +616,6 @@ pub(super) fn open_file_sha256_hex_cancellable(
         if read == 0 {
             return Ok(encode_lowercase_hex(&hasher.finalize()));
         }
-
         hasher.update(&buffer[..read]);
     }
 }

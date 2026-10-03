@@ -104,7 +104,6 @@ pub fn register_context_scout_lifecycle_authority(
     // gauge moves only on the two transitions that change the registry map
     // (fresh install here, exact removal in unregister), so it tracks the
     // map's population exactly.
-
     registration
 }
 
@@ -181,7 +180,6 @@ pub fn unregister_context_scout_lifecycle_authority(
         .is_some_and(|existing| existing.sessions.shares_client_with(sessions))
     {
         authorities.remove(&key);
-
         return true;
     }
     false
@@ -422,7 +420,6 @@ async fn lookup_context_scout_lifecycle(
         Err(reason) => {
             // The bounded per-reason detail already goes to tracing; the
             // counter records only the fail-closed outcome.
-
             tracing::debug!(
                 target: "tracedecay::context_scout_lifecycle",
                 reason = reason.as_str(),

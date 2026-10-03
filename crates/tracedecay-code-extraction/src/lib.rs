@@ -497,7 +497,6 @@ impl LanguageRegistry {
                 .get(ext)
                 .map(|&index| self.extractors[index].as_ref())
         });
-
         extractor
     }
 

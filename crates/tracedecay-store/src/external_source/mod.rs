@@ -1577,7 +1577,6 @@ pub fn apply_source_projection(
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
     let outcome = reduce_source_projection(current.clone(), pending, projection);
-
     outcome
 }
 
@@ -1596,7 +1595,6 @@ pub fn apply_source_projection_owned(
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
     let outcome = reduce_source_projection(current, pending, projection);
-
     outcome
 }
 

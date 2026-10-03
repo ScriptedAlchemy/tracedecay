@@ -82,7 +82,6 @@ fn read_graph_evidence(
     check_request_control(request, control.as_ref())?;
     let batch = project_graph_batch(reader, request, control.as_ref(), raw)?;
     check_request_control(request, control.as_ref())?;
-
     Ok(RetrieverOutcome::Complete(batch))
 }
 

@@ -152,7 +152,6 @@ pub(super) fn scan_records_from(
             .checked_add(1)
             .ok_or(HookSpoolError::MetadataCorrupted)?;
     }
-
     Ok(ScanResult {
         records,
         valid_end: offset,
@@ -225,7 +224,6 @@ pub(super) fn encode_frame(
     frame.extend_from_slice(payload);
     let checksum = frame_checksum(&frame);
     frame.extend_from_slice(&checksum);
-
     Ok(frame)
 }
 

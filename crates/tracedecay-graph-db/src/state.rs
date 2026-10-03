@@ -1039,7 +1039,6 @@ pub(crate) fn labeled_projection_nodes(
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
     };
-
     let nodes = {
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.filter").entered();
         {
@@ -1053,7 +1052,6 @@ pub(crate) fn labeled_projection_nodes(
                 .collect::<Vec<_>>()
         }
     };
-
     Ok(nodes)
 }
 
@@ -1086,7 +1084,6 @@ fn labeled_projection_nodes_checked(
         let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
     };
-
     check()?;
     require_generation_capacity(
         if label == ENTITY_LABEL {
@@ -1121,7 +1118,6 @@ fn labeled_projection_nodes_checked(
             }
         }
     };
-
     check()?;
     Ok(nodes)
 }

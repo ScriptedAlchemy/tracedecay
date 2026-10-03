@@ -224,7 +224,6 @@ where
             .map_err(storage_problem)?;
         // Idempotent replays are the interesting half of this decision: a
         // rising replay share means callers are re-adjudicating settled pairs.
-
         Ok(outcome)
     }
 

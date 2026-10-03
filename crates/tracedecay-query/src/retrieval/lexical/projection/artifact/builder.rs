@@ -1179,7 +1179,6 @@ impl CodeLexicalArtifactBuilderV1 {
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
         set_triggers_enabled(&connection, true)?;
-
         tracing::debug!(
             pages = carried.pages,
             re_encoded_pages = carried.re_encoded_pages,
@@ -1348,7 +1347,6 @@ impl CodeLexicalArtifactBuilderV1 {
             let prepared = self.prepare_pages(pages, control)?;
             self.append_prepared_pages_inner(&prepared, control)
         })();
-
         result
     }
 
@@ -1368,7 +1366,6 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             &prepared,
         )?;
-
         Ok(prepared)
     }
 
@@ -1413,7 +1410,6 @@ impl CodeLexicalArtifactBuilderV1 {
                         .to_owned(),
                 )
             })?;
-
             return Err(batch_limit(
                 exceeded.limit,
                 exceeded.required,
@@ -1429,7 +1425,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact admissible source prefix was empty".to_owned(),
             )
         })?;
-
         Ok(PreparedCodeLexicalArtifactBatchV1 {
             accepted_prefix,
             prepared_pages: prepared,
@@ -1541,7 +1536,6 @@ impl CodeLexicalArtifactBuilderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         let result = self.append_prepared_pages_inner(pages, control);
-
         result
     }
 
@@ -1613,7 +1607,6 @@ impl CodeLexicalArtifactBuilderV1 {
                         let _span = tracing::trace_span!("query.artifact.batch.rows").entered();
                         append_prepared_rows(&transaction, pages, control)
                     }?;
-
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.postings").entered();
                         append_prepared_postings(
@@ -1624,7 +1617,6 @@ impl CodeLexicalArtifactBuilderV1 {
                             control,
                         )
                     }?;
-
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.receipts").entered();
                         {
@@ -1634,7 +1626,6 @@ impl CodeLexicalArtifactBuilderV1 {
                             Ok::<(), CodeLexicalArtifactErrorV1>(())
                         }
                     }?;
-
                     checkpoint(control)
                 })();
                 if let Err(error) = mutation {
@@ -1644,12 +1635,10 @@ impl CodeLexicalArtifactBuilderV1 {
                     }?;
                     return Err(error);
                 }
-
                 let commit = {
                     let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
                 };
-
                 commit
             }
         })?;
@@ -1804,7 +1793,6 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         })?;
         validate_finalization_state(&state)?;
-
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if source.is_some_and(|source| &state.source_state_digest != source.source_state_digest()) {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1845,7 +1833,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
-
             wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
@@ -2085,7 +2072,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )?;
             crate::observe::Residency::Warm.record("query.artifact.residency");
-
             return Ok(receipt);
         }
         Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -4762,7 +4748,6 @@ fn merge_wake_fits_memory_temp_store(
         .query_row(staged_runs, [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-
     Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 

@@ -174,7 +174,6 @@ impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
         // Coordinator-level failures never reach the per-phase counters, so
         // they are recorded here or the waste is invisible to profiling.
-
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -475,7 +474,6 @@ async fn run_daemon_shutdown(
     // Forced vs graceful: graceful means in-flight client work idled out
     // cooperatively before the drain deadline; forced means the deadline
     // expired and the abort/join path did the draining.
-
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
@@ -586,7 +584,6 @@ async fn run_daemon_shutdown(
     // Graceful means every lane drained cooperatively inside its budget;
     // anything else, a timed-out owner, a forced client abort, a failed or
     // timed-out project server, makes this attempt a forced shutdown.
-
     receipt
 }
 

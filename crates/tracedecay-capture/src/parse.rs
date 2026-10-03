@@ -182,7 +182,6 @@ pub fn parse_observation_record_v1(
         ordering_domain,
         ParseLimits::default_policy(),
     );
-
     parsed
 }
 
@@ -226,7 +225,6 @@ pub fn prepare_observation_record_v1(
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
     let prepared = prepare_observation_record(record, source_range, ordering_domain);
-
     prepared
 }
 
@@ -342,7 +340,6 @@ fn parse_observation_record(
 fn record_digest(record: &[u8]) -> [u8; 32] {
     // Cumulative decoded bytes across every host pipeline, not a last-record
     // sample, corpus-scale throughput is the quantity being compared.
-
     {
         let _span = tracing::trace_span!("capture.parse.record_digest").entered();
         Sha256::digest(record).into()

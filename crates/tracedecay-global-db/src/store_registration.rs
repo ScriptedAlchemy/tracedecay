@@ -306,7 +306,6 @@ pub async fn register_project_store(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_id.to_string(), digest);
-
     Ok(())
 }
 

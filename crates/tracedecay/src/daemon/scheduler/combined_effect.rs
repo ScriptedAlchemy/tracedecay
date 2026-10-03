@@ -452,7 +452,6 @@ fn run_combined_scheduler_effect_inner<'a>(
                 .await
             }
         };
-
         outcome
     })
 }

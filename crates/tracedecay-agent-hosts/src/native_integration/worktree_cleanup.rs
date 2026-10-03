@@ -35,7 +35,6 @@ impl DaemonNativeWorktreeAuthority {
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
         let removal = self.remove_cleanup_checked(request, scope_set, cancellation);
-
         removal
     }
 
@@ -173,7 +172,6 @@ impl DaemonNativeWorktreeAuthority {
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         let reconciliation = self.reconcile_cleanup_checked(request, scope_set, cancellation);
-
         reconciliation
     }
 

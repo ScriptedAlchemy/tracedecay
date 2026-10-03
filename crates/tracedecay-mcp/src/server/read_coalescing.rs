@@ -64,7 +64,6 @@ struct ReadFollowerWaitGuard {
 impl ReadFollowerWaitGuard {
     fn enter(active: Arc<AtomicU64>) -> Self {
         active.fetch_add(1, Ordering::AcqRel);
-
         Self { active }
     }
 }

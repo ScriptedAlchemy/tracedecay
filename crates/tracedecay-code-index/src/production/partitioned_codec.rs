@@ -1519,7 +1519,6 @@ fn decode_verified_file_segment(
         let _span = tracing::trace_span!("code_index.restore.segment_identity_restore").entered();
         canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)
     };
-
     identity_restore?;
     let payload_decoding_failed = |error: serde_json::Error| {
         // The payload already parsed as canonical JSON under its verified

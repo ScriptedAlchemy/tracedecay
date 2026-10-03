@@ -605,7 +605,6 @@ fn envelope<T>(value: T, mut coverage: GitCoverageV1, truncated: bool) -> GitQue
     if truncated {
         // Bound-hit results across every query kind: a rising count means
         // callers routinely outgrow `max_entries`, not that reads failed.
-
         coverage.record(GitDegradationV1::TruncatedOutput);
     }
     GitQueryEnvelopeV1 {

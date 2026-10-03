@@ -32,7 +32,6 @@ impl GitWatcher {
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
         let admission = self.ensure_watching_admission(project_root, config).await;
-
         admission
     }
 
@@ -150,7 +149,6 @@ impl GitWatcher {
                     WorktreeRegistration::Capacity => return GitWatcherAdmission::Capacity,
                     WorktreeRegistration::Retired => {
                         projects.remove(&common_dir);
-
                         drop(admission);
                         join_retired_repository_state(&state).await;
                         drop(projects);
@@ -175,7 +173,6 @@ impl GitWatcher {
             let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
             state.retain_task(handle);
             projects.insert(common_dir.clone(), Arc::clone(&state));
-
             #[cfg(test)]
             self.inner.lifecycle_receipts.record_repository();
             log_daemon_event(
@@ -230,7 +227,6 @@ impl GitWatcher {
                 () = self.inner.cancellation.cancelled() => break,
                 () = tokio::time::sleep(backoff) => {}
             }
-
             match self
                 .ensure_watching_with_config(&project_root, &config)
                 .await

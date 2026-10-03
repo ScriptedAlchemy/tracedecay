@@ -799,7 +799,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .with_relation_graph_health(observed.report.clone())
                 .await;
         }
-
         let snapshot = match self.health_read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -939,7 +938,6 @@ async fn diagnose_snapshot(
             status = SessionTemporalHealthStatus::Partial;
             continue;
         }
-
         if diagnose_health_check(
             conn,
             check,

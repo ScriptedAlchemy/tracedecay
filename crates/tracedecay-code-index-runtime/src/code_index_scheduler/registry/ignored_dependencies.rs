@@ -311,7 +311,6 @@ impl AdmissionFlightOwnerV1 {
         if result.is_err() {
             self.flight.owner_abandoned();
         }
-
         self.flight.finish(&result);
         self.remove_flight();
         self.finished = true;
@@ -336,11 +335,9 @@ impl Drop for AdmissionFlightOwnerV1 {
     fn drop(&mut self) {
         // The owner is the RAII holder of the in-flight admission slot, so the
         // gauge cannot leak on cancellation, panic, or shutdown.
-
         if self.finished {
             return;
         }
-
         self.bridge.cancel();
         self.flight.owner_abandoned();
         let cancellation = Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
@@ -469,7 +466,6 @@ impl CodeIndexSchedulerRegistryV1 {
             return await_flight(flight, control.as_ref()).await;
         }
         let bridge = Arc::new(AdmissionControlBridgeV1::new());
-
         let owner = AdmissionFlightOwnerV1 {
             key: flight_key,
             flight: Arc::clone(&flight),

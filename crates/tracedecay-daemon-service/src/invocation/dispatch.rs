@@ -160,7 +160,6 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = self.request_cancellations.register(&request_id) else {
-
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -174,7 +173,6 @@ impl DaemonInvocationService {
             (Some(token), _) => token,
             (None, Some(lease)) => lease.token(),
             (None, None) => {
-
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -229,7 +227,6 @@ impl DaemonInvocationService {
                     },
                 );
             }
-
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let operation = request.operation();
@@ -258,7 +255,6 @@ impl DaemonInvocationService {
                  not admitted (project graph runtime unavailable or its \
                  activation is pending)"
             );
-
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,

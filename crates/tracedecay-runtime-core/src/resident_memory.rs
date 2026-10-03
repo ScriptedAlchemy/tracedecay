@@ -234,7 +234,6 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
         cgroup,
         process_resident_memory_limit_override_v1(),
     );
-
     authority
 }
 
@@ -683,7 +682,6 @@ impl ResidentMemoryPressureV1 {
             return self.state();
         }
         let sample = (self.sampler)();
-
         let interval = u64::try_from(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros())
             .unwrap_or(u64::MAX);
         self.next_checkpoint_sample_micros.store(
@@ -700,7 +698,6 @@ impl ResidentMemoryPressureV1 {
     fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
         let sample = (self.sampler)()?;
         self.publish_observation(sample.admission_bytes());
-
         Some(self.state())
     }
 
@@ -749,14 +746,12 @@ impl ResidentMemoryPressureV1 {
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
-
         self.state()
     }
 
     fn publish_observation(&self, observed_bytes: u64) {
         self.observed_bytes.store(observed_bytes, Ordering::Release);
         self.observed.store(true, Ordering::Release);
-
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
         } else if observed_bytes <= self.low_watermark_bytes
@@ -873,7 +868,6 @@ impl ResidentMemoryPressureV1 {
         for reclaimer in reclaimers {
             released_bytes = released_bytes.saturating_add(reclaimer(request));
         }
-
         released_bytes
     }
 
@@ -996,7 +990,6 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
         before_bytes,
         after_bytes,
     };
-
     trim
 }
 
@@ -1470,7 +1463,6 @@ impl ProcessResidentMemoryV1 {
         };
         state.used_bytes = next_used;
         *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
-
         Ok(ProcessSharedMemoryReservationV1 {
             authority: Arc::clone(self),
             component,
@@ -1573,7 +1565,6 @@ impl ProcessResidentMemoryV1 {
         }
         state.used_bytes = next_used;
         *state.charges.entry(key.clone()).or_default() += requested_bytes.get();
-
         Some(ResidentMemoryReservationV1 {
             authority: Arc::clone(self),
             key: key.clone(),
@@ -1630,7 +1621,6 @@ impl ProcessResidentMemoryV1 {
         {
             return None;
         }
-
         Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
             observed_bytes,
             limit_bytes: self.pressure.limit_bytes(),
@@ -1674,7 +1664,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= released_bytes;
-
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= released_bytes;
             if *charge == 0 {
@@ -1727,7 +1716,6 @@ impl ProcessResidentMemoryV1 {
         }
         let released_bytes = reserved_bytes - measured_bytes;
         state.used_bytes -= released_bytes;
-
         if measured_bytes > 0 {
             let mut to = from.clone();
             to.component = to_component;
@@ -1743,7 +1731,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= reserved_bytes;
-
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= reserved_bytes;
             if *charge == 0 {
@@ -1777,7 +1764,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-
         self.ledger_released(state);
         Ok(())
     }
@@ -1794,7 +1780,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-
         self.ledger_released(state);
     }
 }

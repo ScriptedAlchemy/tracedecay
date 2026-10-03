@@ -48,7 +48,6 @@ pub fn defer_graph_replay_pool_busy(
     project_root: &Path,
 ) -> super::CodeGenerationRetentionOutcomeV1 {
     observations.record_graph_replay_release_unhealthy(project_root);
-
     log_code_generation_retention_degraded(observations, "graph_replay_pool_busy");
     super::CodeGenerationRetentionOutcomeV1::Failed
 }

@@ -476,7 +476,6 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);

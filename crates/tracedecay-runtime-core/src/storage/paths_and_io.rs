@@ -351,7 +351,6 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
-
         set_owner_private_file_mode(target)?;
         Ok(bytes)
     }

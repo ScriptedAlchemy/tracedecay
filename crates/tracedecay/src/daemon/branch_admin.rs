@@ -180,7 +180,6 @@ impl MaintenanceReaperRegistry {
             return None;
         }
         *state.pending.entry(owner.owner.clone()).or_default() += 1;
-
         drop(state);
         self.changed.notify_waiters();
         Some(MaintenanceReaperReservation {
@@ -201,7 +200,6 @@ impl MaintenanceReaperRegistry {
         if remove {
             state.pending.remove(owner);
         }
-
         drop(state);
         self.changed.notify_waiters();
     }
@@ -228,7 +226,6 @@ impl MaintenanceReaperRegistry {
     fn finish(&self, key: &MaintenanceReaperKey) {
         let mut state = self.state();
         state.reapers.remove(key);
-
         drop(state);
         self.changed.notify_waiters();
     }
@@ -1552,7 +1549,6 @@ impl StoreAdministration {
             state.pending.remove(&reservation.owner);
         }
         reservation.active = false;
-
         drop(state);
         self.retirement_reapers.changed.notify_waiters();
         let _ = start.send(());

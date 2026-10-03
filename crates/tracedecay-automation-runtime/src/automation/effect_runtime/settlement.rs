@@ -1198,7 +1198,6 @@ impl AutomationEffectAuthority {
             )
             .map_err(contract_error)?;
             let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
-
             return Ok(admission);
         }
         let reserve_path = journal_path.clone();
@@ -1296,7 +1295,6 @@ impl AutomationEffectAuthority {
                     finalize_terminal_housekeeping(&dashboard_root, &authority.journal_path)
                         .await?;
                     let admission = AutomationEffectAdmission::Replay(Box::new(terminal));
-
                     return Ok(admission);
                 }
                 let recovery_cancellation = cancellation.clone();
@@ -1354,7 +1352,6 @@ impl AutomationEffectAuthority {
                 terminal,
             )),
         }?;
-
         Ok(admission)
     }
 
