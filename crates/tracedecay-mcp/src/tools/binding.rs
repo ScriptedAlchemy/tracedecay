@@ -478,17 +478,6 @@ pub fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     )
 }
 
-/// Selector-bound effects accept a project selector but must not open the
-/// selected project's store. The calling session stays admitted; the retained
-/// owner denies a foreign selector as `NotFoundOrNotAuthorized`.
-#[cfg(test)]
-pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
-    matches!(
-        registered_project_access(tool_name),
-        Some(RegisteredProjectAccess::SelectorOnly)
-    ) && direct_effect(tool_name).is_effect()
-}
-
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"

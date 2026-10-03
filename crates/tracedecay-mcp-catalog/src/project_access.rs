@@ -1,4 +1,5 @@
-/// Tools whose schema advertises a registered-project reader selector.
+/// Tools whose `project_selector` dispatches to the selected registered
+/// project's server, so reads and writes both use that project's store.
 ///
 /// This list is the sole Reader authority. Root `MCP_TOOL_BINDINGS` derives
 /// `RegisteredProjectAccess::Reader` from these names at construction.
@@ -14,6 +15,11 @@ const REGISTERED_PROJECT_READER_TOOL_NAMES: &[&str] = &[
     "tracedecay_fact_store_contradict",
     "tracedecay_fact_store_get",
     "tracedecay_fact_store_list",
+    "tracedecay_fact_store_add",
+    "tracedecay_fact_store_update",
+    "tracedecay_fact_store_remove",
+    "tracedecay_fact_store_supersede",
+    "tracedecay_fact_feedback",
     "tracedecay_memory_status",
     "tracedecay_message_search",
     "tracedecay_grep",
