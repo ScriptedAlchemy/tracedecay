@@ -94,10 +94,7 @@ pub async fn sweep_unregistered_store_page(
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(interrupted_report(
-            completion,
-            CollectionOutcome::default(),
-        )));
+        return Ok(interrupted_report(completion, CollectionOutcome::default()));
     }
     let census = census_unregistered_project_dirs_page(
         db,
@@ -110,32 +107,32 @@ pub async fn sweep_unregistered_store_page(
     )
     .await?;
     let Some((findings, next_cursor)) = census else {
-        return Ok(observed_page_report(interrupted_report(
+        return Ok(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
                 .unwrap_or(UnregisteredSweepCompletionV1::DeadlineExceeded),
             CollectionOutcome::default(),
-        )));
+        ));
     };
     let plan = plan_unregistered_collection(findings, request.retention_secs);
     if !request.apply {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan,
             applied: false,
             outcome: CollectionOutcome::default(),
             next_cursor,
             completion: UnregisteredSweepCompletionV1::Complete,
-        }));
+        });
     }
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan: UnregisteredCollectionPlan::default(),
             applied: false,
             outcome: CollectionOutcome::default(),
             next_cursor: request.cursor,
             completion,
-        }));
+        });
     }
     let outcome = execute_unregistered_collection_controlled(
         db,
@@ -149,7 +146,7 @@ pub async fn sweep_unregistered_store_page(
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,
         CollectionCompletionV1::DeadlineExceeded => UnregisteredSweepCompletionV1::DeadlineExceeded,
     };
-    Ok(observed_page_report(UnregisteredStoreSweepReport {
+    Ok(UnregisteredStoreSweepReport {
         plan,
         applied: completion == UnregisteredSweepCompletionV1::Complete,
         outcome,
@@ -157,7 +154,7 @@ pub async fn sweep_unregistered_store_page(
             .then_some(next_cursor)
             .flatten(),
         completion,
-    }))
+    })
 }
 
 fn interrupted_report(
@@ -169,13 +166,6 @@ fn interrupted_report(
         completion,
         ..UnregisteredStoreSweepReport::default()
     }
-}
-
-/// Page-terminal census: cancelled and deadline-bounded pages count next to
-/// complete ones so a starved sweep is visible, and collected/failed items
-/// are attributed even when the page ends early.
-fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
-    report
 }
 
 /// Builds only one page of costly child inventories. Its directory cursor is

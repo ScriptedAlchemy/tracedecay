@@ -150,8 +150,7 @@ pub async fn reconcile_graph_replay_releases(
     // A runtime that answered its last attempts with deadline or
     // unavailability failures is skipped for the bounded backoff window
     // instead of being polled, and timed out against, on every tick. The
-    // arming failure was already reported; skips stay quiet on the log and
-    // visible on the gauge.
+    // arming failure was already reported, so skips stay quiet on the log.
     if !observations.graph_replay_release_attempt_admitted(project_root) {
         return ReconcileOutcome::Deferred;
     }

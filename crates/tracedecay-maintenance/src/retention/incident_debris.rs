@@ -86,7 +86,7 @@ pub fn sweep_incident_debris(
             report
                 .errors
                 .extend(census.iter().map(|entry| failure(entry, kind)));
-            return observed_sweep_report(report);
+            return report;
         }
     };
     for entry in census {
@@ -95,12 +95,6 @@ pub fn sweep_incident_debris(
             Err(kind) => report.errors.push(failure(entry, kind)),
         }
     }
-    observed_sweep_report(report)
-}
-
-/// Items-removed census for the one outer sweep wall span, including the
-/// fail-closed early exits that touch nothing but report every store.
-fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSweepReport {
     report
 }
 

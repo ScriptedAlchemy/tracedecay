@@ -699,6 +699,7 @@ async fn project_storage_report_page(
 struct ProjectDirectoryPage {
     directories: Vec<(String, PathBuf)>,
     next_cursor: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     entries_scanned: usize,
 }
 
