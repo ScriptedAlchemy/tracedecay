@@ -30,7 +30,8 @@ pub(super) async fn run_git_sync(
     )
     .await?;
 
-    await_session_sync_completion(profile, &project_root, "session git sync", outcome).await?;
+    await_session_sync_completion(profile, &project_root, SessionSyncSurface::GitSync, outcome)
+        .await?;
     if dry_run {
         println!("git-sync (dry-run): no rows were written");
     }
@@ -52,7 +53,7 @@ pub(super) async fn run_sync_status(
     )
     .await?;
     let receipt = json.then(|| outcome.clone());
-    let state = session_sync_poll_state("session sync", outcome)?;
+    let state = session_sync_poll_state(SessionSyncSurface::Status, outcome)?;
     if let Some(receipt) = receipt {
         println!("{}", serde_json::to_string_pretty(&receipt)?);
         return Ok(());
@@ -101,6 +102,31 @@ pub(super) enum SessionSyncPollState {
     },
 }
 
+/// CLI surface observing a session sync operation. The receipt does not name
+/// the command that started it, so the surface owns the deferral policy.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SessionSyncSurface {
+    Import,
+    GitSync,
+    Status,
+}
+
+impl SessionSyncSurface {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Import => "session import",
+            Self::GitSync => "session git sync",
+            Self::Status => "session sync",
+        }
+    }
+
+    /// Git sync is a bounded foreground pass, so unfinished coverage there is
+    /// a failure rather than background catch-up.
+    fn accepts_deferred_catch_up(self) -> bool {
+        !matches!(self, Self::GitSync)
+    }
+}
+
 fn sync_failed(label: &str, detail: &str) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("{label} did not complete successfully ({detail})"),
@@ -108,9 +134,10 @@ fn sync_failed(label: &str, detail: &str) -> tracedecay_domain::errors::TraceDec
 }
 
 pub(super) fn session_sync_poll_state(
-    label: &str,
+    surface: SessionSyncSurface,
     outcome: AdminCliSessionSyncV1,
 ) -> tracedecay_domain::errors::Result<SessionSyncPollState> {
+    let label = surface.label();
     match outcome {
         AdminCliSessionSyncV1::Accepted {
             operation_id,
@@ -140,13 +167,9 @@ pub(super) fn session_sync_poll_state(
                     ),
                 }
             })?;
-            if session_import_deferred_progress(
-                label,
-                termination,
-                &coverage,
-                &failure_codes,
-                remaining_work,
-            ) {
+            if surface.accepts_deferred_catch_up()
+                && deferred_catch_up(termination, &coverage, &failure_codes, remaining_work)
+            {
                 return Ok(SessionSyncPollState::Deferred {
                     operation_id,
                     idempotency_key,
@@ -188,15 +211,13 @@ fn termination_label(termination: OperationTermination) -> String {
     }
 }
 
-fn session_import_deferred_progress(
-    label: &str,
+fn deferred_catch_up(
     termination: OperationTermination,
     coverage: &[SessionSyncSourceCoverageV1],
     failure_codes: &[String],
     remaining_work: u64,
 ) -> bool {
-    label == "session import"
-        && termination == OperationTermination::Partial
+    termination == OperationTermination::Partial
         && failure_codes.is_empty()
         && remaining_work > 0
         && coverage.iter().all(|entry| {
@@ -219,16 +240,17 @@ fn session_sync_remaining_work(coverage: &[SessionSyncSourceCoverageV1]) -> Opti
 pub(super) async fn await_session_sync_completion(
     profile: &ProfileRoot,
     project_root: &Path,
-    label: &str,
+    surface: SessionSyncSurface,
     mut outcome: AdminCliSessionSyncV1,
 ) -> tracedecay_domain::errors::Result<()> {
+    let label = surface.label();
     let client_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
     // Poll with exponential backoff so a long-running sync costs dozens of
     // daemon round trips instead of one every 50 ms for up to 35 s.
     let mut poll_interval = std::time::Duration::from_millis(50);
     const MAX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
     loop {
-        match session_sync_poll_state(label, outcome)? {
+        match session_sync_poll_state(surface, outcome)? {
             SessionSyncPollState::Completed { operation_id } => {
                 println!("{label} completed ({})", operation_id.as_str());
                 return Ok(());
@@ -357,8 +379,8 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{
-        SessionSyncPollState, session_sync_deferred_report, session_sync_poll_state,
-        session_sync_timeout_message,
+        SessionSyncPollState, SessionSyncSurface, session_sync_deferred_report,
+        session_sync_poll_state, session_sync_timeout_message,
     };
 
     fn complete(
@@ -418,7 +440,7 @@ mod tests {
     fn session_sync_admission_is_pending_until_truthful_completion() {
         assert!(matches!(
             session_sync_poll_state(
-                "session import",
+                SessionSyncSurface::Import,
                 AdminCliSessionSyncV1::Accepted {
                     operation_id: RequestId::new("operation.fixture").unwrap(),
                     idempotency_key: IdempotencyKey::new("session-sync.fixture").unwrap(),
@@ -431,7 +453,7 @@ mod tests {
         ));
         assert!(matches!(
             session_sync_poll_state(
-                "session import",
+                SessionSyncSurface::Import,
                 complete(
                     OperationTermination::Completed,
                     vec![SessionSyncCoverageV1::Complete],
@@ -474,7 +496,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                session_sync_poll_state("session import", outcome)
+                session_sync_poll_state(SessionSyncSurface::Import, outcome)
                     .unwrap_err()
                     .to_string(),
                 format!("config error: {expected}")
@@ -491,9 +513,29 @@ mod tests {
         );
 
         assert!(matches!(
-            session_sync_poll_state("session import", outcome).unwrap(),
+            session_sync_poll_state(SessionSyncSurface::Import, outcome).unwrap(),
             SessionSyncPollState::Deferred {
                 remaining_work: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sync_status_reports_a_deferred_import_instead_of_failing() {
+        let outcome = complete(
+            OperationTermination::Partial,
+            vec![
+                SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                SessionSyncCoverageV1::Partial { deferred_units: 1 },
+            ],
+            &[],
+        );
+
+        assert!(matches!(
+            session_sync_poll_state(SessionSyncSurface::Status, outcome).unwrap(),
+            SessionSyncPollState::Deferred {
+                remaining_work: 2,
                 ..
             }
         ));
@@ -528,7 +570,7 @@ mod tests {
     #[test]
     fn session_git_sync_still_rejects_unfinished_coverage() {
         let error = session_sync_poll_state(
-            "session git sync",
+            SessionSyncSurface::GitSync,
             complete(
                 OperationTermination::Partial,
                 vec![SessionSyncCoverageV1::Partial { deferred_units: 1 }],
@@ -543,7 +585,7 @@ mod tests {
     #[test]
     fn session_sync_reports_remaining_coverage_even_if_daemon_mislabels_completion() {
         let error = session_sync_poll_state(
-            "session import",
+            SessionSyncSurface::Import,
             complete(
                 OperationTermination::Completed,
                 vec![SessionSyncCoverageV1::Partial { deferred_units: 4 }],
@@ -558,7 +600,7 @@ mod tests {
     #[test]
     fn session_sync_rejects_completion_without_source_coverage() {
         let error = session_sync_poll_state(
-            "session import",
+            SessionSyncSurface::Import,
             complete(OperationTermination::Completed, Vec::new(), &[]),
         )
         .expect_err("coverage-free completion cannot prove convergence");

@@ -128,7 +128,13 @@ async fn handle_sessions_import(
         AdminCliSurfaceRequestV1::SessionsImport {},
     )
     .await?;
-    await_session_sync_completion(profile, &project_path, "session import", outcome).await
+    await_session_sync_completion(
+        profile,
+        &project_path,
+        session_sync::SessionSyncSurface::Import,
+        outcome,
+    )
+    .await
 }
 
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
