@@ -270,6 +270,48 @@ async fn seed_payload_metadata(
 }
 
 #[tokio::test]
+async fn payload_batch_replay_checks_every_duplicate_reference() -> Result<(), String> {
+    let store = test_store().await?;
+    insert_session(&store.conn, &store.storage_root, "session-a").await?;
+    let stored = payload::write_external_payload(
+        &store.storage_root,
+        PROVIDER,
+        "session-a",
+        "message-1",
+        "message",
+        "shared media body",
+        Some(r#"{"field_path":"content.b"}"#.to_string()),
+    )
+    .map_err(|err| err.to_string())?;
+    payload::upsert_payload_metadata(&store.conn, &stored)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    payload::upsert_payload_metadata_batch(&store.conn, &[stored.clone(), stored.clone()])
+        .await
+        .map_err(|err| format!("identical duplicates must replay cleanly: {err}"))?;
+
+    // An earlier duplicate whose metadata disagrees with the stored manifest
+    // must conflict even though the last duplicate matches it.
+    let earlier = crate::LcmPayloadRef {
+        metadata_json: Some(r#"{"field_path":"content.a"}"#.to_string()),
+        ..stored.clone()
+    };
+    let error = payload::upsert_payload_metadata_batch(&store.conn, &[earlier, stored.clone()])
+        .await
+        .expect_err("conflicting earlier duplicate must be rejected");
+    assert!(
+        matches!(
+            &error,
+            crate::LcmError::ImmutablePayloadConflict { payload_ref }
+                if payload_ref == &stored.payload_ref
+        ),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn only_live_placeholders_in_the_owner_row_reference_a_payload() -> Result<(), String> {
     let store = test_store().await?;
     let live = seed_payload_metadata(&store, "message-1", "live body").await?;

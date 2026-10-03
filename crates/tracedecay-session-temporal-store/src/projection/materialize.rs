@@ -25,6 +25,7 @@ use super::super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartState
 use super::MATERIALIZE_REFRESH;
 use super::persist::*;
 use super::receipts::*;
+use crate::sql::live_effect_predicate;
 
 const PARENT_RESOLVER_PAGE_SIZE: i64 = 512;
 const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
@@ -86,14 +87,18 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
         .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
     let mut rows = conn
         .query(
-            "SELECT observation_id, observation_sequence, output_count
-             FROM session_temporal_observation_effects
-             WHERE session_id = ?1
-               AND observation_sequence > ?2
-               AND observation_sequence <= ?3
-               AND output_count > 0
-             ORDER BY observation_sequence, observation_id
-             LIMIT ?4",
+            &format!(
+                "SELECT effect.observation_id, effect.observation_sequence, effect.output_count
+                 FROM session_temporal_observation_effects AS effect
+                 WHERE effect.session_id = ?1
+                   AND effect.observation_sequence > ?2
+                   AND effect.observation_sequence <= ?3
+                   AND effect.output_count > 0
+                   AND {}
+                 ORDER BY effect.observation_sequence, effect.observation_id
+                 LIMIT ?4",
+                live_effect_predicate("?3")
+            ),
             params![
                 recovery.session_id().as_str(),
                 frontier_i64(committed_through, MATERIALIZE_REFRESH)?,
@@ -727,30 +732,34 @@ pub async fn canonical_parent_message_resolver(
         record_parent_resolver_probe();
         let mut rows = conn
             .query(
-                "WITH page AS (
-                     SELECT effect.observation_sequence AS sequence,
-                            observation.observation_json
-                     FROM session_temporal_observation_effects AS effect
-                     JOIN observations AS observation
-                       ON observation.observation_id = effect.observation_id
-                     WHERE effect.session_id = ?1
-                       AND effect.observation_sequence > ?2
-                       AND effect.observation_sequence <= ?3
-                       AND effect.output_count > 0
-                     ORDER BY effect.observation_sequence
-                     LIMIT ?4
-                 ),
-                 bounded AS (
-                     SELECT sequence, observation_json,
-                            ROW_NUMBER() OVER (ORDER BY sequence) AS page_row,
-                            SUM(length(CAST(observation_json AS BLOB)))
-                                OVER (ORDER BY sequence) AS cumulative_bytes
-                     FROM page
-                 )
-                 SELECT sequence, observation_json
-                 FROM bounded
-                 WHERE cumulative_bytes <= ?5 OR page_row = 1
-                 ORDER BY sequence",
+                &format!(
+                    "WITH page AS (
+                         SELECT effect.observation_sequence AS sequence,
+                                observation.observation_json
+                         FROM session_temporal_observation_effects AS effect
+                         JOIN observations AS observation
+                           ON observation.observation_id = effect.observation_id
+                         WHERE effect.session_id = ?1
+                           AND effect.observation_sequence > ?2
+                           AND effect.observation_sequence <= ?3
+                           AND effect.output_count > 0
+                           AND {}
+                         ORDER BY effect.observation_sequence
+                         LIMIT ?4
+                     ),
+                     bounded AS (
+                         SELECT sequence, observation_json,
+                                ROW_NUMBER() OVER (ORDER BY sequence) AS page_row,
+                                SUM(length(CAST(observation_json AS BLOB)))
+                                    OVER (ORDER BY sequence) AS cumulative_bytes
+                         FROM page
+                     )
+                     SELECT sequence, observation_json
+                     FROM bounded
+                     WHERE cumulative_bytes <= ?5 OR page_row = 1
+                     ORDER BY sequence",
+                    live_effect_predicate("?3")
+                ),
                 params![
                     session_id,
                     after_sequence,
@@ -822,7 +831,7 @@ pub async fn canonical_parent_message_resolver(
             break;
         }
     }
-    resolver.reject_ambiguity(operation)?;
+    resolver.reject_ambiguity()?;
     Ok(resolver)
 }
 
@@ -856,19 +865,16 @@ impl ParentMessageResolver {
             });
     }
 
-    pub(crate) fn reject_ambiguity(&self, operation: &'static str) -> SessionStoreResult<()> {
+    pub(crate) fn reject_ambiguity(&self) -> SessionStoreResult<()> {
         if let Some((message_id, resolution)) = self
             .occurrences
             .iter()
             .find(|(_, resolution)| resolution.occurrences.len() > 1)
         {
-            return Err(storage_message(
-                operation,
-                format!(
-                    "session-scoped message id {message_id} resolves to {} occurrences",
-                    resolution.occurrences.len()
-                ),
-            ));
+            return Err(SessionStoreError::AmbiguousMessageOccurrence {
+                message_id: message_id.clone(),
+                occurrences: resolution.occurrences.len(),
+            });
         }
         Ok(())
     }

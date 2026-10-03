@@ -7,7 +7,7 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 30 is the only layout this build serves: interned exact terms,
+/// Revision 31 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
 /// documents with an uncompressed scoring preface (chunk id, field lengths,
 /// and trimmed normalized-text length) ahead of the deflated payload
@@ -32,17 +32,22 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// freshness, clone occurrence project/worktree/snapshot) and the sealed
 /// source's resume cursors are supplied by the opener or dropped before the
 /// seal, so identical trees in different worktrees seal byte-identical
-/// files. Every other revision is refused as incompatible and rebuilt from
-/// the sealed generation. There is no reader for an older layout. A byte
-/// copy of a parent artifact stays valid only when that parent was sealed at
-/// this revision: each `row_blocks.payload` begins with preface tag 24, not
-/// the deflate tag 23, and a rewritten block goes through `encode_row_blocks`
-/// with that row's field lengths and trimmed normalized-text length. The
-/// digest domain is `tracedecay.code-lexical-artifact.v30`. Callers take the
-/// revision from this constant.
-pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 30;
+/// files. Every page holds one file's rows and names that file's ordinal,
+/// and its stored receipts are position-free (page-local document numbers,
+/// a page-local import digest); the sealed digests bind each page's
+/// position by folding those receipts in page order. An edit therefore
+/// re-encodes only the changed files' pages and carries every other page's
+/// rows, postings, and receipts from the parent artifact
+/// (`artifact/increment.rs`), sealing the same bytes a cold build of the
+/// same generation seals. `row_dictionary.page_references` counts the pages
+/// whose rows name each entry so a carried dictionary retires exactly the
+/// entries no page names. Every other revision is refused as incompatible
+/// and rebuilt from the sealed generation. There is no reader for an older
+/// layout. The digest domain is `tracedecay.code-lexical-artifact.v31`.
+/// Callers take the revision from this constant.
+pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 31;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v30\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v31\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -211,7 +216,7 @@ pub(super) fn derive_row_dictionary(
     }
     transaction
         .execute_batch(
-            "INSERT INTO row_dictionary(entry_id, entry) SELECT entry_id, MIN(entry) FROM row_dictionary_pages GROUP BY entry_id;
+            "INSERT INTO row_dictionary(entry_id, entry, page_references) SELECT entry_id, MIN(entry), COUNT(*) FROM row_dictionary_pages GROUP BY entry_id;
              DROP TABLE row_dictionary_pages;
              CREATE TRIGGER frozen_row_dictionary_insert BEFORE INSERT ON row_dictionary BEGIN SELECT RAISE(ABORT, 'frozen lexical row dictionary'); END;
              CREATE TRIGGER frozen_row_dictionary_update BEFORE UPDATE ON row_dictionary BEGIN SELECT RAISE(ABORT, 'frozen lexical row dictionary'); END;

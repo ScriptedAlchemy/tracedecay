@@ -31,7 +31,7 @@ pub use artifact::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1,
-    CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
+    CarriedFilePagesV1, CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,
     CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
     CloneFingerprintArtifactReadV1, CloneFingerprintCancellationPointV1,
     CloneFingerprintPartialReasonV1, CloneFingerprintReadAccountingV1,
@@ -795,37 +795,8 @@ fn normalized_field_text<'a>(
     }
 }
 
-fn phrase_field_counts(
-    row: &impl LexicalFieldTextV1,
-    phrase: &str,
-) -> Vec<(LexicalFieldV1, usize)> {
-    row.field_lengths()
-        .keys()
-        .filter_map(|field| {
-            let text = normalized_field_text(row, *field)?;
-            let count = substring_count(&text, phrase);
-            (count > 0).then_some((*field, count))
-        })
-        .collect()
-}
-
-fn proximity_field_counts(
-    row: &impl LexicalFieldTextV1,
-    terms: &[String],
-    maximum_gap: u32,
-) -> Vec<(LexicalFieldV1, usize)> {
-    row.field_lengths()
-        .keys()
-        .filter_map(|field| {
-            let text = normalized_field_text(row, *field)?;
-            let count = proximity_count(&text, terms, maximum_gap);
-            (count > 0).then_some((*field, count))
-        })
-        .collect()
-}
-
-fn proximity_count(text: &str, terms: &[String], maximum_gap: u32) -> usize {
-    let tokens = technical_tokens(text)
+fn proximity_tokens(text: &str) -> Vec<String> {
+    technical_tokens(text)
         .flat_map(|(_, token)| {
             let normalized = normalize_lexical(token);
             let split = split_subtokens(token);
@@ -835,7 +806,10 @@ fn proximity_count(text: &str, terms: &[String], maximum_gap: u32) -> usize {
                 split
             }
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn proximity_count_tokens(tokens: &[String], terms: &[String], maximum_gap: u32) -> usize {
     let maximum_gap = maximum_gap as usize;
     let mut matches = 0usize;
     for start in tokens
@@ -863,6 +837,15 @@ fn proximity_count(text: &str, terms: &[String], maximum_gap: u32) -> usize {
         matches += usize::from(complete);
     }
     matches
+}
+
+/// One normalized-text pass per row: phrase and proximity lookups share the
+/// result instead of re-deriving every field per term.
+fn row_field_texts(row: &impl LexicalFieldTextV1) -> Vec<(LexicalFieldV1, Cow<'_, str>)> {
+    row.field_lengths()
+        .keys()
+        .filter_map(|field| normalized_field_text(row, *field).map(|text| (*field, text)))
+        .collect()
 }
 
 fn substring_count(haystack: &str, needle: &str) -> usize {

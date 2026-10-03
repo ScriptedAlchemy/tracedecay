@@ -31,6 +31,7 @@ use tracedecay_code_extraction::ImportNamespaceV1;
 use tracedecay_domain::{RelationEdgeKindV1, blank_json_comments};
 
 use super::FileGenerationArtifactsV1;
+use super::resolution_view::{ResolutionFileV1, SymbolsByNameV1};
 use crate::chunks::{
     CodeIndexImportEvidenceV1, is_typescript_family, relation_target_kind_is_compatible,
 };
@@ -136,16 +137,15 @@ pub(super) struct TypeScriptModuleIndexV1 {
 impl TypeScriptModuleIndexV1 {
     pub(super) fn new<T>(files: &[T]) -> Self
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let mut sources = HashMap::new();
         let mut packages = Vec::new();
         let mut by_package_name: HashMap<String, Option<usize>> = HashMap::new();
         let mut tsconfigs: BTreeMap<String, TsConfigV1> = BTreeMap::new();
         for (index, file) in files.iter().enumerate() {
-            let file = file.as_ref();
-            let path = file.authority.logical_path.as_str();
-            let language = file.extraction.language.as_str();
+            let path = file.logical_path();
+            let language = file.language();
             if is_typescript_family(language) {
                 sources.insert(path.to_owned(), index);
                 continue;
@@ -155,7 +155,7 @@ impl TypeScriptModuleIndexV1 {
             }
             let (dir, name) = split_parent(path);
             if name == "package.json" {
-                let (package_name, package) = node_package(dir, &file.artifacts.symbols);
+                let (package_name, package) = node_package(dir, &file.as_ref().artifacts.symbols);
                 if let Some(package_name) = package_name {
                     by_package_name
                         .entry(package_name)
@@ -166,7 +166,7 @@ impl TypeScriptModuleIndexV1 {
             } else if (name.starts_with("tsconfig") && name.ends_with(".json"))
                 || name == "jsconfig.json"
             {
-                let config = tsconfig(dir, &file.artifacts.symbols);
+                let config = tsconfig(dir, &file.as_ref().artifacts.symbols);
                 let merged = tsconfigs.entry(dir.to_owned()).or_default();
                 merged.extends.extend(config.extends);
                 merged.aliases.extend(config.aliases);
@@ -181,10 +181,6 @@ impl TypeScriptModuleIndexV1 {
             by_package_name,
             tsconfigs,
         }
-    }
-
-    pub(super) fn has_sources(&self) -> bool {
-        !self.sources.is_empty()
     }
 
     /// The file `specifier` names from `from_path`, or why it names none.
@@ -235,12 +231,12 @@ impl TypeScriptModuleIndexV1 {
     pub(super) fn resolve_import_binding<'a, T>(
         &self,
         files: &'a [T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        by_simple_name: &'a dyn SymbolsByNameV1,
         binding: &CodeIndexImportEvidenceV1,
         kind: RelationEdgeKindV1,
     ) -> ImportBindingOutcomeV1<'a>
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let Some(imported_name) = binding.imported_name.as_deref() else {
             return ImportBindingOutcomeV1::Unresolved;
@@ -261,13 +257,13 @@ impl TypeScriptModuleIndexV1 {
     pub(super) fn resolve_member_call<'a, T>(
         &self,
         files: &'a [T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        by_simple_name: &'a dyn SymbolsByNameV1,
         binding: &CodeIndexImportEvidenceV1,
         members: &str,
         kind: RelationEdgeKindV1,
     ) -> ImportBindingOutcomeV1<'a>
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let Some(imported_name) = binding.imported_name.as_deref() else {
             return ImportBindingOutcomeV1::Unresolved;
@@ -317,13 +313,13 @@ impl TypeScriptModuleIndexV1 {
     fn exported_symbol<'a, T>(
         &self,
         files: &'a [T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        by_simple_name: &'a dyn SymbolsByNameV1,
         module: usize,
         name: &str,
         kind: RelationEdgeKindV1,
     ) -> ImportBindingOutcomeV1<'a>
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let mut found = Vec::new();
         self.collect_exported_symbols(
@@ -350,14 +346,14 @@ impl TypeScriptModuleIndexV1 {
     fn namespace_export<T>(
         &self,
         files: &[T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+        by_simple_name: &dyn SymbolsByNameV1,
         file_index: usize,
         name: &str,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
     ) -> NamespaceTargetV1
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
             return NamespaceTargetV1::Missing;
@@ -432,14 +428,14 @@ impl TypeScriptModuleIndexV1 {
     fn local_namespace<T>(
         &self,
         files: &[T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+        by_simple_name: &dyn SymbolsByNameV1,
         file_index: usize,
         name: &str,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
     ) -> NamespaceTargetV1
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let Some(binding) =
             unique_local_import(files[file_index].as_ref(), name, RelationEdgeKindV1::Uses)
@@ -463,7 +459,7 @@ impl TypeScriptModuleIndexV1 {
     fn collect_exported_symbols<'a, T>(
         &self,
         files: &'a [T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        by_simple_name: &'a dyn SymbolsByNameV1,
         file_index: usize,
         name: &str,
         kind: RelationEdgeKindV1,
@@ -471,7 +467,7 @@ impl TypeScriptModuleIndexV1 {
         depth: usize,
         found: &mut Vec<(usize, &'a LineageSymbolRecordV1)>,
     ) where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
             return;
@@ -544,7 +540,7 @@ impl TypeScriptModuleIndexV1 {
     fn collect_local_binding<'a, T>(
         &self,
         files: &'a [T],
-        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        by_simple_name: &'a dyn SymbolsByNameV1,
         file_index: usize,
         name: &str,
         kind: RelationEdgeKindV1,
@@ -552,7 +548,7 @@ impl TypeScriptModuleIndexV1 {
         depth: usize,
         found: &mut Vec<(usize, &'a LineageSymbolRecordV1)>,
     ) where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let defined = defined_symbols(by_simple_name, file_index, name, kind);
         if !defined.is_empty() {
@@ -889,7 +885,7 @@ fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
 }
 
 fn defined_symbols<'a>(
-    by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+    by_simple_name: &'a dyn SymbolsByNameV1,
     file_index: usize,
     name: &str,
     kind: RelationEdgeKindV1,
@@ -901,7 +897,7 @@ fn defined_symbols<'a>(
         .filter(|(index, symbol)| {
             *index == file_index && relation_target_kind_is_compatible(kind, &symbol.kind)
         })
-        .copied()
+        .map(|(index, symbol)| (*index, symbol.as_ref()))
         .collect()
 }
 

@@ -265,6 +265,7 @@ tracedecay install --agent cursor      # Cursor
 tracedecay install --agent devin       # Devin
 tracedecay install --agent kiro        # AWS Kiro
 tracedecay install --agent kimi        # Kimi Code CLI
+tracedecay install --agent chatgpt     # ChatGPT
 ```
 
 Other host integrations can be detected by `doctor`, but do not appear in the
@@ -280,6 +281,7 @@ MCP registration or native plugin tools, with permissions where available.
   leaving Devin's permission policy unchanged.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes. Codex still asks you to trust new command hooks via `/hooks`.
 - Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; for the first install, run the printed `/plugins install <staged-path>` command in Kimi Code (it asks you to trust the plugin), then rerun TraceDecay so it can record the staged source. Later installs and updates refresh that plugin without a Kimi step: TraceDecay briefly starts `kimi web` on a loopback port and asks Kimi's own installer to reinstall it. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
+- ChatGPT stages its portable plugin bundle at `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. Successful staging exits 0; registration inside ChatGPT is reported as unverifiable with installation guidance. `uninstall --agent chatgpt` removes the receipt-owned staged bytes. The same explorer is also included in the local Codex plugin, which launches it over stdio.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -433,6 +435,15 @@ Kimi Code's `/plugins remove tracedecay` first, then rerun `tracedecay
 uninstall --agent kimi` to remove the staged source. TraceDecay never writes
 Kimi's managed plugin directory or `installed.json`; only Kimi's installer
 does.
+
+ChatGPT registers plugins inside its own interactive surfaces. TraceDecay
+stages the portable bundle and reports the host registration as
+`unverifiable`, with informational guidance rather than a standing pending
+action. Successful `install`, `update-plugin`, and `update` exit 0; `doctor`
+checks the staged bytes and fails incomplete or damaged staging.
+`uninstall --agent chatgpt` removes the receipt-owned staged tree; host-side
+removal is performed inside ChatGPT. The local Codex plugin includes the
+same code explorer and launches it over stdio.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 
@@ -1121,6 +1132,10 @@ empty. Nothing is migrated or backed up. The stores it resets on their own:
 | profile sessions | `~/.tracedecay/user-sessions.db` family | projectless session history and stored profile configuration |
 | project sessions `<id>` | `~/.tracedecay/projects/<id>/sessions.db` family | that project's session history and stored configuration |
 | profile / project hook admissions | the Hook V2 admission ledgers | pending hook admissions |
+
+The profile authority holds no session data, so a session-feature schema
+change (LCM, git correlation, workflows) resets only the session stores and
+never the registry.
 
 A profile authority reset keeps every project store (code index, graph,
 sessions, memory) byte-identical. The registry it recreates is empty, so the

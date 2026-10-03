@@ -68,7 +68,7 @@ use super::{
     settle_text_projection, settled_owner_with_idle_admission, test_project_id,
     wait_for_dashboard_ready, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_settled_owner, write,
+    wait_for_settled_owner, with_untouched_fillers, write,
 };
 use crate::{
     code_index::production::{
@@ -479,6 +479,10 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     drop(owners);
     drop(latest);
     drop(scheduler);
+    // Witness files persist only where the platform proves file state, so the
+    // damaged-witness cases exist only there; other hosts always take the
+    // full-decode path this loop exercises as its fallback.
+    #[cfg(unix)]
     for damaged_witness in [None, Some(b"not-a-restore-witness".as_slice())] {
         match damaged_witness {
             None => std::fs::remove_file(&witness_path).expect("remove restore witness"),
@@ -598,7 +602,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
 
 #[test]
 fn same_process_text_restore_releases_the_decoded_generation_before_projection() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let fixture = GitFixture::new(&with_untouched_fillers(ALPHA_LIB_V1));
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
         &fixture,
@@ -657,12 +661,13 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
             .expect("one-file incremental seal"),
     );
     assert!(
-        scheduler.latest_complete_already_decoded().is_some(),
-        "incremental seal must decode the parent and install the successor"
+        scheduler.latest_complete_already_decoded().is_none(),
+        "a successor sealed over its parent holds no decoded generation"
     );
-    assert!(
-        scheduler.sealed_decode_count() >= 1,
-        "releasing the pin forces the next increment to decode on demand"
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        0,
+        "the next increment seals over its released parent without decoding it"
     );
     let incremental_text = scheduler
         .servable_retained_text_generation()
@@ -4302,7 +4307,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .expect("verified graph"),
     );
     graph_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("warm graph catalog");
     let graph_reader = graph_store
         .evidence_reader_with_cancellation(

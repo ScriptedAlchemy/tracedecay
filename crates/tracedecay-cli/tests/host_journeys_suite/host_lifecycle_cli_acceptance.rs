@@ -200,6 +200,9 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Hermes => HERMES_CONFIGS,
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
+        // ChatGPT keeps no config-native registration surface; its staged
+        // bundle is the whole deployment.
+        HostKindV1::ChatGpt => &[],
         HostKindV1::OpenCode => OPENCODE_CONFIGS,
         HostKindV1::Gemini => GEMINI_CONFIGS,
         HostKindV1::Copilot => COPILOT_CONFIGS,

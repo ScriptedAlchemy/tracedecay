@@ -199,14 +199,17 @@ impl HostKindV1 {
             // is an alias surface, the Gemini extension declares no hook route,
             // and Copilot publishes no third-party hook surface at all, so
             // persisting a hook key for any of them would name a spool no event
-            // can ever reach.
+            // can ever reach. ChatGPT shares the gap: its portable plugin
+            // bundle declares no hooks and no checked-in native fixture proves
+            // a ChatGPT event route exists.
             Self::Devin
             | Self::Zed
             | Self::Antigravity
             | Self::Vibe
             | Self::ClineFamily
             | Self::Gemini
-            | Self::Copilot => None,
+            | Self::Copilot
+            | Self::ChatGpt => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -369,6 +372,22 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             StagedManualPlugin,
             ManualHostInstall,
             KimiProjectDirectory,
+        ),
+        // ChatGPT registers a connector or plugin only through its own
+        // interactive surfaces (developer-mode connector setup, the desktop
+        // app's plugin flow); there is no host CLI or local registry file
+        // TraceDecay may write. The lifecycle therefore stages the portable
+        // Agent Plugins bundle as receipt-owned source and defers activation
+        // to the operator, exactly Kimi's shape. There is no project-local
+        // route either.
+        HostKindV1::ChatGpt => (
+            "chatgpt",
+            "chatgpt",
+            NotApplicable,
+            vec![Core],
+            StagedManualPlugin,
+            ManualHostInstall,
+            HostProjectRegistrationPathV1::Unavailable,
         ),
         HostKindV1::OpenCode => (
             "opencode",

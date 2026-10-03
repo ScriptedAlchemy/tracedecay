@@ -25,7 +25,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::id,
+    support::{cold_generation, id},
     typescript_module_resolution::reader,
 };
 
@@ -293,14 +293,16 @@ pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPubli
         .snapshot
         .validate()
         .expect("fixture snapshot is canonical");
-    CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
+    cold_generation(
+        &CodeIndexProductionOwnerV1::new(
+            config(),
+            SharedPublicationStore::default(),
+            ApplyingProjectionSink,
+        )
+        .expect("production owner")
+        .build_and_publish(request, &ActiveControl)
+        .expect("fixture generation publishes"),
     )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("fixture generation publishes")
 }
 
 fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {

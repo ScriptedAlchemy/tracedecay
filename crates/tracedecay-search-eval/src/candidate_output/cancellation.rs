@@ -7,6 +7,7 @@ use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, PolicyRevisionId, PrivacyDomainId, ProjectId,
@@ -17,7 +18,7 @@ use tracedecay_domain::{
 
 use super::control::CancelledControl;
 use super::{
-    ApplyingProjectionSink, CandidateOutputError, CandidateWorkloadV1, SharedPublicationStore, id,
+    ApplyingProjectionSink, CandidateOutputError, CandidateWorkloadV1, id,
     lexical_projection_profile_digest,
 };
 
@@ -89,7 +90,7 @@ pub(super) fn prove_cancellation(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let store = SharedPublicationStore::default();
+    let store = MemorySealedPublicationStoreV1::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let error = match owner.build_and_publish(request, &CancelledControl) {

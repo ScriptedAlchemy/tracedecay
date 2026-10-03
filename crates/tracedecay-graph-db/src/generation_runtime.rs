@@ -1981,38 +1981,38 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         let namespace_projection = snapshot.namespace_projection_map()?;
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let relation_lease = snapshot.lease_for_projection(&reference.projection)?;
-        let relation_namespace = relation_lease.locator.physical_namespace()?;
-        let Some(stored) = load_relation(database, &relation_namespace, &reference.identity)?
-        else {
-            return Ok(None);
-        };
-        let mut endpoints = EndpointIdentityCache::default();
-        let from = typed_entity_ref(
-            database,
-            stored.source,
-            &namespace_projection,
-            &mut endpoints,
-        )?;
-        let to = typed_entity_ref(
-            database,
-            stored.target,
-            &namespace_projection,
-            &mut endpoints,
-        )?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        GraphGenerationRelation::new(
-            stored.relation.identity,
-            from,
-            to,
-            stored.relation.kind,
-            stored.relation.properties,
-        )
-        .map(Some)
+        self.read_intact(cancellation.as_ref(), |database| {
+            let relation_lease = snapshot.lease_for_projection(&reference.projection)?;
+            let relation_namespace = relation_lease.locator.physical_namespace()?;
+            let Some(stored) = load_relation(database, &relation_namespace, &reference.identity)?
+            else {
+                return Ok(None);
+            };
+            let mut endpoints = EndpointIdentityCache::default();
+            let from = typed_entity_ref(
+                database,
+                stored.source,
+                &namespace_projection,
+                &mut endpoints,
+            )?;
+            let to = typed_entity_ref(
+                database,
+                stored.target,
+                &namespace_projection,
+                &mut endpoints,
+            )?;
+            if cancellation.is_cancelled() {
+                return Err(GraphDbError::Cancelled);
+            }
+            GraphGenerationRelation::new(
+                stored.relation.identity,
+                from,
+                to,
+                stored.relation.kind,
+                stored.relation.properties,
+            )
+            .map(Some)
+        })
     }
 
     #[hotpath::measure(label = "graph_db.traversal.verified", impl_type = "GraphDb")]
@@ -2034,118 +2034,9 @@ impl GraphDb {
             return Ok(VerifiedTraversalResult { visits: Vec::new() });
         }
         let namespace_projection = snapshot.namespace_projection_map()?;
-        let guard = self.read_database(request.cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let head_namespace = crate::generation::physical_namespace(
-            &snapshot.projection().namespace,
-            &snapshot.projection().projection,
-            snapshot.generation(),
-        )?;
-        let start = crate::state::load_entity(database, &head_namespace, &request.start)?
-            .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))?;
-        let store = database.graph_store();
-        let mut endpoints = EndpointIdentityCache::default();
-        let mut queue = VecDeque::from([(start.node, 0_usize, None)]);
-        let mut discovered = HashSet::from([start.node]);
-        let mut visits = Vec::new();
-        while let Some((node, depth, via_relation)) = queue.pop_front() {
-            if request.cancellation.is_cancelled() {
-                return Err(GraphDbError::Cancelled);
-            }
-            if visits.len() >= request.max_visits {
-                return Err(GraphDbError::budget_exhausted_count(
-                    GraphBudgetKind::Read,
-                    request.max_visits,
-                ));
-            }
-            visits.push(VerifiedTraversalVisit {
-                entity: typed_entity_ref(database, node, &namespace_projection, &mut endpoints)?,
-                depth,
-                via_relation,
-            });
-            if visits.len() >= request.max_results || depth >= request.max_depth {
-                continue;
-            }
-            let directions: &[Direction] = match request.direction {
-                GraphTraversalDirection::Outgoing => &[Direction::Outgoing],
-                GraphTraversalDirection::Incoming => &[Direction::Incoming],
-                GraphTraversalDirection::Both => &[Direction::Outgoing, Direction::Incoming],
-            };
-            let mut adjacent = Vec::new();
-            for direction in directions {
-                for (neighbor, edge_id) in store.edges_from(node, *direction) {
-                    if request.cancellation.is_cancelled() {
-                        return Err(GraphDbError::Cancelled);
-                    }
-                    let edge = store
-                        .get_edge(edge_id)
-                        .ok_or_else(|| GraphDbError::Corrupt {
-                            message: "verified traversal relation edge is missing".to_owned(),
-                        })?;
-                    let kind = relation_kind_from_type(edge.edge_type.as_str())?;
-                    if !request.relation_kinds.is_empty() && !request.relation_kinds.contains(&kind)
-                    {
-                        continue;
-                    }
-                    let relation_namespace = GraphNamespace::new(required_string(
-                        edge.get_property(NAMESPACE_PROPERTY),
-                        "verified traversal relation namespace",
-                    )?)
-                    .map_err(|error| GraphDbError::Corrupt {
-                        message: format!(
-                            "verified traversal relation namespace is invalid: {error}"
-                        ),
-                    })?;
-                    let Some(relation_projection) =
-                        namespace_projection.get(&relation_namespace).cloned()
-                    else {
-                        continue;
-                    };
-                    let stored = load_relation_by_edge_cached(database, edge_id, &mut endpoints)?
-                        .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "verified traversal edge has no typed relation locator".to_owned(),
-                    })?;
-                    let (neighbor_namespace, neighbor_identity) =
-                        endpoints.identity(database.graph_store().as_ref(), neighbor)?;
-                    let Some(entity_projection) =
-                        namespace_projection.get(&neighbor_namespace).cloned()
-                    else {
-                        continue;
-                    };
-                    let entity = GraphEntityRef::new(entity_projection, neighbor_identity);
-                    adjacent.push((
-                        GraphRelationRef::new(relation_projection, stored.relation.identity),
-                        entity,
-                        neighbor,
-                    ));
-                }
-            }
-            adjacent.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-            adjacent.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
-            for (relation, _, neighbor) in adjacent {
-                if discovered.insert(neighbor) {
-                    let next_depth = depth.checked_add(1).ok_or_else(|| {
-                        GraphDbError::budget_exhausted_count(
-                            GraphBudgetKind::Read,
-                            request.max_depth,
-                        )
-                    })?;
-                    queue.push_back((neighbor, next_depth, Some(relation)));
-                }
-            }
-        }
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = visits
-                .iter()
-                .filter(|visit| visit.via_relation.is_some())
-                .count();
-            crate::hotpath_observe::record_counts(visits.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Snapshot,
-            );
-        }
-        Ok(VerifiedTraversalResult { visits })
+        self.read_intact(request.cancellation.as_ref(), |database| {
+            traverse_in(database, snapshot, &request, &namespace_projection)
+        })
     }
 
     pub(crate) fn verified_generation(
@@ -2329,6 +2220,120 @@ impl GraphDb {
         self.retire_sealed_generation_store(&locator);
         Ok(())
     }
+}
+
+/// Breadth-first walk of a verified generation from `request.start`, read
+/// against one open database.
+fn traverse_in(
+    database: &grafeo_engine::GrafeoDB,
+    snapshot: &VerifiedGraphSnapshot,
+    request: &TraversalRequest,
+    namespace_projection: &BTreeMap<GraphNamespace, crate::GraphProjectionIdentity>,
+) -> Result<VerifiedTraversalResult, GraphDbError> {
+    let head_namespace = crate::generation::physical_namespace(
+        &snapshot.projection().namespace,
+        &snapshot.projection().projection,
+        snapshot.generation(),
+    )?;
+    let start = crate::state::load_entity(database, &head_namespace, &request.start)?
+        .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))?;
+    let store = database.graph_store();
+    let mut endpoints = EndpointIdentityCache::default();
+    let mut queue = VecDeque::from([(start.node, 0_usize, None)]);
+    let mut discovered = HashSet::from([start.node]);
+    let mut visits = Vec::new();
+    while let Some((node, depth, via_relation)) = queue.pop_front() {
+        if request.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        if visits.len() >= request.max_visits {
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                request.max_visits,
+            ));
+        }
+        visits.push(VerifiedTraversalVisit {
+            entity: typed_entity_ref(database, node, namespace_projection, &mut endpoints)?,
+            depth,
+            via_relation,
+        });
+        if visits.len() >= request.max_results || depth >= request.max_depth {
+            continue;
+        }
+        let directions: &[Direction] = match request.direction {
+            GraphTraversalDirection::Outgoing => &[Direction::Outgoing],
+            GraphTraversalDirection::Incoming => &[Direction::Incoming],
+            GraphTraversalDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+        };
+        let mut adjacent = Vec::new();
+        for direction in directions {
+            for (neighbor, edge_id) in store.edges_from(node, *direction) {
+                if request.cancellation.is_cancelled() {
+                    return Err(GraphDbError::Cancelled);
+                }
+                let edge = store
+                    .get_edge(edge_id)
+                    .ok_or_else(|| GraphDbError::Corrupt {
+                        message: "verified traversal relation edge is missing".to_owned(),
+                    })?;
+                let kind = relation_kind_from_type(edge.edge_type.as_str())?;
+                if !request.relation_kinds.is_empty() && !request.relation_kinds.contains(&kind) {
+                    continue;
+                }
+                let relation_namespace = GraphNamespace::new(required_string(
+                    edge.get_property(NAMESPACE_PROPERTY),
+                    "verified traversal relation namespace",
+                )?)
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: format!("verified traversal relation namespace is invalid: {error}"),
+                })?;
+                let Some(relation_projection) =
+                    namespace_projection.get(&relation_namespace).cloned()
+                else {
+                    continue;
+                };
+                let stored = load_relation_by_edge_cached(database, edge_id, &mut endpoints)?
+                    .ok_or_else(|| GraphDbError::Corrupt {
+                        message: "verified traversal edge has no typed relation locator".to_owned(),
+                    })?;
+                let (neighbor_namespace, neighbor_identity) =
+                    endpoints.identity(database.graph_store().as_ref(), neighbor)?;
+                let Some(entity_projection) =
+                    namespace_projection.get(&neighbor_namespace).cloned()
+                else {
+                    continue;
+                };
+                let entity = GraphEntityRef::new(entity_projection, neighbor_identity);
+                adjacent.push((
+                    GraphRelationRef::new(relation_projection, stored.relation.identity),
+                    entity,
+                    neighbor,
+                ));
+            }
+        }
+        adjacent.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        adjacent.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        for (relation, _, neighbor) in adjacent {
+            if discovered.insert(neighbor) {
+                let next_depth = depth.checked_add(1).ok_or_else(|| {
+                    GraphDbError::budget_exhausted_count(GraphBudgetKind::Read, request.max_depth)
+                })?;
+                queue.push_back((neighbor, next_depth, Some(relation)));
+            }
+        }
+    }
+    #[cfg(feature = "hotpath")]
+    {
+        let edges = visits
+            .iter()
+            .filter(|visit| visit.via_relation.is_some())
+            .count();
+        crate::hotpath_observe::record_counts(visits.len(), edges, 0, 0);
+        crate::hotpath_observe::record_hydration_source(
+            crate::hotpath_observe::HydrationSource::Snapshot,
+        );
+    }
+    Ok(VerifiedTraversalResult { visits })
 }
 
 fn typed_entity_ref(

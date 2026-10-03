@@ -276,11 +276,15 @@ impl StaticLanguageRegistry {
             // binds the one overload that accepts its arguments.
             // TypeScript v12 (Svelte and Astro v8) retains a member call on a
             // local, `this`, or global receiver as a disclosed caller gap.
+            // TypeScript v13 (Svelte and Astro v9) extracts exported, nested,
+            // dotted, and `module` namespaces, and retains a member call on a
+            // computed receiver as a disclosed caller gap.
             let extractor_revision = match language.as_str() {
                 "rust" => 19,
-                "typescript" => 12,
+                "typescript" => 13,
+                "svelte" | "astro" => 9,
                 "go" => 9,
-                "java" | "svelte" | "astro" => 8,
+                "java" => 8,
                 "ruby" | "protobuf" | "python" => 7,
                 "sql" | "dart" | "kotlin" | "csharp" => 6,
                 "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,

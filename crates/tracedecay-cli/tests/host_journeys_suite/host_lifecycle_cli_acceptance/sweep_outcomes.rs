@@ -5,13 +5,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Output;
 
-use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
+use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
 use super::install_kimi_cli;
-use super::{IsolatedCli, VERIFY_FAILURE_ENV, assert_success, host_case, seed_host};
+use super::{
+    IsolatedCli, VERIFY_FAILURE_ENV, assert_receipt_digests, assert_seeded_bytes, assert_success,
+    host_case, latest_receipt, seed_host,
+};
 
 /// `EX_TEMPFAIL`: nothing failed, but a host needs an operator step.
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
@@ -666,6 +669,109 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }
 
+/// Staging converges without claiming host registration. Doctor reports the
+/// unverifiable host step informationally and rejects an incomplete stage.
+#[cfg(unix)]
+#[test]
+fn chatgpt_stages_an_unverifiable_registration_and_uninstalls_its_bundle() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::ChatGpt);
+    let originals = seed_host(case, &cli);
+    let staged = cli
+        .home
+        .path()
+        .join(".tracedecay/host-bundle-stage/chatgpt/tracedecay");
+
+    let install = cli.run(&["install", "--agent", case.id]);
+    let install_stderr = stderr(&install);
+    assert_eq!(install.status.code(), Some(0), "{install_stderr}");
+    assert!(
+        install_stderr.contains("ChatGPT registration is unverifiable locally"),
+        "{install_stderr}"
+    );
+    // The receipt-owned staged bundle is the operator's install payload.
+    for relative in [
+        "plugin.json",
+        "mcp.json",
+        "README.md",
+        "chatgpt-extension/embedded/server.mjs",
+        "chatgpt-extension/embedded/app.html",
+        "chatgpt-extension/assets/icon.svg",
+    ] {
+        assert!(
+            staged.join(relative).is_file(),
+            "staged bundle missing {relative}"
+        );
+    }
+    let install_receipt = latest_receipt(&cli, case.host);
+    assert_receipt_digests(&cli, &install_receipt);
+    assert_seeded_bytes(&cli, &originals);
+    // The staged mcp.json launches the resolved tracedecay binary, not a
+    // placeholder or a bare `tracedecay` the host cannot resolve.
+    let mcp: serde_json::Value =
+        serde_json::from_slice(&fs::read(staged.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        mcp["mcpServers"]["graph"]["command"],
+        serde_json::json!(cli.installed_bin()),
+        "{mcp}"
+    );
+
+    let update = cli.run(&["update-plugin"]);
+    let update_stderr = stderr(&update);
+    assert_eq!(
+        update.status.code(),
+        Some(0),
+        "the staged host stays tracked: {update_stderr}"
+    );
+    assert!(
+        update_stderr.contains("ChatGPT registration is unverifiable locally"),
+        "{update_stderr}"
+    );
+
+    {
+        let _daemon = ProfileDaemon::start(&cli);
+        let doctor_result = cli.run(&["doctor"]);
+        let doctor = stderr(&doctor_result);
+        assert_eq!(doctor_result.status.code(), Some(0), "{doctor}");
+        assert!(
+            doctor.contains("ChatGPT registration is unverifiable locally"),
+            "{doctor}"
+        );
+    }
+
+    // A bundle left without its manifest is a broken stage, not an absent
+    // one: doctor fails it, and reinstalling converges the staged bytes the
+    // receipt refuses to remove as foreign.
+    fs::remove_file(staged.join("plugin.json")).unwrap();
+    let partial = stderr(&cli.run(&["doctor"]));
+    assert!(
+        partial.contains("✘")
+            && partial.contains("ChatGPT staged bundle")
+            && partial.contains("incomplete"),
+        "{partial}"
+    );
+
+    let reinstall = cli.run(&["install", "--agent", case.id]);
+    let reinstall_stderr = stderr(&reinstall);
+    assert_eq!(reinstall.status.code(), Some(0), "{reinstall_stderr}");
+    assert!(
+        staged.join("plugin.json").is_file(),
+        "reinstall did not restore the staged manifest"
+    );
+
+    let uninstall = cli.run(&["uninstall", "--agent", case.id]);
+    let uninstall_stderr = stderr(&uninstall);
+    assert_eq!(uninstall.status.code(), Some(0), "{uninstall_stderr}");
+    assert!(!staged.exists(), "uninstall left the staged bundle behind");
+    assert!(install_receipt.component_receipts.iter().all(|component| {
+        component
+            .artifacts
+            .iter()
+            .all(|artifact| !cli.home.path().join(&artifact.relative_path).exists())
+    }));
+    assert_seeded_bytes(&cli, &originals);
+}
+
 #[test]
 fn post_update_exits_nonzero_when_a_host_refresh_fails() {
     let cli = IsolatedCli::new();
@@ -765,6 +871,8 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
     install_cline(&cli);
     fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
     fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    // ChatGPT's desktop app-data directory is its only local presence proof.
+    fs::create_dir_all(cli.home.path().join("Library/Application Support/ChatGPT")).unwrap();
     let _daemon = ProfileDaemon::start(&cli);
 
     let doctor = cli.run(&["doctor"]);
@@ -780,5 +888,98 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
             "{doctor_stderr}"
         );
     }
+    assert!(
+        doctor_stderr.contains(&format!(
+            "ChatGPT detected ({}) but tracedecay is not integrated, run `tracedecay install \
+             --agent chatgpt`\n",
+            cli.home
+                .path()
+                .join("Library/Application Support/ChatGPT")
+                .display()
+        )),
+        "{doctor_stderr}"
+    );
     assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
+}
+
+/// An installed file whose bytes moved is drift the daemon reports; the
+/// finding names the component and the command that converges it.
+#[cfg(unix)]
+#[test]
+fn doctor_names_the_drifted_host_component_and_its_remedy() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    let receipt = latest_receipt(&cli, HostKindV1::Cline);
+    let artifact = cli.home.path().join(
+        &receipt
+            .component_receipts
+            .iter()
+            .find(|receipt| receipt.component == HostComponentV1::ContextMcp)
+            .expect("cline installs its context MCP component")
+            .artifacts[0]
+            .relative_path,
+    );
+    let mut bytes = fs::read(&artifact).unwrap();
+    bytes.push(b'\n');
+    fs::write(&artifact, bytes).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+    // Daemon findings are reported for an enrolled project.
+    fs::write(cli.project.path().join("lib.rs"), "fn probe() {}\n").unwrap();
+    assert_success("project", "init", cli.run(&["init"]));
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert!(
+        doctor_stderr.contains(
+            "advisory: cline/context-mcp has drifted from its installed shape; run `tracedecay \
+             reinstall --component context-mcp` (refreshes tracedecay-owned files) \
+             (host.conformance.drifted)"
+        ),
+        "{doctor_stderr}"
+    );
+}
+
+/// Gemini CLI and Pi are CLIs. `~/.gemini` is also Antigravity's directory and
+/// `~/.pi/agent` outlives an uninstalled `pi`, so neither directory detects its
+/// host; the host's own executable does.
+#[cfg(unix)]
+#[test]
+fn doctor_detects_cli_hosts_by_their_executable_not_their_directory() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    fs::create_dir_all(cli.home.path().join(".pi/agent")).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let absent = cli.run(&["doctor"]);
+    let absent_stderr = stderr(&absent);
+    assert_eq!(absent.status.code(), Some(0), "{absent_stderr}");
+    for name in ["Gemini CLI", "Pi"] {
+        assert!(
+            !absent_stderr.contains(&format!("{name} detected")),
+            "a host whose CLI is absent is not detected:\n{absent_stderr}"
+        );
+    }
+
+    install_host_cli(&cli, "gemini", "exit 0");
+    install_host_cli(&cli, "pi", "exit 0");
+    let present = cli.run(&["doctor"]);
+    let present_stderr = stderr(&present);
+    assert_eq!(present.status.code(), Some(0), "{present_stderr}");
+    assert!(
+        present_stderr.contains(
+            "Gemini CLI detected but tracedecay is not integrated, run `tracedecay install \
+             --agent gemini`\n"
+        ),
+        "{present_stderr}"
+    );
+    assert!(
+        present_stderr.contains(&format!(
+            "Pi detected ({}) but tracedecay is not integrated, run `tracedecay install --agent \
+             pi`\n",
+            cli.home.path().join(".pi/agent").display()
+        )),
+        "{present_stderr}"
+    );
 }

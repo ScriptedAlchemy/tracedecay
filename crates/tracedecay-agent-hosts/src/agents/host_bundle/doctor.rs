@@ -26,6 +26,9 @@ pub enum HostBundleRegistrationStateV1 {
     Repairable,
     Missing,
     Corrupt,
+    /// The host exposes no supported registration readback. This is not
+    /// evidence of an absent or active registration.
+    Unverifiable,
 }
 
 pub trait HostBundleRegistrationInspectorV1 {
@@ -106,6 +109,22 @@ pub struct HostBundleComponentDoctorResultV1 {
     pub registration: Option<HostBundleRegistrationStateV1>,
     pub artifacts: Vec<HostBundleArtifactDoctorResultV1>,
     pub repair_action: String,
+}
+
+impl HostBundleComponentDoctorResultV1 {
+    /// `host/component`, or the receipt path when the receipt names neither.
+    pub fn label(&self) -> String {
+        match (self.host, self.component) {
+            (Some(host), Some(component)) => {
+                format!(
+                    "{}/{}",
+                    host.descriptor().cli_id(),
+                    component_slug(component)
+                )
+            }
+            _ => self.receipt_path.display().to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -230,7 +249,11 @@ pub fn inspect_installed_host_bundle_components_at(
             // `extensions.json` entry, a stale plugin registration), and that
             // orphan is invisible if discovery simply skips the receipt.
             let registration = registrations.inspect_registration(receipt.host, receipt.component);
-            if registration != HostBundleRegistrationStateV1::Missing {
+            if !matches!(
+                registration,
+                HostBundleRegistrationStateV1::Missing
+                    | HostBundleRegistrationStateV1::Unverifiable
+            ) {
                 let state = HostBundleComponentDoctorStateV1::OrphanedRegistration;
                 components.push(HostBundleComponentDoctorResultV1 {
                     repair_action: repair_action(
@@ -343,7 +366,10 @@ pub fn inspect_installed_host_bundle_components_at(
             HostBundleComponentDoctorStateV1::Repairable
         } else {
             match registration {
-                HostBundleRegistrationStateV1::Current => HostBundleComponentDoctorStateV1::Current,
+                HostBundleRegistrationStateV1::Current
+                | HostBundleRegistrationStateV1::Unverifiable => {
+                    HostBundleComponentDoctorStateV1::Current
+                }
                 HostBundleRegistrationStateV1::Repairable
                 | HostBundleRegistrationStateV1::Missing => {
                     HostBundleComponentDoctorStateV1::Repairable
@@ -355,6 +381,11 @@ pub fn inspect_installed_host_bundle_components_at(
         // adapter's exact wording is the repair action; nothing TraceDecay can
         // run would converge it.
         let component_repair_action = match (state, activation_guidance) {
+            (HostBundleComponentDoctorStateV1::Current, Some(guidance))
+                if registration == HostBundleRegistrationStateV1::Unverifiable =>
+            {
+                guidance
+            }
             (HostBundleComponentDoctorStateV1::ActivationDeferred, Some(guidance)) => guidance,
             _ => repair_action(receipt.host, receipt.component, state, registration),
         };
@@ -550,6 +581,9 @@ pub(super) fn repair_action(
 ) -> String {
     if host == HostKindV1::KimiCode && state != HostBundleComponentDoctorStateV1::Current {
         return "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration".to_string();
+    }
+    if host == HostKindV1::ChatGpt && state != HostBundleComponentDoctorStateV1::Current {
+        return "run `tracedecay install --agent chatgpt` to refresh the staged bundle, then register it inside ChatGPT through its interactive plugin or connector surfaces; ChatGPT keeps no local registry Doctor can verify".to_string();
     }
     let component = component_slug(component);
     let host_descriptor = host.descriptor();

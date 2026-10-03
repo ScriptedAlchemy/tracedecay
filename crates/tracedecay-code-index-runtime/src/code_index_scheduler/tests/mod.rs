@@ -53,6 +53,7 @@ mod residency;
 mod retained_configuration_tests;
 mod search_permit_release;
 mod serving;
+mod text_artifact_carry_tests;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
 ///
@@ -84,6 +85,23 @@ pub(super) struct GitFixture {
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 const RETAINED_REVISION_0: &[(&str, &str)] =
     &[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")];
+
+/// Files no test edit touches. A tree carrying them keeps a one-file edit
+/// within the share of the tree an increment seals over its parent.
+const UNTOUCHED_FILLERS: [(&str, &str); 7] = [
+    ("src/untouched_0.rs", "pub const UNTOUCHED_0: u32 = 0;\n"),
+    ("src/untouched_1.rs", "pub const UNTOUCHED_1: u32 = 1;\n"),
+    ("src/untouched_2.rs", "pub const UNTOUCHED_2: u32 = 2;\n"),
+    ("src/untouched_3.rs", "pub const UNTOUCHED_3: u32 = 3;\n"),
+    ("src/untouched_4.rs", "pub const UNTOUCHED_4: u32 = 4;\n"),
+    ("src/untouched_5.rs", "pub const UNTOUCHED_5: u32 = 5;\n"),
+    ("src/untouched_6.rs", "pub const UNTOUCHED_6: u32 = 6;\n"),
+];
+
+/// `files` beside [`UNTOUCHED_FILLERS`].
+fn with_untouched_fillers<'a>(files: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    files.iter().copied().chain(UNTOUCHED_FILLERS).collect()
+}
 
 impl GitFixture {
     pub(super) fn new(files: &[(&str, &str)]) -> Self {
@@ -707,7 +725,10 @@ fn install_verified_graph_store_on_text(
             .expect("verified graph"),
     );
     graph_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("warm graph catalog");
     let graph_reader = graph_store
         .evidence_reader_with_cancellation(

@@ -16,6 +16,7 @@ mod clone_census;
 mod clone_codec;
 mod fingerprints;
 mod format;
+mod increment;
 mod postings;
 mod prepared;
 mod reader;
@@ -42,6 +43,7 @@ pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     VerifiedCodeLexicalArtifactV1, code_lexical_artifact_content_key,
 };
+pub use increment::CarriedFilePagesV1;
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
     CloneArtifactCursorV1, CloneArtifactPageV1, CloneExactArtifactMemberV1,

@@ -48,7 +48,7 @@ use super::{
     wait_for_live_complete_generation_by_polling, wait_for_owner, wait_for_owner_pass,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
     wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
-    wait_for_worker_phase, wait_until_serving_seat, write,
+    wait_for_worker_phase, wait_until_serving_seat, with_untouched_fillers, write,
 };
 use crate::{
     code_index::{
@@ -1016,7 +1016,10 @@ async fn wait_for_ready_clone_index(
 
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\n",
+    )]));
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
@@ -1952,9 +1955,11 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
             .reconcile_now()
             .expect("renamed linked-worktree publish"),
     );
+    // A rename adds and removes a path, so the successor builds whole: the
+    // untouched `src/other.rs` reuses its own artifact, the renamed file none.
     assert_eq!(
         registry.byte_pool_stats().parse_chunk_reused,
-        before_rename.parse_chunk_reused,
+        before_rename.parse_chunk_reused + 1,
         "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
     );
 }
@@ -2160,10 +2165,10 @@ fn empty_generation_restart_preserves_project_identity() {
 
 #[test]
 fn one_symbol_unrelated_work_skip() {
-    let fixture = GitFixture::new(&[(
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
         "src/lib.rs",
         "pub fn alpha() -> u32 { 1 }\n\npub fn unrelated() -> u32 { 99 }\n",
-    )]);
+    )]));
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let mut incremental = scheduler(
@@ -2259,6 +2264,7 @@ async fn graph_activation_does_not_wait_for_bounded_text_projection() {
             &scheduler.repository_id,
             &scheduler.worktree_id,
             latest.clone(),
+            None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
@@ -7748,29 +7754,60 @@ fn source_sweep_rereads_only_files_whose_settled_stat_moved() {
             }
         )
     );
-    assert_eq!(
-        fence.source_sweep_for_test(fixture.path(), &shutting_down),
-        (
-            true,
-            SourceSweepStatsV1 {
-                walked: false,
-                candidates: 2,
-                hashed: 0
-            }
-        )
-    );
+    // Where a native rewrite witness exists the settled stat vouches for the
+    // digest and nothing re-reads; without one every sweep re-derives every
+    // digest (see `StatKeyV1::settled`), which still detects the rewrite below.
+    if cfg!(unix) {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                true,
+                SourceSweepStatsV1 {
+                    walked: false,
+                    candidates: 2,
+                    hashed: 0
+                }
+            )
+        );
+    } else {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                true,
+                SourceSweepStatsV1 {
+                    walked: true,
+                    candidates: 2,
+                    hashed: 2
+                }
+            )
+        );
+    }
     rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert_eq!(
-        fence.source_sweep_for_test(fixture.path(), &shutting_down),
-        (
-            false,
-            SourceSweepStatsV1 {
-                walked: false,
-                candidates: 2,
-                hashed: 1
-            }
-        )
-    );
+    if cfg!(unix) {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                false,
+                SourceSweepStatsV1 {
+                    walked: false,
+                    candidates: 2,
+                    hashed: 1
+                }
+            )
+        );
+    } else {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                false,
+                SourceSweepStatsV1 {
+                    walked: true,
+                    candidates: 2,
+                    hashed: 2
+                }
+            )
+        );
+    }
 }
 
 /// A pass can start and settle entirely between two reads of the running
