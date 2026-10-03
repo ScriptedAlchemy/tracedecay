@@ -187,6 +187,7 @@ fn exact_request(
     ExactLaneRequest {
         control: &ActiveControl,
         literals: authority.parse_literals(query_view, &base),
+        path_prefix: None,
         base,
         query_view,
         generation: id("generation.1"),

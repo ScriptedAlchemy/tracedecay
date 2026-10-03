@@ -38,7 +38,7 @@ fn vendored() -> Value {
 }
 
 fn census(files: Vec<Value>) -> Value {
-    json!({"count": files.len(), "layout": "grouped", "files": files})
+    json!({"count": files.len(), "layout": "grouped", "files": files, "freshness": {"state": "fresh"}})
 }
 
 fn write(root: &Path, relative: &str, contents: &str) {

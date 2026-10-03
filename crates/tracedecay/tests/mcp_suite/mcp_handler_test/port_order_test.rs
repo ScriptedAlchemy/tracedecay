@@ -117,6 +117,7 @@ fn assert_payload(actual: &Value, expected: Value) {
 
 fn ordered_chain() -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "source_dir": "order",
         "total_symbols": 5,
         "returned": 5,
@@ -194,6 +195,7 @@ async fn port_order_ports_leaves_first_and_reports_one_scc() {
     assert_payload(
         &limited,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "tied",
             "total_symbols": 3,
             "returned": 2,
@@ -222,6 +224,7 @@ async fn port_order_ports_leaves_first_and_reports_one_scc() {
     assert_payload(
         &cycle,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "cycle",
             "total_symbols": 4,
             "returned": 0,
@@ -287,6 +290,7 @@ async fn port_order_ports_leaves_first_and_reports_one_scc() {
     assert_payload(
         &empty,
         json!({
+            "freshness": {"state": "fresh"},
             "source_dir": "missing",
             "total_symbols": 0,
             "returned": 0,

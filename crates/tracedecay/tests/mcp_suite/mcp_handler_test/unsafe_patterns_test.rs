@@ -9,7 +9,8 @@ use crate::support::{
     refusal_problem, wait_for_current_graph,
 };
 
-const TODO_MARKDOWN: &str = r#"## Risky Patterns
+const TODO_MARKDOWN: &str = r#"freshness: fresh
+## Risky Patterns
 **Match count:** 1
 **By kind:** todo: 1
 
@@ -19,7 +20,8 @@ const TODO_MARKDOWN: &str = r#"## Risky Patterns
   **Enclosing:** src/audit.rs::unfinished
 "#;
 
-const EMPTY_MARKDOWN: &str = r#"## Risky Patterns
+const EMPTY_MARKDOWN: &str = r#"freshness: fresh
+## Risky Patterns
 **Match count:** 0
 
 _No risky patterns found._
@@ -127,6 +129,7 @@ fn site(kind: &str, file: &str, line: u64, snippet: &str, enclosing: &str, in_te
 
 fn report(match_count: u64, by_kind: Value, matches: Vec<Value>) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "match_count": match_count,
         "by_kind": by_kind,
         "matches": matches,
@@ -595,6 +598,7 @@ async fn unsafe_patterns_withholds_an_unclassifiable_file_and_reports_the_rest()
     assert_eq!(
         parse_json(&full),
         json!({
+            "freshness": {"state": "fresh"},
             "match_count": 1,
             "by_kind": {"unwrap": 1},
             "matches": [site(
@@ -618,7 +622,7 @@ async fn unsafe_patterns_withholds_an_unclassifiable_file_and_reports_the_rest()
     let markdown = tool_text(&fixture, json!({"path": "src/unparsed.rs"})).await;
     assert_eq!(
         markdown,
-        "## Risky Patterns\n**Match count:** 0\n**Coverage:** partial\n\n### Omitted files\n- **src/unparsed.rs**: test_scope_unclassified (syntax_errors), 2 site(s) withheld\n\n_No risky patterns found._\n"
+        "freshness: fresh\n## Risky Patterns\n**Match count:** 0\n**Coverage:** partial\n\n### Omitted files\n- **src/unparsed.rs**: test_scope_unclassified (syntax_errors), 2 site(s) withheld\n\n_No risky patterns found._\n"
     );
 
     fixture.harness.shutdown().await;

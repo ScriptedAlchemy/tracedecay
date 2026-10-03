@@ -227,6 +227,7 @@ mod tests {
             &mut stale,
             &ServedCodeGraphGenerationV1 {
                 generation: "generation.fixture.7".to_owned(),
+                worktree: None,
                 freshness: CodeGraphReadFreshnessV1::LastCompleteStale {
                     sealed_at: UtcMicros(0),
                     rebuild_in_flight: true,
@@ -253,6 +254,7 @@ mod tests {
             &mut current,
             &ServedCodeGraphGenerationV1 {
                 generation: "generation.fixture.8".to_owned(),
+                worktree: None,
                 freshness: CodeGraphReadFreshnessV1::Current,
             },
         );

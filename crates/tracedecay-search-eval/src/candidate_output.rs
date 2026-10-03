@@ -826,6 +826,7 @@ fn production_lanes(
         query_view: &query_view,
         generation: generation_id.clone(),
         literals: authority.parse_literals(&query_view, &request),
+        path_prefix: None,
         budget,
     };
     let exact_outcome = exact_lane
@@ -849,6 +850,7 @@ fn production_lanes(
                 phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                 proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
                 field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                path_prefix: None,
                 fuzzy_budget: 8,
                 lexical_profile_revision: id(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
