@@ -1987,6 +1987,10 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &default_profile_project_id(&project_path),
     );
     let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    // The init daemon keeps publishing into the store after init returns, so
+    // seed between daemons. Dropping the probe table frees its pages and keeps
+    // the exact schema the next daemon requires on open.
+    common::stop_managed_daemon(&home_path);
     common::create_runtime().block_on(async {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
@@ -1998,7 +2002,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
                      VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 128\
                  )\
                  INSERT INTO doctor_daemon_probe SELECT zeroblob(8192) FROM count;\
-                 DELETE FROM doctor_daemon_probe;",
+                 DROP TABLE doctor_daemon_probe;",
         )
         .await
         .expect("seed reclaimable pages");

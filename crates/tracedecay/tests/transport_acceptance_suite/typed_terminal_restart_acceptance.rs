@@ -501,17 +501,18 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
     let mut daemon = spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     initialize_project(&home_path, &reset_project_path, "reset-required-fixture");
 
-    // Tamper the store. `tracedecay init` is daemon-owned, so this daemon
-    // already opened the project once and holds a verified handle; the
-    // incompatible shape is what the *next* process-level open observes, which
-    // is exactly the physical restart below.
-    make_store_reset_required(&home_path, &reset_project_path);
-
     let first_pid = daemon.id();
     let stopped = daemon
         .kill_and_wait()
         .expect("force-stop and reap the first physical daemon");
     assert!(!stopped.success(), "forced daemon stop exited cleanly");
+
+    // Tamper the store between processes. `tracedecay init` is daemon-owned,
+    // so the first daemon already opened the project once; the incompatible
+    // shape is what the *next* process-level open observes. Tampering while
+    // that daemon lived would race its writes.
+    make_store_reset_required(&home_path, &reset_project_path);
+
     let mut daemon = spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     assert_ne!(
         daemon.id(),
