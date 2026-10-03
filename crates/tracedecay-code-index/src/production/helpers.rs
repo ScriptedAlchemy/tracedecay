@@ -464,8 +464,8 @@ where
 {
     let workers = crate::parallelism::indexing_workers().max(1);
 
-    {
-        metrics::gauge!("code_index.seal.resolve.effective_workers").set(workers as f64);
+    metrics::gauge!("code_index.seal.resolve.effective_workers").set(workers as f64);
+    if crate::observe::observing() {
         metrics::gauge!("code_index.seal.resolve.unresolved_references")
             .set(selected_references(files, selection).count() as f64);
     }

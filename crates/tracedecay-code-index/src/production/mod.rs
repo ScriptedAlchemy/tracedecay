@@ -1970,8 +1970,8 @@ where
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
 
-        {
-            crate::observe::record_files(captured_files.len());
+        crate::observe::record_files(captured_files.len());
+        if crate::observe::observing() {
             crate::observe::record_source_bytes(
                 captured_files
                     .values()
