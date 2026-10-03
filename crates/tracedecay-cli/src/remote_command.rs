@@ -267,13 +267,13 @@ fn emit_query_response(
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
-        Err(problem) => Err(TraceDecayError::Config {
-            message: format!(
-                "Remote Brain request {} failed: {}",
-                response.request_id,
-                problem.problem.summary()
-            ),
-        }),
+        // The response is already on stdout, so the refusal is the marker
+        // that keeps `--json` from printing a second document.
+        Err(problem) => Err(TraceDecayError::tool_refused(
+            format!("Remote Brain request {}", response.request_id),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )),
     }
 }
 
@@ -610,16 +610,21 @@ mod tests {
     }
 
     #[test]
-    fn emit_protocol_response_returns_config_error_for_typed_problem() {
+    fn emit_protocol_response_marks_a_typed_problem_as_already_rendered() {
         let response = protocol_problem_response();
+        let problem = &response.result.as_ref().unwrap_err().problem;
         let error = emit_protocol_response(&response, true)
             .expect_err("typed Remote Brain problem must be non-zero");
         match error {
-            TraceDecayError::Config { message } => {
-                assert!(message.contains("request.cli.remote.7"));
-                assert!(message.contains(&response.result.as_ref().unwrap_err().problem.code));
+            TraceDecayError::ToolRefused(refusal) => {
+                assert!(refusal.tool.contains("request.cli.remote.7"));
+                assert_eq!(refusal.code.as_deref(), Some(problem.code.as_str()));
+                assert_eq!(refusal.reason.as_deref(), Some(problem.message.as_str()));
             }
-            other => panic!("expected config error, got {other:?}"),
+            other => panic!(
+                "the response is already printed, so any error but ToolRefused makes the \
+                 process boundary print a second --json document: {other:?}"
+            ),
         }
     }
 
