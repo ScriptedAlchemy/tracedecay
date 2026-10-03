@@ -45,7 +45,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 
 mod authorities;
 mod discovery_queue;
-mod observe;
 mod projection_drain;
 mod replay;
 mod runtime;
