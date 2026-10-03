@@ -17,7 +17,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh 
     && rustup target add x86_64-pc-windows-gnu \
     && chmod -R a+rX /opt/rustup /opt/cargo \
     && rm /tmp/rustup.sh
-RUN npm install --global pnpm@12.6.0 cargo-hauler@0.13.2 @ast-grep/cli@0.44.0 \
+RUN npm install --global pnpm@12.6.0 cargo-hauler@0.13.3 @ast-grep/cli@0.44.0 \
     && case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64) arch=aarch64 ;; *) exit 1 ;; esac \
     && file="cargo-nextest-0.9.146-${arch}-unknown-linux-gnu.tar.gz" \
     && url="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146" \
