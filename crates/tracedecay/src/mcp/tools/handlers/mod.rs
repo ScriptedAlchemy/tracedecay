@@ -439,9 +439,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
     args: Value,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    let bounded_tool_name = mcp_tool_bounded_identity(tool_name);
     let dispatch = async move {
-        tracing::trace!(name: "mcp.tool.name", value = ?bounded_tool_name);
+        tracing::trace!(name: "mcp.tool.name", value = ?mcp_tool_bounded_identity(tool_name));
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
