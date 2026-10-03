@@ -64,9 +64,16 @@ async fn a_session_store_tool_on_the_core_owner_is_mounting_while_graph_tools_an
         json!("project.core-owner"),
         "{answer}"
     );
-    assert_eq!(
-        answer["project_root"],
-        json!(dir.path().canonicalize().unwrap()),
+    // The reported root is spelled for the host (plain vs verbatim, 8.3
+    // aliases); assert it identifies the fixture dir, not a spelling.
+    let reported_root = answer["project_root"]
+        .as_str()
+        .expect("project_root string");
+    assert!(
+        tracedecay_runtime_core::path_safety::same_canonical_path(
+            std::path::Path::new(reported_root),
+            dir.path()
+        ),
         "{answer}"
     );
 }

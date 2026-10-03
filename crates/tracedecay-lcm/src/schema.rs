@@ -792,18 +792,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shipped_v13_profile_refuses_typed_without_upgrading() -> Result<(), String> {
+    async fn previous_schema_profile_refuses_typed_without_upgrading() -> Result<(), String> {
+        const PREVIOUS: i64 = LCM_SCHEMA_VERSION - 1;
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "CREATE TABLE session_schema_migrations (
                 name TEXT PRIMARY KEY,
                 version INTEGER NOT NULL,
                 applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
             INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', 13, 123);",
-        )
+            VALUES ('lcm', {PREVIOUS}, 123);"
+        ))
         .await
         .map_err(|error| error.to_string())?;
 
@@ -818,17 +819,17 @@ mod tests {
             refusal(
                 require_admissible_lcm_schema(&*conn)
                     .await
-                    .expect_err("a shipped v13 store must refuse admission")
+                    .expect_err("a previous-schema store must refuse admission")
             )?,
-            (Some(13), LCM_SCHEMA_VERSION)
+            (Some(PREVIOUS), LCM_SCHEMA_VERSION)
         );
         assert_eq!(
             refusal(
                 ensure_lcm_schema(&conn)
                     .await
-                    .expect_err("opening a shipped v13 store must refuse, not upgrade it")
+                    .expect_err("opening a previous-schema store must refuse, not upgrade it")
             )?,
-            (Some(13), LCM_SCHEMA_VERSION)
+            (Some(PREVIOUS), LCM_SCHEMA_VERSION)
         );
         assert_eq!(
             util::fetch_i64(
@@ -839,7 +840,7 @@ mod tests {
             )
             .await
             .map_err(|error| error.to_string())?,
-            13
+            PREVIOUS
         );
         Ok(())
     }

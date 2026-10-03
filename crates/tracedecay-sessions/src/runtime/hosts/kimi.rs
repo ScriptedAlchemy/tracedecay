@@ -1507,10 +1507,19 @@ mod tests {
         .await
         .unwrap();
         assert!(!second.deferred);
+        // Skipping the reread needs a settled change-time witness to record
+        // convergence; hosts without one (Windows) honestly re-read the file.
+        #[cfg(unix)]
         assert_eq!(
             super::kimi_state_read_count_for_test(&state),
             admitted,
             "a later pass must not open state.json once its agents are settled"
+        );
+        #[cfg(not(unix))]
+        assert_eq!(
+            super::kimi_state_read_count_for_test(&state),
+            admitted + 1,
+            "no stat witness exists, so the pass must read state.json again"
         );
         assert_eq!(admission.observations().len(), 1);
     }

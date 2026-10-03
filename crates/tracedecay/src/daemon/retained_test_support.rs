@@ -64,7 +64,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         deadline: tracedecay_contracts::Deadline,
         cancellation: tracedecay_contracts::CancellationSignal,
-        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
@@ -80,13 +80,11 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
                     },
                 );
             }
-            if tracedecay_daemon_protocol::deadline_remaining(&deadline).is_none() {
-                return Err(
-                    tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
-                        stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
-                    },
-                );
-            }
+            let remaining = tracedecay_daemon_protocol::deadline_remaining(&deadline).ok_or(
+                tracedecay_daemon_protocol::DaemonInvocationError::TimedOut {
+                    stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
+                },
+            )?;
             if let tracedecay_daemon_protocol::DaemonInvocationPayload::ProfileGraphTool {
                 surface_operation,
                 arguments,
@@ -128,18 +126,32 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
                 )
                 .await);
             }
-            Ok(self
-                .service
-                .invoke_with_cancellation(
-                    &self.lsp_registry,
-                    Some(&self.project_root),
-                    None,
-                    None,
-                    None,
-                    request,
-                    None,
-                )
-                .await)
+            let request_id = request.request_id.clone();
+            let executor = self.clone();
+            let invocation = tokio::spawn(async move {
+                executor
+                    .service
+                    .invoke_with_cancellation(
+                        &executor.lsp_registry,
+                        Some(&executor.project_root),
+                        None,
+                        None,
+                        None,
+                        request,
+                        None,
+                    )
+                    .await
+            });
+            super::invocation_executor::settle_in_process_invocation(
+                self.service.request_cancellations(),
+                &request_id,
+                invocation,
+                remaining,
+                cancellation,
+                None,
+                policy,
+            )
+            .await
         })
     }
 
