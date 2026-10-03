@@ -26,8 +26,8 @@ use super::{
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
     QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_WRITE_CONTEXT,
-    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
-    sync_directory, total_bytes, validate_generation_file, write_active_pointer,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, read_optional_active_pointer, storage, sync_directory,
+    total_bytes, validate_generation_file, write_active_pointer,
 };
 
 pub(super) const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<
@@ -230,7 +230,7 @@ impl GraphReplayPoolLockV1 {
         // the daemon writer gate for the whole seal-hash.
         let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
         loop {
-            if observe_cancel(is_cancelled) {
+            if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             // One non-blocking try comes before the elapsed-deadline
@@ -609,7 +609,7 @@ pub(super) fn open_file_sha256_hex_cancellable(
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         let read = read_full(&mut reader, &mut buffer)?;
