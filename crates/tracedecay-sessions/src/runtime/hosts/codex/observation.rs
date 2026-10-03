@@ -441,10 +441,19 @@ impl CodexObservationAdmission<'_> {
         !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
     }
 
-    fn projection_project_path<'b>(&'b self, cwd: Option<&'b Path>) -> Option<&'b Path> {
+    /// A project rollout's session row keys on the registered root while its
+    /// location stays the rollout's own cwd, which is the linked worktree the
+    /// session ran in whenever that differs from the root.
+    fn projection_location<'b>(&'b self, cwd: &'b Path) -> CodexObservationLocation<'b> {
         match self {
-            Self::Project { root, .. } => Some(root),
-            Self::Profile { .. } => cwd,
+            Self::Project { root, .. } => CodexObservationLocation {
+                project_path: Some(root),
+                location_path: Some(cwd),
+            },
+            Self::Profile { .. } => CodexObservationLocation {
+                project_path: Some(cwd),
+                location_path: Some(cwd),
+            },
         }
     }
 }
@@ -633,11 +642,7 @@ async fn admit_codex_jsonl_page(
     // no frame and must not pay it on every pass.
     let resolved_scope = OnceLock::new();
     let scope_matcher = || resolved_scope.get_or_init(|| admission_scope.scope_matcher());
-    let source_location_path = admission_scope.projection_project_path(Some(meta.cwd.as_path()));
-    let source_location = CodexObservationLocation {
-        project_path: source_location_path,
-        location_path: source_location_path,
-    };
+    let source_location = admission_scope.projection_location(meta.cwd.as_path());
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
