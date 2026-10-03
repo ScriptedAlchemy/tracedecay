@@ -121,7 +121,6 @@ async fn release_one_idle_project_server_before_open(
         .into_iter()
         .map(|(_, server)| server)
         .collect::<Vec<_>>();
-    let retired_server_count = retired_servers.len();
     let stores = CapacityRetirementStores {
         administration: store_administration.clone(),
         invocation: invocation.clone(),

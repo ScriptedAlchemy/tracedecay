@@ -210,9 +210,8 @@ impl DaemonInvocationState {
         project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
         reopenable: bool,
     ) -> Result<Option<ProjectRuntimeRootQuiescenceV1>> {
-        // Bounded static transition names: a project leaves the invocation
-        // runtime either by capacity quiescence (reopenable) or by terminal
-        // remote-deletion retirement.
+        // A project leaves the invocation runtime either by capacity
+        // quiescence (reopenable) or by terminal remote-deletion retirement.
         let retirement_kind = if reopenable {
             "capacity-retired"
         } else {
@@ -529,9 +528,6 @@ impl DaemonInvocationState {
                 );
             }
         };
-        // Items-processed: the multi_root_execute span is inclusive over every
-        // admitted root, so per-request root counts are what divide its wall
-        // time into per-root service demand.
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
@@ -1053,9 +1049,6 @@ impl DaemonInvocationState {
     /// at prepare time and, critically, keeps them closed even if the
     /// coordinator later aborts the drain runner. Idempotent.
     pub(super) fn cancel_admissions(&self) {
-        // Counts cancel *requests*, not distinct transitions: the owner's
-        // synchronous cancel side is intentionally idempotent, and a repeat
-        // request after a coordinator retry is itself worth observing.
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
         // Code-index workers only observe `shutting_down` / closed admission

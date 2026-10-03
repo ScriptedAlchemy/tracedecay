@@ -101,21 +101,6 @@ impl Drop for ProjectOpenTaskCompletionFinalizer {
     }
 }
 
-/// RAII observation of one tracked open task. Held inside the spawned future,
-/// so cooperative cancellation, shutdown aborts, and panics all release the
-/// in-flight gauge with the future itself.
-struct ProjectOpenActiveObservationV1;
-
-impl ProjectOpenActiveObservationV1 {
-    fn enter() -> Self {
-        Self
-    }
-}
-
-impl Drop for ProjectOpenActiveObservationV1 {
-    fn drop(&mut self) {}
-}
-
 #[derive(Clone)]
 pub(super) enum ProjectOpenTaskState {
     Opening,
@@ -633,12 +618,10 @@ impl ProjectOpenTasks {
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let outcome_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
         let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let _active = ProjectOpenActiveObservationV1::enter();
                 let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
                 let state = match open(task_cancellation).await {
                     Ok(()) => ProjectOpenTaskState::Ready,

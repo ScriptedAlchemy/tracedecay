@@ -200,11 +200,7 @@ async fn poll_project(
     })
     .await
     {
-        Ok(Ok(discovery)) => {
-            // Sweep volume: every PR head this poll examined, including the
-            // fork heads it refused to track.
-            discovery
-        }
+        Ok(Ok(discovery)) => discovery,
         Ok(Err(reason)) => {
             log_daemon_event(
                 "pr_autotrack",

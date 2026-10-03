@@ -1084,37 +1084,6 @@ async fn retained_project_graph(
     Some(server.cg().await)
 }
 
-struct BackgroundJobGaugeGuard {
-    #[cfg(test)]
-    test_counter: Option<Arc<std::sync::atomic::AtomicI64>>,
-}
-
-impl BackgroundJobGaugeGuard {
-    fn enter() -> Self {
-        Self {
-            #[cfg(test)]
-            test_counter: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn enter_for_test(counter: Arc<std::sync::atomic::AtomicI64>) -> Self {
-        let mut guard = Self::enter();
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        guard.test_counter = Some(counter);
-        guard
-    }
-}
-
-impl Drop for BackgroundJobGaugeGuard {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        if let Some(counter) = self.test_counter.as_ref() {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 /// The scheduler tick as a type-erased boxed future: the loop's state machine
 /// (and every layout query that reaches it from a runtime open) then names
@@ -1293,11 +1262,9 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        let tick_result = {
-            let _background_job = BackgroundJobGaugeGuard::enter();
+        let tick_result =
             boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
-                .await
-        };
+                .await;
         if let Err(e) = tick_result {
             log_daemon_event(
                 "scheduler_tick",
@@ -2275,34 +2242,4 @@ async fn scheduled_user_job_run_id(
         ),
         latest_scheduler_terminal.map(|record| record.run_id),
     ))
-}
-
-#[cfg(test)]
-mod background_job_gauge_tests {
-    use super::BackgroundJobGaugeGuard;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-
-    #[tokio::test]
-    async fn background_job_gauge_is_released_when_the_tick_is_aborted() {
-        let active = Arc::new(AtomicI64::new(0));
-        let observed = Arc::clone(&active);
-        let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _gauge = BackgroundJobGaugeGuard::enter_for_test(observed);
-            entered.send(()).expect("report gauge entry");
-            std::future::pending::<()>().await;
-        });
-
-        entered_rx.await.expect("tick reached gauge scope");
-        assert_eq!(active.load(Ordering::SeqCst), 1);
-        task.abort();
-        assert!(task.await.expect_err("tick was aborted").is_cancelled());
-
-        assert_eq!(
-            active.load(Ordering::SeqCst),
-            0,
-            "aborting a scheduler tick must not strand the background-job gauge"
-        );
-    }
 }
