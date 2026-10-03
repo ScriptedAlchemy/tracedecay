@@ -14,7 +14,7 @@ on:
       max_snapshots:
         description: Maximum PR snapshots admitted per lane
         type: number
-        default: 2
+        default: 6
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_run:
@@ -130,7 +130,7 @@ jobs:
           lane: ${{ matrix.lane }}
           pull-requests: ${{ inputs.pull_requests || '' }}
           max-minutes: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_minutes) || '300' }}
-          max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '2' }}
+          max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '6' }}
       - name: Preserve timing and bounded test reports
         if: always() && steps.hauler.outputs.evidence != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
