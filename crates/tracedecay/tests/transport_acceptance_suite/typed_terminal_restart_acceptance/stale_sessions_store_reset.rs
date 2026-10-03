@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay_lcm::LCM_SCHEMA_VERSION;
+use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
 use super::stale_profile_authority_reset::registered_project_ids;
 use crate::common::{
@@ -333,7 +335,7 @@ struct SessionStoreRefusal {
     authority: &'static str,
     found_version: Value,
     required_version: Value,
-    reason: &'static str,
+    reason: String,
     /// A session tool reading the refused store.
     session_tool: &'static str,
     session_tool_args: fn() -> Value,
@@ -644,27 +646,33 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
         authority: "observations",
         found_version: Value::Null,
         required_version: Value::Null,
-        reason: OBSERVATIONS_RESET_REASON,
+        reason: OBSERVATIONS_RESET_REASON.to_owned(),
         session_tool: "tracedecay_lcm_grep",
         session_tool_args: || json!({ "query": "probe", "format": "json" }),
     });
 }
 
 #[test]
-fn session_stores_at_shipped_lcm_schema_13_refuse_sessions_only_until_their_scoped_reset() {
+fn session_stores_at_the_previous_lcm_schema_refuse_sessions_only_until_their_scoped_reset() {
+    const PREVIOUS: i64 = LCM_SCHEMA_VERSION - 1;
     refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
         age: |db| {
             execute_once(
                 db,
-                "UPDATE session_schema_migrations SET version = 13 WHERE name = 'lcm'",
+                &format!(
+                    "UPDATE session_schema_migrations SET version = {PREVIOUS} WHERE name = 'lcm'"
+                ),
             );
         },
         ages_profile_store: true,
         ages_profile_authority: true,
         authority: "LCM",
-        found_version: json!(13),
-        required_version: json!(14),
-        reason: "LCM profile schema 13 is incompatible with required schema 14; reset the profile",
+        found_version: json!(PREVIOUS),
+        required_version: json!(LCM_SCHEMA_VERSION),
+        reason: format!(
+            "LCM profile schema {PREVIOUS} is incompatible with required schema \
+             {LCM_SCHEMA_VERSION}; reset the profile"
+        ),
         session_tool: "tracedecay_lcm_grep",
         session_tool_args: || json!({ "query": "probe", "format": "json" }),
     });
@@ -672,20 +680,26 @@ fn session_stores_at_shipped_lcm_schema_13_refuse_sessions_only_until_their_scop
 
 #[test]
 fn project_session_store_at_another_git_correlation_version_refuses_sessions_only() {
+    const PREVIOUS: i64 = GIT_CORRELATION_SCHEMA_VERSION - 1;
     refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
         age: |db| {
             execute_once(
                 db,
-                "UPDATE session_schema_migrations SET version = 5 WHERE name = 'git_correlation'",
+                &format!(
+                    "UPDATE session_schema_migrations SET version = {PREVIOUS} \
+                     WHERE name = 'git_correlation'"
+                ),
             );
         },
         ages_profile_store: false,
         ages_profile_authority: true,
         authority: "git correlation",
-        found_version: json!(5),
-        required_version: json!(6),
-        reason: "git correlation profile schema 5 is incompatible with required schema 6; reset \
-                 the profile",
+        found_version: json!(PREVIOUS),
+        required_version: json!(GIT_CORRELATION_SCHEMA_VERSION),
+        reason: format!(
+            "git correlation profile schema {PREVIOUS} is incompatible with required schema \
+             {GIT_CORRELATION_SCHEMA_VERSION}; reset the profile"
+        ),
         session_tool: "tracedecay_sessions_for",
         session_tool_args: || json!({ "git_ref": "branch", "value": "main", "format": "json" }),
     });
@@ -708,7 +722,8 @@ fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_
         found_version: Value::Null,
         required_version: Value::Null,
         reason: "workflow persisted shape requires reset: workflow schema identity does not \
-                 match the final contract",
+                 match the final contract"
+            .to_owned(),
         session_tool: "tracedecay_workflow_list_definitions",
         session_tool_args: || json!({}),
     });

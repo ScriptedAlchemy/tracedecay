@@ -6,7 +6,9 @@ use roaring::RoaringBitmap;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_code_index::production::{
+    CodeIndexExecutionControlV1, advance_import_dictionary_digest, initial_import_dictionary_digest,
+};
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
     ComponentRevision, ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId,
@@ -70,25 +72,22 @@ pub(super) const BASE_SECTION_NAMES: [&str; 5] = [
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CodeLexicalArtifactPageBaseSectionsReceiptV1 {
-    page_ordinal: u64,
     sections: Vec<CodeLexicalArtifactSectionDigestV1>,
 }
 
+/// One page's receipt for one base section. It names documents by their
+/// place on the page and never the page's position, so a page carried into
+/// a successor keeps its receipt; the section fold binds the position.
 pub(super) struct PageBaseSectionReceiptBuilderV1 {
-    page_ordinal: u64,
     name: &'static str,
     row_count: u64,
     hasher: Sha256,
 }
 
 impl PageBaseSectionReceiptBuilderV1 {
-    pub(super) fn new(
-        page_ordinal: u64,
-        name: &'static str,
-    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+    pub(super) fn new(name: &'static str) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.code-lexical-artifact-page-section.v1\0");
-        hasher.update(page_ordinal.to_le_bytes());
+        hasher.update(b"tracedecay.code-lexical-artifact-page-section.v2\0");
         hasher.update(
             u64::try_from(name.len())
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
@@ -96,7 +95,6 @@ impl PageBaseSectionReceiptBuilderV1 {
         );
         hasher.update(name.as_bytes());
         Ok(Self {
-            page_ordinal,
             name,
             row_count: 0,
             hasher,
@@ -133,7 +131,6 @@ impl PageBaseSectionReceiptBuilderV1 {
         mut self,
     ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
         self.hasher.update(b"end\0");
-        self.hasher.update(self.page_ordinal.to_le_bytes());
         self.hasher.update(self.row_count.to_le_bytes());
         let digest = ManifestDigest::from_sha256_bytes(&self.hasher.finalize())
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
@@ -163,15 +160,11 @@ pub(super) fn hash_bytes(
 }
 
 pub(super) fn encode_page_base_sections_receipt(
-    page_ordinal: u64,
     sections: Vec<CodeLexicalArtifactSectionDigestV1>,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    validate_page_base_sections(page_ordinal, &sections)?;
-    serde_json::to_vec(&CodeLexicalArtifactPageBaseSectionsReceiptV1 {
-        page_ordinal,
-        sections,
-    })
-    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+    validate_page_base_sections(None, &sections)?;
+    serde_json::to_vec(&CodeLexicalArtifactPageBaseSectionsReceiptV1 { sections })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
 pub(super) fn decode_page_base_sections_receipt(
@@ -180,11 +173,10 @@ pub(super) fn decode_page_base_sections_receipt(
 ) -> Result<CodeLexicalArtifactPageBaseSectionsReceiptV1, CodeLexicalArtifactErrorV1> {
     let receipt: CodeLexicalArtifactPageBaseSectionsReceiptV1 = serde_json::from_slice(bytes)
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    validate_page_base_sections(expected_page_ordinal, &receipt.sections)?;
-    if receipt.page_ordinal != expected_page_ordinal
-        || serde_json::to_vec(&receipt)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
-            != bytes
+    validate_page_base_sections(Some(expected_page_ordinal), &receipt.sections)?;
+    if serde_json::to_vec(&receipt)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+        != bytes
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact page base-section receipt is not canonical".to_owned(),
@@ -292,7 +284,7 @@ pub(super) fn finish_base_section_receipt_fold(
 }
 
 fn validate_page_base_sections(
-    page_ordinal: u64,
+    page_ordinal: Option<u64>,
     sections: &[CodeLexicalArtifactSectionDigestV1],
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     if sections.len() != BASE_SECTION_NAMES.len()
@@ -301,9 +293,12 @@ fn validate_page_base_sections(
             .zip(BASE_SECTION_NAMES)
             .any(|(section, expected)| section.name != expected)
     {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
-            "lexical artifact page {page_ordinal} base-section receipt is malformed"
-        )));
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(match page_ordinal {
+            Some(page_ordinal) => {
+                format!("lexical artifact page {page_ordinal} base-section receipt is malformed")
+            }
+            None => "lexical artifact page base-section receipt is malformed".to_owned(),
+        }));
     }
     Ok(())
 }
@@ -321,10 +316,13 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
         false,
         &[
             ("page_ordinal", "INTEGER", 0, 1),
+            ("file_ordinal", "INTEGER", 1, 0),
             ("chunk_count", "INTEGER", 1, 0),
+            ("payload_bytes", "INTEGER", 1, 0),
             ("import_count", "INTEGER", 1, 0),
             ("import_payload_bytes", "INTEGER", 1, 0),
-            ("import_dictionary_digest", "TEXT", 1, 0),
+            ("import_digest", "TEXT", 1, 0),
+            ("clone_body_count", "INTEGER", 1, 0),
             ("ngram_digest", "TEXT", 1, 0),
             ("base_sections_receipt", "BLOB", 1, 0),
         ],
@@ -378,7 +376,11 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     (
         "row_dictionary",
         false,
-        &[("entry_id", "INTEGER", 0, 1), ("entry", "BLOB", 1, 0)],
+        &[
+            ("entry_id", "INTEGER", 0, 1),
+            ("entry", "BLOB", 1, 0),
+            ("page_references", "INTEGER", 1, 0),
+        ],
     ),
     (
         "clone_body_payloads",
@@ -503,13 +505,12 @@ fn table_columns(
         })
 }
 
+/// One page's n-gram shards, documents named by their place on the page.
 pub(super) fn ngram_page_digest<'a>(
-    page_ordinal: u64,
     rows: impl IntoIterator<Item = (i64, i64, &'a [u8], u64)>,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-ngram-page.v1\0");
-    hasher.update(page_ordinal.to_le_bytes());
+    hasher.update(b"tracedecay.code-lexical-artifact-ngram-page.v2\0");
     let mut row_count = 0u64;
     for (kind, ngram, documents, cardinality) in rows {
         hasher.update(b"row\0");
@@ -1500,6 +1501,105 @@ pub(super) fn decode_padded_receipt_with_control(
     Ok(Some(receipt))
 }
 
+/// The source totals a sealed receipt binds. A cold build takes them from
+/// the sealed source's completion receipt and checks them against its staged
+/// pages; every later finalization step, and a carried build, folds them
+/// from `source_pages` alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CodeLexicalSourceSummaryV1 {
+    pub(super) format_revision: u32,
+    pub(super) page_count: u64,
+    pub(super) total_chunks: u64,
+    pub(super) total_payload_bytes: u64,
+    pub(super) total_imports: u64,
+    pub(super) import_payload_bytes: u64,
+    pub(super) import_dictionary_digest: ManifestDigest,
+}
+
+impl CodeLexicalSourceSummaryV1 {
+    pub(super) fn of_receipt(
+        source: &tracedecay_code_index::production::VerifiedSealedLexicalSourceReceiptV1,
+    ) -> Self {
+        Self {
+            format_revision: source.format_revision(),
+            page_count: source.page_count(),
+            total_chunks: source.total_chunks(),
+            total_payload_bytes: source.total_payload_bytes(),
+            total_imports: source.total_imports(),
+            import_payload_bytes: source.import_payload_bytes(),
+            import_dictionary_digest: source.import_dictionary_digest().clone(),
+        }
+    }
+
+    /// Fold the staged page rows in page order.
+    pub(super) fn of_staged_pages(
+        connection: &Connection,
+        format_revision: u32,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let corrupt =
+            |error: rusqlite::Error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string());
+        let overflow = || {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact staged source totals overflowed".to_owned(),
+            )
+        };
+        let mut summary = Self {
+            format_revision,
+            page_count: 0,
+            total_chunks: 0,
+            total_payload_bytes: 0,
+            total_imports: 0,
+            import_payload_bytes: 0,
+            import_dictionary_digest: initial_import_dictionary_digest()
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT page_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest FROM source_pages ORDER BY page_ordinal",
+            )
+            .map_err(sqlite_error)?;
+        let mut rows = statement.query([]).map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            if summary.page_count.is_multiple_of(4_096) {
+                super::checkpoint(control)?;
+            }
+            let ordinal: i64 = row.get(0).map_err(corrupt)?;
+            if u64::try_from(ordinal).ok() != Some(summary.page_count) {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact page receipts are not contiguous".to_owned(),
+                ));
+            }
+            let count = |index: usize| -> Result<u64, CodeLexicalArtifactErrorV1> {
+                u64::try_from(row.get::<_, i64>(index).map_err(corrupt)?).map_err(contract_number)
+            };
+            summary.total_chunks = summary
+                .total_chunks
+                .checked_add(count(1)?)
+                .ok_or_else(overflow)?;
+            summary.total_payload_bytes = summary
+                .total_payload_bytes
+                .checked_add(count(2)?)
+                .ok_or_else(overflow)?;
+            summary.total_imports = summary
+                .total_imports
+                .checked_add(count(3)?)
+                .ok_or_else(overflow)?;
+            summary.import_payload_bytes = summary
+                .import_payload_bytes
+                .checked_add(count(4)?)
+                .ok_or_else(overflow)?;
+            let import_digest = ManifestDigest::new(row.get::<_, String>(5).map_err(corrupt)?)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            summary.import_dictionary_digest =
+                advance_import_dictionary_digest(&summary.import_dictionary_digest, &import_digest)
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+            summary.page_count = summary.page_count.checked_add(1).ok_or_else(overflow)?;
+        }
+        Ok(summary)
+    }
+}
+
 /// Seal `sections` for `source`. The receipt binds only content: the sealed
 /// source's state and chunk-chain digests hash the building worktree's
 /// generation into every chunk anchor and clone occurrence, so they stay
@@ -1507,20 +1607,20 @@ pub(super) fn decode_padded_receipt_with_control(
 /// fixed-width generation id, not its value.
 pub(super) fn new_verified_receipt(
     metadata_digest: ManifestDigest,
-    source: &tracedecay_code_index::production::VerifiedSealedLexicalSourceReceiptV1,
+    source: &CodeLexicalSourceSummaryV1,
     section_digests: Vec<CodeLexicalArtifactSectionDigestV1>,
     clone_index_census: CodeLexicalCloneIndexCensusV1,
     file_size_bytes: u64,
 ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
     let artifact_digest = artifact_digest(
         &metadata_digest,
-        source.format_revision(),
-        source.page_count(),
-        source.total_chunks(),
-        source.total_payload_bytes(),
-        source.total_imports(),
-        source.import_payload_bytes(),
-        source.import_dictionary_digest(),
+        source.format_revision,
+        source.page_count,
+        source.total_chunks,
+        source.total_payload_bytes,
+        source.total_imports,
+        source.import_payload_bytes,
+        &source.import_dictionary_digest,
         &section_digests,
         &clone_index_census,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
@@ -1528,13 +1628,13 @@ pub(super) fn new_verified_receipt(
     Ok(VerifiedCodeLexicalArtifactV1 {
         format_revision: CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
         metadata_digest,
-        source_format_revision: source.format_revision(),
-        page_count: source.page_count(),
-        total_chunks: source.total_chunks(),
-        total_payload_bytes: source.total_payload_bytes(),
-        total_imports: source.total_imports(),
-        import_payload_bytes: source.import_payload_bytes(),
-        import_dictionary_digest: source.import_dictionary_digest().clone(),
+        source_format_revision: source.format_revision,
+        page_count: source.page_count,
+        total_chunks: source.total_chunks,
+        total_payload_bytes: source.total_payload_bytes,
+        total_imports: source.total_imports,
+        import_payload_bytes: source.import_payload_bytes,
+        import_dictionary_digest: source.import_dictionary_digest.clone(),
         artifact_digest,
         section_digests,
         clone_index_census,

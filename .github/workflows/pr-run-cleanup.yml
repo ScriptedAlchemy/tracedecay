@@ -5,10 +5,7 @@ on:
     types: [closed]
 
 # This workflow runs trusted inline API calls only. It never checks out PR code.
-permissions:
-  actions: write
-  checks: read
-  pull-requests: read
+permissions: {}
 
 # A late close event must not cancel a reopened PR before its state is checked.
 concurrency:
@@ -21,6 +18,10 @@ jobs:
     name: Cancel closed PR runs and delete their caches
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: write
+      checks: read
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
