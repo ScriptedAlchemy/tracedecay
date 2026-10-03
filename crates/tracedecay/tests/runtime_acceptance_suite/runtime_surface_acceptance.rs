@@ -769,6 +769,7 @@ async fn assert_application_transport_parity(
     case: &str,
     operation: ApplicationSurfaceOperation,
     arguments: Value,
+    termination: OperationTermination,
 ) -> Value {
     let cli = run_application_tool(fixture.home(), &fixture.project, operation, &arguments);
     assert_command_success(operation.as_str(), &cli);
@@ -826,8 +827,8 @@ async fn assert_application_transport_parity(
         };
         assert_eq!(
             evidence.execution.termination,
-            OperationTermination::Completed,
-            "{case} ({operation:?}) did not complete: {envelope:?}\nIsolated daemon log:\n{}",
+            termination,
+            "{case} ({operation:?}) terminated unexpectedly: {envelope:?}\nIsolated daemon log:\n{}",
             fixture.daemon_log_tail()
         );
         assert_eq!(evidence.coverage.returned, evidence.page.returned);
@@ -840,7 +841,7 @@ async fn assert_application_transport_parity(
     assert_eq!(cli["outcome"]["outcome"], "evidence");
     assert_eq!(
         cli["outcome"]["value"]["execution"]["termination"],
-        "completed"
+        serde_json::to_value(termination).expect("termination JSON")
     );
 
     let mut cli_envelope = cli.clone();
@@ -848,16 +849,20 @@ async fn assert_application_transport_parity(
         serde_json::to_value(mcp.result.as_ref().expect("MCP result")).expect("MCP envelope");
     let mut http_envelope =
         serde_json::to_value(http.result.as_ref().expect("HTTP result")).expect("HTTP envelope");
+    let mcp_payload = mcp_envelope["outcome"]["value"]["payload"].clone();
+    let http_payload = http_envelope["outcome"]["value"]["payload"].clone();
     normalize_application_envelope(&mut cli_envelope);
     normalize_application_envelope(&mut mcp_envelope);
     normalize_application_envelope(&mut http_envelope);
     assert_eq!(mcp_envelope, http_envelope);
     assert_eq!(cli_envelope, mcp_envelope);
 
-    let mcp_payload = successful_application(&mcp);
-    let http_payload = successful_application(&http);
+    assert!(
+        !mcp_payload.is_null(),
+        "{case} returned no evidence payload"
+    );
     assert_eq!(mcp_payload, http_payload);
-    assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
+    assert_eq!(cli["outcome"]["value"]["payload"], mcp_payload);
     assert_eq!(
         cli["scope"]["project_id"],
         serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope.project_id)
@@ -867,7 +872,7 @@ async fn assert_application_transport_parity(
         mcp.result.as_ref().expect("MCP result").scope,
         http.result.as_ref().expect("HTTP result").scope
     );
-    mcp_payload.clone()
+    mcp_payload
 }
 
 fn normalize_application_envelope(value: &mut Value) {
@@ -1590,6 +1595,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "qualified_name": "src/auth/login.rs::authenticate",
             "page": page,
         }),
+        OperationTermination::Completed,
     )
     .await;
     let authenticate_id = authenticate["symbols"][0]["node_id"]
@@ -1605,6 +1611,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "qualified_name": "src/auth/login.rs::credentials_are_valid",
             "page": { "page_size": 10, "cursor": null },
         }),
+        OperationTermination::Completed,
     )
     .await;
     let credentials_are_valid_id = credentials_are_valid["symbols"][0]["node_id"]
@@ -1620,6 +1627,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "to_node_id": credentials_are_valid_id,
             "maximum_depth": 8,
         }),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(call_chain["node_ids"][0], authenticate_id);
@@ -1645,6 +1653,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         "file-dependents",
         ApplicationSurfaceOperation::FileDependents,
         serde_json::json!({ "file": "src/auth/session.rs" }),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(dependents["file"], "src/auth/session.rs");
@@ -1667,6 +1676,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
                 "cursor": null,
             },
         }),
+        OperationTermination::Partial,
     )
     .await;
     let occurrence = &exact["items"][0]["occurrence"];
@@ -1686,6 +1696,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         "source-lines",
         ApplicationSurfaceOperation::SourceLines,
         source_lines_arguments,
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(source_lines["file"], "src/auth/login.rs");
@@ -1718,6 +1729,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
                 "order": "source_position",
             },
         }),
+        OperationTermination::Completed,
     )
     .await;
     assert!(references_only.get("file").is_none());
@@ -1730,6 +1742,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         "source-body",
         ApplicationSurfaceOperation::SourceBody,
         source_body_arguments.clone(),
+        OperationTermination::Completed,
     )
     .await;
     assert_eq!(source_body["file"], "src/auth/login.rs");
@@ -2720,6 +2733,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         "test-results",
         ApplicationSurfaceOperation::TestResults,
         serde_json::json!({}),
+        OperationTermination::Completed,
     )
     .await;
     let http_test_results =
