@@ -284,7 +284,7 @@ impl AgentIntegration for KiroIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        dc.section("Kiro integration");
         let host_home = kiro_home(&ctx.home);
         match kiro_doctor_installation_state(&ctx.home) {
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {

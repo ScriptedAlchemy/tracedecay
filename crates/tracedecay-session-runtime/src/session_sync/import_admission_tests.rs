@@ -116,7 +116,7 @@ async fn import_receipt(
     // `timed_out`. The callers' literal terminations are the hand-off proof.
     loop {
         match SessionSyncServicePort::status(&service, control.clone()).await {
-            SessionSyncOutcomeV1::Complete(receipt) => return (receipt, project_state),
+            SessionSyncOutcomeV1::Complete { receipt, .. } => return (receipt, project_state),
             SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

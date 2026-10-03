@@ -165,6 +165,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn converge_git_evidence_for_test(
         &self,
         git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
+        project_root: Option<&Path>,
     ) -> std::result::Result<
         tracedecay_sessions::runtime::git_correlation::GitEvidencePassOutcome,
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
@@ -175,7 +176,7 @@ impl HostAdmissionTestRuntimeV1 {
             )
         })?;
         tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
-            .converge_session_git_evidence(git)
+            .converge_session_git_evidence(git, project_root)
             .await
     }
 
