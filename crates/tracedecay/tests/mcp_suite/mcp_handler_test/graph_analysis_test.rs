@@ -5278,7 +5278,7 @@ fn assert_clamped_truncation(payload: &Value) {
         .as_str()
         .unwrap_or_else(|| panic!("preview missing: {payload}"));
     assert_eq!(preview.chars().count() as u64, preview_chars, "{preview}");
-    let marker = r#"{"hotspot_count":100,"hotspots":["#;
+    let marker = r#"{"freshness":{"state":"fresh"},"hotspot_count":100,"hotspots":["#;
     let array = preview
         .strip_prefix(marker)
         .unwrap_or_else(|| panic!("clamped preview did not start with 100 rows: {preview}"));

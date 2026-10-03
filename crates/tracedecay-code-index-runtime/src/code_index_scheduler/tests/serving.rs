@@ -455,6 +455,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             phrases: std::borrow::Cow::Owned(Vec::new()),
             proximities: std::borrow::Cow::Owned(Vec::new()),
             field_filters: std::borrow::Cow::Owned(Vec::new()),
+            path_prefix: None,
             fuzzy_budget: 0,
             lexical_profile_revision: ComponentRevision::new(
                 tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
