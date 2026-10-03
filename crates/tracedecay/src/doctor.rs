@@ -108,9 +108,9 @@ pub enum DoctorCompletion {
 
 /// Runs a comprehensive health check of the tracedecay installation.
 ///
-/// The human report goes to stderr. With `emit_json`, stdout also carries one
-/// JSON document with the same check lines and the daemon's canonical findings
-/// in the `/api/doctor/findings` payload shape.
+/// The human report goes to stderr. With `emit_json`, stdout carries one JSON
+/// document with the same check lines and the daemon's canonical findings in
+/// the `/api/doctor/findings` payload shape instead, and no human report.
 #[tracing::instrument(name = "doctor.run", level = "trace", skip_all)]
 pub async fn run_doctor(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
@@ -129,16 +129,22 @@ pub async fn run_doctor(
             }
         };
     let build_version = tracedecay_project::version::build_version()?;
-    let mut dc = DoctorCounters::new();
+    let mut dc = if emit_json {
+        DoctorCounters::quiet()
+    } else {
+        DoctorCounters::new()
+    };
 
-    eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m\n");
+    if !emit_json {
+        eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m");
+    }
 
     check_binary(&mut dc, build_version);
     check_daemon_service(&mut dc, profile, build_version);
     let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
     let mut pending_reset = check_reset_required_stores(&mut dc, profile, build_version);
 
-    eprintln!("\n\x1b[1mCurrent project\x1b[0m");
+    dc.section("Current project");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     check_inert_project_config(&mut dc, &project_path);
     check_pr_autotrack_state(&mut dc, profile.data_dir(), &project_path);
@@ -439,7 +445,7 @@ fn render_doctor_findings(
     dc: &mut DoctorCounters,
     payload: &tracedecay_dashboard_api::DoctorFindingsPayloadV1,
 ) {
-    eprintln!("\n\x1b[1mCanonical Doctor findings\x1b[0m");
+    dc.section("Canonical Doctor findings");
     for entry in &payload.entries {
         render_doctor_finding(dc, entry.finding());
     }
@@ -801,7 +807,7 @@ fn check_daemon_service(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     build_version: &str,
 ) {
-    eprintln!("\n\x1b[1mDaemon service\x1b[0m");
+    dc.section("Daemon service");
     let state = match tracedecay_daemon_control::installed_service_state(profile) {
         Ok(state) => state,
         Err(error) => {
@@ -876,7 +882,7 @@ fn daemon_service_doctor_message(
 
 /// Check binary location and version.
 fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
-    eprintln!("\x1b[1mBinary\x1b[0m");
+    dc.section("Binary");
     if let Ok(exe) = std::env::current_exe() {
         dc.pass(&format!("Binary: {}", exe.display()));
     } else {
@@ -895,7 +901,7 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// a failure, activation comes from each project's pinned configuration.
 #[tracing::instrument(name = "doctor.check.watcher", level = "trace", skip_all)]
 fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::config::ProfileRoot) {
-    eprintln!("\n\x1b[1mWatcher\x1b[0m");
+    dc.section("Watcher");
 
     if !tracedecay_daemon_control::daemon_reachable(profile) {
         dc.info("Daemon not running, watcher inactive; sync happens on hook/read events");
@@ -1148,7 +1154,7 @@ fn check_user_config(
     profile_root: &Path,
     upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
 ) {
-    eprintln!("\n\x1b[1mUser config\x1b[0m");
+    dc.section("User config");
     match upload_enabled {
         Ok(UploadSetting::Resolved(true)) => dc.pass("Worldwide counter upload enabled"),
         Ok(UploadSetting::Resolved(false)) => {
@@ -1224,7 +1230,7 @@ fn check_host_integrations(
             Err(error) => match error.host_absence() {
                 Some(absence) => Some((absence, error.to_string())),
                 None => {
-                    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                    dc.section(&format!("{} integration", agent.name()));
                     dc.fail(&format!("{}: host CLI is unusable: {error}", agent.id()));
                     continue;
                 }
@@ -1233,7 +1239,7 @@ fn check_host_integrations(
         match absence {
             None => agent.healthcheck(dc, &hctx),
             Some((absence, detail)) => {
-                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                dc.section(&format!("{} integration", agent.name()));
                 dc.skipped(&format!(
                     "{}: skipped, {} ({detail})",
                     agent.id(),
@@ -1260,7 +1266,7 @@ fn warn_detected_unintegrated_host(
         Ok(agents::HostPresence::NoHostCli) if surface.is_some() || agent.is_detected(home) => {}
         Ok(agents::HostPresence::NoHostCli) | Err(_) => return,
     }
-    eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+    dc.section(&format!("{} integration", agent.name()));
     dc.warn(&format!(
         "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
         agent.name(),
@@ -1286,7 +1292,7 @@ fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
 /// Check optional external tools that gate optional MCP capabilities.
 #[tracing::instrument(name = "doctor.check.external_tools", level = "trace", skip_all)]
 fn check_external_tools(dc: &mut DoctorCounters) {
-    eprintln!("\n\x1b[1mExternal tools\x1b[0m");
+    dc.section("External tools");
     let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
     let installed = json_bool(&diagnostics, "installed");
     let rewrite_available = json_bool(&diagnostics, "rewrite_available");
@@ -1329,7 +1335,7 @@ fn check_network(
     upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
     network: AdmittedDoctorNetworkProbes,
 ) {
-    eprintln!("\n\x1b[1mNetwork\x1b[0m");
+    dc.section("Network");
     match upload_enabled {
         Ok(UploadSetting::Resolved(true)) => {
             if let Some(total) = (network.fetch_worldwide_total)() {
@@ -1359,6 +1365,9 @@ fn check_network(
 
 /// Print final summary.
 fn print_summary(dc: &DoctorCounters) {
+    if dc.is_quiet() {
+        return;
+    }
     eprintln!();
     if dc.issues == 0 && dc.warnings == 0 && dc.pending_actions == 0 {
         eprintln!("\x1b[32mAll checks passed.\x1b[0m");

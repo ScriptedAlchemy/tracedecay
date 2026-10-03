@@ -453,6 +453,52 @@ impl VerifiedGraphSnapshot {
         Ok(relation)
     }
 
+    /// What this head serves differently from the sealed base it layers
+    /// over, or `None` when the head is a cold generation with no base.
+    pub fn layered_rows(&self) -> Option<crate::GraphLayeredRowsV1> {
+        let sealed = self.sealed_head()?;
+        let reads = sealed.layered_reads()?;
+        Some(reads.layer.layered_rows())
+    }
+
+    /// The row the sealed base this head layers over holds for `reference`,
+    /// whether or not the head hides or shadows it. `Ok(None)` when the head
+    /// is cold or the base never held the row.
+    pub fn base_entity(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        let Some(sealed) = self.sealed_head() else {
+            return Ok(None);
+        };
+        self.with_operation(|| match sealed.layered_reads() {
+            Some(reads) => reads.layer.base_entity(&reference.identity, cancellation),
+            None => Ok(None),
+        })
+    }
+
+    /// The relation the sealed base this head layers over holds for
+    /// `reference`, whether or not the head hides or shadows it. `Ok(None)`
+    /// when the head is cold or the base never held the row.
+    pub fn base_relation(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        let Some(sealed) = self.sealed_head() else {
+            return Ok(None);
+        };
+        self.with_operation(|| match sealed.layered_reads() {
+            Some(reads) => reads.layer.base_relation(
+                reads.projection,
+                &reference.identity,
+                cancellation.as_ref(),
+            ),
+            None => Ok(None),
+        })
+    }
+
     #[tracing::instrument(name = "graph_db.lease.read_projection", level = "trace", skip_all)]
     pub fn read_projection(
         &self,

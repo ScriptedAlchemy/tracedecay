@@ -51,6 +51,7 @@ use super::prepared::{
     PreparedCloneBodyV1, PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1,
     prepare_page as prepare_page_values,
 };
+use super::reader::hash_artifact_file;
 use super::row_codec::{
     ConnectionRowDictionaryV1, decode_artifact_row, decode_row_block, stored_chunk_key,
     stored_symbol_key,
@@ -1034,7 +1035,8 @@ impl CodeLexicalArtifactBuilderV1 {
         })
     }
 
-    /// Stage a successor over a byte copy of the sealed `parent`, re-encoding
+    /// Stage a successor over a byte copy of the sealed `parent`, whose bytes
+    /// must hash to `parent_digest` and number `parent_size_bytes`, re-encoding
     /// only `changed_files` (ascending file ordinals) through
     /// `stage_file_pages`. The result stands where a cold build of the same
     /// generation stands on entering digest verification, so
@@ -1050,6 +1052,8 @@ impl CodeLexicalArtifactBuilderV1 {
     pub fn carry_parent_with_memory_budget(
         path: impl AsRef<Path>,
         parent: File,
+        parent_digest: &ManifestDigest,
+        parent_size_bytes: u64,
         metadata: CodeLexicalProjectionMetadataV1,
         memory_budget_bytes: usize,
         source_state_digest: ManifestDigest,
@@ -1073,7 +1077,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let metadata_digest = metadata_digest(&metadata)?;
         {
             let _span = tracing::trace_span!("query.artifact.carry.copy").entered();
-            copy_sealed_parent(parent, path)
+            copy_sealed_parent(parent, parent_digest, parent_size_bytes, path, control)
         }?;
         let (mut connection, private_file, file_identity) =
             open_private_builder_connection(path, memory_budget_bytes)?;
@@ -2082,8 +2086,17 @@ fn publish_initialized_staging(
 }
 
 /// Copy the sealed `parent` under the initializing sibling and name it the
-/// staging path once its bytes are durable.
-fn copy_sealed_parent(mut parent: File, path: &Path) -> Result<(), CodeLexicalArtifactErrorV1> {
+/// staging path once its bytes are durable. The carry never re-reads the
+/// rows it keeps, so the copy is held to the parent's content address: a
+/// damaged parent is refused as incompatible rather than sealed into its
+/// successor.
+fn copy_sealed_parent(
+    mut parent: File,
+    parent_digest: &ManifestDigest,
+    parent_size_bytes: u64,
+    path: &Path,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     let initializing = initializing_staging_sibling(path)?;
     match std::fs::remove_file(&initializing) {
         Ok(()) => {}
@@ -2092,14 +2105,42 @@ fn copy_sealed_parent(mut parent: File, path: &Path) -> Result<(), CodeLexicalAr
     }
     let mut target = create_private_file_retained(&initializing)
         .map_err(|failure| private_staging_error(failure.into_error()))?;
-    std::io::copy(&mut parent, &mut target)
-        .map_err(|error| staging_initialization_error("copy its sealed parent", error))?;
-    target
-        .sync_all()
-        .map_err(|error| staging_initialization_error("sync its carried parent", error))?;
+    let copied = (|| {
+        let mut copied_bytes = 0u64;
+        let digest = hash_artifact_file(&mut parent, control, |bytes| {
+            copied_bytes += bytes.len() as u64;
+            target
+                .write_all(bytes)
+                .map_err(|error| staging_initialization_error("copy its sealed parent", error))
+        })?;
+        if digest != *parent_digest || copied_bytes != parent_size_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "carried lexical parent does not match its content address".to_owned(),
+            ));
+        }
+        target
+            .sync_all()
+            .map_err(|error| staging_initialization_error("sync its carried parent", error))
+    })();
     drop(target);
-    std::fs::rename(&initializing, path)
-        .map_err(|error| staging_initialization_error("name the staging path", error))?;
+    let named = copied.and_then(|()| {
+        std::fs::rename(&initializing, path)
+            .map_err(|error| staging_initialization_error("name the staging path", error))
+    });
+    if let Err(error) = named {
+        // No sidecar sweep recognises the initializing name, so an abandoned
+        // copy would otherwise outlive every generation that could reuse it.
+        if let Err(cleanup) = std::fs::remove_file(&initializing)
+            && cleanup.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %initializing.display(),
+                error = %cleanup,
+                "could not remove an abandoned lexical carry copy"
+            );
+        }
+        return Err(error);
+    }
     sync_parent_directory(path, DirectorySyncPolicy::Strict)
         .map_err(|error| staging_initialization_error("sync the staging directory", error))
 }
@@ -6762,6 +6803,46 @@ mod tests {
             verify_artifact_table_layout(&connection),
             Err(CodeLexicalArtifactErrorV1::Incompatible(_))
         ));
+    }
+
+    #[test]
+    fn interrupted_parent_copy_leaves_no_initializing_file() {
+        struct CancelOnSecondCheck(std::sync::atomic::AtomicUsize);
+        impl CodeIndexExecutionControlV1 for CancelOnSecondCheck {
+            fn is_cancelled(&self) -> bool {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1
+            }
+            fn is_deadline_exceeded(&self) -> bool {
+                false
+            }
+        }
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let parent_path = directory.path().join("parent");
+        let parent_size = 4 * 1024 * 1024 + 1;
+        std::fs::write(&parent_path, vec![7u8; parent_size]).expect("parent bytes");
+        let staging = directory.path().join("successor.staging");
+
+        let copied = copy_sealed_parent(
+            File::open(&parent_path).expect("parent"),
+            &ManifestDigest::from_sha256_bytes(&[0u8; 32]).expect("digest"),
+            parent_size as u64,
+            &staging,
+            &CancelOnSecondCheck(std::sync::atomic::AtomicUsize::new(0)),
+        );
+
+        assert!(matches!(
+            copied,
+            Err(CodeLexicalArtifactErrorV1::Interrupted(
+                tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled
+            ))
+        ));
+        assert!(!staging.exists(), "an interrupted copy is never named");
+        assert!(
+            !initializing_staging_sibling(&staging)
+                .expect("sibling")
+                .exists(),
+            "an interrupted copy must not leave its partial bytes behind"
+        );
     }
 
     impl CodeIndexExecutionControlV1 for ActiveControl {

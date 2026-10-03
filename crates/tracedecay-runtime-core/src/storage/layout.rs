@@ -123,6 +123,18 @@ pub fn default_profile_project_id(project_root: &Path) -> String {
     }
 }
 
+/// Whether this profile holds a shard for the repository named by the
+/// checkout's `.git/` identity marker.
+///
+/// Every profile reads the same repository-wide marker, so its presence alone
+/// says nothing about which profile enrolled the repository.
+pub(crate) fn has_repository_profile_store(profile_root: &Path, project_root: &Path) -> bool {
+    read_repository_identity_marker(project_root)
+        .ok()
+        .flatten()
+        .is_some_and(|marker| profile_sharded_data_root(profile_root, &marker.project_id).is_dir())
+}
+
 /// Whether a profile shard keyed to this exact path already holds a graph.
 ///
 /// See [`path_local_profile_project_id`] for why discovery must not consult

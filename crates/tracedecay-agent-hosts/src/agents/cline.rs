@@ -41,7 +41,7 @@ impl AgentIntegration for ClineIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mCline integration\x1b[0m");
+        dc.section("Cline integration");
         doctor_check_settings(dc, &ctx.home);
     }
 

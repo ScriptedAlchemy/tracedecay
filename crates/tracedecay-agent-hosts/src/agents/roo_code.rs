@@ -38,7 +38,7 @@ impl AgentIntegration for RooCodeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mRoo Code integration\x1b[0m");
+        dc.section("Roo Code integration");
         doctor_check_settings(dc, &ctx.home);
     }
 

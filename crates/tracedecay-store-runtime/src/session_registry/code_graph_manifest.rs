@@ -1348,7 +1348,6 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
@@ -1807,11 +1806,11 @@ mod tests {
         let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
 
         let pooled = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
-        assert_eq!(pooled.row_counts(), (1602, 1600));
+        assert_eq!(pooled.row_counts(), (10, 9));
         let canonical = generations_root.join(fixture.pool_manifest.file_name().unwrap());
         std::fs::rename(&fixture.pool_manifest, &canonical).unwrap();
         let canonical_only = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
-        assert_eq!(canonical_only.row_counts(), (1602, 1600));
+        assert_eq!(canonical_only.row_counts(), (10, 9));
         std::fs::remove_file(&canonical).unwrap();
         assert!(matches!(
             hydrate(&provider, &owner, &source, &two_second_check()),
@@ -1934,38 +1933,7 @@ mod tests {
         generation: CodeGenerationId,
     }
 
-    /// 1,600 functions named `{prefix}_{index}` whose bodies apply
-    /// `operator`. A clean generation's evidence is implied by its own
-    /// symbols and chunks and fits one page; a successor that changes every
-    /// body keeps one whole lineage row per function, which spans several.
-    fn multi_page_evidence_source(prefix: &str, operator: char) -> String {
-        let mut source = String::new();
-        for index in 0..1_600 {
-            writeln!(
-                source,
-                "pub fn {prefix}_{index}(value: usize) -> usize {{ value {operator} {index} }}"
-            )
-            .unwrap();
-        }
-        source
-    }
-
-    /// Publish a successor of the fixture's clean generation that changes
-    /// every function body, so the active generation's evidence spans pages.
-    fn publish_multi_page_evidence(
-        project_root: &Path,
-        prefix: &str,
-        scheduler: &mut CodeIndexWorktreeSchedulerV1,
-    ) {
-        scheduler.reconcile_now().unwrap();
-        std::fs::write(
-            project_root.join("src/lib.rs"),
-            multi_page_evidence_source(prefix, '*'),
-        )
-        .unwrap();
-        git(project_root, &["commit", "-qam", "change every body"]);
-        scheduler.reconcile_now().unwrap();
-    }
+    const PARTITIONED_FIXTURE_FILES: [&str; 3] = ["lib", "alpha", "beta"];
 
     fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
         let temporary = TempDir::new().unwrap();
@@ -1978,11 +1946,16 @@ mod tests {
             &project_root,
             &["config", "user.email", "tracedecay@example.invalid"],
         );
-        std::fs::write(
-            project_root.join("src/lib.rs"),
-            multi_page_evidence_source("partitioned_fixture", '+'),
-        )
-        .unwrap();
+        for module in PARTITIONED_FIXTURE_FILES {
+            std::fs::write(
+                project_root.join(format!("src/{module}.rs")),
+                format!(
+                    "pub fn {module}_first(value: usize) -> usize {{ value + 1 }}\n\
+                     pub fn {module}_second(value: usize) -> usize {{ {module}_first(value) * 2 }}\n"
+                ),
+            )
+            .unwrap();
+        }
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "partitioned fixture"]);
         let project_id = ProjectId::new(format!("project.manifest-{label}")).unwrap();
@@ -2001,7 +1974,7 @@ mod tests {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .unwrap();
-        publish_multi_page_evidence(&project_root, "partitioned_fixture", &mut scheduler);
+        scheduler.reconcile_now().unwrap();
         let latest = scheduler.latest_complete().unwrap();
         let repository = latest.generation().snapshot().repository.clone();
         let generation = latest.generation().manifest().generation_id.clone();
@@ -2017,13 +1990,15 @@ mod tests {
         let segments_root = code_generation_segments_root(&scoped_store);
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&canonical_manifest).unwrap()).unwrap();
+        // Graph pages are the only segments a build reads, and verification
+        // reads them after the evidence Range read that fires its barrier.
         assert!(
-            manifest["generation"]["generation_evidence"]["pages"]
+            manifest["generation"]["code_graph_pages"]
                 .as_array()
                 .unwrap()
                 .len()
                 > 1,
-            "fixture must reach a later evidence Range callback"
+            "fixture must read several graph pages after the evidence Range read"
         );
         let replay_root = root.join("replay-pool");
         tracedecay_private_fs::create_private_directory(&replay_root).unwrap();

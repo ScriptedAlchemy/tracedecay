@@ -53,7 +53,7 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mZed integration\x1b[0m");
+        dc.section("Zed integration");
         doctor_check_registration(
             dc,
             &zed_settings_path(&ctx.home),

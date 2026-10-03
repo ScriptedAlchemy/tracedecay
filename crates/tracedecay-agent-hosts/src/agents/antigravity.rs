@@ -59,7 +59,7 @@ impl AgentIntegration for AntigravityIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mAntigravity integration\x1b[0m");
+        dc.section("Antigravity integration");
         doctor_check_registration(
             dc,
             &mcp_config_path(&ctx.home),

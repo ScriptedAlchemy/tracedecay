@@ -98,7 +98,8 @@ pub use registry::{
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnapshot};
 pub use schema::graph_stable_identity;
 pub use sealed_layer::{
-    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
+    GraphLayeredRowSpill, GraphLayeredRowsV1, GraphSealedBaseAbsenceV1, GraphSealedBaseV1,
+    LayeredGraphGeneration,
 };
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
