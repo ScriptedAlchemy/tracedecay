@@ -228,13 +228,11 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
     let total_memory_bytes = physical_memory_bytes_v1().unwrap_or(0);
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
-    let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
-    let authority = resident_memory_authority_v1(
+    resident_memory_authority_v1(
         total_memory_bytes,
-        cgroup,
+        cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root),
         process_resident_memory_limit_override_v1(),
-    );
-    authority
+    )
 }
 
 /// Fraction of the configured limit, in permille, at or above which *measured*

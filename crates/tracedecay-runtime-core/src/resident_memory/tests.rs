@@ -47,37 +47,25 @@ fn cgroup_fixture(
     (directory, proc_self_cgroup, cgroup_root)
 }
 
-fn effective_memory_bytes(
-    total_memory_bytes: u64,
+fn service_ceiling_bytes(
     proc_self_cgroup: &std::path::Path,
     cgroup_root: &std::path::Path,
-) -> u64 {
-    match cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
+) -> Option<u64> {
+    cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
         .and_then(cgroup_service_ceiling_bytes)
-    {
-        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
-        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
-        None => total_memory_bytes,
-    }
 }
 
 #[test]
 fn absent_cgroup_membership_keeps_host_memory_capacity() {
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(None, None, None);
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
 fn absent_cgroup_memory_files_keep_host_memory_capacity() {
     let (_directory, proc_self_cgroup, cgroup_root) =
         cgroup_fixture(Some("0::/trace.slice/daemon.scope\n"), None, None);
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
@@ -89,10 +77,7 @@ fn cgroup_v1_only_membership_does_not_invent_a_v2_ceiling() {
         Some("max\n"),
     );
 
-    assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        88 * gib
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
@@ -105,8 +90,8 @@ fn hybrid_membership_uses_the_unified_v2_memory_ceiling() {
     );
 
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
     );
 }
 
@@ -122,8 +107,8 @@ fn root_v2_membership_reads_the_mount_root_ceiling() {
     fs::write(cgroup_root.join("memory.high"), "max\n").expect("root memory.high fixture");
 
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
     );
 }
 
@@ -188,10 +173,7 @@ fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
         Some("max\n"),
         Some("max\n"),
     );
-    assert_eq!(
-        effective_memory_bytes(88 * 1024 * 1024 * 1024, &proc_self_cgroup, &cgroup_root,),
-        88 * 1024 * 1024 * 1024
-    );
+    assert_eq!(service_ceiling_bytes(&proc_self_cgroup, &cgroup_root), None);
 }
 
 #[test]
@@ -203,8 +185,8 @@ fn memory_high_does_not_replace_memory_max_as_the_hard_capacity() {
         Some("25769803776\n"),
     );
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib,
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib),
         "memory.max is the kernel kill line"
     );
     let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
@@ -227,8 +209,8 @@ fn finite_ancestor_limit_bounds_an_unlimited_process_cgroup() {
         .expect("ancestor memory.high fixture");
 
     assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
+        service_ceiling_bytes(&proc_self_cgroup, &cgroup_root),
+        Some(30 * gib)
     );
     drop(directory);
 }
