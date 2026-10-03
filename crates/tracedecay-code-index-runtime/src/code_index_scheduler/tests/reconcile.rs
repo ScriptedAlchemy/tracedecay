@@ -2264,6 +2264,7 @@ async fn graph_activation_does_not_wait_for_bounded_text_projection() {
             &scheduler.repository_id,
             &scheduler.worktree_id,
             latest.clone(),
+            None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )

@@ -570,6 +570,9 @@ impl CodeGraphActivationAuthorityV1 {
         }
     }
 
+    /// Seats `latest`'s graph. `predecessor` is the graph store of the
+    /// generation `latest` replaces, when one is serving: a layered
+    /// generation carries its interactive catalog from it.
     #[hotpath::measure(future = true, label = "code_graph.activation.total")]
     pub async fn activate(
         &self,
@@ -577,6 +580,7 @@ impl CodeGraphActivationAuthorityV1 {
         repository_id: &RepositoryId,
         worktree_id: &WorktreeId,
         latest: LatestCompleteCodeIndexV1,
+        predecessor: Option<Arc<CodeGraphProjectionStore>>,
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -613,7 +617,7 @@ impl CodeGraphActivationAuthorityV1 {
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
                 let pending_catalog_warm = tokio::task::spawn_blocking(move || {
-                    latest.activate_persistent_graph(retained, cancellation)
+                    latest.activate_persistent_graph(retained, predecessor, cancellation)
                 })
                 .await
                 .map_err(|error| {
@@ -749,6 +753,9 @@ impl GraphCancellation for SchedulerGraphCancellation {
 
 struct PendingInteractiveCatalogWarmV1 {
     store: Arc<CodeGraphProjectionStore>,
+    /// The graph store this generation replaced, whose ready catalog a
+    /// layered generation carries instead of scanning its projection.
+    predecessor: Option<Arc<CodeGraphProjectionStore>>,
     cancellation: Arc<dyn GraphCancellation>,
     owner: LatestCodeTextGenerationV1,
 }
@@ -758,9 +765,10 @@ impl PendingInteractiveCatalogWarmV1 {
     /// predecessor it held is released here and never outlives it.
     #[hotpath::measure(label = "code_graph.catalog.background_warm")]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
-        let warmed = self
-            .store
-            .warm_interactive_catalog_with_cancellation(self.cancellation);
+        let warmed = self.store.warm_interactive_catalog_with_cancellation(
+            self.predecessor.as_deref(),
+            self.cancellation,
+        );
         self.owner.release_graph_predecessor();
         warmed
     }
@@ -810,8 +818,10 @@ impl LatestCodeTextGenerationV1 {
             },
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        // A recovered head has no in-memory predecessor to carry from.
         Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,
+            predecessor: None,
             cancellation: graph_cancellation,
             owner: self.clone(),
         }))
@@ -823,6 +833,7 @@ impl LatestCompleteCodeIndexV1 {
     fn activate_persistent_graph(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
+        predecessor: Option<Arc<CodeGraphProjectionStore>>,
         cancellation: Arc<AtomicBool>,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
@@ -875,6 +886,7 @@ impl LatestCompleteCodeIndexV1 {
         let _ = self.record_index();
         Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,
+            predecessor,
             cancellation: graph_cancellation,
             owner: self.text.clone(),
         }))
