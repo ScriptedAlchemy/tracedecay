@@ -738,9 +738,9 @@ pub(super) struct CodeTextArtifactBuildV1 {
     /// The key the artifact is published under, derived before the build.
     content_key: ManifestDigest,
     source_receipt: Option<VerifiedSealedLexicalSourceReceiptV1>,
-    /// Finalization began before this build opened (a carried parent, or a
-    /// resumed staging file): the source is never walked and finalization
-    /// reads its totals from the staged pages.
+    /// Finalization has begun (a carried parent, a resumed staging file, or
+    /// a first finalization step): no further page is read from the source
+    /// and the staged pages' totals are the progress authority.
     finalizing: bool,
     pub(super) staging_path: PathBuf,
     /// Holds the builder's advertised memory ceiling reserved in the
@@ -2429,8 +2429,8 @@ impl LatestCodeTextGenerationV1 {
         let source_cursor = build.source.cursor();
         let finalizing = build.finalizing;
         match build.source_receipt.as_ref() {
-            // A build that opened finalizing never walks its source; its
-            // counters are the staged pages' own totals.
+            // A finalizing build reads no more source pages; its counters
+            // are the staged pages' own totals.
             _ if finalizing => {}
             // A completed source mints one terminal read that emits no record
             // and only normalizes the exhausted file position, so its live
