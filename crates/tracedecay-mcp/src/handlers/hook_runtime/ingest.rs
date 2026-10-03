@@ -71,15 +71,15 @@ fn host_admission_facade<'a>(
     let authority = match scope {
         HostAdmissionScope::Project => match (authorities.project, authorities.profile_identity) {
             (Some(registered), Some(identity)) => {
-                let project_id = project_observation_id(
-                    cg.ok_or_else(|| config_error("project admission requires a project"))?,
-                )?;
+                let project =
+                    cg.ok_or_else(|| config_error("project admission requires a project"))?;
                 HostAdmissionAuthorities::for_project(
                     identity.brain_id().clone(),
                     identity.profile_id().clone(),
-                    project_id,
+                    project_observation_id(project)?,
                     registered,
                 )
+                .with_project_root(project.project_root().to_path_buf())
             }
             (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },

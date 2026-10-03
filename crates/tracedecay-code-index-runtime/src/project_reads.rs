@@ -136,6 +136,26 @@ impl ProjectCodeGraphServingAuthorityV1 {
         &self,
         lease: ServingReadLeaseV1,
     ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
+        // The predecessor goes first. A decoded successor is seated while its
+        // catalog still warms, and serving it then fails name lookups the
+        // outgoing warm graph answers.
+        let retained = self
+            .schedulers
+            .retained_text_owner_freshness_for_scope(&self.scope)
+            .await;
+        let graph_activation_enabled = self
+            .schedulers
+            .graph_activation_enabled_for_scope(&self.scope)
+            .await;
+        if let Some(predecessor) = retained
+            .as_ref()
+            .and_then(|(text, _)| text.graph_predecessor(graph_activation_enabled))
+        {
+            let freshness = self
+                .last_complete_stale(predecessor.metadata().manifest().seal.sealed_at)
+                .await;
+            return Self::text_projection(predecessor, freshness);
+        }
         if let Some(latest) = self
             .schedulers
             .latest_complete_ready_decoded_for_root_scope_with(
@@ -155,22 +175,14 @@ impl ProjectCodeGraphServingAuthorityV1 {
         // exact/lexical readiness as well made a restart that resumed an
         // unfinished ngram index refuse every graph read for the duration of
         // that build, with a recovered verified head already seated.
-        if let Some((text, current)) = self
-            .schedulers
-            .retained_text_owner_freshness_for_scope(&self.scope)
-            .await
+        if let Some((text, current)) = retained
             && text.interactive_graph_store().is_ok()
         {
             let freshness = if current {
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current
             } else {
-                tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-                    sealed_at: text.metadata().manifest().seal.sealed_at,
-                    rebuild_in_flight: self
-                        .schedulers
-                        .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
-                        .await,
-                }
+                self.last_complete_stale(text.metadata().manifest().seal.sealed_at)
+                    .await
             };
             return Self::text_projection(text, freshness);
         }
@@ -181,14 +193,23 @@ impl ProjectCodeGraphServingAuthorityV1 {
         else {
             return Err(self.unseated_graph_error().await);
         };
-        let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-            sealed_at: seated.generation().manifest().seal.sealed_at,
+        let freshness = self
+            .last_complete_stale(seated.generation().manifest().seal.sealed_at)
+            .await;
+        Self::complete_projection(seated, freshness)
+    }
+
+    async fn last_complete_stale(
+        &self,
+        sealed_at: tracedecay_domain::UtcMicros,
+    ) -> tracedecay_graph_query::CodeGraphReadFreshnessV1 {
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at,
             rebuild_in_flight: self
                 .schedulers
                 .rebuild_pass_in_flight_for_root_scope(&self.project_root, &self.scope)
                 .await,
-        };
-        Self::complete_projection(seated, freshness)
+        }
     }
 
     /// Why no graph is seated. A park no wake retries is why it never seats;

@@ -306,8 +306,82 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
         .with_background_cpu(background_cpu_for_host_admission_test()),
     );
 
-    let session_id = SessionId::new("session.graph-unavailable-capture").unwrap();
-    let message_id = ObservationId::new("message.graph-unavailable-capture").unwrap();
+    let project_path = project.to_string_lossy().into_owned();
+    let listed =
+        capture_session_on_branch(&facade, database, &project_id, "codex", &project_path).await;
+    let correlation = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database);
+    let health = correlation.correlation_index_health().await.unwrap();
+    assert_eq!((health.span_count, health.commit_count), (1, 0));
+    assert_eq!(listed, ["session.codex-git-capture"]);
+}
+
+/// A session whose observations name no folder records the project id as its
+/// path. Live hook drains carry no repository provenance, so the admitted
+/// project root alone must place the session in the project's worktree.
+#[tokio::test]
+async fn hook_drain_without_provenance_places_project_id_sessions_in_the_project_root() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("hook-project");
+    std::fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init", "-b", "capture-branch"]);
+    run_git(
+        &project,
+        &[
+            "-c",
+            "user.email=t@t.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "init",
+        ],
+    );
+    let project_id = ProjectId::new("project.hook-capture").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let shard = &database.binding().shard_id;
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_project(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            project_id.clone(),
+            database,
+        )
+        .with_project_root(project.clone())
+        .with_background_cpu(background_cpu_for_host_admission_test()),
+    );
+
+    let listed = capture_session_on_branch(
+        &facade,
+        database,
+        &project_id,
+        "claude",
+        project_id.as_str(),
+    )
+    .await;
+    assert_eq!(listed, ["session.claude-git-capture"]);
+}
+
+/// Captures and drains one `provider` session recording `project_path`, then
+/// lists the sessions Git evidence places on `capture-branch`.
+async fn capture_session_on_branch(
+    facade: &HostAdmissionFacade<'_>,
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    project_id: &ProjectId,
+    provider: &str,
+    project_path: &str,
+) -> Vec<String> {
+    let session_id = SessionId::new(format!("session.{provider}-git-capture")).unwrap();
+    let message_id = ObservationId::new(format!("message.{provider}-git-capture")).unwrap();
     let payload = json!({"text": "ordinary canonical message remains available"});
     let encoded = serde_json::to_vec(&payload).unwrap();
     let range = ObservationSourceRangeV1::new(0, encoded.len() as u64).unwrap();
@@ -318,10 +392,10 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
         {
             let session_id = session_id.clone();
             let message_id = message_id.clone();
-            let project_path = project.to_string_lossy().into_owned();
+            let project_path = project_path.to_owned();
             move |native| {
                 CanonicalObservationEnvelopeV1::new(
-                    ProviderId::new("codex").unwrap(),
+                    ProviderId::new(provider).unwrap(),
                     "message",
                     message_id.clone(),
                     CanonicalObservationRelationsV1::new(session_id.clone())
@@ -366,7 +440,7 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
         project_id: project_id.clone(),
     };
     let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
+        ProviderId::new(provider).unwrap(),
         session_id.clone(),
     )
     .unwrap();
@@ -393,20 +467,17 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
             | CaptureObservationOutcome::AcceptedForReplay { .. }
     ));
     let drained = facade
-        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 1)
+        .drain_projection_queue(provider, &scope, &ObservationCancellation::default(), 1)
         .await
         .unwrap();
     assert!(!drained.deferred);
     assert!(
         facade
-            .has_session_message(&scope, "codex", message_id.as_str())
+            .has_session_message(&scope, provider, message_id.as_str())
             .await
             .unwrap()
     );
-    let correlation = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database);
-    let health = correlation.correlation_index_health().await.unwrap();
-    assert_eq!((health.span_count, health.commit_count), (1, 0));
-    let (hits, _) = correlation
+    let (hits, _) = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
         .sessions_for_with_relation_and_presence(
             &tracedecay_sessions::runtime::git_correlation::SessionsForQuery {
                 git_ref: tracedecay_sessions::runtime::git_correlation::GitRefFilter::Branch(
@@ -420,12 +491,7 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        hits.iter()
-            .map(|hit| hit.session_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![session_id.as_str()]
-    );
+    hits.into_iter().map(|hit| hit.session_id).collect()
 }
 
 #[tokio::test]

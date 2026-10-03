@@ -171,7 +171,7 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKimi CLI integration\x1b[0m");
+        dc.section("Kimi CLI integration");
         doctor_check_plugin(dc, &ctx.home, &kimi_code_home(&ctx.home));
         // Kimi exports only a project index: `export_managed_skills_local`
         // writes `AGENTS.md` while the user-scope export stays the no-op

@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    AdminCliSurfaceRequestV1, DerivesResultV1, NodeResultV1, PrimitiveSearchFreshnessV1,
-    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, ImpactResultV1, NodeResultV1,
+    PrimitiveSearchFreshnessV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
 };
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -330,6 +330,7 @@ pub fn render_graph_tool(
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
+        | GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }

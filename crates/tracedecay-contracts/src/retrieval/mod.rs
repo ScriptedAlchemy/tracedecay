@@ -222,8 +222,8 @@ pub use ports::{
 pub use primitive_surface::{
     ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextModeV1,
     ContextPlanV1, ContextRelatedOmissionV1, ContextResultV1, ContextRetrievalPlanV1,
-    ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
-    LexicalAnchorDropReasonV1, LexicalAnchorDropV1, MAX_REDUNDANCY_FAMILIES_V1,
+    ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactRadiusV1,
+    ImpactResultV1, LexicalAnchorDropReasonV1, LexicalAnchorDropV1, MAX_REDUNDANCY_FAMILIES_V1,
     MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1, MAX_REDUNDANCY_WORK_V1, NodeDepthSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1,
     PortCycleFileV1, PortCycleSymbolV1, PortCycleV1, PortMatchedSymbolV1, PortOrderLevelV1,

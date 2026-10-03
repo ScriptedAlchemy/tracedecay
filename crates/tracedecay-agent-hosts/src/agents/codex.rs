@@ -171,7 +171,7 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
+        dc.section("Codex CLI integration");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
             doctor_check_plugin_dir(

@@ -397,7 +397,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     .await;
     assert!(matches!(
         replay,
-        SessionSyncOutcomeV1::Complete(receipt)
+        SessionSyncOutcomeV1::Complete { receipt, .. }
             if receipt.termination == OperationTermination::TimedOut
                 && receipt.coverage == vec![
                     SessionSyncSourceCoverageV1 {
@@ -503,7 +503,7 @@ async fn registration_recovery_fences_concurrent_execute() {
     registration.await.unwrap().unwrap();
     assert!(matches!(
         execute.await.unwrap(),
-        SessionSyncOutcomeV1::Complete(receipt)
+        SessionSyncOutcomeV1::Complete { receipt, .. }
             if receipt.termination == OperationTermination::TimedOut
                 && receipt.coverage == vec![
                     SessionSyncSourceCoverageV1 {
