@@ -18,9 +18,10 @@ use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    SealedGenerationFileWindowsV1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+    CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, SealedGenerationFileWindowsV1,
+    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -71,6 +72,8 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 /// The counters are process-wide, so measurements run one at a time.
 static MEASUREMENT: Mutex<()> = Mutex::new(());
 
+/// Seals each generation and keeps none of it: these measurements count what
+/// a build and its decode hold, not what a store holds.
 #[derive(Default)]
 struct Publication;
 
@@ -78,7 +81,7 @@ impl CodeIndexAtomicPublicationPort for Publication {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         Ok(None)
     }
 
@@ -86,10 +89,17 @@ impl CodeIndexAtomicPublicationPort for Publication {
         &mut self,
         _scope: &CodeIndexGenerationScopeV1,
         _expected_active_generation: Option<&CodeGenerationId>,
-        _generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        Ok(())
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        generation
+            .encode(None, |_| Ok(()))
+            .map(Arc::from)
+            .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
     }
+}
+
+fn decoded(built: &CodeIndexPublishedBuildV1) -> &CodeIndexPublishedGenerationV1 {
+    built.decoded().expect("a build without a parent runs cold")
 }
 
 struct Projection;
@@ -223,7 +233,8 @@ fn seal(generation: &CodeIndexPublishedGenerationV1) -> (Vec<u8>, BTreeMap<Strin
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -301,12 +312,14 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
         .expect("owner")
         .build_and_publish(request(300), &Active)
         .expect("build");
-    let (manifest, segments) = seal(&built);
+    let (manifest, segments) = seal(decoded(&built));
     // One worker reads four files per window, so the 300-file fixture spans
     // 75 windows the way a production corpus spans its windows.
     tracedecay_code_index::parallelism::force_indexing_workers_for_test(1);
-    let bound = built.graph_build_bound().expect("graph build bound");
-    let retained = usize::try_from(built.retained_bytes()).expect("retained");
+    let bound = decoded(&built)
+        .graph_build_bound()
+        .expect("graph build bound");
+    let retained = usize::try_from(decoded(&built).retained_bytes()).expect("retained");
     drop(built);
     let scratch = tempfile::tempdir().expect("scratch");
     let projection =
@@ -368,7 +381,7 @@ fn a_full_build_leaves_live_only_what_its_generation_charges() {
         .build_and_publish(request(300), &Active)
         .expect("build");
     let live = LIVE.load(Ordering::Relaxed) - before;
-    let retained = usize::try_from(built.retained_bytes()).expect("retained");
+    let retained = usize::try_from(decoded(&built).retained_bytes()).expect("retained");
     eprintln!("ACCOUNTING full build live {live} retained {retained}");
     assert_eq!(owner.retained_parse_stats().initial_parses, 300);
     assert!(
@@ -422,7 +435,7 @@ fn retained_bytes_account_for_what_a_decode_leaves_live() {
         .expect("owner")
         .build_and_publish(request(300), &Active)
         .expect("build");
-    let (manifest, segments) = seal(&built);
+    let (manifest, segments) = seal(decoded(&built));
     drop(built);
 
     let before = LIVE.load(Ordering::Relaxed);

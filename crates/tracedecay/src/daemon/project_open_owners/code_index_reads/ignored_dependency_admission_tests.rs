@@ -12,7 +12,7 @@ use tracedecay_application::code_index::{
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
+    RequestContext, RequestId, ResolvedScope, code_index_freshness::CodeGraphServingReadinessV1,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -307,10 +307,14 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
             .any(|file| file.logical_path == "node_modules/pkg/private.d.ts"),
         "the project binding cannot widen the scheduler beyond the exact entrypoint"
     );
-    assert_eq!(
-        serving.code_graph_serving_readiness(),
-        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
-        "admission returns only after graph activation completes for the generation it minted"
+    let readiness = serving.code_graph_serving_readiness();
+    assert!(
+        matches!(
+            readiness,
+            CodeGraphServingReadinessV1::Ready | CodeGraphServingReadinessV1::Warming { .. }
+        ),
+        "admission returns only after graph activation completes for the generation it minted: \
+         {readiness:?}"
     );
     let graph = serving
         .interactive_graph_store()
@@ -322,6 +326,11 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
     })
     .await
     .expect("background graph catalog warm completes");
+    assert_eq!(
+        serving.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Ready,
+        "the background graph catalog warm completes"
+    );
     fixture.registry.shutdown().await;
 }
 

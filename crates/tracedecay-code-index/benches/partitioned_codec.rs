@@ -14,12 +14,11 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-        CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
+        MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
     projection::{
@@ -28,11 +27,11 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
 };
 
 const CORPUS_ROOT: &str = concat!(
@@ -69,30 +68,6 @@ struct SourceFile {
     logical_path: String,
     language: LanguageId,
     bytes: Arc<[u8]>,
-}
-
-#[derive(Default)]
-struct BenchmarkPublication;
-
-impl CodeIndexAtomicPublicationPort for BenchmarkPublication {
-    fn load_active(
-        &self,
-        _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(None)
-    }
-
-    fn publish_atomically(
-        &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        _generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        if expected_active_generation.is_some() {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        Ok(())
-    }
 }
 
 struct ApplyingProjection;
@@ -409,10 +384,14 @@ fn build_generation(
     };
     let mut owner = CodeIndexProductionOwnerV1::new(
         production_config()?,
-        BenchmarkPublication,
+        MemorySealedPublicationStoreV1::default(),
         ApplyingProjection,
     )?;
-    Ok(owner.build_and_publish(request, &ActiveControl)?)
+    let published = owner.build_and_publish(request, &ActiveControl)?;
+    let generation = published
+        .decoded()
+        .ok_or("a build without a parent runs cold")?;
+    Ok(Arc::clone(generation))
 }
 
 fn production_config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
@@ -436,7 +415,8 @@ fn encode_once(
     let manifest = generation.encode_partitioned_sealed(|publication| {
         match publication {
             SealedGenerationSegmentPublicationV1::File { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {

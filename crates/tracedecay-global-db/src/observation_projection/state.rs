@@ -552,7 +552,7 @@ async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<
     Ok((data_version, provenance_rowid))
 }
 
-pub(super) async fn ensure_projection_output_state_cache(
+pub(in super::super) async fn ensure_projection_output_state_cache(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
     conn.execute_batch(

@@ -104,7 +104,9 @@ async fn release_one_idle_project_server_before_open(
     }
     let project_roots = retired_servers
         .iter()
-        .map(|(key, _)| key.project_root.clone())
+        .map(|(key, _)| {
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&key.project_root)
+        })
         .collect::<std::collections::BTreeSet<_>>();
     let mut hook_data_roots = std::collections::BTreeSet::new();
     for (_, server) in &retired_servers {

@@ -532,8 +532,12 @@ pub struct RegisteredSchemaConvergenceTestGate {
 #[cfg(any(test, feature = "test-helpers"))]
 impl RegisteredSchemaConvergenceTestGate {
     pub async fn wait_until_blocked(&self) {
-        while !self.state.started.load(Ordering::Acquire) {
-            self.state.started_notify.notified().await;
+        loop {
+            let notified = self.state.started_notify.notified();
+            if self.state.started.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
         }
     }
 

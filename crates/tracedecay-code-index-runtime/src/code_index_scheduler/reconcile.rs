@@ -30,10 +30,11 @@ use tracedecay_contracts::{
     now_micros,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, IndexPathPolicyV1,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SnapshotFileDispositionV1, TreeId, WorktreeId, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId,
+    IndexPathPolicyV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, TreeId, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
@@ -52,8 +53,9 @@ use crate::code_index::{
         CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        DAEMON_CODE_INDEX_CHUNKER_REVISION, VerifiedSealedTextGenerationMetadataV1,
+        CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
+        CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+        VerifiedSealedTextGenerationMetadataV1,
     },
 };
 
@@ -1417,23 +1419,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Reserve the installed worker plan on the canonical process authority.
     /// The returned RAII guard spans source capture and the complete production
     /// build, releasing on success, typed failure, cancellation, or unwind.
-    ///
-    /// Every build decodes its active parent generation under this slab, and
-    /// that decode is admitted against the ledger the slab is part of. The
-    /// parent is decoded first, so the slab is planned against the headroom
-    /// the resident parent leaves instead of refusing the parent for the slab
-    /// this same build just took.
     pub(super) fn reserve_worker_memory(
         &self,
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         let _workers = self.ensure_worker_plan()?;
-        self.publication
-            .load_active_shared()
-            .map_err(CodeIndexProductionErrorV1::Publication)?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-        // Planned from the view admission refuses against, taken after the
-        // parent decoded: a width the process cannot hold is refused on every
-        // retry.
+        // Planned from the view admission refuses against: a width the
+        // process cannot hold is refused on every retry.
         let remaining = self
             .resident_memory
             .headroom_below(u64::MAX)
@@ -1655,11 +1647,85 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.observe_compatibility(&generation.manifest().generation_id, compatibility)
     }
 
+    fn require_reusable_publication(
+        &self,
+        published: &CodeIndexPublishedBuildV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        if self
+            .observe_retained_text_compatibility(published.metadata())
+            .is_reusable()
+        {
+            return Ok(());
+        }
+        Err(CodeIndexSchedulerErrorV1::Identity(
+            "newly published generation is incompatible with its production owner".to_owned(),
+        ))
+    }
+
+    pub(super) fn publish_evidence(
+        &self,
+        published: &CodeIndexPublishedBuildV1,
+        reextracted_files: usize,
+        overflow_reconciled: bool,
+    ) -> CodeIndexPublishEvidenceV1 {
+        let changes = &published.projection().request().changes;
+        let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
+            published.clone_update_statistics();
+        CodeIndexPublishEvidenceV1 {
+            generation_id: published.manifest().generation_id.clone(),
+            repository_id: self.repository_id.clone(),
+            snapshot_content_identity: published.snapshot().content_identity.clone(),
+            lane_digest: published.lane_digest().clone(),
+            file_occurrence_ids: published
+                .snapshot()
+                .files
+                .iter()
+                .map(|file| file.file_occurrence_id.clone())
+                .collect(),
+            reextracted_files,
+            changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
+            reused_chunks: changes.reused_count,
+            clone_payloads_reused: Some(clone_payloads_reused),
+            clone_stale_invalidations: Some(clone_stale_invalidations),
+            clone_body_changes_observed: Some(clone_body_changes_observed),
+            overflow_reconciled,
+        }
+    }
+
+    /// Record that `metadata`, just published, seals the tree the stat
+    /// signature describes.
+    fn persist_published_witness(
+        &self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+        git_metadata: &identity::GitMetadataFingerprintV1,
+        stat_signature: Option<String>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let Some(stat_signature) = stat_signature else {
+            return Ok(());
+        };
+        let repository_parse_identity_digest =
+            canonical_sha256(metadata.repository_parse_identity())
+                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        RestoreFreshnessWitnessV1 {
+            generation_id: metadata.manifest().generation_id.as_str().to_owned(),
+            git_metadata_signature: git_metadata.stable_signature(),
+            stat_signature,
+            repository_parse_identity_digest: repository_parse_identity_digest.as_str().to_owned(),
+            ignored_source_admissions_digest: metadata
+                .ignored_source_admissions_digest()
+                .as_str()
+                .to_owned(),
+            ignored_source_paths: Vec::new(),
+        }
+        .persist(&self.store_root);
+        Ok(())
+    }
+
     fn observe_retained_text_compatibility(
         &self,
         metadata: &VerifiedSealedTextGenerationMetadataV1,
     ) -> CodeIndexGenerationCompatibilityV1 {
-        let compatibility = metadata.manifest_compatibility_with(&self.production_config);
+        let compatibility = metadata.compatibility_with(&self.production_config);
         self.observe_compatibility(&metadata.manifest().generation_id, compatibility)
     }
 
@@ -1712,10 +1778,10 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     fn validate_generation_identity(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        manifest: &CodeGenerationManifestV1,
+        snapshot: &SanitizedCodeSnapshotV1,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let snapshot = generation.snapshot();
-        if generation.manifest().project_id != self.project_id
+        if manifest.project_id != self.project_id
             || snapshot.repository != self.repository_id
             || snapshot.worktree.as_ref() != Some(&self.worktree_id)
         {
@@ -1774,7 +1840,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return Ok(None);
         };
-        self.validate_generation_identity(&generation)?;
+        self.validate_generation_identity(generation.manifest(), generation.snapshot())?;
         if !self
             .observe_generation_compatibility(&generation)
             .is_reusable()
@@ -1782,7 +1848,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             return Ok(None);
         }
-        self.adopt_ignored_source_roster(&generation);
+        self.adopt_ignored_source_roster(generation.ignored_source_admissions());
         let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
             return Ok(None);
         };
@@ -1876,7 +1942,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .active_already_decoded()
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         let configuration_changed = if let Some(generation) = decoded.as_ref() {
-            self.validate_generation_identity(generation)?;
+            self.validate_generation_identity(generation.manifest(), generation.snapshot())?;
             let compatibility = self.observe_generation_compatibility(generation);
             if !compatibility.may_serve_while_rebuilding() {
                 self.request_background_reconcile();
@@ -1917,7 +1983,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `load_active_shared` here parked remount on the publication
         // barrier while activation owned it, so the seated event never
         // published and the dirty successor extract never started.
-        self.adopt_ignored_source_roster(&generation);
+        self.adopt_ignored_source_roster(generation.ignored_source_admissions());
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
@@ -2021,69 +2087,23 @@ impl CodeIndexWorktreeSchedulerV1 {
             .publication
             .for_undecoded_active_rebuild(&pointer)
             .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
-        publication
-            .publish_atomically(&scope, None, Arc::clone(&pending))
+        let manifest_bytes = publication
+            .publish_atomically(&scope, None, &pending)
             .map_err(CodeIndexProductionErrorV1::Publication)?;
-        let snapshot_content_identity = pending.snapshot().content_identity.clone();
-        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        let generation = CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?;
+        self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled_state(
             git_metadata.clone(),
             stat_signature
                 .clone()
-                .map(|signature| ReconciledSourceWitnessV1::new(signature, pending.snapshot())),
+                .map(|signature| ReconciledSourceWitnessV1::new(signature, generation.snapshot())),
         );
-        let repository_parse_identity_digest =
-            canonical_sha256(pending.repository_parse_identity())
-                .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        if let Some(stat_signature) = stat_signature {
-            RestoreFreshnessWitnessV1 {
-                generation_id: pending.manifest().generation_id.as_str().to_owned(),
-                git_metadata_signature: git_metadata.stable_signature(),
-                stat_signature,
-                repository_parse_identity_digest: repository_parse_identity_digest
-                    .as_str()
-                    .to_owned(),
-                ignored_source_admissions_digest: pending
-                    .ignored_source_admissions_digest()
-                    .as_str()
-                    .to_owned(),
-                ignored_source_paths: Vec::new(),
-            }
-            .persist(&self.store_root);
-        }
-        let changes = &pending.projection().request().changes;
-        let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
-            pending.clone_update_statistics();
-        let lane_digest = canonical_sha256(&(
-            pending.snapshot().content_identity.clone(),
-            pending
-                .chunks()
-                .chunks()
-                .iter()
-                .map(|chunk| (&chunk.id, &chunk.content_digest))
-                .collect::<Vec<_>>(),
-            pending.edges(),
-        ))
-        .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        let outcome = CodeIndexReconcileOutcomeV1::Published(CodeIndexPublishEvidenceV1 {
-            generation_id: pending.manifest().generation_id.clone(),
-            repository_id: self.repository_id.clone(),
-            snapshot_content_identity,
-            lane_digest,
-            file_occurrence_ids: pending
-                .snapshot()
-                .files
-                .iter()
-                .map(|file| file.file_occurrence_id.clone())
-                .collect(),
-            reextracted_files: 0,
-            changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-            reused_chunks: changes.reused_count,
-            clone_payloads_reused: Some(clone_payloads_reused),
-            clone_stale_invalidations: Some(clone_stale_invalidations),
-            clone_body_changes_observed: Some(clone_body_changes_observed),
-            overflow_reconciled: drained_hints.overflow(),
-        });
+        self.persist_published_witness(generation.metadata(), &git_metadata, stat_signature)?;
+        let outcome = CodeIndexReconcileOutcomeV1::Published(self.publish_evidence(
+            &generation,
+            0,
+            drained_hints.overflow(),
+        ));
         drained_hints.commit();
         Ok(Some(outcome))
     }
@@ -2360,10 +2380,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 // miss their deadline waiting on a cold parser warmup.
                 let scope = CodeIndexGenerationScopeV1::for_snapshot(&captured.snapshot);
                 let mut publication = publication;
-                publication
-                    .publish_atomically(&scope, None, Arc::clone(&pending))
+                let manifest_bytes = publication
+                    .publish_atomically(&scope, None, &pending)
                     .map_err(CodeIndexProductionErrorV1::Publication)?;
-                pending
+                CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?
             } else {
                 let mut owner = open_production_code_index_owner_v1(
                     self.production_config.clone(),
@@ -2388,15 +2408,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     )
                     .map_err(|error| prefer_resident_memory_refusal(&control, error.into()))?
             };
-            if !self
-                .observe_generation_compatibility(&generation)
-                .is_reusable()
-            {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "newly published generation is incompatible with its production owner"
-                        .to_owned(),
-                ));
-            }
+            self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled_retained_generation_state(
                 git_metadata.clone(),
@@ -2404,58 +2416,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                     ReconciledSourceWitnessV1::new(signature, generation.snapshot())
                 }),
             );
-            let repository_parse_identity_digest =
-                canonical_sha256(generation.repository_parse_identity())
-                    .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            if let Some(stat_signature) = stat_signature {
-                RestoreFreshnessWitnessV1 {
-                    generation_id: generation.manifest().generation_id.as_str().to_owned(),
-                    git_metadata_signature: git_metadata.stable_signature(),
-                    stat_signature,
-                    repository_parse_identity_digest: repository_parse_identity_digest
-                        .as_str()
-                        .to_owned(),
-                    ignored_source_admissions_digest: generation
-                        .ignored_source_admissions_digest()
-                        .as_str()
-                        .to_owned(),
-                    ignored_source_paths: Vec::new(),
-                }
-                .persist(&self.store_root);
-            }
-            let changes = &generation.projection().request().changes;
-            let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
-                generation.clone_update_statistics();
-            let lane_digest = canonical_sha256(&(
-                generation.snapshot().content_identity.clone(),
-                generation
-                    .chunks()
-                    .chunks()
-                    .iter()
-                    .map(|chunk| (&chunk.id, &chunk.content_digest))
-                    .collect::<Vec<_>>(),
-                generation.edges(),
-            ))
-            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            let outcome = CodeIndexReconcileOutcomeV1::Published(CodeIndexPublishEvidenceV1 {
-                generation_id: generation.manifest().generation_id.clone(),
-                repository_id: self.repository_id.clone(),
-                snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                lane_digest,
-                file_occurrence_ids: generation
-                    .snapshot()
-                    .files
-                    .iter()
-                    .map(|file| file.file_occurrence_id.clone())
-                    .collect(),
+            self.persist_published_witness(generation.metadata(), &git_metadata, stat_signature)?;
+            let outcome = CodeIndexReconcileOutcomeV1::Published(self.publish_evidence(
+                &generation,
                 reextracted_files,
-                changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-                reused_chunks: changes.reused_count,
-                clone_payloads_reused: Some(clone_payloads_reused),
-                clone_stale_invalidations: Some(clone_stale_invalidations),
-                clone_body_changes_observed: Some(clone_body_changes_observed),
-                overflow_reconciled: drained_hints.overflow(),
-            });
+                drained_hints.overflow(),
+            ));
             drained_hints.commit();
             return Ok(Some(outcome));
         }
@@ -2525,7 +2491,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             );
             return None;
         }
-        if let Err(error) = self.validate_generation_identity(&generation) {
+        if let Err(error) =
+            self.validate_generation_identity(generation.manifest(), generation.snapshot())
+        {
             tracing::warn!(
                 event = "code_index_servable_generation_identity_invalid",
                 error = %error,
@@ -2534,7 +2502,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             );
             return None;
         }
-        self.adopt_ignored_source_roster(&generation);
+        self.adopt_ignored_source_roster(generation.ignored_source_admissions());
         if !self.ignored_source_roster_matches_generation(&generation) {
             tracing::warn!(
                 event = "code_index_servable_ignored_roster_mismatch",
@@ -2883,11 +2851,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.identity = resolved;
         if let Some(active) = self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         {
-            self.validate_generation_identity(&active)?;
-            self.adopt_ignored_source_roster(&active);
+            let active = &active.metadata;
+            self.validate_generation_identity(active.manifest(), active.snapshot())?;
+            self.adopt_ignored_source_roster(active.ignored_source_admissions());
         }
         // Capture may advance `.git/index` mtime (git_open::open). The post-reconcile
         // witness is sampled at `mark_reconciled`, after that side effect, so
@@ -2932,18 +2901,19 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let active_generation = self
                 .publication
-                .load_active_shared()
-                .map_err(CodeIndexProductionErrorV1::Publication)?;
-            if let Some(generation) = active_generation.as_ref() {
-                self.validate_generation_identity(generation)?;
+                .load_active_manifest()
+                .map_err(CodeIndexProductionErrorV1::Publication)?
+                .map(|active| active.metadata);
+            if let Some(generation) = active_generation.as_deref() {
+                self.validate_generation_identity(generation.manifest(), generation.snapshot())?;
             }
-            let active_is_reusable = active_generation.as_ref().is_none_or(|generation| {
-                self.observe_generation_compatibility(generation)
+            let active_is_reusable = active_generation.as_deref().is_none_or(|generation| {
+                self.observe_retained_text_compatibility(generation)
                     .is_reusable()
             });
             let latest_snapshot = active_generation
-                .as_ref()
-                .map(|generation| generation.snapshot());
+                .as_deref()
+                .map(VerifiedSealedTextGenerationMetadataV1::snapshot);
             let unchanged_source = latest_snapshot.is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
@@ -3052,50 +3022,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let replacement_compatibility = self.observe_generation_compatibility(&generation);
-            if !replacement_compatibility.is_reusable() {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "newly published generation is incompatible with its production owner"
-                        .to_owned(),
-                ));
-            }
+            self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(source_manifest);
-
-            let changes = &generation.projection().request().changes;
-            let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
-                generation.clone_update_statistics();
-            let lane_digest = canonical_sha256(&(
-                generation.snapshot().content_identity.clone(),
-                generation
-                    .chunks()
-                    .chunks()
-                    .iter()
-                    .map(|chunk| (&chunk.id, &chunk.content_digest))
-                    .collect::<Vec<_>>(),
-                generation.edges(),
-            ))
-            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
             return Ok(CodeIndexReconcileOutcomeV1::Published(
-                CodeIndexPublishEvidenceV1 {
-                    generation_id: generation.manifest().generation_id.clone(),
-                    repository_id: self.repository_id.clone(),
-                    snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                    lane_digest,
-                    file_occurrence_ids: generation
-                        .snapshot()
-                        .files
-                        .iter()
-                        .map(|file| file.file_occurrence_id.clone())
-                        .collect(),
-                    reextracted_files,
-                    changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-                    reused_chunks: changes.reused_count,
-                    clone_payloads_reused: Some(clone_payloads_reused),
-                    clone_stale_invalidations: Some(clone_stale_invalidations),
-                    clone_body_changes_observed: Some(clone_body_changes_observed),
-                    overflow_reconciled,
-                },
+                self.publish_evidence(&generation, reextracted_files, overflow_reconciled),
             ));
         }
         unreachable!("the bounded reconciliation loop returns on its final attempt")
@@ -3123,7 +3054,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) {
         let reconciled_without_generation = self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .is_ok_and(|generation| generation.is_none());
         self.freshness_fence.mark_reconciled(
             metadata,
@@ -3162,31 +3093,25 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return;
         };
-        let Some(latest) = self.latest_complete() else {
+        let Ok(Some(latest)) = self.publication.load_active_manifest() else {
             return;
         };
+        let latest = &latest.metadata;
         let Ok(repository_parse_identity_digest) =
-            canonical_sha256(latest.generation.repository_parse_identity())
+            canonical_sha256(latest.repository_parse_identity())
         else {
             return;
         };
         let witness = RestoreFreshnessWitnessV1 {
-            generation_id: latest
-                .generation
-                .manifest()
-                .generation_id
-                .as_str()
-                .to_owned(),
+            generation_id: latest.manifest().generation_id.as_str().to_owned(),
             git_metadata_signature: freshness.git_metadata.stable_signature(),
             stat_signature,
             repository_parse_identity_digest: repository_parse_identity_digest.as_str().to_owned(),
             ignored_source_admissions_digest: latest
-                .generation
                 .ignored_source_admissions_digest()
                 .as_str()
                 .to_owned(),
             ignored_source_paths: latest
-                .generation
                 .ignored_source_admissions()
                 .iter()
                 .map(|admission| admission.logical_path.clone())
@@ -3572,7 +3497,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         .ok()
         .flatten()?;
-        self.validate_generation_identity(&generation).ok()?;
+        self.validate_generation_identity(generation.manifest(), generation.snapshot())
+            .ok()?;
         if !self
             .observe_generation_compatibility(&generation)
             .may_serve_while_rebuilding()
@@ -3584,6 +3510,26 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Bind one decoded generation to this scheduler's per-generation serving
     /// derivations, so every reader of the same generation shares one build.
+    /// The decoded form of `published` for serving: a cold build already
+    /// holds it, a sparse successor is decoded from the store.
+    pub(super) fn decoded_publication(
+        &self,
+        published: &CodeIndexPublishedBuildV1,
+    ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        if let Some(generation) = published.decoded() {
+            return Ok(Arc::clone(generation));
+        }
+        let generation_id = &published.manifest().generation_id;
+        self.publication
+            .load_generation(generation_id)?
+            .ok_or_else(|| {
+                CodeIndexPublicationStoreErrorV1::Unavailable(format!(
+                    "published generation {} is no longer retained",
+                    generation_id.as_str()
+                ))
+            })
+    }
+
     pub(super) fn bind_latest_complete(
         &self,
         generation: Arc<CodeIndexPublishedGenerationV1>,
@@ -3803,7 +3749,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             .load_generation(generation_id)
             .map(|generation| {
                 generation
-                    .filter(|generation| self.validate_generation_identity(generation).is_ok())
+                    .filter(|generation| {
+                        self.validate_generation_identity(
+                            generation.manifest(),
+                            generation.snapshot(),
+                        )
+                        .is_ok()
+                    })
                     .map(|generation| self.historical_generation_owner().bind_complete(generation))
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
@@ -3926,11 +3878,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             match self
                 .publication
-                .load_active_shared()
+                .load_active_manifest()
                 .map_err(CodeIndexProductionErrorV1::Publication)?
+                .map(|active| active.metadata)
             {
                 Some(active) => {
-                    self.validate_generation_identity(&active)?;
+                    self.validate_generation_identity(active.manifest(), active.snapshot())?;
                     let current_scope = CodeIndexGenerationScopeV1 {
                         repository: self.repository_id.clone(),
                         reference: self.identity.head_ref().cloned(),

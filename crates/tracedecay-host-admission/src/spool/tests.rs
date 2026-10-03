@@ -990,7 +990,7 @@ fn a_batch_shares_one_intent_publish_and_one_frame_sync() {
     ]);
 
     // Intent file sync, directory sync, and one frame sync for all three.
-    assert_eq!(barriers.syncs(), 3);
+    assert_eq!(barriers.syncs(), 2 + u64::from(cfg!(unix)));
     assert_eq!(
         appended
             .into_iter()

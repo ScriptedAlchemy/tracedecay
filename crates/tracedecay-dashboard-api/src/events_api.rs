@@ -277,9 +277,12 @@ struct EventStreamState {
     last_registry_digest: Option<String>,
     last_store_total_bytes: Option<u64>,
     /// Canonical project root → registered project id, refreshed for free from
-    /// the registry poll this task already runs. Lets a producer that does not
-    /// hold its project id (transcript ingest) still land on the right neuron.
-    registry_roots: HashMap<PathBuf, String>,
+    /// the shared registry poll. Lets a producer that does not hold its
+    /// project id (transcript ingest) still land on the right neuron.
+    registry_roots: Arc<HashMap<PathBuf, String>>,
+    /// Reader of the shared source poll; `None` until `subscribe` runs at
+    /// stream open so unit tests that never connect keep direct control.
+    source_receiver: Option<tokio::sync::watch::Receiver<SourcePollSnapshot>>,
 }
 
 impl EventStreamState {
@@ -292,7 +295,8 @@ impl EventStreamState {
             activity_dropped_events: 0,
             last_registry_digest: None,
             last_store_total_bytes: None,
-            registry_roots: HashMap::new(),
+            registry_roots: Arc::new(HashMap::new()),
+            source_receiver: None,
         }
     }
 
@@ -483,24 +487,32 @@ impl EventStreamState {
             .collect()
     }
 
-    /// Poll all real sources against `state`, appending any change events.
-    async fn poll_sources(
-        &mut self,
-        state: &DashboardState,
-        scope: &DashboardScopeV1,
-    ) -> Vec<DashboardEventV1> {
+    /// Poll the shared source snapshot, appending any change events.
+    async fn poll_sources(&mut self, scope: &DashboardScopeV1) -> Vec<DashboardEventV1> {
         hotpath::future!(
             async move {
                 let mut events = Vec::new();
-                if let Some(snapshot) = registry_snapshot(state).await {
-                    self.registry_roots = snapshot.roots;
+                let Some(receiver) = self.source_receiver.as_mut() else {
+                    return events;
+                };
+                // `watch::channel` starts with a placeholder, not a source
+                // baseline. Wait for the poller's first complete observation;
+                // otherwise a connection could consume the empty default and
+                // miss the first real change before its next poll tick.
+                let needs_initial_snapshot = !receiver.borrow().initialized;
+                if needs_initial_snapshot && receiver.changed().await.is_err() {
+                    return events;
+                }
+                let snapshot = receiver.borrow_and_update().clone();
+                if let Some(registry) = snapshot.registry {
+                    self.registry_roots = registry.roots;
                     if let Some(event) =
-                        self.detect_registry_change(snapshot.digest, snapshot.count, scope)
+                        self.detect_registry_change(registry.digest, registry.count, scope)
                     {
                         events.push(event);
                     }
                 }
-                if let Some(total) = summed_store_bytes(state).await
+                if let Some(total) = snapshot.total_store_bytes
                     && let Some(event) = self.detect_storage_change(total, scope)
                 {
                     events.push(event);
@@ -510,6 +522,96 @@ impl EventStreamState {
             label = "dashboard_api.events.poll"
         )
         .await
+    }
+}
+
+/// Latest registry/storage observation published by the single shared poller
+/// owned by a dashboard state.
+#[derive(Clone, Default)]
+struct SourcePollSnapshot {
+    /// False only for the watch channel's placeholder. A published snapshot is
+    /// initialized even when both sources are currently unavailable, so a new
+    /// stream can establish a real baseline before it starts change detection.
+    initialized: bool,
+    registry: Option<RegistrySnapshot>,
+    total_store_bytes: Option<u64>,
+}
+
+/// One shared poller per `DashboardState`: the first `/api/events` stream
+/// starts it, and every stream reads its latest snapshot instead of running
+/// the same registry and store-size queries per client. The poller task exits
+/// when its last stream drops so a replaced dashboard state does not keep its
+/// store handles alive; a later stream re-arms it.
+#[derive(Clone, Default)]
+pub struct SharedSourcePoll {
+    sender: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<SourcePollSnapshot>>>>,
+}
+
+impl SharedSourcePoll {
+    /// Acquire the poller slot without turning a prior holder's panic into an
+    /// SSE-server panic. The protected sender remains valid after poisoning, so
+    /// retain it and report the invariant failure rather than replacing or
+    /// discarding a live poller.
+    fn lock_sender(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<tokio::sync::watch::Sender<SourcePollSnapshot>>> {
+        match self.sender.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                tracing::error!("dashboard shared source poller slot was poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Subscribe to the shared snapshot, starting the poller when it is not
+    /// running (first stream, or a restart after the last stream dropped).
+    fn subscribe(
+        &self,
+        state: &DashboardState,
+    ) -> tokio::sync::watch::Receiver<SourcePollSnapshot> {
+        let mut slot = self.lock_sender();
+        if let Some(sender) = slot.as_ref() {
+            return sender.subscribe();
+        }
+        let (sender, _initial) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let poller_state = state.clone();
+        let poller_sender = sender.clone();
+        let poller_slot = Arc::clone(&self.sender);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if poller_sender.receiver_count() == 0 {
+                    // The exit re-check runs under the same lock `subscribe`
+                    // holds while attaching a receiver: a stream that lands in
+                    // between either bumps the count (keep polling) or sees
+                    // the cleared slot and arms a fresh poller.
+                    let mut slot = match poller_slot.lock() {
+                        Ok(slot) => slot,
+                        Err(poisoned) => {
+                            tracing::error!("dashboard shared source poller slot was poisoned");
+                            poisoned.into_inner()
+                        }
+                    };
+                    if poller_sender.receiver_count() == 0 {
+                        *slot = None;
+                        return;
+                    }
+                }
+                let registry = registry_snapshot(&poller_state).await;
+                let total_store_bytes = summed_store_bytes(&poller_state).await;
+                let _ = poller_sender.send(SourcePollSnapshot {
+                    initialized: true,
+                    registry,
+                    total_store_bytes,
+                });
+            }
+        });
+        let receiver = sender.subscribe();
+        *slot = Some(sender);
+        receiver
     }
 }
 
@@ -536,6 +638,7 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         async {
         let activity_run_id = run_id.clone();
         let mut stream_state = EventStreamState::new(run_id);
+        stream_state.source_receiver = Some(state.event_source_poll.subscribe(&state));
         // The first frame proves the stream is live before the activity
         // replay or the source baselines read a store.
         let connected = stream_state.heartbeat(&scope);
@@ -613,7 +716,7 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         }
 
         // Prime the source baselines immediately so the first real change emits.
-        let _ = stream_state.poll_sources(&state, &scope).await;
+        let _ = stream_state.poll_sources(&scope).await;
         for event in control
             .into_iter()
             .chain(stream_state.flush_activity(&mut pending, &scope))
@@ -639,7 +742,7 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                     if tick.is_multiple_of(HEARTBEAT_EVERY_TICKS) {
                         batch.push(stream_state.heartbeat(&scope));
                     }
-                    batch.extend(stream_state.poll_sources(&state, &scope).await);
+                    batch.extend(stream_state.poll_sources(&scope).await);
                     batch
                 }
                 _ = flush.tick() => {
@@ -909,10 +1012,11 @@ fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
 
 /// One observation of the project registry: its change digest, its size, and
 /// the canonical-root → project-id map the activity flush resolves against.
+#[derive(Clone)]
 struct RegistrySnapshot {
     digest: String,
     count: u64,
-    roots: HashMap<PathBuf, String>,
+    roots: Arc<HashMap<PathBuf, String>>,
 }
 
 /// Compute a stable digest of the project-registry snapshot plus its count.
@@ -943,7 +1047,7 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
     Some(RegistrySnapshot {
         digest: format!("{:016x}", hasher.finish()),
         count,
-        roots,
+        roots: Arc::new(roots),
     })
 }
 
@@ -1081,6 +1185,7 @@ pub(crate) async fn dashboard_state_fixture(
         delivery_settlements: Arc::new(
             crate::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
         ),
+        event_source_poll: crate::events_api::SharedSourcePoll::default(),
     };
     (project, state)
 }
@@ -1350,9 +1455,10 @@ mod tests {
     #[test]
     fn a_pulse_without_a_project_id_resolves_through_the_registry_map() {
         let mut state = EventStreamState::new("run-test".to_string());
-        state
-            .registry_roots
-            .insert(PathBuf::from("/repo/ingested"), "proj-ingested".to_string());
+        state.registry_roots = Arc::new(HashMap::from([(
+            PathBuf::from("/repo/ingested"),
+            "proj-ingested".to_string(),
+        )]));
         let mut pending = std::collections::BTreeMap::new();
         accumulate_record(
             &mut pending,
@@ -1490,6 +1596,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_sources_waits_for_the_first_published_snapshot_before_baselining() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("run-test".to_string());
+        state.source_receiver = Some(receiver);
+        let base = scope();
+
+        let poll = tokio::spawn(async move {
+            let initial = state.poll_sources(&base).await;
+            (state, initial)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !poll.is_finished(),
+            "the watch placeholder must not become the source baseline"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("polling stream is still subscribed");
+        let (mut state, initial) = poll.await.expect("source poll task completes");
+        assert!(
+            initial.is_empty(),
+            "first published snapshot establishes baseline"
+        );
+
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(11),
+            })
+            .expect("polling stream is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(
+            changes.len(),
+            1,
+            "the first post-baseline change is emitted"
+        );
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 11 }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_initial_source_poll_releases_its_watch_receiver() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("cancelled-poll".to_string());
+        state.source_receiver = Some(receiver);
+        let poll = tokio::spawn(async move { state.poll_sources(&scope()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(sender.receiver_count(), 1, "the poll owns one receiver");
+
+        poll.abort();
+        assert!(poll.await.expect_err("aborted initial poll").is_cancelled());
+        assert_eq!(
+            sender.receiver_count(),
+            0,
+            "cancelling before the first snapshot must not retain a receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_source_poller_join_baselines_the_current_published_snapshot() {
+        let (sender, first) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("initial subscriber keeps sender alive");
+        let mut state = EventStreamState::new("late-join".to_string());
+        state.source_receiver = Some(sender.subscribe());
+
+        assert!(
+            state.poll_sources(&scope()).await.is_empty(),
+            "a late joiner must baseline the shared current snapshot"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(12),
+            })
+            .expect("late joiner is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 12 }
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
@@ -1497,9 +1702,17 @@ mod tests {
         dash.savings_db = Some(registry);
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        // The shared poller publishes on its own tick; wait for that first
+        // snapshot instead of racing it.
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
+            .await
+            .expect("shared poller publishes its first snapshot")
+            .expect("shared poller sender is alive");
+        state.source_receiver = Some(receiver);
 
         // First poll primes the baselines and emits nothing.
-        let primed = state.poll_sources(&dash, &scope).await;
+        let primed = state.poll_sources(&scope).await;
         assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
         let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
             .await
@@ -1523,5 +1736,36 @@ mod tests {
             state.last_registry_digest.as_deref(),
             Some(format!("{:016x}", hasher.finish())).as_deref()
         );
+    }
+
+    #[tokio::test]
+    async fn shared_source_poller_releases_its_state_after_the_last_stream() {
+        let (_project, dash) = dashboard_state_fixture("project.dashboard-events-retire").await;
+        let baseline = Arc::strong_count(&dash.delivery_settlements);
+        let receiver = dash.event_source_poll.subscribe(&dash);
+        assert!(
+            Arc::strong_count(&dash.delivery_settlements) > baseline,
+            "the running poller holds a state clone"
+        );
+
+        drop(receiver);
+        // Generous ceiling: the loop exits as soon as the poller's next tick
+        // retires it, so only a genuine leak waits this long.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while Arc::strong_count(&dash.delivery_settlements) > baseline {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the poller must release its state once no stream reads it"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(dash.event_source_poll.lock_sender().is_none());
+
+        // A later stream re-arms a fresh poller that publishes again.
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
+            .await
+            .expect("re-armed poller publishes")
+            .expect("re-armed poller sender is alive");
     }
 }

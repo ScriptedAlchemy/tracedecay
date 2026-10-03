@@ -21,6 +21,7 @@ use tracedecay_domain::git::{
     GitChangeKindV1, GitDegradationV1, GitFileModeV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, GitStatusEntryV1, GitTrackedStatusV1,
 };
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 
 mod history;
 mod native_integration;
@@ -200,27 +201,27 @@ static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
 type HeadBranchMemo = HashMap<PathBuf, (HeadFileStamp, Option<String>)>;
 
 /// Identity of a HEAD file. Git replaces HEAD by renaming a lock file over
-/// it, so every checkout yields a new inode and change time.
+/// it, so every checkout yields a new change time; an equal stamp proves the
+/// branch unchanged only once that change time is settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeadFileStamp {
     len: u64,
     modified: Option<std::time::SystemTime>,
     #[cfg(unix)]
     inode: (u64, u64),
-    #[cfg(unix)]
-    changed: (i64, i64),
+    changed: ChangeStamp,
 }
 
 impl HeadFileStamp {
     fn read(head: &Path) -> Option<Self> {
+        let sampled_at = ChangeClockReading::now();
         let metadata = std::fs::symlink_metadata(head).ok()?;
         Some(Self {
             len: metadata.len(),
             modified: metadata.modified().ok(),
             #[cfg(unix)]
             inode: (metadata.dev(), metadata.ino()),
-            #[cfg(unix)]
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
+            changed: RewriteWitness::NATIVE.stamp(&metadata, sampled_at),
         })
     }
 }
@@ -489,6 +490,8 @@ struct RepositoryDiscoveryObservation {
     /// When set, the walk waits on a test channel instead of sleeping, so a
     /// hung discovery is controllable without occupying a timeout.
     block: Option<std::sync::Arc<RepositoryDiscoveryBlockGate>>,
+    /// When set, a caller's discovery budget ends only when the walk does.
+    clock_held: bool,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -804,6 +807,31 @@ fn count_topology_observation(
     }
 }
 
+/// Stop the wall clock from ending discovery budgets under `root`, for tests
+/// whose subject is not the discovery deadline. Keeps any delay or block
+/// already armed there.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn hold_repository_discovery_clock_for_test(root: &Path) {
+    repository_discovery_observations()
+        .entry(observed_discovery_root(root))
+        .or_default()
+        .clock_held = true;
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn repository_discovery_clock_held(directory: &Path) -> bool {
+    let observations = repository_discovery_observations();
+    if observations.is_empty() {
+        return false;
+    }
+    let canonical = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    observations
+        .iter()
+        .any(|(root, observation)| observation.clock_held && canonical.starts_with(root))
+}
+
 /// Stop observing `root` and drop its retained topology.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_repository_discovery_for_test(root: &Path) {
@@ -981,6 +1009,7 @@ impl GitRepositoryAuthority {
         // The stamp was taken before the read, so a HEAD replaced in between
         // is re-read on the next call instead of being pinned.
         if let Some(stamp) = stamp
+            && stamp.changed.is_settled()
             && !topology.common_dir.join("reftable").exists()
         {
             let mut branches = HEAD_BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);

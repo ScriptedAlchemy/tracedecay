@@ -2406,7 +2406,6 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
-        drop(state);
         wake.notify_one();
     }
 
@@ -2428,7 +2427,6 @@ impl CodeIndexSchedulerRegistryV1 {
         state.micros = wake_micros;
         state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
-        drop(state);
         wake.notify_one();
         true
     }
@@ -2446,7 +2444,6 @@ impl CodeIndexSchedulerRegistryV1 {
             // An arrival is already queued, or a continuation already occupies
             // the slot. Replenish the coalesced permit so the worker cannot
             // sleep behind work it has not claimed.
-            drop(state);
             wake.notify_one();
             return;
         }
@@ -2454,7 +2451,6 @@ impl CodeIndexSchedulerRegistryV1 {
         state.micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
         state.attributable = false;
         state.trigger = Self::pack_trigger(CodeIndexCadenceTriggerV1::BusyFollowUp);
-        drop(state);
         wake.notify_one();
     }
 
@@ -2482,6 +2478,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// delay, so the absence stays typed.
     fn take_pending_arrival(
         pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
         let (wake_micros, packed_trigger, attributable) = {
@@ -2489,6 +2486,9 @@ impl CodeIndexSchedulerRegistryV1 {
             let wake_micros = state.micros;
             let packed_trigger = state.trigger;
             let attributable = state.attributable;
+            if wake_micros != 0 {
+                std::pin::pin!(wake.notified()).enable();
+            }
             state.micros = 0;
             state.trigger = 0;
             state.owner = 0;
@@ -4126,6 +4126,7 @@ mod text_slice_fairness_tests {
 
         let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
             &pending,
+            &wake,
             CodeIndexCadenceTriggerV1::Mount,
         );
         assert!(
@@ -4146,6 +4147,7 @@ mod text_slice_fairness_tests {
 
         let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
             &pending,
+            &wake,
             CodeIndexCadenceTriggerV1::Mount,
         );
         assert_eq!(
@@ -4177,6 +4179,7 @@ mod text_slice_fairness_tests {
 
         let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
             &pending,
+            &wake,
             CodeIndexCadenceTriggerV1::Mount,
         );
         assert!(
@@ -4184,6 +4187,47 @@ mod text_slice_fairness_tests {
             "the receipt names the external wake, not the continuation slot: {arrival:?}"
         );
         assert_eq!(trigger, CodeIndexCadenceTriggerV1::QueryAdmission);
+    }
+
+    #[test]
+    fn claiming_a_coalesced_wake_claims_its_permit() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::HookHint,
+        );
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+        let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            !std::pin::pin!(wake.notified()).enable(),
+            "a claimed wake must not leave a permit that starts an unseen pass"
+        );
+    }
+
+    #[test]
+    fn a_permit_without_a_stamp_survives_a_claim() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        wake.notify_one();
+        let _ = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            &wake,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            std::pin::pin!(wake.notified()).enable(),
+            "a claim drains only the permit its stamp banked"
+        );
     }
 }
 

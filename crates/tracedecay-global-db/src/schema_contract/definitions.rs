@@ -557,6 +557,25 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
+        "observation_source_presence",
+        [
+            column("source_key", "TEXT", true, None, 1),
+            column("observation_id", "TEXT", true, None, 2),
+            column("generation", "TEXT", true, None, 0),
+            column("start_offset", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "observation_source_rewrites",
+        [
+            column("source_key", "TEXT", false, None, 1),
+            column("generation", "TEXT", true, None, 0),
+            column("retained_through", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "observation_projection_dispositions",
         [
             column("projector_version", "TEXT", true, None, 1),
@@ -1267,6 +1286,15 @@ pub(super) const TABLES: &[Table] = &[
                 "NO ACTION"
             ),
         ]
+    ),
+    table!(
+        "session_temporal_resets",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("requested_at", "INTEGER", false, None, 0),
+            column("reset_generation", "INTEGER", false, None, 0),
+        ],
+        []
     ),
     table!(
         "session_turns",
@@ -2032,6 +2060,13 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["session_id", "observation_sequence"],
+    },
+    Index {
+        table: "session_temporal_resets",
+        name: Some("idx_session_temporal_resets_requested"),
+        unique: false,
+        origin: "c",
+        columns: &["requested_at"],
     },
     Index {
         table: "session_turns",

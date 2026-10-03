@@ -85,7 +85,7 @@ pub fn resolved_host_bundle_lifecycle_root(profile_root: &Path) -> PathBuf {
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
-pub const fn stock_host_kinds() -> [HostKindV1; 20] {
+pub const fn stock_host_kinds() -> [HostKindV1; 21] {
     HostKindV1::ALL
 }
 

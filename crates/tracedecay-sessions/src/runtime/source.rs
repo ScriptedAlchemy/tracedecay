@@ -428,8 +428,7 @@ use jsonl::stream_new_jsonl_raw_strict;
 pub(in crate::runtime) use jsonl::{HoldUnchangedGenerationCache, spin_until_jsonl_change_settled};
 pub(in crate::runtime) use jsonl::{
     JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_change_token_settled,
-    jsonl_file_change_token, jsonl_file_change_token_under, jsonl_native_file_identity,
-    jsonl_prefix_digest,
+    jsonl_file_change_token_under, jsonl_native_file_identity, jsonl_prefix_digest,
 };
 pub use jsonl::{
     JsonlFrameDeferral, JsonlPrefixCheckpoint, JsonlPrefixRecovery, JsonlResumeState,

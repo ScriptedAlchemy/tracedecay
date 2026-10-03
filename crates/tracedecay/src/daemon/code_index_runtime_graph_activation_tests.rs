@@ -420,6 +420,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
             &repository_id,
             &worktree_id,
             latest,
+            None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
@@ -540,6 +541,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             &scope.repository_id,
             &scope.worktree_id,
             latest_a,
+            None,
             replay_a,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
@@ -2317,10 +2319,8 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
 
     assert_eq!(
         resolve_alpha().await,
-        Err(tracedecay_graph_query::CodeGraphReadError::Unavailable {
-            detail: "code graph engine was released and is re-warming in the background".to_owned(),
-        }),
-        "the read that finds the engine away answers the retryable warming state"
+        Ok(warm.clone()),
+        "the read that finds the engine away waits out the re-warm within its budget"
     );
     until_ready("re-warm").await;
     assert_eq!(resolve_alpha().await, Ok(warm));

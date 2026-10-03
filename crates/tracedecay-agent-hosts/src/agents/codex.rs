@@ -847,6 +847,19 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) 
     // of the result.
     let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
+    // Codex's legacy MCP loader resolves cwd relative to the plugin but does
+    // not expand the portable PLUGIN_ROOT token in args. Keep the adapter path
+    // relative to that plugin cwd.
+    if let Some(args) = mcp["mcpServers"]["tracedecay-explorer"]["args"].as_array_mut() {
+        for arg in args {
+            if let Some(relative) = arg
+                .as_str()
+                .and_then(|value| value.strip_prefix("${PLUGIN_ROOT}/"))
+            {
+                *arg = serde_json::json!(relative);
+            }
+        }
+    }
     let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args();
     server["startup_timeout_sec"] = CODEX_MCP_STARTUP_TIMEOUT_SECS.into();

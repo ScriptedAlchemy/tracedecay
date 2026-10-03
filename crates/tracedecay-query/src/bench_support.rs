@@ -10,14 +10,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
-    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublishedBuildV1,
+    CodeIndexPublishedGenerationV1, MemorySealedPublicationStoreV1,
     SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageBatchBoundsV1,
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
@@ -27,7 +27,7 @@ use tracedecay_code_index::projection::{
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, LanguageId, ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
+    LanguageId, ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
     ProjectionOutcomeV1,
 };
 
@@ -158,54 +158,19 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
     }
 }
 
-/// In-memory compare-and-swap publication authority. The benchmark measures
-/// indexing or query evaluation, not the daemon's database publication store.
-#[derive(Default)]
-pub(crate) struct MemoryPublicationStore {
-    active: Arc<
-        Mutex<
-            std::collections::BTreeMap<
-                CodeIndexGenerationScopeV1,
-                Arc<CodeIndexPublishedGenerationV1>,
-            >,
-        >,
-    >,
-}
-
-impl CodeIndexAtomicPublicationPort for MemoryPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
-            .get(scope)
-            .map(Arc::clone))
+/// The generation `published` sealed, decoded whole from `store`. A cold
+/// build already holds it.
+pub(crate) fn decoded_generation(
+    store: &MemorySealedPublicationStoreV1,
+    published: &CodeIndexPublishedBuildV1,
+) -> Result<Arc<CodeIndexPublishedGenerationV1>, String> {
+    if let Some(generation) = published.decoded() {
+        return Ok(Arc::clone(generation));
     }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
+    store
+        .decode(published.manifest_bytes())
+        .map(Arc::new)
+        .map_err(|error| format!("decode published generation: {error}"))
 }
 
 /// Applies every decision without a downstream model or store.
@@ -283,7 +248,8 @@ pub(crate) fn seal_partitioned(
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {

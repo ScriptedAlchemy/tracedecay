@@ -1,3 +1,5 @@
+use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
+
 use super::*;
 
 async fn persisted_column_names(db_path: &Path, table: &str) -> Vec<String> {
@@ -42,7 +44,7 @@ async fn assert_session_temporal_version_refused(db_path: &Path, found_version: 
             refusal.map(|error| error.to_string()),
             Some(format!(
                 "session temporal profile schema {found_version} is incompatible with required \
-                 schema 7; reset the profile"
+                 schema {SESSION_TEMPORAL_SCHEMA_VERSION}; reset the profile"
             ))
         );
     }
@@ -239,19 +241,20 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
         .expect("temporal schema initialization should not error");
     drop(db);
 
+    let previous = SESSION_TEMPORAL_SCHEMA_VERSION - 1;
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
          CREATE TRIGGER session_refresh_progress_insert_guard_v1
          BEFORE INSERT ON session_refresh_progress BEGIN SELECT 1; END;
          INSERT INTO session_temporal_generations (
              session_id, generation, state, frozen_watermarks_json, created_at
-         ) VALUES ('session-a', 1, 'building', '{}', 1);
+         ) VALUES ('session-a', 1, 'building', '{{}}', 1);
          UPDATE session_temporal_schema_migrations
-         SET version = 2
-         WHERE name = 'session-temporal';",
-    )
+         SET version = {previous}
+         WHERE name = 'session-temporal';"
+    ))
     .await
     .unwrap();
     drop(conn);
@@ -259,8 +262,8 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
     let stale_guard =
         normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1").await;
 
-    assert_session_temporal_version_refused(&db_path, 2).await;
-    assert_eq!(temporal_schema_version(&db_path).await, 2);
+    assert_session_temporal_version_refused(&db_path, previous).await;
+    assert_eq!(temporal_schema_version(&db_path).await, previous);
     assert_eq!(
         normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1").await,
         stale_guard,
@@ -289,15 +292,16 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
     );
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
          CREATE TRIGGER session_refresh_progress_insert_guard_v1
          BEFORE INSERT ON session_refresh_progress BEGIN SELECT 1; END;
          DROP INDEX idx_session_occurrences_introduced;
          UPDATE session_temporal_schema_migrations
-         SET version = 6
+         SET version = {}
          WHERE name = 'session-temporal';",
-    )
+        SESSION_TEMPORAL_SCHEMA_VERSION - 1
+    ))
     .await
     .unwrap();
     drop(conn);
@@ -312,7 +316,10 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
             .await
             .expect("an earlier authority holding no rows is replaced, not refused"),
     );
-    assert_eq!(temporal_schema_version(&db_path).await, 7);
+    assert_eq!(
+        temporal_schema_version(&db_path).await,
+        SESSION_TEMPORAL_SCHEMA_VERSION
+    );
     assert_eq!(
         temporal_schema_object_catalog(&db_path).await,
         final_catalog

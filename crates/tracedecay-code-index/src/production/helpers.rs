@@ -15,6 +15,7 @@ use crate::chunks::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::module_resolution::{ModuleImportIndexV1, is_module_import_language};
+use crate::production::resolution_view::{FileSymbolsByNameV1, ResolutionFileV1, SymbolsByNameV1};
 use crate::production::typescript_resolution::{
     ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
 };
@@ -23,10 +24,6 @@ pub(crate) struct StagedGenerationV1 {
     pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
     pub(crate) chunks: GenerationChunkManifestV1,
     pub(crate) symbols: GenerationSymbolIndexV1,
-    pub(crate) lineage: Vec<SymbolLineageCandidateV1>,
-    /// File occurrences Arc-shared from the parent published generation.
-    /// `None` when this stage was built without a parent.
-    pub(crate) parent_shared_occurrences: Option<BTreeSet<tracedecay_domain::FileOccurrenceId>>,
     pub(crate) clone_payloads_reused: u64,
     pub(crate) clone_payloads_computed: u64,
     pub(crate) clone_stale_invalidations: u64,
@@ -35,8 +32,6 @@ pub(crate) struct StagedGenerationV1 {
 pub(crate) fn staged_generation(
     generation_id: CodeGenerationId,
     mut files: Vec<Arc<FileGenerationArtifactsV1>>,
-    lineage: Vec<SymbolLineageCandidateV1>,
-    parent: Option<&CodeIndexPublishedGenerationV1>,
 ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
     files.sort_by(|left, right| {
         left.artifacts
@@ -45,131 +40,36 @@ pub(crate) fn staged_generation(
             .file_occurrence_id
             .cmp(&right.artifacts.chunks.document.file_occurrence_id)
     });
-    let (chunks, symbols, parent_shared_occurrences) = match parent {
-        Some(parent) => {
-            let (chunks, symbols, shared) = hotpath::measure_block!(
-                "code_index.generation.aggregate_parent_delta",
-                aggregate_from_parent(generation_id, parent, &files)
-            )?;
-            (chunks, symbols, Some(shared))
-        }
-        None => {
-            let chunks = hotpath::measure_block!(
-                "code_index.generation.aggregate_chunks",
-                GenerationChunkManifestV1::from_validated_files(
-                    generation_id.clone(),
-                    files
-                        .iter()
-                        .map(|file| file.artifacts.chunks.clone())
-                        .collect(),
-                )
-            )
-            .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = hotpath::measure_block!(
-                "code_index.generation.aggregate_symbols",
-                GenerationSymbolIndexV1::new(
-                    generation_id,
-                    files
-                        .iter()
-                        .flat_map(|file| file.artifacts.symbols.clone())
-                        .collect(),
-                )
-            )
-            .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            (chunks, symbols, None)
-        }
-    };
+    let chunks = hotpath::measure_block!(
+        "code_index.generation.aggregate_chunks",
+        GenerationChunkManifestV1::from_validated_files(
+            generation_id.clone(),
+            files
+                .iter()
+                .map(|file| file.artifacts.chunks.clone())
+                .collect(),
+        )
+    )
+    .map_err(CodeIndexProductionErrorV1::Increment)?;
+    let symbols = hotpath::measure_block!(
+        "code_index.generation.aggregate_symbols",
+        GenerationSymbolIndexV1::new(
+            generation_id,
+            files
+                .iter()
+                .flat_map(|file| file.artifacts.symbols.clone())
+                .collect(),
+        )
+    )
+    .map_err(CodeIndexProductionErrorV1::Lineage)?;
     Ok(StagedGenerationV1 {
         files,
         chunks,
         symbols,
-        lineage,
-        parent_shared_occurrences,
         clone_payloads_reused: 0,
         clone_payloads_computed: 0,
         clone_stale_invalidations: 0,
     })
-}
-
-/// Build serving chunk/symbol indexes from Arc-shared parent pages plus fresh
-/// file pages. File-page `generation_id` stays extraction provenance; the
-/// returned manifests carry the publish generation as serving identity.
-fn aggregate_from_parent(
-    generation_id: CodeGenerationId,
-    parent: &CodeIndexPublishedGenerationV1,
-    files: &[Arc<FileGenerationArtifactsV1>],
-) -> Result<
-    (
-        GenerationChunkManifestV1,
-        GenerationSymbolIndexV1,
-        BTreeSet<tracedecay_domain::FileOccurrenceId>,
-    ),
-    CodeIndexProductionErrorV1,
-> {
-    let parent_by_occurrence = parent
-        .files
-        .iter()
-        .map(|file| {
-            (
-                file.artifacts.chunks.document.file_occurrence_id.clone(),
-                file,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut shared_occurrences = BTreeSet::new();
-    let mut fresh_files = Vec::new();
-    for file in files {
-        let occurrence = &file.artifacts.chunks.document.file_occurrence_id;
-        if parent_by_occurrence
-            .get(occurrence)
-            .is_some_and(|prior| Arc::ptr_eq(prior, file))
-        {
-            shared_occurrences.insert(occurrence.clone());
-        } else {
-            fresh_files.push(file);
-        }
-    }
-
-    let replaced_parent_occurrences = parent_by_occurrence
-        .keys()
-        .filter(|occurrence| !shared_occurrences.contains(*occurrence))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-
-    // Ordinary increments replace a tiny complement of the parent. Track that
-    // complement instead of hashing nearly every shared file and symbol.
-    let fresh_chunks = fresh_files
-        .iter()
-        .flat_map(|file| file.artifacts.chunks.chunks.iter().cloned())
-        .collect::<Vec<_>>();
-
-    let replaced_symbol_ptrs = replaced_parent_occurrences
-        .iter()
-        .filter_map(|occurrence| parent_by_occurrence.get(occurrence))
-        .flat_map(|file| file.artifacts.symbols.iter())
-        .map(Arc::as_ptr)
-        .collect::<HashSet<_>>();
-    let fresh_symbols = fresh_files
-        .iter()
-        .flat_map(|file| file.artifacts.symbols.iter().cloned())
-        .collect::<Vec<_>>();
-
-    let chunks = GenerationChunkManifestV1::from_parent_delta_arcs(
-        generation_id.clone(),
-        &parent.chunks,
-        &replaced_parent_occurrences,
-        fresh_chunks,
-    )
-    .map_err(CodeIndexProductionErrorV1::Increment)?;
-    let symbols = GenerationSymbolIndexV1::from_parent_delta_arcs(
-        generation_id,
-        &parent.symbols,
-        &replaced_symbol_ptrs,
-        fresh_symbols,
-    )
-    .map_err(CodeIndexProductionErrorV1::Lineage)?;
-    Ok((chunks, symbols, shared_occurrences))
 }
 
 /// Pin one descriptor registry to the languages this generation can actually
@@ -249,6 +149,87 @@ pub(crate) fn coverage_summary(
     snapshot: &SanitizedCodeSnapshotV1,
     files: &[Arc<FileGenerationArtifactsV1>],
 ) -> CoverageSummaryV1 {
+    let mut coverage = snapshot_coverage(snapshot);
+    for file in files {
+        coverage = add_coverage(coverage, file_coverage(file));
+    }
+    coverage
+}
+
+/// What one file's extraction contributes to its generation's coverage.
+pub(crate) fn file_coverage(file: &FileGenerationArtifactsV1) -> CoverageSummaryV1 {
+    let mut coverage = CoverageSummaryV1 {
+        ranges_unsupported: u64::try_from(
+            file.extraction.error_ranges.len() + file.extraction.unsupported_ranges.len(),
+        )
+        .unwrap_or(u64::MAX),
+        ..CoverageSummaryV1::default()
+    };
+    match &file.artifacts.chunks.document.eligibility {
+        CodeSearchEligibilityV1::Eligible => {}
+        CodeSearchEligibilityV1::Excluded { .. } => coverage.files_excluded += 1,
+        CodeSearchEligibilityV1::Partial { .. } => coverage.files_partial += 1,
+    }
+    coverage
+}
+
+fn add_coverage(left: CoverageSummaryV1, right: CoverageSummaryV1) -> CoverageSummaryV1 {
+    CoverageSummaryV1 {
+        files_eligible: left.files_eligible.saturating_add(right.files_eligible),
+        files_excluded: left.files_excluded.saturating_add(right.files_excluded),
+        files_partial: left.files_partial.saturating_add(right.files_partial),
+        files_unsupported: left
+            .files_unsupported
+            .saturating_add(right.files_unsupported),
+        ranges_excluded: left.ranges_excluded.saturating_add(right.ranges_excluded),
+        ranges_unsupported: left
+            .ranges_unsupported
+            .saturating_add(right.ranges_unsupported),
+    }
+}
+
+/// `parent`'s coverage for a successor over `snapshot` that replaces each
+/// file of `before` with its counterpart in `after`: coverage is a sum of
+/// the snapshot's rows and every file's extraction, so it moves by the
+/// replaced terms. A parent that does not contain the replaced terms is
+/// refused rather than clamped.
+pub(crate) fn successor_coverage<'a>(
+    parent: CoverageSummaryV1,
+    parent_snapshot: &SanitizedCodeSnapshotV1,
+    snapshot: &SanitizedCodeSnapshotV1,
+    before: impl Iterator<Item = &'a FileGenerationArtifactsV1>,
+    after: impl Iterator<Item = &'a FileGenerationArtifactsV1>,
+) -> Result<CoverageSummaryV1, CodeIndexProductionErrorV1> {
+    let subtract = |left: CoverageSummaryV1, right: CoverageSummaryV1| {
+        let field = |left: u64, right: u64| {
+            left.checked_sub(right).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed parent coverage does not contain the files its successor replaces"
+                        .to_owned(),
+                )
+            })
+        };
+        Ok::<_, CodeIndexProductionErrorV1>(CoverageSummaryV1 {
+            files_eligible: field(left.files_eligible, right.files_eligible)?,
+            files_excluded: field(left.files_excluded, right.files_excluded)?,
+            files_partial: field(left.files_partial, right.files_partial)?,
+            files_unsupported: field(left.files_unsupported, right.files_unsupported)?,
+            ranges_excluded: field(left.ranges_excluded, right.ranges_excluded)?,
+            ranges_unsupported: field(left.ranges_unsupported, right.ranges_unsupported)?,
+        })
+    };
+    let mut files = subtract(parent, snapshot_coverage(parent_snapshot))?;
+    for file in before {
+        files = subtract(files, file_coverage(file))?;
+    }
+    for file in after {
+        files = add_coverage(files, file_coverage(file));
+    }
+    Ok(add_coverage(snapshot_coverage(snapshot), files))
+}
+
+/// What a snapshot's rows contribute to coverage, before any file extracts.
+fn snapshot_coverage(snapshot: &SanitizedCodeSnapshotV1) -> CoverageSummaryV1 {
     let mut coverage = CoverageSummaryV1::default();
     for file in &snapshot.files {
         match &file.disposition {
@@ -270,70 +251,29 @@ pub(crate) fn coverage_summary(
         .iter()
         .filter(|source| source.reason == CodeSourceOmissionReasonV1::UnrepresentablePath)
         .count() as u64;
-    for file in files {
-        coverage.ranges_unsupported += u64::try_from(
-            file.extraction.error_ranges.len() + file.extraction.unsupported_ranges.len(),
-        )
-        .unwrap_or(u64::MAX);
-        match &file.artifacts.chunks.document.eligibility {
-            CodeSearchEligibilityV1::Eligible => {}
-            CodeSearchEligibilityV1::Excluded { .. } => coverage.files_excluded += 1,
-            CodeSearchEligibilityV1::Partial { .. } => coverage.files_partial += 1,
-        }
-    }
     coverage
 }
 
+/// The projection request a generation seals for `changes`: an initial
+/// replay of every chunk when the generation has no projected parent, and a
+/// source edit over the parent's projection otherwise. A successor whose
+/// projection key moved replays whole, so it is built without a parent.
 pub(crate) fn projection_request(
-    active: Option<&CodeIndexPublishedGenerationV1>,
-    increment: Option<&crate::generations::GenerationIncrementPlanV1>,
+    previous_projection_key: Option<ProjectionKeyV1>,
     target_projection_key: ProjectionKeyV1,
-    mut changes: tracedecay_domain::ChangedCodeChunkSetV1,
-    current_chunks: &GenerationChunkManifestV1,
+    changes: tracedecay_domain::ChangedCodeChunkSetV1,
 ) -> Result<ProjectionBatchRequestV1, CodeIndexProductionErrorV1> {
-    let previous_projection_key =
-        active.map(|active| active.projection.request().target_projection_key.clone());
-    let replay_reason = match (active, increment) {
-        (None, _) => ProjectionReplayReasonV1::InitialProjection,
-        (_, Some(increment)) if increment.is_full_rebuild() => {
-            ProjectionReplayReasonV1::FullRebuildIncompatible
+    let replay_reason = match &previous_projection_key {
+        None => ProjectionReplayReasonV1::InitialProjection,
+        Some(previous) if *previous == target_projection_key => {
+            ProjectionReplayReasonV1::SourceEdit
         }
-        (Some(_), _) if previous_projection_key.as_ref() != Some(&target_projection_key) => {
-            ProjectionReplayReasonV1::ProjectionProfileChange
+        Some(_) => {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "a source edit cannot change its projection key".to_owned(),
+            ));
         }
-        _ => ProjectionReplayReasonV1::SourceEdit,
     };
-    if replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange {
-        // Expand while the current corpus is still available.
-        let mut added_or_changed = current_chunks
-            .chunks()
-            .iter()
-            .map(|chunk| tracedecay_domain::ChangedCodeChunkV1 {
-                chunk_id: chunk.id.clone(),
-                prior_digest: None,
-                current_digest: Some(chunk.content_digest.clone()),
-            })
-            .collect::<Vec<_>>();
-        added_or_changed.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        let (reused_count, reused_digest) =
-            tracedecay_domain::ChangedCodeChunkSetV1::seal_reused_partition(&[])
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        changes = tracedecay_domain::ChangedCodeChunkSetV1 {
-            from_generation: changes.from_generation,
-            to_generation: changes.to_generation,
-            manifest_digest: changes.manifest_digest,
-            added_or_changed,
-            deleted: Vec::new(),
-            reused_count,
-            reused_digest,
-        };
-        changes.manifest_digest = changes
-            .compute_digest()
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        changes
-            .validate()
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    }
     let mut request = ProjectionBatchRequestV1 {
         request_digest: changes.manifest_digest.clone(),
         changes,
@@ -373,7 +313,7 @@ pub(crate) fn collect_edge_evidence<T>(
     CodeIndexProductionErrorV1,
 >
 where
-    T: AsRef<FileGenerationArtifactsV1> + Sync,
+    T: ResolutionFileV1,
 {
     // Resolution's whole-set indexes are gone before the per-file copies are
     // made, and the one exact-capacity vector never regrows, so the peak is
@@ -389,7 +329,7 @@ pub(crate) fn edge_evidence<T>(
     cross_file: Vec<CanonicalRelationEdgeV1>,
 ) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let per_file = files
         .iter()
@@ -426,29 +366,35 @@ pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
 ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
 where
-    T: AsRef<FileGenerationArtifactsV1> + Sync,
+    T: ResolutionFileV1,
 {
     #[cfg(test)]
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
-    resolve_references(files, None)
+    let by_simple_name = hotpath::measure_block!(
+        "code_index.seal.reference_index",
+        FileSymbolsByNameV1::new(files)
+    );
+    resolve_references(files, &by_simple_name, None)
 }
 
 /// The retained references a resolution pass decides: per file index, the
 /// indices of its references to decide, ascending.
 pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
 
-/// Resolves only `selection`'s references against the whole staged file set.
-/// Each reference binds exactly as [`resolve_cross_file_references`] binds
-/// it; the result is the edges those references contribute.
+/// Resolves only `selection`'s references against the whole file set whose
+/// symbols `by_simple_name` indexes. Each reference binds exactly as
+/// [`resolve_cross_file_references`] binds it; the result is the edges those
+/// references contribute.
 #[hotpath::measure(label = "code_index.seal.resolve_selected")]
 pub(crate) fn resolve_selected_cross_file_references<T>(
     files: &[T],
+    by_simple_name: &dyn SymbolsByNameV1,
     selection: &ReferenceSelectionV1,
 ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
 where
-    T: AsRef<FileGenerationArtifactsV1> + Sync,
+    T: ResolutionFileV1,
 {
-    resolve_references(files, Some(selection))
+    resolve_references(files, by_simple_name, Some(selection))
 }
 
 /// `selection`'s references, or every retained reference, as `(file index,
@@ -458,7 +404,7 @@ pub(crate) fn selected_references<'f, T>(
     selection: Option<&ReferenceSelectionV1>,
 ) -> impl Iterator<Item = (usize, &'f CodeIndexUnresolvedReferenceV1)>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let every = selection.is_none().then(|| {
         files.iter().enumerate().flat_map(|(index, file)| {
@@ -476,12 +422,45 @@ where
     every.into_iter().flatten().chain(selected)
 }
 
+/// The module facts resolution consults beside symbols by name, each built
+/// from the file set the first time a reference needs it: a file set whose
+/// references are all Rust never reads a TypeScript manifest or a Python
+/// module.
+pub(crate) struct ResolutionModulesV1<'f, T> {
+    files: &'f [T],
+    rust: RustFileIndexV1,
+    typescript: OnceLock<TypeScriptModuleIndexV1>,
+    modules: OnceLock<ModuleImportIndexV1<'f, T>>,
+}
+
+impl<'f, T: ResolutionFileV1> ResolutionModulesV1<'f, T> {
+    pub(crate) fn new(files: &'f [T]) -> Self {
+        Self {
+            files,
+            rust: RustFileIndexV1::new(files),
+            typescript: OnceLock::new(),
+            modules: OnceLock::new(),
+        }
+    }
+
+    fn typescript(&self) -> &TypeScriptModuleIndexV1 {
+        self.typescript
+            .get_or_init(|| TypeScriptModuleIndexV1::new(self.files))
+    }
+
+    fn modules(&self) -> &ModuleImportIndexV1<'f, T> {
+        self.modules
+            .get_or_init(|| ModuleImportIndexV1::new(self.files))
+    }
+}
+
 fn resolve_references<T>(
     files: &[T],
+    by_simple_name: &dyn SymbolsByNameV1,
     selection: Option<&ReferenceSelectionV1>,
 ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
 where
-    T: AsRef<FileGenerationArtifactsV1> + Sync,
+    T: ResolutionFileV1,
 {
     let workers = crate::parallelism::indexing_workers().max(1);
     #[cfg(feature = "hotpath")]
@@ -490,25 +469,10 @@ where
         hotpath::gauge!("code_index.seal.resolve.unresolved_references")
             .set(selected_references(files, selection).count() as u64);
     }
-    let (by_simple_name, rust_files, typescript_modules, modules) =
-        hotpath::measure_block!("code_index.seal.reference_index", {
-            let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
-                HashMap::new();
-            for (index, file) in files.iter().enumerate() {
-                for symbol in &file.as_ref().artifacts.symbols {
-                    by_simple_name
-                        .entry(symbol.simple_name.as_str())
-                        .or_default()
-                        .push((index, symbol));
-                }
-            }
-            (
-                by_simple_name,
-                RustFileIndexV1::new(files),
-                TypeScriptModuleIndexV1::new(files),
-                ModuleImportIndexV1::new(files),
-            )
-        });
+    let modules = hotpath::measure_block!(
+        "code_index.seal.module_index",
+        ResolutionModulesV1::new(files)
+    );
     // Every file resolves against the same immutable whole-set index, so this
     // is one ordered fan-out over the indexing pool. Concatenating each file's
     // edges in file-index order reproduces the exact sequence the serial loop
@@ -520,17 +484,9 @@ where
             Some(selection) => (selection[unit].0, Some(selection[unit].1.as_slice())),
             None => (unit, None),
         };
-        resolve_one_file_cross_file_references(
-            files,
-            &by_simple_name,
-            &rust_files,
-            &typescript_modules,
-            &modules,
-            index,
-            picks,
-        )
+        resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
     })?;
-    drop((by_simple_name, rust_files, typescript_modules, modules));
+    drop(modules);
     let mut edges = Vec::with_capacity(per_file.iter().map(Vec::len).sum());
     for file_edges in per_file {
         edges.extend(file_edges);
@@ -553,39 +509,33 @@ where
 /// `selection`, when given, limits the sites decided to its references.
 pub(crate) fn unresolved_import_calls<T>(
     files: &[T],
+    by_simple_name: &dyn SymbolsByNameV1,
     selection: Option<&ReferenceSelectionV1>,
 ) -> Vec<CodeIndexUnresolvedReferenceV1>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
+    let modules = ResolutionModulesV1::new(files);
+    let selected = || selected_references(files, selection);
     let mut unresolved =
-        ModuleImportIndexV1::new(files).call_gaps(selected_references(files, selection));
-    let typescript_modules = TypeScriptModuleIndexV1::new(files);
-    if !typescript_modules.has_sources() {
-        return unresolved;
-    }
-    let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> = HashMap::new();
-    for (index, file) in files.iter().enumerate() {
-        for symbol in &file.as_ref().artifacts.symbols {
-            by_simple_name
-                .entry(symbol.simple_name.as_str())
-                .or_default()
-                .push((index, symbol));
-        }
-    }
+        if selected().any(|(index, _)| is_module_import_language(files[index].language())) {
+            modules.modules().call_gaps(selected())
+        } else {
+            Vec::new()
+        };
     let mut receiver_gaps = HashSet::new();
-    for (index, reference) in selected_references(files, selection) {
-        let file = files[index].as_ref();
-        if !is_typescript_family(file.extraction.language.as_str())
+    for (index, reference) in selected() {
+        if !is_typescript_family(files[index].language())
             || reference.kind != RelationEdgeKindV1::Calls
             || reference.reference_name.contains("::")
         {
             continue;
         }
+        let file = files[index].as_ref();
         match typescript_import_call_outcome(
             files,
-            &by_simple_name,
-            &typescript_modules,
+            by_simple_name,
+            modules.typescript(),
             file,
             reference,
         ) {
@@ -595,7 +545,7 @@ where
             // and one site per caller and name is the whole disclosure.
             None => {
                 if let Some((_, member)) = reference.reference_name.rsplit_once('.')
-                    && by_simple_name.contains_key(member)
+                    && by_simple_name.get(member).is_some()
                     && receiver_gaps.insert((&reference.from_occurrence, member))
                 {
                     unresolved.push(reference.clone());
@@ -612,13 +562,13 @@ where
 /// module namespace. `None` when no unique local import names the callee.
 fn typescript_import_call_outcome<'a, T>(
     files: &'a [T],
-    by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+    by_simple_name: &'a dyn SymbolsByNameV1,
     typescript_modules: &TypeScriptModuleIndexV1,
     file: &FileGenerationArtifactsV1,
     reference: &CodeIndexUnresolvedReferenceV1,
 ) -> Option<ImportBindingOutcomeV1<'a>>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     if !reference.reference_name.contains('.') {
         let binding = unique_import(file, &reference.reference_name, reference.kind)?;
@@ -690,20 +640,17 @@ where
 /// serial loop decided.
 fn resolve_one_file_cross_file_references<T>(
     files: &[T],
-    by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
-    rust_files: &RustFileIndexV1,
-    typescript_modules: &TypeScriptModuleIndexV1,
-    modules: &ModuleImportIndexV1<'_>,
+    by_simple_name: &dyn SymbolsByNameV1,
+    modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     picks: Option<&[usize]>,
 ) -> Vec<CanonicalRelationEdgeV1>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     // A module-rule binding may land in the referencing file itself
     // (`Util.normalize` inside `Util`); the per-file pass never saw it.
-    let same_file_binds =
-        is_module_import_language(files[index].as_ref().extraction.language.as_str());
+    let same_file_binds = is_module_import_language(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
     let references = &files[index].as_ref().artifacts.unresolved_references;
@@ -721,15 +668,7 @@ where
         } else {
             let resolved = hotpath::measure_block!(
                 "code_index.seal.reference_candidate_lookup",
-                resolve_cross_file_reference(
-                    files,
-                    by_simple_name,
-                    rust_files,
-                    typescript_modules,
-                    modules,
-                    index,
-                    reference,
-                )
+                resolve_cross_file_reference(files, by_simple_name, modules, index, reference)
             );
             resolved_references.insert(cache_key, resolved.clone());
             resolved
@@ -768,21 +707,20 @@ type ResolvedReferenceCacheV1<'a> = HashMap<
 
 fn resolve_cross_file_reference<T>(
     files: &[T],
-    by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
-    rust: &RustFileIndexV1,
-    typescript_modules: &TypeScriptModuleIndexV1,
-    modules: &ModuleImportIndexV1<'_>,
+    by_simple_name: &dyn SymbolsByNameV1,
+    modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
 ) -> Option<(usize, Vec<SymbolOccurrenceId>)>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
+    let rust = &modules.rust;
     let file = files[index].as_ref();
     // These languages bind one exact module member through their own import
     // and package rules, never by name matching.
     if is_module_import_language(file.extraction.language.as_str()) {
-        return match modules.call_outcome(index, reference)? {
+        return match modules.modules().call_outcome(index, reference)? {
             ImportBindingOutcomeV1::Bound(target_index, symbol) => {
                 Some((target_index, vec![symbol.occurrence.clone()]))
             }
@@ -806,7 +744,7 @@ where
         && let Some(outcome) = typescript_import_call_outcome(
             files,
             by_simple_name,
-            typescript_modules,
+            modules.typescript(),
             file,
             reference,
         )
@@ -882,7 +820,7 @@ where
                 index: *candidate_index,
                 symbol,
             };
-            files[*candidate_index].as_ref().extraction.language == file.extraction.language
+            files[*candidate_index].language() == file.extraction.language.as_str()
                 && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
                 && match import {
                     None => {
@@ -904,17 +842,14 @@ where
                                     || (!is_rust
                                         && file_qualified_name_matches(
                                             &reference.reference_name,
-                                            &files[*candidate_index]
-                                                .as_ref()
-                                                .authority
-                                                .logical_path,
+                                            files[*candidate_index].logical_path(),
                                             &symbol.qualified_name,
                                         ))
                             }
                             Some(crate_path) => rust_crate_qualified_name_matches(
                                 crate_path,
                                 source_path,
-                                &files[*candidate_index].as_ref().authority.logical_path,
+                                files[*candidate_index].logical_path(),
                                 &symbol.qualified_name,
                             ),
                         };
@@ -927,7 +862,7 @@ where
                         ImportModuleKindV1::ProjectRelative => project_import_matches(
                             binding,
                             &binding.logical_path,
-                            &files[*candidate_index].as_ref().authority.logical_path,
+                            files[*candidate_index].logical_path(),
                             &symbol.qualified_name,
                         ),
                         ImportModuleKindV1::BareModule
@@ -1026,21 +961,26 @@ struct RustFileIndexV1 {
 impl RustFileIndexV1 {
     fn new<T>(files: &[T]) -> Self
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let mut modules = BTreeMap::new();
         let mut crate_roots = BTreeMap::new();
+        // Cargo manifests are found by path without scanning the set per
+        // crate root.
+        let by_path = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.logical_path(), index))
+            .collect::<HashMap<_, _>>();
         for (index, file) in files.iter().enumerate() {
-            let file = file.as_ref();
-            if file.extraction.language.as_str() != "rust" {
+            if file.language() != "rust" {
                 continue;
             }
-            let Some(source_root) = rust_source_root(&file.authority.logical_path) else {
+            let logical_path = file.logical_path();
+            let Some(source_root) = rust_source_root(logical_path) else {
                 continue;
             };
-            let Some(relative) = file
-                .authority
-                .logical_path
+            let Some(relative) = logical_path
                 .strip_prefix(source_root)
                 .and_then(|path| path.strip_prefix('/'))
             else {
@@ -1054,7 +994,7 @@ impl RustFileIndexV1 {
                 );
             }
             if relative == "lib.rs"
-                && let Some(crate_name) = rust_crate_name(files, source_root)
+                && let Some(crate_name) = rust_crate_name(files, &by_path, source_root)
             {
                 insert_unique_index(&mut crate_roots, crate_name, index);
             }
@@ -1078,25 +1018,32 @@ impl RustFileIndexV1 {
     }
 }
 
-fn rust_crate_name<T>(files: &[T], source_root: &str) -> Option<String>
+fn rust_crate_name<T>(
+    files: &[T],
+    by_path: &HashMap<&str, usize>,
+    source_root: &str,
+) -> Option<String>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
-    let manifest = Path::new(source_root)
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("Cargo.toml");
-    let manifest = manifest.to_str()?;
-    files
-        .iter()
-        .find(|file| file.as_ref().authority.logical_path == manifest)
+    // `logical_path` is always `/`-normalized, so build the manifest path
+    // with `/` instead of `Path::join`, which produces `\\` on Windows.
+    let manifest = match source_root.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/Cargo.toml"),
+        None => "Cargo.toml".to_owned(),
+    };
+    by_path
+        .get(manifest.as_str())
+        .map(|index| &files[*index])
         .and_then(|file| {
             file.as_ref().artifacts.symbols.iter().find(|symbol| {
                 symbol.simple_name == "name" && symbol.qualified_name.ends_with("::package::name")
             })
         })
         .and_then(|symbol| symbol.signature.as_deref())
-        .and_then(|signature| toml::from_str::<toml::Value>(signature).ok())
+        // A CRLF checkout leaves the pair's trailing `\r` in its signature,
+        // and bare CR is invalid TOML, so parse the trimmed fragment.
+        .and_then(|signature| toml::from_str::<toml::Value>(signature.trim_end()).ok())
         .and_then(|pair| {
             pair.get("name")
                 .and_then(toml::Value::as_str)
@@ -1128,7 +1075,7 @@ fn rust_parent_glob_import_matches<T>(
     target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let source = files[source_index].as_ref();
     source
@@ -1149,7 +1096,7 @@ where
             ImportModuleKindV1::ProjectRelative => project_import_matches(
                 binding,
                 &binding.logical_path,
-                &files[target.index].as_ref().authority.logical_path,
+                files[target.index].logical_path(),
                 &target.symbol.qualified_name,
             ),
             ImportModuleKindV1::BareModule => {
@@ -1167,7 +1114,7 @@ fn rust_bare_import_matches<T>(
     member: &str,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let mut chain = Vec::new();
     rust_bare_import_chain(files, rust, access_index, binding, member, &mut chain);
@@ -1199,7 +1146,7 @@ fn rust_qualified_path_matches<T>(
     target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     RustQualifiedWalkV1::new(files, rust, index, reference_name)
         .is_some_and(|walk| walk.matches(files, rust, target))
@@ -1225,7 +1172,7 @@ impl RustQualifiedWalkV1 {
         reference_name: &str,
     ) -> Option<Self>
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         let file = files[index].as_ref();
         let segments = reference_name.split("::").collect::<Vec<_>>();
@@ -1242,7 +1189,7 @@ impl RustQualifiedWalkV1 {
             RustPathOriginV1::InCrate => (index, false),
             RustPathOriginV1::Crate { root_index } => (root_index, true),
         };
-        let root_path = files[origin_index].as_ref().authority.logical_path.as_str();
+        let root_path = files[origin_index].logical_path();
         let chains = (0..path.len())
             .filter_map(|k| {
                 let scope_index = rust.module(root_path, &path[..k].join("/"))?;
@@ -1276,7 +1223,7 @@ impl RustQualifiedWalkV1 {
         target: RustSymbolTargetV1<'_>,
     ) -> bool
     where
-        T: AsRef<FileGenerationArtifactsV1>,
+        T: ResolutionFileV1,
     {
         self.chains
             .iter()
@@ -1417,7 +1364,7 @@ fn rust_reexport_visible<T>(
     scope_index: usize,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     if binding.is_public {
         return true;
@@ -1425,8 +1372,8 @@ where
     let Some(reexport_scope) = binding.reexport_scope.as_ref() else {
         return false;
     };
-    let access_path = files[access_index].as_ref().authority.logical_path.as_str();
-    let scope_path = files[scope_index].as_ref().authority.logical_path.as_str();
+    let access_path = files[access_index].logical_path();
+    let scope_path = files[scope_index].logical_path();
     let (Some(access_root), Some(scope_root)) =
         (rust_source_root(access_path), rust_source_root(scope_path))
     else {
@@ -1509,7 +1456,7 @@ fn rust_export_resolves_to_target<T>(
     member: &str,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let mut chain = Vec::new();
     rust_export_chain(
@@ -1546,12 +1493,12 @@ fn rust_export_chain<T>(
     visited: &mut BTreeSet<(usize, String)>,
     chain: &mut Vec<RustExportHopV1>,
 ) where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
         return;
     }
-    let scope_path = &files[scope_index].as_ref().authority.logical_path;
+    let scope_path = files[scope_index].logical_path();
     let Some(source_root) = rust_source_root(scope_path) else {
         return;
     };
@@ -1643,7 +1590,7 @@ fn rust_bare_import_chain<T>(
     member: &str,
     chain: &mut Vec<RustExportHopV1>,
 ) where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let Some(imported_name) = binding.imported_name.as_deref() else {
         return;
@@ -1659,7 +1606,7 @@ fn rust_bare_import_chain<T>(
     let scope_index = if module.is_empty() {
         root_index
     } else {
-        let root_path = &files[root_index].as_ref().authority.logical_path;
+        let root_path = files[root_index].logical_path();
         let Some(index) = rust.module(root_path, &module) else {
             return;
         };
@@ -1688,14 +1635,14 @@ fn rust_export_chain_matches<T>(
     target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
-    let target_path = &files[target.index].as_ref().authority.logical_path;
+    let target_path = files[target.index].logical_path();
     for hop in chain {
         if hop.requires_public && target.symbol.visibility != "public" {
             return false;
         }
-        let root_path = &files[hop.origin_index].as_ref().authority.logical_path;
+        let root_path = files[hop.origin_index].logical_path();
         if (target.index == hop.scope_index
             && rust_crate_qualified_name_matches(
                 &hop.qualified,
@@ -1754,7 +1701,7 @@ fn rust_project_import_resolves_to_target<T>(
     member: &str,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     let Some(imported_name) = binding.imported_name.as_deref() else {
         return false;
@@ -1764,11 +1711,11 @@ where
     else {
         return false;
     };
-    let root_path = &files[origin_index].as_ref().authority.logical_path;
+    let root_path = files[origin_index].logical_path();
     if rust_crate_qualified_name_matches(
         &format!("{qualified}{member}"),
         root_path,
-        &files[target.index].as_ref().authority.logical_path,
+        files[target.index].logical_path(),
         &target.symbol.qualified_name,
     ) {
         return true;
@@ -1956,20 +1903,19 @@ fn rust_inherent_method_owned_by_scope_type<T>(
     target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: ResolutionFileV1,
 {
     if member.is_empty() {
         return false;
     }
-    let root_path = &files[origin_index].as_ref().authority.logical_path;
+    let root_path = files[origin_index].logical_path();
     // The member's own identity settles nearly every candidate (another
     // crate, another member name) without scanning either file's rows.
-    let impl_file = files[target.index].as_ref();
     let Some(impl_owner) = rust_inherent_method_owner(
         exported_name,
         member,
         root_path,
-        &impl_file.authority.logical_path,
+        files[target.index].logical_path(),
         &target.symbol.qualified_name,
     ) else {
         return false;
@@ -1977,6 +1923,7 @@ where
     if impl_owner.rsplit("::").next() != Some(exported_name) {
         return false;
     }
+    let impl_file = files[target.index].as_ref();
     if !rust_method_belongs_to_type_impl(impl_file, target.symbol) {
         return false;
     }

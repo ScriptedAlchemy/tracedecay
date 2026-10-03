@@ -17,9 +17,8 @@ use super::*;
 use crate::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
-        CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexInterruptionV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     },
     projection::{
@@ -36,27 +35,6 @@ const BATCH_FIXTURE_SOURCE: &str = concat!(
     "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" }\n",
     "pub fn final_batch_page() -> usize { 3 }\n",
 );
-
-#[derive(Default)]
-struct TestPublicationStore;
-
-impl CodeIndexAtomicPublicationPort for TestPublicationStore {
-    fn load_active(
-        &self,
-        _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(None)
-    }
-
-    fn publish_atomically(
-        &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
-        _expected_active_generation: Option<&tracedecay_domain::CodeGenerationId>,
-        _generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        Ok(())
-    }
-}
 
 #[derive(Default)]
 struct ApplyingProjectionSink;
@@ -709,13 +687,18 @@ fn fixture_for_source_files(
             privacy_key_epoch: 7,
             max_snapshot_age_micros: None,
         },
-        TestPublicationStore,
+        super::super::MemorySealedPublicationStoreV1::default(),
         ApplyingProjectionSink,
     )
     .expect("fixture production owner opens");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
+    let generation = Arc::clone(
+        generation
+            .decoded()
+            .expect("a cold seal holds its generation"),
+    );
     let mut segments = BTreeMap::new();
     let manifest = generation
         .encode_partitioned_sealed(|request| {

@@ -682,6 +682,9 @@ fn parse_oid(value: &str) -> Result<gix::ObjectId, BoundedBackfillInterruption> 
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)
 }
 
+/// Refuses a reflog replaced or visibly rewritten between chunks. Completion
+/// is proven by the content chain re-derived from the bytes, never by an
+/// equal generation, so no change-time settledness is needed here.
 fn present_source_generation(
     path: &Path,
     metadata: &std::fs::Metadata,

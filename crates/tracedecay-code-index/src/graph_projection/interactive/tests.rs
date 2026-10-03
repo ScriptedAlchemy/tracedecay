@@ -21,6 +21,7 @@ use tracedecay_graph_db::{
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
+use crate::graph_projection::warm_clock::WarmOwner;
 use crate::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
     CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphServingWarmthV1,
@@ -1212,6 +1213,9 @@ fn with_catalog_warm_held<T: Send + 'static>(
         .build
         .lock()
         .expect("hold the catalog build gate");
+    // The held warm starts with the hold, not whenever its thread first
+    // runs, so its measured wall time covers the whole hold.
+    store.warm_clock.begin(WarmOwner::Catalog);
     let running = std::thread::spawn(during);
     std::thread::sleep(hold);
     drop(gate);
@@ -1240,13 +1244,11 @@ fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
     ));
 
     let waiting = store.clone();
-    let (outcome, waited) = with_catalog_warm_held(&store, Duration::from_secs(1), move || {
-        let started = Instant::now();
-        (
-            waiting.await_rewarm(Duration::from_secs(5)),
-            started.elapsed(),
-        )
+    let started = Instant::now();
+    let (outcome, finished) = with_catalog_warm_held(&store, Duration::from_secs(1), move || {
+        (waiting.await_rewarm(Duration::from_secs(5)), Instant::now())
     });
+    let waited = finished.duration_since(started);
 
     assert_eq!(outcome, Ok(()));
     assert!(
@@ -1277,7 +1279,7 @@ fn a_read_past_its_budget_answers_the_measured_remaining_rewarm() {
     let warming = store.clone();
     with_catalog_warm_held(&store, hold, move || {
         warming
-            .warm_interactive_catalog_with_cancellation(request())
+            .warm_interactive_catalog_with_cancellation(None, request())
             .expect("the first warm builds the catalog");
     });
     assert!(matches!(

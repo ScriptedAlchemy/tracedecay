@@ -1233,6 +1233,7 @@ mod recent_first_discovery_tests {
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
         persist_codex_history_frontier, persist_host_provider_coverage,
@@ -1249,6 +1250,8 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, "{}\n").unwrap();
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
     }
 
@@ -1862,12 +1865,15 @@ mod recent_first_discovery_tests {
         let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
         // Write the target mid-corpus: tmpfs lists newest entries first and
         // btrfs oldest first, so either end would land in the first slice.
+        // Distractor names also sort before the target so ordered enumeration
+        // (NTFS) only reaches it past the first retained slice; the loop below
+        // must then continue across calls on every platform.
         for index in 0..4_100 {
             if index == 2_050 {
                 std::fs::write(&expected, b"{}\n").unwrap();
             }
             std::fs::write(
-                directory.join(format!("rollout-distractor-{index:04}.jsonl")),
+                directory.join(format!("rollout-1999-12-31-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();
@@ -2141,6 +2147,40 @@ mod recent_first_discovery_tests {
 
         assert_ne!(replaced.next_frontier.epoch, completed.epoch);
         assert_eq!(replaced.report.paths, vec![path]);
+    }
+
+    /// An in-place rewrite keeps the inode and its generation; inside the
+    /// change-time quantum of the identity discovery recorded it keeps every
+    /// stat field too, so that identity must not prove the file unchanged.
+    #[test]
+    #[cfg(unix)]
+    fn codex_same_size_in_place_rewrite_is_redelivered() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let path = write_dated_rollout(home, ("2026", "08", "17"), "rewritten");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let mut frontier = CodexDiscoveryFrontier::initial();
+
+        for round in 0..32_u8 {
+            let completed = source
+                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .unwrap()
+                .next_frontier;
+            let original = std::fs::metadata(&path).unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.write_all(if round % 2 == 0 { b"[]\n" } else { b"{}\n" })
+                .unwrap();
+            file.set_modified(original.modified().unwrap()).unwrap();
+            drop(file);
+
+            let rewritten = source
+                .discover_transcript_paths_with_frontier(bounds, completed)
+                .unwrap();
+            assert_ne!(rewritten.next_frontier.epoch, completed.epoch);
+            assert_eq!(rewritten.report.paths, vec![path.clone()]);
+            frontier = rewritten.next_frontier;
+        }
     }
 
     /// Coverage: retained traversal across passes must visit every historical

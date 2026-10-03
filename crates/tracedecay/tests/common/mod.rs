@@ -1152,6 +1152,24 @@ pub fn spawn_tracedecay_daemon_logged(
 /// genuinely still reachable, and a real leak still fails rather than hangs.
 const PREDECESSOR_DAEMON_VACATE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The probe unlocks explicitly, so a child forked meanwhile by another test
+/// thread cannot carry the probe's own lock past it.
+#[cfg(unix)]
+fn daemon_authority_lock_held(profile_root: &Path) -> bool {
+    let Ok(lock) = fs::File::open(
+        profile_root.join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE),
+    ) else {
+        return false;
+    };
+    match lock.try_lock() {
+        Ok(()) => {
+            let _ = lock.unlock();
+            false
+        }
+        Err(error) => matches!(error, std::fs::TryLockError::WouldBlock),
+    }
+}
+
 fn spawn_tracedecay_daemon_process(
     home: &Path,
     binary: &Path,
@@ -1185,13 +1203,16 @@ fn spawn_tracedecay_daemon_process(
     // spawn again) hit on a loaded runner. Wait a bounded time for the endpoint
     // to stop accepting; a daemon that keeps accepting still fails with the
     // same refusal. The group signal in `terminate_and_reap` is what makes the
-    // endpoint go quiet; this wait only covers the kernel's leftover.
+    // endpoint go quiet; this wait only covers the kernel's leftover. The
+    // authority lock has the same tail, and `stop_managed_daemon` unlinks the
+    // socket, so only the lock shows such a predecessor's child is still alive.
     poll_until(
         Instant::now() + PREDECESSOR_DAEMON_VACATE_TIMEOUT,
         Duration::from_millis(25),
         || {
             #[cfg(unix)]
-            let live = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+            let live = std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
+                || daemon_authority_lock_held(&profile_root);
             #[cfg(not(unix))]
             let live = portable_daemon_connectable();
             (!live).then_some(())
@@ -1200,7 +1221,7 @@ fn spawn_tracedecay_daemon_process(
             #[cfg(unix)]
             {
                 format!(
-                    "refusing to replace a live test daemon at {}",
+                    "refusing to replace a live test daemon at {} or its authority lock",
                     socket_path.display()
                 )
             }
