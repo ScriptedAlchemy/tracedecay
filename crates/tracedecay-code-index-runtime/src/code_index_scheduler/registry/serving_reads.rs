@@ -868,6 +868,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
                     return Ok(Some(CodeIndexSeatWaitV1::Seated(latest)));
                 }
+                #[cfg(test)]
+                Self::wait_for_complete_seat_probe_miss_gate(root).await;
                 let mounted = self.mounted.lock().await;
                 let Some(worktree) = mounted.get(root) else {
                     return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
