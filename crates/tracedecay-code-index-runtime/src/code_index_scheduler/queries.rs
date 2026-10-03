@@ -2905,6 +2905,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                         })
                         .collect(),
                 ),
+                path_prefix: request.scope.path_prefix.as_deref(),
                 fuzzy_budget: request.fuzzy_budget,
                 lexical_profile_revision: ComponentRevision::new(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,

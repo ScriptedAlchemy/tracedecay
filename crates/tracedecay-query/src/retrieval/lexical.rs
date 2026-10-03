@@ -308,6 +308,9 @@ pub struct LexicalLaneRequest<'a> {
     pub phrases: Cow<'a, [String]>,
     pub proximities: Cow<'a, [LexicalProximityV1]>,
     pub field_filters: Cow<'a, [LexicalFieldFilterV1]>,
+    /// Applied before the candidate cap, so out-of-scope matches cannot
+    /// crowd in-scope ones out of a bounded selection.
+    pub path_prefix: Option<&'a str>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
     /// normalization versions.
     pub fuzzy_budget: u32,

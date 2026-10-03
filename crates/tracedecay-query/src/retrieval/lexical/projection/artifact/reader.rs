@@ -2098,6 +2098,7 @@ impl<'a> ArtifactQueryV1<'a> {
             &phrase_frequencies,
             &stats,
             &request.field_filters,
+            request.path_prefix,
             cap,
             control,
         )?;
@@ -2323,6 +2324,7 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         filters: &[LexicalFieldFilterV1],
+        path_prefix: Option<&str>,
         cap: usize,
         control: &dyn RetrievalExecutionControl,
     ) -> Result<(Vec<SelectedLexicalV1>, u64, u64), RetrievalPortError> {
@@ -2397,6 +2399,17 @@ impl<'a> ArtifactQueryV1<'a> {
                 let Some(upper) = admitted_score_micros(&score, filters)? else {
                     continue;
                 };
+                // ponytail: the preface has no path, so a scoped read inflates
+                // every admitted row; store the path in the preface if scoped
+                // queries over large trees get slow.
+                if path_prefix.is_some()
+                    && !tracedecay_domain::path_matches_scope(
+                        &self.row(document)?.logical_path,
+                        path_prefix,
+                    )
+                {
+                    continue;
+                }
                 eligible += 1;
                 excluded = excluded.saturating_sub(1);
                 if cap == 0 {
