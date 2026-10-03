@@ -303,11 +303,6 @@ where
                 pass.duplicates = pass.duplicates.saturating_add(1);
             }
             ReplaySettlement::Tombstone(reason) => {
-                match reason {
-                    HookReplayTombstoneReasonV1::Expired => {}
-                    HookReplayTombstoneReasonV1::BindingStale
-                    | HookReplayTombstoneReasonV1::IdentityConflict => {}
-                }
                 log_tombstone(host, &record, reason);
                 pass.tombstoned = pass.tombstoned.saturating_add(1);
             }

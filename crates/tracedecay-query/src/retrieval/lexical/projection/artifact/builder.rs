@@ -885,31 +885,10 @@ impl FinalizationWakeMetricsV1 {
     }
 
     #[inline(always)]
-    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
-        match pass {
-            PersistedFinalizationPhaseV1::Statistics => {}
-            PersistedFinalizationPhaseV1::Indexes => {}
-            PersistedFinalizationPhaseV1::Digest => {}
-        };
-    }
+    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {}
 
     #[inline(always)]
-    fn phase(&self, phase: FinalizationSectionV1) {
-        match phase {
-            FinalizationSectionV1::SourcePages => {}
-            FinalizationSectionV1::DocumentIntegrity => {}
-            FinalizationSectionV1::Rows => {}
-            FinalizationSectionV1::TermPostings => {}
-            FinalizationSectionV1::ExactPostings => {}
-            FinalizationSectionV1::NgramPostings => {}
-            FinalizationSectionV1::CloneOccurrences => {}
-            FinalizationSectionV1::CloneExactPostings => {}
-            FinalizationSectionV1::CloneBodyPayloads => {}
-            FinalizationSectionV1::CloneFingerprintPostings => {}
-            FinalizationSectionV1::FieldStatistics => {}
-            FinalizationSectionV1::Vocabulary => {}
-        };
-    }
+    fn phase(&self, phase: FinalizationSectionV1) {}
 
     #[inline(always)]
     fn probe(&self) {}
@@ -1375,7 +1354,7 @@ impl CodeLexicalArtifactBuilderV1 {
             let prepared = self.prepare_pages(pages, control)?;
             self.append_prepared_pages_inner(&prepared, control)
         })();
-        record_batch_outcome(&result);
+
         result
     }
 
@@ -1415,7 +1394,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let memory_prefix = self.largest_admissible_page_prefix(pages)?;
         if memory_prefix == 0 {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
             admit_page_batch_within_memory_budget(
                 &self.metadata,
                 self.fixed_ledger_charge_bytes,
@@ -1441,7 +1419,7 @@ impl CodeLexicalArtifactBuilderV1 {
                         .to_owned(),
                 )
             })?;
-            record_batch_prefix_limit(exceeded.limit);
+
             return Err(batch_limit(
                 exceeded.limit,
                 exceeded.required,
@@ -1457,11 +1435,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact admissible source prefix was empty".to_owned(),
             )
         })?;
-        if let Some(exceeded) = exact_limit {
-            record_batch_prefix_limit(exceeded.limit);
-        } else if memory_prefix < pages.len() {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
-        }
+
         record_prepared_batch_metrics(&prepared);
         Ok(PreparedCodeLexicalArtifactBatchV1 {
             accepted_prefix,
@@ -1574,7 +1548,7 @@ impl CodeLexicalArtifactBuilderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         let result = self.append_prepared_pages_inner(pages, control);
-        record_batch_outcome(&result);
+
         result
     }
 
@@ -1597,7 +1571,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let current = progress(&self.connection, control)?;
         if pages.is_empty() {
-            record_artifact_progress(&current);
             return Ok(current);
         }
         validate_prepared_page_batch(&current, pages)?;
@@ -1668,7 +1641,7 @@ impl CodeLexicalArtifactBuilderV1 {
                             Ok::<(), CodeLexicalArtifactErrorV1>(())
                         }
                     }?;
-                    record_batch_receipt_metrics(pages);
+
                     checkpoint(control)
                 })();
                 if let Err(error) = mutation {
@@ -1683,7 +1656,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
                 };
-                if commit.is_ok() {}
+
                 commit
             }
         })?;
@@ -1692,7 +1665,6 @@ impl CodeLexicalArtifactBuilderV1 {
         // cursor once the whole batch has committed.
         let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
 
-        record_artifact_progress(&progress);
         Ok(progress)
     }
 
@@ -6766,18 +6738,6 @@ fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
     }
 }
 
-fn record_batch_outcome(
-    result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
-) {
-    {
-        match result {
-            Ok(_) => {}
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {}
-            Err(_) => {}
-        }
-    }
-}
-
 fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     if crate::observe::observing() {
         let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
@@ -6807,15 +6767,7 @@ fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
             .flat_map(|page| &page.documents)
             .map(|document| document.term_postings.len() + document.exact_postings.len())
             .sum::<usize>();
-        let ngram_shards = pages
-            .iter()
-            .map(|page| page.ngram_shards.len())
-            .sum::<usize>();
-        let ngram_documents = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.cardinality)
-            .sum::<u64>();
+
         let ngram_bytes = pages
             .iter()
             .flat_map(|page| &page.ngram_shards)
@@ -6824,29 +6776,7 @@ fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     }
 }
 
-fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
-        let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-    }
-}
-
-fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {}
-}
-
-fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
-    {
-        match limit {
-            CodeLexicalArtifactBatchLimitV1::Memory => {}
-            CodeLexicalArtifactBatchLimitV1::PreparedRows => {}
-            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {}
-        }
-    }
-}
-
-fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
-    {}
-}
+fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {}
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,

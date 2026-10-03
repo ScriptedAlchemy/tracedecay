@@ -637,7 +637,6 @@ impl Worker {
                             .pop_front()
                             .expect("exact SQL queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            crate::observe::record_exact_sql_dispatch();
                             let started = Instant::now();
                             let connection = checkpoint.connection_mut();
                             let rows_before = connection.total_changes();
@@ -678,7 +677,6 @@ impl Worker {
                             .pop_front()
                             .expect("incremental vacuum queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            crate::observe::record_incremental_vacuum_dispatch();
                             {
                                 let _span =
                                     tracing::trace_span!("rusqlite.writer.incremental_vacuum")
@@ -867,7 +865,6 @@ impl Worker {
     }
 
     fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
-        crate::observe::record_scheduled_checkpoint_dispatch();
         let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
         let match_result = {
             let _span = tracing::trace_span!("rusqlite.writer.checkpoint").entered();
@@ -897,7 +894,7 @@ impl Worker {
             command.settle(Err(error));
             return;
         }
-        crate::observe::record_requested_checkpoint_dispatch();
+
         self.checkpoint_blockers.await_released_snapshots();
         let (snapshot_blockers, kind, authority, reply) = command.into_parts();
         let result = match kind {
@@ -1055,14 +1052,7 @@ pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
     let dequeued_at = Instant::now();
     let queue_wait_micros =
         queue_wait_micros(batch.items.iter().map(|item| item.enqueued_at), dequeued_at);
-    if let Some(first) = batch.items.first() {
-        crate::observe::record_writer_batch(
-            first.priority(),
-            u64::try_from(batch.items.len()).unwrap_or(u64::MAX),
-            batch.bytes,
-            queue_wait_micros,
-        );
-    }
+    if let Some(first) = batch.items.first() {}
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.

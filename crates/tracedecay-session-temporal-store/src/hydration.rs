@@ -15,7 +15,6 @@ use zeroize::Zeroizing;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
-use crate::support::{record_hydration_emitted_bytes, record_hydration_verified_bytes};
 use tracedecay_lcm::payload::{
     PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
 };

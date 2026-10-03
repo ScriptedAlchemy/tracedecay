@@ -22,12 +22,9 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
-        crate::observe::measure_extract_file(
-            extractor.language_name(),
-            self.source.len(),
-            || self.extract_canonical_artifact_unmeasured(extractor, report, previous),
-            crate::observe::ExtractOutputCounts::from_extract_result,
-        )
+        crate::observe::measure_extract_file(|| {
+            self.extract_canonical_artifact_unmeasured(extractor, report, previous)
+        })
     }
 
     fn extract_canonical_artifact_unmeasured(
@@ -37,9 +34,6 @@ impl RetainedParseDocument {
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
         if report.state_epoch != self.state_epoch {
-            crate::observe::record_retained_parse_abstention(
-                crate::observe::RetainedParseAbstention::StaleReport,
-            );
             return Err(ParseError::StaleReport);
         }
 
@@ -144,7 +138,6 @@ impl RetainedParseDocument {
         let extracted = self.complete_composite_reset(extractor, extracted);
         match reason {
             Some(reason) => {
-                crate::observe::record_extraction_reset(reason);
                 ParsedExtractionArtifactV1::reset(extracted.artifact, reason, self.source.len())
             }
             None => extracted,

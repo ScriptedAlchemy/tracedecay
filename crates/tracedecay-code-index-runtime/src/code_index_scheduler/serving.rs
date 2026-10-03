@@ -250,17 +250,6 @@ impl CodeIndexBuildProgressSlotStateV1 {
         let published_phase = snapshot.phase;
         self.snapshot = Some(Arc::new(snapshot));
 
-        {
-            match published_phase {
-                CodeIndexBuildPhaseV1::SourceScan => {}
-                CodeIndexBuildPhaseV1::RelationalPreparation => {}
-                CodeIndexBuildPhaseV1::BulkCommit => {}
-                CodeIndexBuildPhaseV1::IndexBuild => {}
-                CodeIndexBuildPhaseV1::Verification => {}
-                CodeIndexBuildPhaseV1::GraphPublication => {}
-                CodeIndexBuildPhaseV1::Ready => {}
-            }
-        }
         true
     }
 
@@ -2477,8 +2466,6 @@ impl LatestCodeTextGenerationV1 {
                 completed_lexical_units,
                 clone_peak_scratch_memory_bytes: None,
             });
-
-            {}
         }
         let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
             state.rates_and_eta(total_lexical_units);
@@ -2708,13 +2695,7 @@ impl LatestCodeTextGenerationV1 {
                 other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
             })?;
         let result = self.advance_text_serving_inner(maximum_work, control);
-        if matches!(&result, Err(RetrievalPortError::Cancelled)) {
-            match self.text_control.cancellation_source() {
-                Some(GenerationTextCancellationSourceV1::Shutdown) => {}
-                Some(GenerationTextCancellationSourceV1::Superseded) => {}
-                None => {}
-            }
-        }
+
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,
@@ -3236,8 +3217,6 @@ impl LatestCodeTextGenerationV1 {
             )
             .map_err(map_sealed_page_source_error)?;
 
-            let completed_lexical_units_before =
-                artifact_build.source.completed_lexical_units().ok();
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
             let mut durable_progress = None;
             let mut commit_latency_micros = None;
@@ -3369,11 +3348,6 @@ impl LatestCodeTextGenerationV1 {
                             u64::try_from(clone_scratch_bytes).unwrap_or(u64::MAX),
                         );
 
-                    if let (Some(before), Ok(after)) = (
-                        completed_lexical_units_before,
-                        artifact_build.source.completed_lexical_units(),
-                    ) {}
-                    if let Some(latency_micros) = commit_latency_micros {}
                     remaining = remaining.checked_sub(page_count).ok_or_else(|| {
                         RetrievalPortError::Contract(
                             "accepted text-artifact batch exceeded its work budget".to_owned(),

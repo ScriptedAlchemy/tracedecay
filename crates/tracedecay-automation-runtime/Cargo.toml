@@ -25,7 +25,6 @@ cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 getrandom = "0.2"
 hex = "0.4"
-metrics.workspace = true
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "std",

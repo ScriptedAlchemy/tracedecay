@@ -34,7 +34,6 @@ gix = { version = "=0.87.1", default-features = false, features = [
     "sha256",
     "status",
 ] }
-metrics.workspace = true
 rayon = "1"
 same-file = "1"
 serde = { version = "1", features = ["derive"] }

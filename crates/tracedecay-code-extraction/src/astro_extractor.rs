@@ -81,15 +81,10 @@ impl LanguageExtractor for AstroExtractor {
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let masked = Self::mask_non_frontmatter(source);
-                TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
-            },
-            crate::observe::ExtractOutputCounts::from_artifact,
-        )
+        crate::observe::measure_extract_file(|| {
+            let masked = Self::mask_non_frontmatter(source);
+            TypeScriptExtractor::extract_typescript_artifact(file_path, &masked)
+        })
     }
 
     /// The retained document already holds this extractor's mask as its parse

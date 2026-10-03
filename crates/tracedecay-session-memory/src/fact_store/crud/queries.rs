@@ -1050,7 +1050,7 @@ impl DatabaseFactStore<'_> {
         })
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        if outcome.is_err() {}
+
         outcome
     }
 }

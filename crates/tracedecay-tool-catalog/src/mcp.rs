@@ -268,7 +268,7 @@ impl McpDispatchCatalogV1 {
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
         let contract = self.contracts.get(tool_name);
-        crate::observe::mcp_contract_lookup(contract.is_some());
+
         contract
     }
 

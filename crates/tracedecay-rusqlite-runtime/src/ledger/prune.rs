@@ -98,6 +98,6 @@ pub(super) fn prune_superseded(
             MAX_PRUNED_ROWS_PER_COMMIT,
         ],
     )?;
-    crate::observe::record_ledger_pruned_rows(u64::try_from(pruned).unwrap_or(u64::MAX));
+
     Ok(pruned)
 }

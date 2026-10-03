@@ -412,7 +412,7 @@ async fn process_candidate(
             bounded.bytes_scanned,
         ));
     }
-    observe_session_outcome(&disposition, response.summary_nodes_created);
+
     Ok(session_result(
         candidate,
         disposition,
@@ -618,21 +618,6 @@ fn unix_millis() -> Result<i64, LcmError> {
 fn duration_millis(duration: Duration) -> Result<i64, LcmError> {
     i64::try_from(duration.as_millis())
         .map_err(|_| LcmError::Db("LCM convergence retry timestamp overflow".to_string()))
-}
-
-fn observe_session_outcome(
-    disposition: &LcmSummaryConvergenceDisposition,
-    summary_nodes_created: usize,
-) {
-    if summary_nodes_created > 0 {}
-    match disposition {
-        LcmSummaryConvergenceDisposition::Preparing
-        | LcmSummaryConvergenceDisposition::Summarized => {}
-        LcmSummaryConvergenceDisposition::Current => {}
-        LcmSummaryConvergenceDisposition::Pending { .. } => {}
-        LcmSummaryConvergenceDisposition::Retryable { .. } => {}
-        LcmSummaryConvergenceDisposition::Permanent { .. } => {}
-    }
 }
 
 #[cfg(test)]

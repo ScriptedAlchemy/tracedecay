@@ -41,12 +41,6 @@ pub(crate) fn record_status_class(status: StatusCode) {
 pub(crate) fn observe_response(response: &Response) {
     {
         record_status_class(response.status());
-        if let Some(len) = response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-        {}
     }
 }
 

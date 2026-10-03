@@ -192,7 +192,7 @@ fn publish_pages<T: Serialize + Sync>(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<Vec<PartitionedIndexSegmentDescriptorV1>, CodeIndexProductionErrorV1> {
-    let encoded = collect_bounded_ordered(pages, |page, _worker| encode_segment(page))?;
+    let encoded = collect_bounded_ordered(pages, |page| encode_segment(page))?;
     let mut descriptors = Vec::with_capacity(encoded.len());
     for (descriptor, bytes) in encoded {
         publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {

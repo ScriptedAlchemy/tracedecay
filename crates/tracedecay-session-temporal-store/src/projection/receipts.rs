@@ -251,10 +251,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
         let anchor_json = row
             .get::<String>(1)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        record_assertion_history_row(
-            u64::try_from(observation_json.len().saturating_add(anchor_json.len()))
-                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
-        );
+
         let observation: tracedecay_domain::DurableObservationV1 =
             serde_json::from_str(&observation_json)
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
@@ -1024,10 +1021,7 @@ async fn fold_coverage_rows(
                     row.get::<i64>(2)
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                 );
-                record_coverage_row(
-                    u64::try_from(encoded.len())
-                        .map_err(|error| storage(PERSIST_OPERATION, error))?,
-                );
+
                 match rows {
                     CoverageRows::Superseded => digest.remove(encoded.as_bytes())?,
                     CoverageRows::Visible | CoverageRows::Introduced => {
@@ -1210,16 +1204,6 @@ pub(crate) async fn base_projection_coverage(
         current: component(10)?,
         fts: component(12)?,
     })
-}
-
-#[inline(always)]
-fn record_assertion_history_row(bytes: u64) {
-    {}
-}
-
-#[inline(always)]
-fn record_coverage_row(bytes: u64) {
-    {}
 }
 
 fn copy_encoding(copy: &LogicalCopyRelation) -> SessionStoreResult<Vec<u8>> {

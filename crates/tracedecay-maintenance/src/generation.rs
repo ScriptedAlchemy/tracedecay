@@ -140,7 +140,6 @@ fn finalize_generation_outcome(
     if cancellation.is_cancelled() {
         MaintenanceTickOutcome::Retry
     } else {
-        if matches!(outcome, MaintenanceTickOutcome::Retry) {}
         outcome
     }
 }

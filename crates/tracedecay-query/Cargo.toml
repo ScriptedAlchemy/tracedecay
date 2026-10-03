@@ -16,7 +16,6 @@ fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"]
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"
 hmac = "0.13.0"
-metrics.workspace = true
 rayon = "1"
 roaring = { version = "=0.11.4", default-features = false }
 # Lexical artifact finalization installs a SQLite progress_handler, and

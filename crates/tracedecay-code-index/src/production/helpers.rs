@@ -464,7 +464,6 @@ where
 {
     let workers = crate::parallelism::indexing_workers().max(1);
 
-    if crate::observe::observing() {}
     let modules = {
         let _span = tracing::trace_span!("code_index.seal.module_index").entered();
         ResolutionModulesV1::new(files)

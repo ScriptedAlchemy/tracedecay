@@ -1121,9 +1121,7 @@ impl GraphDbRegistry {
                 }
             }
         };
-        if matches!(open_mode, OwnerOpenMode::Eager) {
-        } else {
-        }
+
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
         // has overwritten it.

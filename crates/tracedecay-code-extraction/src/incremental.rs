@@ -379,7 +379,6 @@ impl RetainedParseDocument {
         }
         let (language, mut parser) = crate::observe::measure_language(|| {
             let language = ts_provider::try_language(&grammar_key).map_err(|_| {
-                crate::observe::record_grammar_lookup_miss();
                 ParseError::UnsupportedLanguage {
                     language_id: language_id.clone(),
                 }
@@ -388,8 +387,7 @@ impl RetainedParseDocument {
             Ok::<_, ParseError>((language, parser))
         })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
-        let (tree, elapsed) =
-            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits, control)?;
+        let (tree, elapsed) = parse_with_deadline(&mut parser, parse_text, None, limits, control)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -488,32 +486,22 @@ impl RetainedParseDocument {
         control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
-            crate::observe::record_retained_parse_abstention(
-                crate::observe::RetainedParseAbstention::IdentityMismatch,
-            );
             return Err(ParseError::IdentityMismatch);
         }
         ensure_source_bound(&new_source, self.limits)?;
         if let Some(parsed) = new_parsed_source.as_deref() {
             validate_prepared_source(&new_source, parsed)?;
         }
-        validate_edits(self.source.len(), new_source.len(), edits).inspect_err(|_| {
-            crate::observe::record_retained_parse_abstention(
-                crate::observe::RetainedParseAbstention::InvalidEdit,
-            )
-        })?;
+        validate_edits(self.source.len(), new_source.len(), edits)?;
         if edits.is_empty() {
             if self.source != new_source || self.parsed_source != new_parsed_source {
-                crate::observe::record_retained_parse_abstention(
-                    crate::observe::RetainedParseAbstention::InvalidEdit,
-                );
                 return Err(ParseError::InvalidEdit {
                     detail: "an empty edit batch changed source bytes".to_owned(),
                 });
             }
             self.identity = next_identity;
             self.state_epoch = self.state_epoch.saturating_add(1);
-            crate::observe::record_retained_parse_reuse(ParseReuse::Noop);
+
             return Ok(ParseReport {
                 reuse: ParseReuse::Noop,
                 completeness: completeness_for(&self.tree, None, None),
@@ -542,7 +530,6 @@ impl RetainedParseDocument {
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
-            &self.language_id,
             &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             Some(&edited_tree),
@@ -670,9 +657,6 @@ impl RetainedParseDocument {
         control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
-            crate::observe::record_retained_parse_abstention(
-                crate::observe::RetainedParseAbstention::IdentityMismatch,
-            );
             return Err(ParseError::IdentityMismatch);
         }
         ensure_source_bound(&new_source, self.limits)?;
@@ -681,7 +665,6 @@ impl RetainedParseDocument {
         }
         let parse_text = new_parsed_source.as_deref().unwrap_or(&new_source);
         let (new_tree, elapsed) = parse_with_deadline(
-            &self.language_id,
             &mut parser_for(&self.language_id, &self.language)?,
             parse_text,
             None,
@@ -724,21 +707,17 @@ impl RetainedParseDocument {
 
 fn parser_for(language_id: &str, language: &Language) -> Result<Parser, ParseError> {
     let mut parser = Parser::new();
-    parser.set_language(language).map_err(|error| {
-        crate::observe::record_grammar_rejected();
-        ParseError::GrammarRejected {
+    parser
+        .set_language(language)
+        .map_err(|error| ParseError::GrammarRejected {
             language_id: language_id.to_owned(),
             detail: error.to_string(),
-        }
-    })?;
+        })?;
     Ok(parser)
 }
 
 fn ensure_source_bound(source: &str, limits: ParseLimits) -> Result<(), ParseError> {
     if source.len() > limits.max_source_bytes {
-        crate::observe::record_retained_parse_abstention(
-            crate::observe::RetainedParseAbstention::SourceTooLarge,
-        );
         return Err(ParseError::SourceTooLarge {
             size: source.len(),
             limit: limits.max_source_bytes,
@@ -754,32 +733,21 @@ fn validate_prepared_source(source: &str, prepared: &str) -> Result<(), ParseErr
             .zip(prepared.bytes())
             .all(|(original, parsed)| (original == b'\n') == (parsed == b'\n'));
     if !same_shape {
-        crate::observe::record_retained_parse_abstention(
-            crate::observe::RetainedParseAbstention::PreparedSourceMismatch,
-        );
         return Err(ParseError::PreparedSourceShapeMismatch);
     }
     Ok(())
 }
 
 fn parse_with_deadline(
-    language_id: &str,
     parser: &mut Parser,
     source: &str,
     old_tree: Option<&Tree>,
     limits: ParseLimits,
     control: Option<&dyn Fn() -> bool>,
 ) -> Result<(Tree, Duration), ParseError> {
-    crate::observe::measure_parse_file(
-        language_id,
-        source.len(),
-        || parse_with_deadline_unmeasured(parser, source, old_tree, limits, control),
-        |result| match result {
-            Ok((tree, _)) => crate::observe::ParseFileOutcome::from_parsed_root(tree.root_node()),
-            Err(ParseError::TimedOut { .. }) => crate::observe::ParseFileOutcome::TimedOut,
-            Err(_) => crate::observe::ParseFileOutcome::NoTree,
-        },
-    )
+    crate::observe::measure_parse_file(|| {
+        parse_with_deadline_unmeasured(parser, source, old_tree, limits, control)
+    })
 }
 
 fn parse_with_deadline_unmeasured(
@@ -1012,7 +980,6 @@ fn report_for(
     max_changed_ranges: usize,
     state_epoch: u64,
 ) -> ParseReport {
-    crate::observe::record_retained_parse_reuse(reuse);
     let total_ranges = changed_ranges.len();
     let total_extraction_ranges = extraction_ranges.len();
     let changed_truncated = (total_ranges > max_changed_ranges).then_some(total_ranges);

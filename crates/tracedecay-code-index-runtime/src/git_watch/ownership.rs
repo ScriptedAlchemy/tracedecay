@@ -264,7 +264,7 @@ pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
             retired.push(state);
         }
     }
-    if !retired.is_empty() {}
+
     drop(projects);
     for state in retired {
         join_retired_repository_state(&state).await;

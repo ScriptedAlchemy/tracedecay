@@ -35,7 +35,7 @@ impl DaemonNativeWorktreeAuthority {
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
         let removal = self.remove_cleanup_checked(request, scope_set, cancellation);
-        record_worktree_removal_outcome(&removal);
+
         removal
     }
 
@@ -173,7 +173,7 @@ impl DaemonNativeWorktreeAuthority {
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         let reconciliation = self.reconcile_cleanup_checked(request, scope_set, cancellation);
-        record_worktree_reconciliation_outcome(&reconciliation);
+
         reconciliation
     }
 
@@ -483,41 +483,6 @@ impl DaemonNativeWorktreeAuthority {
                 receipt,
             )
             .map_err(removal_store_error)
-    }
-}
-
-/// Tallies one durable worktree removal against its exact typed outcome. The
-/// outcome set is the closed [`WorktreeCleanupRemovalV1`] enum plus one
-/// contract-error bucket, so every gauge key stays compile-time static and
-/// fail-closed outcomes are recorded alongside removals.
-fn record_worktree_removal_outcome(
-    removal: &Result<WorktreeCleanupRemovalV1, WorktreeContractError>,
-) {
-    match removal {
-        Ok(WorktreeCleanupRemovalV1::Removed { .. }) => {}
-        Ok(WorktreeCleanupRemovalV1::AlreadyRemoved { .. }) => {}
-        Ok(WorktreeCleanupRemovalV1::Denied) => {}
-        Ok(WorktreeCleanupRemovalV1::Stale) => {}
-        Ok(WorktreeCleanupRemovalV1::DurabilityUncertain) => {}
-        Ok(WorktreeCleanupRemovalV1::Unavailable) => {}
-        Err(_) => {}
-    }
-}
-
-/// Tallies one worktree cleanup reconciliation against its exact typed
-/// outcome, mirroring [`record_worktree_removal_outcome`] for the recovery
-/// path.
-fn record_worktree_reconciliation_outcome(
-    reconciliation: &Result<WorktreeCleanupReconciliationV1, WorktreeContractError>,
-) {
-    match reconciliation {
-        Ok(WorktreeCleanupReconciliationV1::Removed { .. }) => {}
-        Ok(WorktreeCleanupReconciliationV1::StillPresent) => {}
-        Ok(WorktreeCleanupReconciliationV1::DurabilityUncertain) => {}
-        Ok(WorktreeCleanupReconciliationV1::Stale) => {}
-        Ok(WorktreeCleanupReconciliationV1::Denied) => {}
-        Ok(WorktreeCleanupReconciliationV1::Unavailable) => {}
-        Err(_) => {}
     }
 }
 

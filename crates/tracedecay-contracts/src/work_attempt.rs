@@ -1129,43 +1129,9 @@ where
                 evidence,
             )
             .map_err(storage_problem)?;
-        observe_attempt_state_entered(previous, next);
+
         Ok(())
     }
-}
-
-/// Counts every durably committed attempt state entry on a bounded static
-/// gauge key, so failed, timed-out, cancelled, and recovery-fenced attempts
-/// are recorded with the same weight as successes. The long-lived attempt
-/// wall clock stays with the daemon's `future = true` run span; this is the
-/// per-transition decision record the flat aggregation cannot infer from
-/// entry-point call counts alone.
-fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1) {
-    {
-        if previous.state() == next.state() {
-            return;
-        }
-        let entered = match next.state() {
-            WorkAttemptStateV1::Leased => "application.work.attempt.state.leased",
-            WorkAttemptStateV1::Running => "application.work.attempt.state.running",
-            WorkAttemptStateV1::CancellationRequested => {
-                "application.work.attempt.state.cancellation_requested"
-            }
-            WorkAttemptStateV1::CancellationAcknowledged => {
-                "application.work.attempt.state.cancellation_acknowledged"
-            }
-            WorkAttemptStateV1::CancellationEscalated => {
-                "application.work.attempt.state.cancellation_escalated"
-            }
-            WorkAttemptStateV1::RecoveryRequired => {
-                "application.work.attempt.state.recovery_required"
-            }
-            WorkAttemptStateV1::Succeeded => "application.work.attempt.state.succeeded",
-            WorkAttemptStateV1::Failed => "application.work.attempt.state.failed",
-            WorkAttemptStateV1::TimedOut => "application.work.attempt.state.timed_out",
-            WorkAttemptStateV1::Cancelled => "application.work.attempt.state.cancelled",
-        };
-    };
 }
 
 /// Refuses a caller-provided execution snapshot that does not agree with the

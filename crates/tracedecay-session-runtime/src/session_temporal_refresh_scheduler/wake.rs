@@ -214,13 +214,13 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn take_dirty(&self) -> bool {
         let dirty = self.dirty.swap(false, Ordering::AcqRel);
-        if dirty {}
+
         dirty
     }
 
     pub fn take_historical_dirty(&self) -> bool {
         let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
-        if dirty {}
+
         dirty
     }
 
@@ -346,12 +346,12 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn requeue_projection(&self) {
-        if !self.dirty.swap(true, Ordering::AcqRel) {}
+        self.dirty.swap(true, Ordering::AcqRel);
         self.mark_converging();
     }
 
     pub fn wake_history(&self) {
-        if !self.historical_dirty.swap(true, Ordering::AcqRel) {}
+        self.historical_dirty.swap(true, Ordering::AcqRel);
         self.mark_converging();
         self.wake.notify_one();
     }
@@ -394,11 +394,11 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn mark_worker_busy(&self) {
-        if !self.busy.swap(true, Ordering::AcqRel) {}
+        self.busy.swap(true, Ordering::AcqRel);
     }
 
     pub fn mark_worker_idle(&self) {
-        if self.busy.swap(false, Ordering::AcqRel) {}
+        self.busy.swap(false, Ordering::AcqRel);
     }
 
     pub fn clear_worker_instrumentation(&self) {
@@ -431,7 +431,7 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn update_history_retry_state(&self, pending: bool) {
-        if self.history_retry_pending.swap(pending, Ordering::AcqRel) != pending {}
+        self.history_retry_pending.swap(pending, Ordering::AcqRel);
     }
 
     pub fn mark_running(&self) {
@@ -461,13 +461,6 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
-        match outcome {
-            SessionHistoricalIngestOutcome::Complete => {}
-            SessionHistoricalIngestOutcome::Pending { .. } => {}
-            SessionHistoricalIngestOutcome::Retryable { .. } => {}
-            SessionHistoricalIngestOutcome::Blocked { .. } => {}
-            SessionHistoricalIngestOutcome::Cancelled => {}
-        }
         let state = match outcome {
             SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
             SessionHistoricalIngestOutcome::Pending { .. } => {
@@ -530,7 +523,7 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if telemetry.depths_published {}
+
         telemetry.durable_backlog = backlog;
     }
 
@@ -546,7 +539,6 @@ impl SessionTemporalRefreshWakeState {
             let micros = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
             telemetry.last_progress_at_unix_micros = Some(micros);
         }
-        if telemetry.depths_published {}
     }
 
     fn observe_queued_backlog(&self, backlog: usize) {
@@ -554,7 +546,7 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if telemetry.depths_published {}
+
         telemetry.queued_backlog = backlog;
     }
 

@@ -920,7 +920,7 @@ impl DaemonGitHubStackRuntimeV1 {
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
         let outcome = self.preflight_via_circuit(request, cancellation);
-        record_stack_preflight_outcome(&outcome);
+
         outcome
     }
 
@@ -1188,26 +1188,6 @@ impl Drop for DaemonGitHubStackRuntimeV1 {
         {
             task.abort();
         }
-    }
-}
-
-/// Tallies one GitHub-stack preflight against its exact typed outcome. The
-/// outcome set is the closed [`NativeIntegrationPreflightOutcomeV1`] enum plus
-/// one coordinator-error bucket, so every gauge key stays compile-time static
-/// and fail-closed dispositions are recorded alongside previews.
-fn record_stack_preflight_outcome(
-    outcome: &Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
-) {
-    match outcome {
-        Ok(NativeIntegrationPreflightOutcomeV1::Preview(_)) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::Partial) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::Stale) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::Denied) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::Unavailable) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::ResetRequired) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::DurabilityUncertain) => {}
-        Ok(NativeIntegrationPreflightOutcomeV1::Cancelled) => {}
-        Err(_) => {}
     }
 }
 

@@ -171,7 +171,7 @@ fn normalize_codex_observation_inner(
         range,
         location,
     );
-    if envelope.is_err() {}
+
     envelope
 }
 

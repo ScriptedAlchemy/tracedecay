@@ -9,7 +9,6 @@ description = "Generation-pinned verified code-graph queries and code-index-back
 include = ["/src/**"]
 
 [dependencies]
-metrics.workspace = true
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "process"] }

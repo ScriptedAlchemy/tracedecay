@@ -517,7 +517,6 @@ impl GraphLayeredRowSpill {
         row_sum.merge(delta.row_sum());
         let expected_recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
 
-        {}
         Ok(LayeredGraphGeneration {
             identity,
             delta,

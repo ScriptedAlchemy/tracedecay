@@ -1874,7 +1874,7 @@ fn open_validated_graph(
     }?;
     let engine_elapsed_ms = engine_started.elapsed().as_millis();
     let identity = ContainerIdentity::from_engine(&database);
-    crate::recovery::record_open_corpus_gauges(&database);
+
     tracing::info!(
         event = "graph_engine_opened",
         site = site.as_str(),

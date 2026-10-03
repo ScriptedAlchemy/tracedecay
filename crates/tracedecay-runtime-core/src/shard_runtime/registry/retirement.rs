@@ -694,7 +694,7 @@ impl StoreRuntimeRegistry {
                 }),
             );
         }
-        if !pending.is_empty() {}
+
         StoreRuntimeRetirementResult::Reserved(StoreRuntimeRetirementReservation {
             registry: self.clone(),
             pending,
@@ -877,7 +877,7 @@ impl StoreRuntimeRetirementReservation {
         let count = self.pending.len();
         let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
-        if count > 0 {}
+
         Ok(targets)
     }
 
@@ -896,9 +896,7 @@ impl StoreRuntimeRetirementReservation {
         if let Some(message) = self.registry.begin_retirement_commit(&mut self.pending)? {
             let pending = std::mem::take(&mut self.pending);
             self.armed = false;
-            if !pending.is_empty() {
-                let count = pending.len() as f64;
-            }
+
             let mut outcomes = Vec::with_capacity(pending.len());
             for mut retirement in pending {
                 let target = retirement.target.outcome_target();
@@ -918,9 +916,6 @@ impl StoreRuntimeRetirementReservation {
         }
         let pending = std::mem::take(&mut self.pending);
         self.armed = false;
-        if !pending.is_empty() {
-            let count = pending.len() as f64;
-        }
 
         let mut outcomes = Vec::with_capacity(pending.len());
         for mut retirement in pending {
@@ -1008,7 +1003,6 @@ impl Drop for StoreRuntimeRetirementReservation {
             let count = self.pending.len();
             let _ = self.registry.restore_retiring_batch(&mut self.pending);
             self.armed = false;
-            if count > 0 {}
         }
     }
 }

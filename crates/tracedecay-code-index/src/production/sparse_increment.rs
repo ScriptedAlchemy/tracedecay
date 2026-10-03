@@ -504,7 +504,7 @@ impl SparseBuildV1<'_> {
         rows: &[&'s SanitizedCodeFileV1],
         manifest: &CodeGenerationManifestV1,
     ) -> Result<Vec<EditedFileV1<'s>>, CodeIndexProductionErrorV1> {
-        let extracted = collect_bounded_ordered(rows, |file, worker| {
+        let extracted = collect_bounded_ordered(rows, |file| {
             lexical_page_source::checkpoint(self.control)?;
             let before = parent.decode_parent_file(&file.logical_path)?;
             let (reuse_key, after, clone_stats) = extract_file(
@@ -522,7 +522,6 @@ impl SparseBuildV1<'_> {
                 Some(&before.artifacts.clone_bodies),
                 self.captured_files,
                 self.control,
-                worker,
             )?;
             let stale_invalidations = before.stale_clone_bindings(&after);
             Ok::<_, CodeIndexProductionErrorV1>((

@@ -231,7 +231,7 @@ where
                 event,
             })?
             .into_projection();
-        observe_run_status_entered(&projection);
+
         Ok(projection)
     }
 
@@ -255,26 +255,8 @@ where
                 event,
             })?
             .into_projection();
-        observe_run_status_entered(&next);
-        Ok(next)
-    }
-}
 
-/// Counts every durably appended run transition on a bounded static gauge
-/// key for the status it entered, so failed and cancelled runs are recorded
-/// with the same weight as completed ones. The run's wall lifetime spans
-/// daemon restarts through the journal, so a per-transition counter, not an
-/// in-process RAII lifetime, is the truthful application-layer record.
-fn observe_run_status_entered(projection: &WorkflowRunProjection) {
-    {
-        let entered = match projection.status() {
-            WorkflowRunStatus::Running => "application.workflow.run.status.running",
-            WorkflowRunStatus::Paused => "application.workflow.run.status.paused",
-            WorkflowRunStatus::Cancelling => "application.workflow.run.status.cancelling",
-            WorkflowRunStatus::Completed => "application.workflow.run.status.completed",
-            WorkflowRunStatus::Failed => "application.workflow.run.status.failed",
-            WorkflowRunStatus::Cancelled => "application.workflow.run.status.cancelled",
-        };
+        Ok(next)
     }
 }
 

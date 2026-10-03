@@ -89,73 +89,7 @@ impl Drop for DurationGuard {
     fn drop(&mut self) {
         {
             let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            match self.kind {
-                DurationKind::BackendStartup => {}
-                DurationKind::Run => {}
-            }
         }
-    }
-}
-
-/// Counts one constructed run terminal per status. Failed and skipped
-/// terminals are counted alongside successes because a success-only counter
-/// hides exactly the waste an automation stall/skip diagnosis needs.
-#[inline]
-pub(crate) fn observe_run_terminal(_status: AutomationRunStatus) {
-    {
-        match _status {
-            AutomationRunStatus::Succeeded => {}
-            AutomationRunStatus::Failed => {}
-            AutomationRunStatus::Skipped => {}
-            // Non-terminal statuses never reach terminal-record construction.
-            AutomationRunStatus::Queued | AutomationRunStatus::Running => {}
-        }
-    }
-}
-
-/// Maps the closed skip vocabulary onto a bounded static counter family.
-/// A new variant fails compilation until it chooses a counter.
-fn count_skip_reason(reason: AutomationSkipReasonV1) {
-    match reason {
-        AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {}
-        AutomationSkipReasonV1::SchedulerCooldownActive => {}
-        AutomationSkipReasonV1::SchedulerIntervalNotElapsed
-        | AutomationSkipReasonV1::SchedulerCronNotDue
-        | AutomationSkipReasonV1::SchedulerIdleWindowActive
-        | AutomationSkipReasonV1::SchedulerScheduleManual
-        | AutomationSkipReasonV1::SchedulerPaused => {}
-        AutomationSkipReasonV1::NoNewSessionActivity => {}
-        AutomationSkipReasonV1::AutomationDisabled
-        | AutomationSkipReasonV1::DelegatedHostMode
-        | AutomationSkipReasonV1::BackendDisabled
-        | AutomationSkipReasonV1::TaskNotSchedulable
-        | AutomationSkipReasonV1::MemoryCuratorDisabled
-        | AutomationSkipReasonV1::SessionReflectorDisabled
-        | AutomationSkipReasonV1::SkillWriterDisabled
-        | AutomationSkipReasonV1::CombinedReviewDisabled
-        | AutomationSkipReasonV1::UserJobDisabled
-        | AutomationSkipReasonV1::JobCommandsDisabled => {}
-        AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed
-        | AutomationSkipReasonV1::BackendIdentitySuppressed
-        | AutomationSkipReasonV1::SchedulerNonRetryableFailure => {}
-        AutomationSkipReasonV1::SchedulerHistoryInvalid
-        | AutomationSkipReasonV1::SchedulerScheduleInvalid => {}
-        AutomationSkipReasonV1::SimilarityAuthorityUnavailable
-        | AutomationSkipReasonV1::PartialCoverageNoCandidates
-        | AutomationSkipReasonV1::NothingToReview
-        | AutomationSkipReasonV1::SessionEvidenceFilterUnavailable
-        | AutomationSkipReasonV1::SessionEvidenceRetrievalUnavailable
-        | AutomationSkipReasonV1::SessionEvidenceUnavailable
-        | AutomationSkipReasonV1::SessionEvidencePartial
-        | AutomationSkipReasonV1::SessionEvidenceStale
-        | AutomationSkipReasonV1::SessionEvidenceDenied
-        | AutomationSkipReasonV1::SessionEvidenceLocked
-        | AutomationSkipReasonV1::SessionEvidenceResetRequired
-        | AutomationSkipReasonV1::SessionCursorManifestLimitExceeded
-        | AutomationSkipReasonV1::SessionEvidenceBudgetExhausted
-        | AutomationSkipReasonV1::SessionEvidenceTimedOut
-        | AutomationSkipReasonV1::SessionEvidenceCancelled
-        | AutomationSkipReasonV1::NoSessionEvidence => {}
     }
 }
 
@@ -171,7 +105,6 @@ pub(crate) fn observe_due() {
 #[inline]
 pub(crate) fn observe_skip_reason(reason: AutomationSkipReasonV1) {
     {
-        count_skip_reason(reason);
         match reason {
             AutomationSkipReasonV1::SchedulerLockActive | AutomationSkipReasonV1::JobLockActive => {
                 tracing::trace!(name: "automation.schedule_state", value = ?STATE_QUEUED);

@@ -259,10 +259,6 @@ pub fn finish_synchronous_hook(
         deadline_exceeded,
     );
 
-    {
-        if deadline_exceeded {}
-    }
-
     Ok(HookSynchronousResultV1 {
         receipt: HookAdmissionReceiptV1 {
             event_id: envelope.event_id,

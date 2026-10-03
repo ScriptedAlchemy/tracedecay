@@ -73,7 +73,7 @@ pub fn normalize_observation(
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let envelope = normalize_pi_entry(native, session_id, range);
-    if envelope.is_err() {}
+
     envelope
 }
 

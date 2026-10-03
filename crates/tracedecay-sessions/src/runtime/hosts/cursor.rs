@@ -238,7 +238,7 @@ fn admit_cursor_jsonl_observations<'a>(
                         parent_session_id,
                         agent_id,
                     );
-                    record_dispatch_scan_gauges(receipt);
+
                     model
                 })
             })

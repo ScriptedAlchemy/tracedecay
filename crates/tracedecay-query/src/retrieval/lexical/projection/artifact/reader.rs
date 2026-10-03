@@ -1927,11 +1927,6 @@ impl NgramListBudgetV1 {
             self.observed_bytes = self.observed_bytes.saturating_add(encoded_bytes as u64);
         }
     }
-
-    #[inline(always)]
-    fn report(&self) {
-        {}
-    }
 }
 
 fn ngram_bitmap_candidates(
@@ -2008,7 +2003,7 @@ fn ngram_bitmap_candidates(
             break;
         }
     }
-    budget.report();
+
     Ok(candidates.unwrap_or_default())
 }
 
@@ -3636,7 +3631,6 @@ fn configure_reader_window(
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
 
-    {}
     Ok(page_cache_bytes)
 }
 

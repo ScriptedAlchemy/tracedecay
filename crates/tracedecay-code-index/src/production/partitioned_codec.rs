@@ -1425,7 +1425,7 @@ fn decode_file_evidence(
     let mut buffers =
         vec![Vec::new(); CodeIndexPublishedGenerationV1::partitioned_decode_window_files()];
     let mut restored = FileEvidenceV1::default();
-    for lineage in collect_bounded_ordered(&without_evidence, |file, _worker| {
+    for lineage in collect_bounded_ordered(&without_evidence, |file| {
         identity_lineage(
             file,
             lineage_prior_generation,
@@ -1457,7 +1457,7 @@ fn decode_file_evidence(
             .zip(&buffers)
             .map(|((descriptor, file), bytes)| (descriptor, file, bytes.as_slice()))
             .collect::<Vec<_>>();
-        let expanded = collect_bounded_ordered(&segments, |(descriptor, file, bytes), _worker| {
+        let expanded = collect_bounded_ordered(&segments, |(descriptor, file, bytes)| {
             decode_file_evidence_segment(descriptor, bytes)?.expand(
                 file,
                 &present_files,
@@ -2085,7 +2085,7 @@ fn decode_segment_window(
     scope: &FileScopeIdentityV1,
 ) -> Result<Vec<PersistedFileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
     let window = descriptors.iter().zip(segments).collect::<Vec<_>>();
-    collect_bounded_ordered(&window, |(descriptor, segment), _worker| {
+    collect_bounded_ordered(&window, |(descriptor, segment)| {
         let mut restored = Vec::new();
         decode_file_segment(
             descriptor,
@@ -2515,7 +2515,7 @@ impl CodeIndexPublishedGenerationV1 {
         for window in self.files.chunks(window_files) {
             let plans = {
                 let _span = tracing::trace_span!("code_index.sealed_encode.file_window").entered();
-                collect_bounded_ordered(window, |file, _worker| plan_file(file))
+                collect_bounded_ordered(window, |file| plan_file(file))
             }?;
             for plan in plans {
                 let descriptor = match plan {
@@ -2657,7 +2657,7 @@ impl CodeIndexPublishedGenerationV1 {
             .zip(&persisted)
             .filter(|(_, evidence)| !evidence.is_empty())
             .collect::<Vec<_>>();
-        let encoded = collect_bounded_ordered(&owned, |(file, evidence), _worker| {
+        let encoded = collect_bounded_ordered(&owned, |(file, evidence)| {
             let occurrence = &file.extraction.file_occurrence_id;
             let file_key = file_keys.get(occurrence).copied().ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(

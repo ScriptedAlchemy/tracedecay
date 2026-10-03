@@ -35,7 +35,7 @@ pub fn normalize_observation(
 
     let envelope =
         normalize_vibe_record(native, session_id, model, location, stable_record_id, range);
-    if envelope.is_err() {}
+
     envelope
 }
 

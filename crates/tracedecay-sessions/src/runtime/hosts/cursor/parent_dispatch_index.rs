@@ -528,13 +528,6 @@ pub fn parent_dispatch_model_for_subagent_with_receipt(
     (None, receipt)
 }
 
-pub(super) fn record_dispatch_scan_gauges(receipt: DispatchScanReceipt) {
-    if receipt.bytes_parsed > 0 {}
-    if receipt.prefix_digest_bytes > 0 {}
-    if receipt.records_parsed > 0 {}
-    if receipt.rescanned_from_zero {}
-}
-
 fn scan_parent_delta(
     file: File,
     start: u64,

@@ -35,7 +35,7 @@ pub fn normalize_observation(
     // record's byte length. Failed normalizations are counted, never hidden.
 
     let envelope = normalize_kimi_record(native, session_id, stable_record_id, range);
-    if envelope.is_err() {}
+
     envelope
 }
 

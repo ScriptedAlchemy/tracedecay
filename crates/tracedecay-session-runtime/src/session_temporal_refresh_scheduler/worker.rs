@@ -462,10 +462,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.cancelled > 0
                 || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
                 || summary_convergence_made_progress;
-            observe_pass_report(
-                &report,
-                !made_progress && (report.retry_class.is_some() || history_needs_another_pass),
-            );
             if let Some(backlog) = report.backlog {
                 state.record_pass(
                     backlog.saturating_add(usize::from(history_needs_another_pass)),
@@ -480,7 +476,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     error = report.last_error.as_deref(),
                     "session temporal refresh pass will retry"
                 );
-                observe_retry(class, retry_attempt);
+
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
                 let retry_delay = session_refresh_retry_delay(class, retry_attempt);
@@ -606,49 +602,6 @@ fn stop_worker(state: &SessionTemporalRefreshWakeState) {
     state.clear_worker_activity_instrumentation();
 }
 
-macro_rules! increment_outcome {
-    ($key:literal, $count:expr) => {{
-        let count = $count;
-        if count > 0 {
-            metrics::gauge!($key).increment(count.min(u32::MAX as usize) as f64);
-        }
-    }};
-}
-
-fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_retry: bool) {
-    if no_progress_retry {}
-    increment_outcome!("session_temporal_refresh_begun", report.begun);
-    increment_outcome!("session_temporal_refresh_joined", report.joined);
-    increment_outcome!(
-        "session_temporal_refresh_projected_batches",
-        report.projected_batches
-    );
-    increment_outcome!("session_temporal_refresh_completed", report.completed);
-    increment_outcome!("session_temporal_refresh_failed", report.failed);
-    increment_outcome!("session_temporal_refresh_cancelled", report.cancelled);
-    increment_outcome!("session_temporal_refresh_deferred", report.deferred);
-    increment_outcome!(
-        "session_temporal_refresh_retryable_errors",
-        report.retryable_errors
-    );
-    increment_outcome!(
-        "session_temporal_refresh_terminal_errors",
-        report.terminal_errors
-    );
-    increment_outcome!(
-        "session_temporal_refresh_deadline_errors",
-        report.deadline_errors
-    );
-}
-
-fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
-    match class {
-        SessionTemporalRefreshRetryClass::Storage => {}
-        SessionTemporalRefreshRetryClass::Projector => {}
-        SessionTemporalRefreshRetryClass::Deadline => {}
-    }
-}
-
 /// Runs one historical ingest pass under the daemon-wide bounded admission.
 ///
 /// The permit is held for the whole pass, so at most
@@ -761,7 +714,7 @@ pub async fn process_refresh_begin_requests(
             Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+
                 break;
             }
             Err(_) => {
@@ -800,7 +753,6 @@ pub async fn begin_admitted_session_refreshes(
             if is_retryable_storage(&error) {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
                 report.terminal_errors += 1;
             }
@@ -858,7 +810,6 @@ async fn complete_ready_refresh(
         Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
         }
         Err(error) if is_deterministic_refusal(&error) => {
             // Activation reads the same durable rows on every attempt, so a
@@ -890,7 +841,6 @@ fn record_projector_error(
     match error.class {
         SessionTemporalRefreshProjectorErrorClass::Retryable => {
             report.retryable_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Projector);
         }
         SessionTemporalRefreshProjectorErrorClass::Terminal => {
             report.terminal_errors += 1;
@@ -965,7 +915,6 @@ pub async fn apply_refresh_effect(
                 Err(error) if is_retryable_storage(&error) => {
                     report.last_error = Some(format!("{error:?}"));
                     report.retryable_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
                 Err(error) if is_deterministic_refusal(&error) => {
                     // A refused progress row is not work the next pass can
@@ -1026,7 +975,6 @@ async fn apply_fail_effect(
         Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
         }
         Err(error) => {
             attempt.retain();
@@ -1106,7 +1054,6 @@ async fn running_refreshes(
             report.last_error = Some(format!("{error:?}"));
             if is_retryable_storage(&error) {
                 report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
                 report.terminal_errors += 1;
             }
@@ -1222,7 +1169,6 @@ pub async fn run_session_temporal_refresh_pass(
                 {
                     report.last_error = Some("completion_deadline_exceeded".to_string());
                     report.deadline_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
                 }
             }
             SessionRefreshRestartStateV1::BeginProjection

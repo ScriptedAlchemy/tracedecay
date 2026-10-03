@@ -139,7 +139,6 @@ clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
-metrics.workspace = true
 rayon = "1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 self-replace = "1"

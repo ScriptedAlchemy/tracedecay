@@ -418,7 +418,6 @@ fn budget_exhausted<T>(
     stage: SessionRetrievalBudgetStageV1,
     accounting: Option<SessionRetrievalBudgetAccountingV1>,
 ) -> SessionRetrievalOutcome<T> {
-    crate::session::observe::session_retrieval_budget_stage(stage);
     SessionRetrievalOutcome::BudgetExhausted { stage, accounting }
 }
 
@@ -677,9 +676,6 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                     .map(tracedecay_session_temporal_store::execution::port_budget_accounting),
             ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
-                crate::session::observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
-                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::Participants,
                     observed,
@@ -687,9 +683,6 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
-                crate::session::observe::session_retrieval_budget_stage(
-                    SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes,
-                );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
                     kind: CursorManifestLimitKindV1::CanonicalBytes,
                     observed,

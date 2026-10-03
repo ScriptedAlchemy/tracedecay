@@ -41,7 +41,6 @@ impl DeterministicDiversity {
         policy: &DiversityPolicy,
         candidates: Vec<FusedCandidate>,
     ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
-        let candidate_count = candidates.len();
         let enabled = [
             policy.per_source_namespace,
             policy.per_source_instance,

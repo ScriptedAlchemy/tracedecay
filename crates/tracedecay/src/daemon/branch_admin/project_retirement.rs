@@ -161,11 +161,6 @@ struct ProjectServerRetirementFinalizer {
 
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
-        match &status {
-            ProjectServerRetirementStatus::Clean => {}
-            ProjectServerRetirementStatus::Failed(_) => {}
-            ProjectServerRetirementStatus::Pending => {}
-        }
         self.completion.send_replace(status);
         self.terminal = true;
     }

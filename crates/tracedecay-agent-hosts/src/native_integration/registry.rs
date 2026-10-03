@@ -388,7 +388,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         let owner = self
             .ensure_registered(database, target, observed_at, analysis)
             .await;
-        if owner.is_err() {}
+
         owner
     }
 

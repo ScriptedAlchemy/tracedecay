@@ -127,7 +127,6 @@ impl HookConfigurationSubscriberV1 {
     ) -> HookConfigurationReadOutcomeV1 {
         let outcome = self.load_current_inner(host, now);
 
-        {}
         outcome
     }
 

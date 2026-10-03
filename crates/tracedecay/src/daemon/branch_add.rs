@@ -201,7 +201,7 @@ async fn activate_and_track_manual_branch(
                 )
                 .await;
                 if let (Err(error), Some(prepared)) = (&tracked, prepared.as_deref()) {
-                    match rollback_prepared_branch_tracking(&data_root, prepared).map_err(
+                    rollback_prepared_branch_tracking(&data_root, prepared).map_err(
                         |rollback| {
                             TraceDecayError::project_route(
                                 BRANCH_TRACKING_FAILED,
@@ -211,10 +211,7 @@ async fn activate_and_track_manual_branch(
                                 ),
                             )
                         },
-                    )? {
-                        PreparedBranchRollbackOutcome::RolledBack
-                        | PreparedBranchRollbackOutcome::NoMatch => {}
-                    }
+                    )?;
                 }
                 tracked
             }

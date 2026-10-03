@@ -642,15 +642,9 @@ impl ProjectOpenTasks {
                 let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
                 let state = match open(task_cancellation).await {
                     Ok(()) => ProjectOpenTaskState::Ready,
-                    Err(error) => {
-                        if outcome_cancellation.is_cancelled() {
-                        } else {
-                        }
-                        ProjectOpenTaskState::Failed(ProjectOpenFailure::recorded_for_route(
-                            &error,
-                            &failure_route,
-                        ))
-                    }
+                    Err(error) => ProjectOpenTaskState::Failed(
+                        ProjectOpenFailure::recorded_for_route(&error, &failure_route),
+                    ),
                 };
                 updates.send_replace(state);
             },

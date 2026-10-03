@@ -558,8 +558,7 @@ pub(crate) fn redact_sensitive_values(
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
-    if !findings.is_empty() {}
-    if !quarantine_findings.is_empty() {}
+
     patterns
         .checked(DetectionResult {
             payload,

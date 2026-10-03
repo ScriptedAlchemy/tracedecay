@@ -9,7 +9,7 @@ pub fn apply_source_commit(
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     let outcome = reduce_source_commit(current.cloned(), commit);
-    crate::observe::record_source_commit_outcome(&outcome);
+
     outcome
 }
 
@@ -27,7 +27,7 @@ pub fn apply_source_commit_owned(
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     let outcome = reduce_source_commit(current, commit);
-    crate::observe::record_source_commit_outcome(&outcome);
+
     outcome
 }
 

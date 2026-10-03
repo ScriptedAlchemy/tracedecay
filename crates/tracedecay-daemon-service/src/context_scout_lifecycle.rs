@@ -104,12 +104,7 @@ pub fn register_context_scout_lifecycle_authority(
     // gauge moves only on the two transitions that change the registry map
     // (fresh install here, exact removal in unregister), so it tracks the
     // map's population exactly.
-    match registration {
-        AuthorityRegistrationV1::Registered => {}
-        AuthorityRegistrationV1::AlreadyRegistered => {}
-        AuthorityRegistrationV1::Conflict => {}
-        AuthorityRegistrationV1::Rejected(_) => {}
-    }
+
     registration
 }
 

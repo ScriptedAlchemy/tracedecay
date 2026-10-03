@@ -1287,11 +1287,9 @@ impl Drop for ManifestDigestReservation {
             Ok(gate) => gate,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let prior = self
-            .metrics
+        self.metrics
             .current_bytes
             .fetch_sub(self.bytes, Ordering::AcqRel);
-        let remaining = prior.saturating_sub(self.bytes);
 
         self.metrics.reservation_released.notify_all();
     }

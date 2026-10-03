@@ -1068,7 +1068,7 @@ impl ProjectOpenInputs<'_> {
         // retirement handoff. Release admission before the remaining
         // project-open awaits.
         drop(retirement_admission);
-        if inserted {}
+
         Ok(CoreRouteBinding { resolved, inserted })
     }
 

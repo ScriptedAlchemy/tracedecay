@@ -2482,7 +2482,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
 
-        if let Some(peak_growth) = generation.decode_peak_growth_bytes() {}
         Ok(Some(Arc::new(generation)))
     }
 
@@ -3122,7 +3121,6 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             }
         }
 
-        {}
         let manifest_publication = (|| {
             {
                 let _span =

@@ -218,30 +218,9 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
                     .instrument(tracing::trace_span!("daemon.authority.callable_code.admit"))
                     .await
             };
-            record_graph_read_admission(&admission);
+
             admission
         })
-    }
-}
-
-/// Tallies one graph-read admission decision against its exact typed outcome.
-/// The reason set is the closed [`CodeGraphReadError`] enum, so every gauge
-/// key stays compile-time static.
-fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
-    match admission {
-        Ok(_) => {}
-        Err(CodeGraphReadError::MissingRegistry) => {}
-        Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {}
-        Err(CodeGraphReadError::Rewarming { .. }) => {}
-        Err(CodeGraphReadError::ResetRequired { .. }) => {}
-        Err(CodeGraphReadError::Stale { .. }) => {}
-        Err(CodeGraphReadError::Cancelled) => {}
-        Err(CodeGraphReadError::TimedOut) => {}
-        Err(CodeGraphReadError::BudgetExhausted { .. }) => {}
-        Err(CodeGraphReadError::Denied) => {}
-        Err(CodeGraphReadError::InvalidRequest { .. }) => {}
-        Err(CodeGraphReadError::Corrupt { .. }) => {}
-        Err(CodeGraphReadError::Parked { .. }) => {}
     }
 }
 
@@ -286,10 +265,7 @@ impl DaemonCallableCodeAuthorization {
         let receipt = self
             .route_receipt_checked(context, operation, observed_at)
             .await;
-        match &receipt {
-            Ok(_) => {}
-            Err(_) => {}
-        }
+
         receipt
     }
 
@@ -356,10 +332,7 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
                     ))
                     .await
             };
-            match &receipt {
-                Ok(_) => {}
-                Err(_) => {}
-            }
+
             receipt
         })
     }

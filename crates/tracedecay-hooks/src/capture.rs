@@ -88,7 +88,6 @@ pub fn capture_native_event_for_replay(
         wait_budget,
     );
 
-    {}
     outcome
 }
 

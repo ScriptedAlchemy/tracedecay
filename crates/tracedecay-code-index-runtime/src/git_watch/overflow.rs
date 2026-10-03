@@ -86,7 +86,7 @@ impl OverflowRoster {
     }
 
     pub fn remove(&mut self, root: &Path) {
-        if self.entries.remove(root).is_some() {}
+        self.entries.remove(root);
     }
 
     pub fn contains(&self, root: &Path) -> bool {

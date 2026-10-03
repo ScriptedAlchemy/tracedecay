@@ -851,10 +851,6 @@ fn record_success(
             .extracted_bytes
             .saturating_add(extraction.metrics.visited_bytes as u64);
     }
-    crate::observe::add_parse_bytes(report.metrics.source_bytes as u64);
-    if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
-        crate::observe::add_reused_parses(1);
-    }
 }
 
 #[cfg(test)]

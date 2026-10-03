@@ -65,21 +65,6 @@ pub enum QueryMcpAdmissionUnavailableV1 {
     Revoked,
 }
 
-/// Tallies one admission refusal against its exact policy reason. The reason
-/// set is the closed [`QueryMcpAdmissionUnavailableV1`] enum, so every gauge
-/// key stays compile-time static.
-fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
-    match reason {
-        QueryMcpAdmissionUnavailableV1::Unauthenticated => {}
-        QueryMcpAdmissionUnavailableV1::InvalidGrant => {}
-        QueryMcpAdmissionUnavailableV1::CapabilityMismatch => {}
-        QueryMcpAdmissionUnavailableV1::ScopeMismatch => {}
-        QueryMcpAdmissionUnavailableV1::AuthorizationStale => {}
-        QueryMcpAdmissionUnavailableV1::Expired => {}
-        QueryMcpAdmissionUnavailableV1::Revoked => {}
-    }
-}
-
 pub fn admit_query_mcp_read(
     identity: Option<&LocalProfileIdentityAuthorityV1>,
     project_id: &ProjectId,

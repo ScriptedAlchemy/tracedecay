@@ -184,7 +184,7 @@ const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
 #[inline]
 fn observe_cancel(is_cancelled: &dyn Fn() -> bool) -> bool {
     let cancelled = is_cancelled();
-    if cancelled {}
+
     cancelled
 }
 

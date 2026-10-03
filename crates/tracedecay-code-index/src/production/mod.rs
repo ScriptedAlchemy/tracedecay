@@ -640,18 +640,15 @@ where
     T: Sync,
     R: Send,
     E: From<crate::parallelism::CodeIndexParallelismErrorV1> + Send,
-    F: Fn(&T, &crate::observe::WorkerBusyGuard) -> Result<R, E> + Sync,
+    F: Fn(&T) -> Result<R, E> + Sync,
 {
-    let queue = crate::observe::PendingWorkQueue::new(items.len());
-    crate::observe::record_files(items.len());
     // Always enter the indexing pool, even when the width is 1. File-level
     // leaves are the pool actors. Chunk sweeps stay on the calling leaf so
     // they do not become a second admission class.
     crate::parallelism::install(|| {
         let run = |(index, item): (usize, &T)| -> Result<R, E> {
             crate::parallelism::with_background_cpu_permit(|| {
-                let worker = queue.start_worker();
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item, &worker)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item)))
                     .unwrap_or_else(|payload| {
                         Err(E::from(
                             crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
@@ -722,11 +719,9 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
         extractor_revision: &ExtractorRevision,
-        worker: &crate::observe::WorkerBusyGuard,
     ) -> Option<Arc<FileGenerationArtifactsV1>> {
         crate::observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
             let artifact = {
-                let _coordination = worker.pool_coordination();
                 upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
             }?;
             let rebound = Arc::new(
@@ -735,7 +730,6 @@ impl SharedPhysicalCodeArtifactPoolV1 {
                     .ok()?,
             );
             {
-                let _coordination = worker.pool_coordination();
                 let mut state = self
                     .state
                     .lock()
@@ -1594,7 +1588,7 @@ impl CodeIndexPublishedGenerationV1 {
             .collect::<HashMap<_, _>>();
         {
             let _span = tracing::trace_span!("code_index.collect.validate_files").entered();
-            collect_bounded_ordered(&files, |file, _worker| {
+            collect_bounded_ordered(&files, |file| {
                 if reread {
                     file.artifacts
                         .validate()
@@ -1950,7 +1944,6 @@ where
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
-        let started = crate::observe::start_build_to_queryable();
         crate::observe::record_generation_state("building");
         crate::observe::record_rebuild_state("unknown");
         lexical_page_source::checkpoint(control)?;
@@ -1971,8 +1964,6 @@ where
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
 
-        crate::observe::record_files(captured_files.len());
-        if crate::observe::observing() {}
         lexical_page_source::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
@@ -2071,7 +2062,6 @@ where
                             &scope,
                             lookup.cas_incumbent.as_ref(),
                             CodeIndexSealedPublicationV1::Sparse(Arc::new(sparse)),
-                            started,
                         );
                     }
                     Err(reason) => reason,
@@ -2103,14 +2093,10 @@ where
             control,
         )?;
 
-        if let Ok(statistics) = candidate.generation_statistics() {
-            crate::observe::record_files(candidate.files.len());
-        }
         self.publish(
             &scope,
             lookup.cas_incumbent.as_ref(),
             CodeIndexSealedPublicationV1::Cold(Arc::new(candidate), cold_reason),
-            started,
         )
     }
 
@@ -2226,18 +2212,15 @@ where
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
         publication: CodeIndexSealedPublicationV1,
-        started: crate::observe::BuildToQueryableStart,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
         let manifest_bytes = {
             let _span = tracing::trace_span!("code_index.build.publish").entered();
-            {
-                self.publication
-                    .publish_atomically(scope, expected, &publication)
-            }
+            self.publication
+                .publish_atomically(scope, expected, &publication)
         }?;
         let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes)?;
         crate::observe::record_generation_state("queryable");
-        crate::observe::record_build_to_queryable(started);
+
         Ok(published)
     }
 
@@ -2281,7 +2264,7 @@ where
         let retained_parses = &self.retained_parses;
         let extracted = {
             let _span = tracing::trace_span!("code_index.collect.materialize_full").entered();
-            collect_bounded_ordered(&present_files, |file, worker| {
+            collect_bounded_ordered(&present_files, |file| {
                 extract_file(
                     config,
                     physical_artifacts,
@@ -2297,7 +2280,6 @@ where
                     None,
                     captured_files,
                     control,
-                    worker,
                 )
             })
         }?;
@@ -2343,7 +2325,6 @@ fn extract_file(
     prior_clone_bodies: Option<&[CodeIndexCloneBodyV1]>,
     captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
     control: &dyn CodeIndexExecutionControlV1,
-    worker: &crate::observe::WorkerBusyGuard,
 ) -> Result<
     (
         ManifestDigest,
@@ -2385,9 +2366,7 @@ fn extract_file(
             &physical_reuse_key,
             &receipt_bound,
             &descriptor.extractor_revision,
-            worker,
         ) {
-            crate::observe::add_reused_parses(1);
             physical_artifacts.record_clone_payloads(
                 u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                 0,

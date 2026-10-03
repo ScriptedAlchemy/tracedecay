@@ -1214,7 +1214,7 @@ async fn settle_prepared_owner_facts(
             Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
     }
     insert_settled_outbox_rows(transaction, &rows).await?;
-    if !rows.is_empty() {}
+
     Ok(())
 }
 

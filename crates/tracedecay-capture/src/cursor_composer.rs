@@ -54,7 +54,7 @@ pub fn normalize_cursor_composer_observation_with_message_id(
         range,
         position,
     );
-    if envelope.is_err() {}
+
     envelope
 }
 
@@ -403,7 +403,7 @@ pub fn normalize_cursor_composer_envelope_observation(
         range,
         position,
     );
-    if envelope.is_err() {}
+
     envelope
 }
 

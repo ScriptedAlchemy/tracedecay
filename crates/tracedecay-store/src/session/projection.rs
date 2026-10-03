@@ -253,7 +253,7 @@ impl SessionTemporalProjectionBatchReceiptV1 {
                 });
             }
         }
-        crate::observe::record_session_projection_batch_disposition(disposition);
+
         Ok(Self {
             session_id: batch.session_id().clone(),
             generation: batch.generation(),

@@ -60,7 +60,7 @@ pub fn normalize_spawned(
     // record's byte length. Failed normalizations are counted, never hidden.
 
     let envelope = normalize_record(native, session_id, parent, stable_record_id, range);
-    if envelope.is_err() {}
+
     envelope
 }
 

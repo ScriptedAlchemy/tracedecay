@@ -626,7 +626,6 @@ impl HookSpoolV1 {
             }
         }
 
-        if observing() {}
         Ok(record)
     }
 
@@ -716,22 +715,6 @@ impl HookSpoolV1 {
             });
         }
 
-        if observing() {
-            let frame_count = batches
-                .iter()
-                .map(|batch| batch.records.len())
-                .sum::<usize>();
-            let frame_bytes = batches
-                .iter()
-                .map(|batch| u64::from(batch.byte_count))
-                .sum::<u64>();
-            let queue_wait_micros = batches
-                .iter()
-                .flat_map(|batch| batch.records.iter())
-                .map(|record| now.0.saturating_sub(record.queued_at.0))
-                .max()
-                .unwrap_or(0);
-        }
         Ok(batches)
     }
 

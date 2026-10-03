@@ -687,10 +687,7 @@ async fn candidate_parent_message_resolver(
         let Some(occurrence_id) = occurrence_id else {
             continue;
         };
-        record_parent_resolver_row(
-            u64::try_from(message_id.len().saturating_add(occurrence_id.len()))
-                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-        );
+
         resolver.register(&message_id, &occurrence_id);
     }
     Ok(resolver)
@@ -777,9 +774,7 @@ pub async fn canonical_parent_message_resolver(
                 ));
             }
             let encoded: String = row.get(1).map_err(|error| storage(operation, error))?;
-            record_parent_resolver_row(
-                u64::try_from(encoded.len()).map_err(|error| storage(operation, error))?,
-            );
+
             let observation: tracedecay_domain::DurableObservationV1 =
                 serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
             let envelope = if retain_canonical_outputs {
@@ -823,11 +818,6 @@ pub async fn canonical_parent_message_resolver(
     }
     resolver.reject_ambiguity()?;
     Ok(resolver)
-}
-
-#[inline(always)]
-fn record_parent_resolver_row(bytes: u64) {
-    {}
 }
 
 impl ParentMessageResolver {

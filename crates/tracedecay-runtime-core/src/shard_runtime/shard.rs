@@ -658,9 +658,7 @@ impl ShardRuntimeState {
         self.runtime_leases
             .retain(|_, lease| !lease.is_expired_at(now));
         let released = before - self.runtime_leases.len();
-        if released > 0 {
-            let count = released as f64;
-        }
+
         released
     }
 
@@ -780,12 +778,7 @@ impl ShardRuntimeState {
             .ok_or(ShardRuntimeError::CounterOverflow {
                 counter: counter_name,
             })?;
-        match kind {
-            ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {}
-            ShardRuntimeLeaseKind::Snapshot => {}
-            ShardRuntimeLeaseKind::Client => {}
-            ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {}
-        }
+
         Ok(())
     }
 
@@ -794,12 +787,6 @@ impl ShardRuntimeState {
         let counter = self.lease_counter_mut(kind);
         if let Some(next) = counter.checked_sub(1) {
             *counter = next;
-            match kind {
-                ShardRuntimeLeaseKind::GeneralReader | ShardRuntimeLeaseKind::HealthReader => {}
-                ShardRuntimeLeaseKind::Snapshot => {}
-                ShardRuntimeLeaseKind::Client => {}
-                ShardRuntimeLeaseKind::Watcher | ShardRuntimeLeaseKind::Scheduler => {}
-            }
         } else {
             debug_assert!(false, "attempted to release absent {counter_name}");
         }
@@ -901,7 +888,7 @@ impl ShardRuntimeLifetimeLeaseToken {
         }
         self.runtime
             .release_lifetime_lease(self.resource, self.token);
-        if self.resource == ShardRuntimeResource::Client {}
+
         true
     }
 }

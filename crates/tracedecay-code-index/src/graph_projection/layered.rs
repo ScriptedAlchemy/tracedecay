@@ -146,7 +146,6 @@ pub fn build_layered_code_graph_rows(
         ..report
     };
 
-    {}
     Ok(Ok(CodeGraphLayeredBuildV1 { generation, report }))
 }
 

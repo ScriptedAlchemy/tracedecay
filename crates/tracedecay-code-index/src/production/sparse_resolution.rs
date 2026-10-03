@@ -431,7 +431,7 @@ pub(super) fn resolve_edit(
             .difference(&referencing)
             .copied()
             .collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             let parent_key = parent_key_of_path
                 .get(files[file_index].logical_path())
                 .ok_or_else(|| contract("a carried file has no parent segment"))?;
@@ -460,7 +460,7 @@ pub(super) fn resolve_edit(
             .chain(&dependents)
             .copied()
             .collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             files[file_index].artifacts();
             Ok::<_, CodeIndexProductionErrorV1>(())
         },

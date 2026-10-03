@@ -245,9 +245,6 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
         process_resident_memory_limit_override_v1(),
     );
 
-    if let Some(high_bytes) = cgroup.and_then(|ceiling| ceiling.high_bytes) {}
-    if let Some(service_ceiling) = service_ceiling {}
-
     authority
 }
 

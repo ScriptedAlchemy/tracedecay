@@ -1233,7 +1233,6 @@ impl<'a> AgentRunFinalizer<'a> {
         outcome: RunRecordOutcome,
         completed_at_micros: i64,
     ) -> AutomationRunLedgerRecord {
-        super::scheduler_metrics::observe_run_terminal(outcome.status);
         let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = outcome.error_classification;
         let contract = agent_task_contract(self.task);

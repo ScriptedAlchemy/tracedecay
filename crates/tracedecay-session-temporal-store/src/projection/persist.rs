@@ -82,7 +82,7 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     require_contiguous_checkpoint(conn, batch).await?;
 
     let occurrence_work = persist_occurrences(conn, batch, control).await?;
-    record_occurrence_persistence_work(occurrence_work);
+
     for copy in batch.copies() {
         checkpoint_relation_rebuild_control(control)?;
         validate_copy(conn, batch, copy).await?;
@@ -561,11 +561,6 @@ pub(super) async fn canonical_occurrence(
         .map(|source| source.anchor_id().clone())
         .collect();
     Ok((record, copied_from))
-}
-
-#[inline(always)]
-fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
-    {}
 }
 
 /// Versions a thread whose earliest grouping or creation time moved. The

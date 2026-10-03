@@ -175,12 +175,6 @@ fn interrupted_report(
 /// complete ones so a starved sweep is visible, and collected/failed items
 /// are attributed even when the page ends early.
 fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
-    match report.completion {
-        UnregisteredSweepCompletionV1::Complete => {}
-        UnregisteredSweepCompletionV1::Cancelled => {}
-        UnregisteredSweepCompletionV1::DeadlineExceeded => {}
-    }
-
     report
 }
 

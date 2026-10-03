@@ -282,7 +282,6 @@ impl CodeIndexCadenceTelemetryV1 {
     );
 
     pub fn record(&mut self, receipt: CodeIndexEventToReadyReceiptV1) {
-        observe_receipt(&receipt);
         if let CodeIndexCadenceOutcomeV1::Published {
             generation_id,
             clone_payloads_reused,
@@ -394,25 +393,6 @@ impl CodeIndexCadenceTelemetryV1 {
             queue_delay_micros: CodeIndexPercentilesV1::from_values(queue_delay),
             service_micros: CodeIndexPercentilesV1::from_values(service),
         }
-    }
-}
-
-/// Bounded wake-decision counters for one completed reconcile: which trigger
-/// woke the worker and whether the pass published or proved a no-op. Both
-/// reason sets are closed enums, so the keys stay static; per-receipt latency
-/// stays in the ring's truthful percentile model rather than a profiler gauge.
-fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
-    match receipt.trigger {
-        CodeIndexCadenceTriggerV1::Mount => {}
-        CodeIndexCadenceTriggerV1::HookHint => {}
-        CodeIndexCadenceTriggerV1::Overflow => {}
-        CodeIndexCadenceTriggerV1::GitWatcher => {}
-        CodeIndexCadenceTriggerV1::QueryAdmission => {}
-        CodeIndexCadenceTriggerV1::BusyFollowUp => {}
-        CodeIndexCadenceTriggerV1::MemoryHeadroom => {}
-    }
-    if receipt.is_noop() {
-    } else {
     }
 }
 

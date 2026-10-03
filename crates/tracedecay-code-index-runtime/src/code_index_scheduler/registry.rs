@@ -2847,9 +2847,6 @@ impl CodeIndexSchedulerRegistryV1 {
         // An un-attributable follow-up pass remains absent rather than
         // fabricating a zero-latency sample.
 
-        if let Some(ttfq_micros) = receipt.event_to_ready_micros() {
-        } else {
-        }
         // A successful publication is the terminal outcome operators need to see
         // to know a rebuild window actually closed, so it is `info`, not `debug`:
         // the cadence receipt below is debug-level and was invisible in the

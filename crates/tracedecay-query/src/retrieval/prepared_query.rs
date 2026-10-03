@@ -319,7 +319,6 @@ impl PreparedQueryV1 {
         } else {
             (None, None)
         };
-        let page_len = end.saturating_sub(start);
 
         Ok(PreparedQueryPageV1 {
             items: materialize(candidates, start, end)?,

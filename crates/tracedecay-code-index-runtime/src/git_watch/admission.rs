@@ -32,7 +32,7 @@ impl GitWatcher {
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
         let admission = self.ensure_watching_admission(project_root, config).await;
-        record_admission_outcome(admission);
+
         admission
     }
 
@@ -249,21 +249,6 @@ impl GitWatcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retries.remove(&project_root);
-    }
-}
-
-/// Bounded typed admission counters. Refusals are first-class evidence: a
-/// profile must separate capacity pressure from identity-discovery churn and
-/// shutdown races without recording repository paths.
-fn record_admission_outcome(admission: GitWatcherAdmission) {
-    match admission {
-        GitWatcherAdmission::Ready => {}
-        GitWatcherAdmission::Disabled => {}
-        GitWatcherAdmission::LinkedWorktreeDisabled => {}
-        GitWatcherAdmission::ShuttingDown => {}
-        GitWatcherAdmission::Capacity => {}
-        GitWatcherAdmission::NotRepository => {}
-        GitWatcherAdmission::IdentityUnavailable => {}
     }
 }
 

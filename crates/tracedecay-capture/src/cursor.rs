@@ -56,7 +56,7 @@ pub fn normalize_cursor_observation_with_message_id(
         agent_id,
         parent_agent_id,
     );
-    if envelope.is_err() {}
+
     envelope
 }
 

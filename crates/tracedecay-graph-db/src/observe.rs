@@ -1,8 +1,8 @@
-//! Static span and metric names and record helpers for graph-db operation
+//! Static span names and record helpers for graph-db operation
 //! boundaries.
 //!
 //! Lock-wait labels stay separate from generation, read, and traversal work.
-//! Gauges and span fields are bounded: counts and enumerated hydration sources
+//! Span and event fields are bounded: counts and enumerated hydration sources
 //! only, never paths, digests, query text, or identifiers.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,8 +89,6 @@ pub(crate) fn record_counts(
 ) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record(nodes, edges, replay_rows, generation_bytes);
-
-    {}
 }
 
 /// Records how one sealed generation's recovered digest was established.
@@ -107,14 +105,11 @@ pub(crate) fn record_generation_verification(
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record_verification(outcome, canonical_bytes);
 
-    {
-        use crate::verified_marker::GenerationVerification;
-        match outcome {
-            GenerationVerification::VerifiedFresh => {}
-            GenerationVerification::Reverified => {}
-        }
-        tracing::trace!(name: "graph_db.generation.verify.outcome", value = ?outcome.as_str());
-    }
+    tracing::trace!(
+        name: "graph_db.generation.verify.outcome",
+        value = ?outcome.as_str(),
+        canonical_bytes
+    );
 }
 
 /// Records how one sealed per-generation copy's recovered digest was
@@ -129,14 +124,11 @@ pub(crate) fn record_sealed_copy_verification(
     outcome: crate::verified_marker::GenerationVerification,
     canonical_bytes: u64,
 ) {
-    {
-        use crate::verified_marker::GenerationVerification;
-        match outcome {
-            GenerationVerification::VerifiedFresh => {}
-            GenerationVerification::Reverified => {}
-        }
-        tracing::trace!(name: "graph_db.sealed_store.verify.outcome", value = ?outcome.as_str());
-    }
+    tracing::trace!(
+        name: "graph_db.sealed_store.verify.outcome",
+        value = ?outcome.as_str(),
+        canonical_bytes
+    );
 }
 
 #[inline(always)]
@@ -144,9 +136,7 @@ pub(crate) fn record_hydration_source(source: HydrationSource) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record_source(source);
 
-    {
-        tracing::trace!(name: "graph_db.hydration_source", value = ?source.as_str());
-    }
+    tracing::trace!(name: "graph_db.hydration_source", value = ?source.as_str());
 }
 
 /// Whether a memory census can be observed. The census walks Grafeo's
@@ -170,8 +160,8 @@ pub(crate) fn record_grafeo_memory(
     };
     tracing::trace!(name: "graph_db.memory.phase", value = ?phase.as_str());
 
-    // Gauges keep the last census, so a daemon with several resident engines
-    // needs each census in the log to attribute retained bytes per container.
+    // A daemon with several resident engines needs each census in the log to
+    // attribute retained bytes per container.
     tracing::debug!(
         event = "graph_engine_memory_census",
         phase = phase.as_str(),

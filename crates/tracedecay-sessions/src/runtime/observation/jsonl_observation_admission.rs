@@ -938,7 +938,6 @@ impl SharedJsonlPreparedBytesGuard {
             .saturating_add(bytes);
         let previous_peak = SHARED_JSONL_PEAK_PREPARED_BYTES.fetch_max(current, Ordering::AcqRel);
 
-        if current > previous_peak {}
         Self { bytes }
     }
 }
@@ -1207,7 +1206,7 @@ fn build_shared_jsonl_page_with_frame_limit(
             .collect::<TranscriptIngestResult<Vec<_>>>()
     };
     let frames = frames?;
-    if prepare_frames && !frames.is_empty() {}
+
     let retained_container_bytes = std::mem::size_of::<SharedJsonlPage>()
         .saturating_add(std::mem::size_of::<CachedSharedJsonlPage>())
         .saturating_add(std::mem::size_of::<SharedJsonlPageKey>())
@@ -1383,7 +1382,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-    let prepared_count = prepared.len();
+
     let newly_prepared_bytes = prepared.iter().fold(0_u64, |total, (_, prepared)| {
         total.saturating_add(
             prepared
@@ -2069,7 +2068,6 @@ impl ActiveAdmission<'_> {
                 Ok(DurableFrameDisposition::Refused)
             }
             Err(outcome) => {
-                if outcome.status == HostAdmissionStatus::Backpressured {}
                 if is_lost_cursor_cas(&outcome)
                     && self
                         .peer_already_covered(expected_cursor, checkpoint.end_offset)
@@ -2193,7 +2191,6 @@ impl ActiveAdmission<'_> {
                 Ok(())
             }
             Err(outcome) => {
-                if outcome.status == HostAdmissionStatus::Backpressured {}
                 if let Some(HostAdmissionRecovery::DeterministicContentRefusal) = outcome.recovery {
                     return Err(CaptureWindowError::ContentRefusal);
                 }

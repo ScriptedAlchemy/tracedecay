@@ -27,7 +27,6 @@ test-transport = [
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-metrics.workspace = true
 same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"

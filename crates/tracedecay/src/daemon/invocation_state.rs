@@ -213,9 +213,7 @@ impl DaemonInvocationState {
         // Bounded static transition names: a project leaves the invocation
         // runtime either by capacity quiescence (reopenable) or by terminal
         // remote-deletion retirement.
-        if reopenable {
-        } else {
-        }
+
         let retirement_kind = if reopenable {
             "capacity-retired"
         } else {

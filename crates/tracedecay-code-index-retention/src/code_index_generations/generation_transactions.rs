@@ -269,7 +269,7 @@ impl GraphReplayPoolLockV1 {
     }
 
     fn release_exclusive(&mut self) {
-        if self.guard.take().is_some() {}
+        self.guard = None;
     }
 }
 

@@ -452,11 +452,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 .await
             }
         };
-        match outcome {
-            CombinedEffectOutcome::Completed => {}
-            CombinedEffectOutcome::Handled => {}
-            CombinedEffectOutcome::Deferred => {}
-        }
+
         outcome
     })
 }

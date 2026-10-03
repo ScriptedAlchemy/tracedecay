@@ -39,10 +39,6 @@ pub(super) struct QueuedFrame {
 pub(super) struct OutboundController {
     pub(super) queue: VecDeque<QueuedFrame>,
     pub(super) in_flight: bool,
-    /// When the current in-flight frame was first polled; drives the
-    /// `lsp.outbound.ack_wait_us` sample at acknowledgement so poll-to-ack
-    /// bridge latency is separable from handler and queue time.
-    pub(super) in_flight_since: Option<std::time::Instant>,
     pub(super) queued_bytes: usize,
 }
 
@@ -136,9 +132,7 @@ where
     /// frame. It cannot fetch arbitrary daemon socket data.
     pub fn poll_outbound(&mut self) -> Option<&[u8]> {
         let frame = self.outbound.queue.front()?;
-        if !self.outbound.in_flight {
-            self.outbound.in_flight_since = Some(std::time::Instant::now());
-        }
+
         self.outbound.in_flight = true;
         Some(frame.payload.as_slice())
     }
@@ -151,11 +145,9 @@ where
         }
         let Some(frame) = self.outbound.queue.pop_front() else {
             self.outbound.in_flight = false;
-            self.outbound.in_flight_since = None;
             return false;
         };
         self.outbound.in_flight = false;
-        if let Some(in_flight_since) = self.outbound.in_flight_since.take() {}
         self.outbound.queued_bytes = self
             .outbound
             .queued_bytes
@@ -180,7 +172,6 @@ where
         self.outbound.in_flight = false;
         // Drained frames were never acknowledged by the bridge; an ack-latency
         // sample here would misattribute drain time as bridge latency.
-        self.outbound.in_flight_since = None;
         let mut frames = Vec::with_capacity(self.outbound.queue.len());
         while let Some(frame) = self.outbound.queue.pop_front() {
             self.outbound.queued_bytes = self

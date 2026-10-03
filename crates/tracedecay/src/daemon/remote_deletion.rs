@@ -65,28 +65,11 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
         )
         .await
     {
-        Ok(receipt) => {
-            observe_remote_deletion_receipt(&receipt);
-            Ok(RemoteDeletionBootMode::DeletionOnly(receipt))
-        }
+        Ok(receipt) => Ok(RemoteDeletionBootMode::DeletionOnly(receipt)),
         Err(error) if error.receipt.tombstone_recorded => {
-            observe_remote_deletion_receipt(&error.receipt);
             Ok(RemoteDeletionBootMode::DeletionOnly(error.receipt))
         }
         Err(error) => Err(error.source),
-    }
-}
-
-/// Terminal receipt census for the deletion lane: settling, partial, and
-/// denied terminals count alongside success so interrupted deletions are
-/// visible in counters, not only in per-request receipts.
-fn observe_remote_deletion_receipt(receipt: &RemoteDeletionReceipt) {
-    match receipt.status {
-        RemoteDeletionStatus::Deleted => {}
-        RemoteDeletionStatus::Settling => {}
-        RemoteDeletionStatus::Partial => {}
-        RemoteDeletionStatus::Denied => {}
-        RemoteDeletionStatus::Failed => {}
     }
 }
 
@@ -244,7 +227,7 @@ pub(super) async fn dispatch_remote_deletion(
         },
         Err(receipt) => receipt,
     };
-    observe_remote_deletion_receipt(&receipt);
+
     if receipt.tombstone_recorded
         && let Some(target) = receipt.target
     {

@@ -30,20 +30,6 @@ impl Drop for InvocationDispatchGaugeGuard {
     fn drop(&mut self) {}
 }
 
-/// Counts a request the front door denied before any payload handler ran.
-/// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
-/// key is static and bounded.
-fn observe_front_door_denial(problem: DaemonInvocationProblem) {
-    match problem {
-        DaemonInvocationProblem::InvalidRequest => {}
-        DaemonInvocationProblem::UnsupportedRevision => {}
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {}
-        DaemonInvocationProblem::ResetRequired => {}
-        DaemonInvocationProblem::ApplicationContractViolation => {}
-        DaemonInvocationProblem::Unavailable => {}
-    }
-}
-
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
@@ -174,7 +160,7 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = self.request_cancellations.register(&request_id) else {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
+
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -188,7 +174,7 @@ impl DaemonInvocationService {
             (Some(token), _) => token,
             (None, Some(lease)) => lease.token(),
             (None, None) => {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
+
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -243,7 +229,7 @@ impl DaemonInvocationService {
                     },
                 );
             }
-            observe_front_door_denial(problem);
+
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let operation = request.operation();
@@ -272,7 +258,7 @@ impl DaemonInvocationService {
                  not admitted (project graph runtime unavailable or its \
                  activation is pending)"
             );
-            observe_front_door_denial(DaemonInvocationProblem::Unavailable);
+
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,

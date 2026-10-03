@@ -305,7 +305,6 @@ impl CatalogSnapshotBuilderV1 {
             executable_schemas: executable_schemas.values().collect(),
             profiles: profiles.values().collect(),
         })?;
-        crate::observe::snapshot_entries(capabilities.len(), bindings.len(), profiles.len());
 
         Ok(CatalogSnapshotV1 {
             digest,
@@ -399,7 +398,7 @@ impl CatalogSnapshotV1 {
             protocol_revision,
             negotiated_features,
         );
-        crate::observe::binding_resolution(resolved.is_some());
+
         resolved
     }
 

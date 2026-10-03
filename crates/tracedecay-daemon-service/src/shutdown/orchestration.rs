@@ -475,9 +475,7 @@ async fn run_daemon_shutdown(
     // Forced vs graceful: graceful means in-flight client work idled out
     // cooperatively before the drain deadline; forced means the deadline
     // expired and the abort/join path did the draining.
-    if in_flight.is_clean() {
-    } else {
-    }
+
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
@@ -588,13 +586,7 @@ async fn run_daemon_shutdown(
     // Graceful means every lane drained cooperatively inside its budget;
     // anything else, a timed-out owner, a forced client abort, a failed or
     // timed-out project server, makes this attempt a forced shutdown.
-    if receipt.in_flight.is_clean()
-        && receipt.clients.is_clean()
-        && receipt.background.unfinished().is_empty()
-        && receipt.project_servers.is_clean()
-    {
-    } else {
-    }
+
     receipt
 }
 

@@ -399,11 +399,6 @@ pub async fn execute_temporal_candidate_export(
         let _span = tracing::trace_span!("temporal_query.participant_manifest.validate").entered();
         snapshot.participant_manifest().validate()
     } {
-        match &error {
-            TemporalPortError::ParticipantLimitExceeded { .. } => {}
-            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {}
-            _ => {}
-        }
         return Err(map_port_error(error));
     }
     check_control(&snapshot)?;

@@ -64,11 +64,7 @@ pub fn admitted_session_refresh_command(
     let admitted = session_refresh_command(request, context, cancellation_signal, mounted);
     // Refused admissions are recorded so trigger volume that never reaches
     // refresh execution stays visible in profiles.
-    match &admitted {
-        Ok(_) => {}
-        Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {}
-        Err(_) => {}
-    }
+
     admitted
 }
 

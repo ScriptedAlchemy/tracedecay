@@ -807,11 +807,7 @@ fn result_from_receipt(
     // Every apply result, fresh, replayed, or inline-recovered, terminates
     // here exactly once; `replayed_total`/`recovered_total` discriminate the
     // overlapping populations.
-    match receipt.outcome {
-        GitIndexReceiptOutcomeV1::Committed => {}
-        GitIndexReceiptOutcomeV1::AbortedNoChange => {}
-        GitIndexReceiptOutcomeV1::NeedsInspection => {}
-    }
+
     let (termination, reconciliation) = match receipt.outcome {
         GitIndexReceiptOutcomeV1::Committed => (
             EffectTermination::Completed,

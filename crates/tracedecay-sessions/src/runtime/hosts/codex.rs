@@ -805,7 +805,7 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     };
                     index.scanning = true;
-                    if start_probe {}
+
                     CodexDiscoveryWork::Replay {
                         source_key,
                         state,
@@ -1065,7 +1065,7 @@ impl CodexDiscoveryHub {
             .consumers
             .get(consumer)
             .is_some_and(|state| state.holds_converged(path, witness));
-        if converged {}
+
         converged
     }
 
@@ -1975,9 +1975,7 @@ impl CodexSource {
         if state.scan.is_none() {
             state.reset_for(self, frontier.is_complete());
         }
-        if state.scan.as_ref().is_some_and(|scan| scan.validation) {
-        } else {
-        }
+
         let pass = retained_scan_step(self, state, bounds, frontier)?;
         let sources = pass.selected_sources.clone();
         state.pending = Some(CodexPendingPass {

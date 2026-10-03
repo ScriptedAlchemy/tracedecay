@@ -176,12 +176,9 @@ pub fn search_tree_with_cancel(
             )
         };
         if stop {
-            crate::observe::record_files(result.files_scanned);
-
             return Ok(result);
         }
     }
-    crate::observe::record_files(result.files_scanned);
 
     Ok(result)
 }

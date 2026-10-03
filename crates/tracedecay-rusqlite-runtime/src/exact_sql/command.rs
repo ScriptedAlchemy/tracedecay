@@ -334,16 +334,8 @@ pub(crate) fn run_writer_command(
                             policy,
                         )
                     }),
-                    Ok(_) => {
-                        crate::observe::record_exact_sql_transaction_outcome(
-                            crate::observe::ExactSqlTransactionOutcome::Abandoned,
-                        );
-                        None
-                    }
+                    Ok(_) => None,
                     Err(error) => {
-                        crate::observe::record_exact_sql_transaction_outcome(
-                            crate::observe::ExactSqlTransactionOutcome::BeginFailed,
-                        );
                         return DeferredReply::new(
                             reply,
                             Err(sqlite_error("begin exact SQL transaction", error)),
@@ -354,9 +346,7 @@ pub(crate) fn run_writer_command(
             let Some(completion) = completion else {
                 return DeferredReply::none();
             };
-            crate::observe::record_exact_sql_transaction_outcome(
-                completion.outcome(lease.is_expired()),
-            );
+
             let (cleanup, terminal) = completion.finish(connection);
             if cleanup.is_err() {
                 shutdown_requested.store(true, Ordering::Release);
@@ -812,26 +802,6 @@ impl TransactionCompletion {
             attachments,
             previous_attachment_limit,
             terminal: None,
-        }
-    }
-
-    /// Classifies how this transaction released the writer thread, for the
-    /// `rusqlite.exact_sql.transaction.*` outcome counters. A missing
-    /// terminal with the lease flag raised is an expiry; without it, the
-    /// caller disconnected or shutdown/authority loss rolled the work back.
-    fn outcome(&self, expired: bool) -> crate::observe::ExactSqlTransactionOutcome {
-        match &self.terminal {
-            Some(TransactionTerminal::Commit { result: Ok(_), .. }) => {
-                crate::observe::ExactSqlTransactionOutcome::Committed
-            }
-            Some(TransactionTerminal::Commit { result: Err(_), .. }) => {
-                crate::observe::ExactSqlTransactionOutcome::CommitFailed
-            }
-            Some(TransactionTerminal::Rollback { .. }) => {
-                crate::observe::ExactSqlTransactionOutcome::RolledBack
-            }
-            None if expired => crate::observe::ExactSqlTransactionOutcome::Expired,
-            None => crate::observe::ExactSqlTransactionOutcome::Abandoned,
         }
     }
 

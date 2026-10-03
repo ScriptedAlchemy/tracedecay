@@ -183,32 +183,22 @@ fn parse_extractor_source_inner(
     let mut parser = crate::observe::measure_language(|| {
         let mut parser = Parser::new();
         let language = try_language(language_key).map_err(|error| {
-            crate::observe::record_grammar_lookup_miss();
             if label_lookup_error {
                 format!("failed to load {grammar_label} grammar: {error}")
             } else {
                 error
             }
         })?;
-        parser.set_language(&language).map_err(|e| {
-            crate::observe::record_grammar_rejected();
-            format!("failed to load {grammar_label} grammar: {e}")
-        })?;
+        parser
+            .set_language(&language)
+            .map_err(|e| format!("failed to load {grammar_label} grammar: {e}"))?;
         Ok::<_, String>(parser)
     })?;
-    crate::observe::measure_parse_file(
-        grammar_label,
-        source.len(),
-        || {
-            parser
-                .parse(source, None)
-                .ok_or_else(|| "tree-sitter parse returned None".to_string())
-        },
-        |result| match result {
-            Ok(tree) => crate::observe::ParseFileOutcome::from_parsed_root(tree.root_node()),
-            Err(_) => crate::observe::ParseFileOutcome::NoTree,
-        },
-    )
+    crate::observe::measure_parse_file(|| {
+        parser
+            .parse(source, None)
+            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+    })
 }
 
 #[cfg(test)]

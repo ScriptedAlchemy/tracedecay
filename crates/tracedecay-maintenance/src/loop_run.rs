@@ -26,14 +26,6 @@ impl MaintenanceLifecycleInstrumentation {
 
         Self
     }
-
-    fn record_outcome(&self, outcome: MaintenanceTickOutcome) {
-        match outcome {
-            MaintenanceTickOutcome::Complete => {}
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {}
-            MaintenanceTickOutcome::Retry => {}
-        }
-    }
 }
 
 impl Drop for MaintenanceLifecycleInstrumentation {
@@ -50,21 +42,12 @@ struct MaintenancePhaseInstrumentation {
 
 impl MaintenancePhaseInstrumentation {
     fn new(continuation: Option<MaintenanceContinuation>) -> Self {
-        match continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {}
-            None => {}
-        }
         Self { continuation }
     }
 }
 
 impl Drop for MaintenancePhaseInstrumentation {
-    fn drop(&mut self) {
-        match self.continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {}
-            None => {}
-        }
-    }
+    fn drop(&mut self) {}
 }
 
 /// The maintenance loop's wake handle.
@@ -143,7 +126,7 @@ pub async fn run_maintenance_loop<F, Fut>(
         if cancellation.is_cancelled() {
             break;
         }
-        lifecycle.record_outcome(outcome);
+
         continuation = outcome.continuation();
         deadline = cadence.finish(CadenceInstant::now(), outcome);
     }

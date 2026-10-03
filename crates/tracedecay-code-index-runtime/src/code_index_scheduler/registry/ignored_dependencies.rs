@@ -311,10 +311,7 @@ impl AdmissionFlightOwnerV1 {
         if result.is_err() {
             self.flight.owner_abandoned();
         }
-        match &result {
-            Ok(_) => {}
-            Err(_) => {}
-        }
+
         self.flight.finish(&result);
         self.remove_flight();
         self.finished = true;

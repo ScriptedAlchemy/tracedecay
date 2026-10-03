@@ -616,7 +616,7 @@ impl BranchPublicationContextV1 {
             return Ok(());
         }
         if let Some(prepared) = prepared {
-            match tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(
+            tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(
                 &self.data_root,
                 prepared,
             )
@@ -626,10 +626,7 @@ impl BranchPublicationContextV1 {
                     true,
                     format!("branch publication failed: {cause}; branch rollback failed: {error}"),
                 )
-            })? {
-                PreparedBranchRollbackOutcome::RolledBack
-                | PreparedBranchRollbackOutcome::NoMatch => {}
-            }
+            })?;
         }
         Ok(())
     }
