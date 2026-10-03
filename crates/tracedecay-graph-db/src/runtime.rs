@@ -902,6 +902,9 @@ impl GraphDb {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
+        // A sealed page is verified only after the read touches it, so targets
+        // wait until the read proves intact before the visitor sees any.
+        let mut targets = Vec::new();
         let edges = self.read_intact(&crate::NeverCancelled, |database| {
             self.ensure_start_projections_readable(
                 database,
@@ -915,9 +918,10 @@ impl GraphDb {
                 relation_kinds,
                 cancellation.as_ref(),
                 &|namespace, projection| self.approve_projection(namespace, projection),
-                visitor,
+                &mut |target| targets.push(target),
             )
         })?;
+        targets.into_iter().for_each(visitor);
         #[cfg(feature = "hotpath")]
         {
             crate::hotpath_observe::record_counts(1, edges, 0, 0);

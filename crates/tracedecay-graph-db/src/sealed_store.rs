@@ -2895,6 +2895,10 @@ mod build_tests {
             "a target visit over a corrupt sealed page must be refused: {visited:?} {targets:?} (copy proof: {proof:?})"
         );
         assert!(
+            targets.is_empty(),
+            "a refused visit must not hand any target to the visitor: {targets:?}"
+        );
+        assert!(
             matches!(proof, Err(GraphDbError::Corrupt { .. })),
             "a copy proof over a corrupt sealed page must be refused as corrupt: {proof:?}"
         );
