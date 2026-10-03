@@ -626,9 +626,8 @@ where
         .execute(
             "INSERT INTO git_index_preview_commitments
                 (preview_id, preview_digest, repository_id, worktree_id, operation,
-                 repository_snapshot_digest, commit_intent_digest, created_at, expires_at,
-                 preview_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 repository_snapshot_digest, created_at, expires_at, preview_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 preview.preview_id.as_str(),
                 preview.preview_digest.as_str(),
@@ -640,10 +639,6 @@ where
                     .map(tracedecay_domain::WorktreeId::as_str),
                 operation_code(preview.operation),
                 preview.repository_snapshot_digest.as_str(),
-                preview
-                    .commit_intent_digest
-                    .as_ref()
-                    .map(tracedecay_domain::ManifestDigest::as_str),
                 preview.created_at.0,
                 preview.expires_at.0,
                 encode(preview)?,
@@ -1175,7 +1170,6 @@ fn operation_code(operation: tracedecay_domain::GitIndexTransactionOperationV1) 
     match operation {
         tracedecay_domain::GitIndexTransactionOperationV1::StageHunks => "stage_hunks",
         tracedecay_domain::GitIndexTransactionOperationV1::UnstageHunks => "unstage_hunks",
-        tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex => "commit_index",
     }
 }
 
@@ -1184,7 +1178,6 @@ fn phase_code(phase: GitIndexJournalPhaseV1) -> &'static str {
         GitIndexJournalPhaseV1::Prepared => "prepared",
         GitIndexJournalPhaseV1::NativeApplyStarted => "native_apply_started",
         GitIndexJournalPhaseV1::IndexCommitted => "index_committed",
-        GitIndexJournalPhaseV1::RefCommitted => "ref_committed",
         GitIndexJournalPhaseV1::Verifying => "verifying",
         GitIndexJournalPhaseV1::Committed => "committed",
         GitIndexJournalPhaseV1::AbortedNoChange => "aborted_no_change",

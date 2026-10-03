@@ -165,20 +165,26 @@ pub(crate) async fn run(
 }
 
 /// A `--json` call refused before any owner answered it prints the same
-/// tool-result refusal an answered call does.
+/// tool-result refusal an answered call does; any other unrendered refusal
+/// prints its problem document.
 fn print_settled_route_refusal(tool_name: &str, error: &TraceDecayError) -> Result<()> {
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate a refusal request id".to_owned(),
         })?;
-    if let Some(rendered) = tracedecay::mcp::tools::render_settled_route_refusal(
+    match tracedecay::mcp::tools::render_settled_route_refusal(
         BindingSurface::Cli,
         tool_name,
         request_id,
         error,
         &serde_json::json!({ "format": "json" }),
     ) {
-        print_tool_output(&rendered?, CliToolOutput::Document)?;
+        Some(rendered) => print_tool_output(&rendered?, CliToolOutput::Document)?,
+        None if !matches!(error, TraceDecayError::ToolRefused(_)) => println!(
+            "{}",
+            tracedecay::mcp::tools::command_refusal_document(error)?
+        ),
+        None => {}
     }
     Ok(())
 }

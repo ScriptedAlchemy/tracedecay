@@ -215,15 +215,16 @@ async fn fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases() {
          `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, \
          `project_selector`",
     ]) {
-        let error: serde_json::Value = serde_json::from_str(
+        let envelope: serde_json::Value = serde_json::from_str(
             refusal
                 .strip_prefix("config error: ")
                 .unwrap_or_else(|| panic!("{refusal}")),
         )
         .unwrap_or_else(|error| panic!("{refusal}: {error}"));
         assert_eq!(
-            error,
-            crate::support::application_invalid_request_error("tracedecay_fact_feedback", expected)
+            crate::support::refusal_summary(&envelope["problem"]),
+            crate::support::application_invalid_request_error(expected),
+            "{refusal}"
         );
     }
     invoke_production_tool(

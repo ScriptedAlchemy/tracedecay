@@ -39,7 +39,7 @@ use tracedecay_sessions::observation::{
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::git_correlation::{
-    DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
+    AdmittedWorktrees, DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
     canonical_observation_git_evidence,
 };
 
@@ -1270,6 +1270,7 @@ async fn publish_canonical_git_evidence(
         merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
         ..GitEvidenceBatch::default()
     };
+    let mut worktrees = AdmittedWorktrees::new(repository_provenance.admitted_project_root());
     for outcome in outcomes {
         let CaptureObservationOutcome::Persisted {
             sanitized_record, ..
@@ -1277,11 +1278,9 @@ async fn publish_canonical_git_evidence(
         else {
             continue;
         };
-        let (commit_records, span_observations) = canonical_observation_git_evidence(
-            sanitized_record.payload(),
-            repository_provenance.admitted_project_root(),
-        )
-        .map_err(classify_git_evidence_error)?;
+        let (commit_records, span_observations) =
+            canonical_observation_git_evidence(sanitized_record.payload(), &mut worktrees)
+                .map_err(classify_git_evidence_error)?;
         batch.commits.extend(commit_records);
         batch.observations.extend(span_observations);
     }

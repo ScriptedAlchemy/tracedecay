@@ -105,6 +105,10 @@ impl WorktreeResidencyV1 {
     pub(super) fn yield_serving_graph_to_refresh(self: &Arc<Self>, owners: &ResidentOwnersV1) {
         let released = [
             (
+                ResidentOwnerKindV1::GraphEngine,
+                OutgoingGraphOwnerV1(Arc::clone(self)).release(),
+            ),
+            (
                 ResidentOwnerKindV1::GraphCatalog,
                 GraphCatalogOwnerV1(Arc::clone(self)).release(),
             ),
@@ -173,6 +177,8 @@ impl WorktreeResidencyV1 {
             Arc::new(GraphCatalogOwnerV1(Arc::clone(&self)));
         let retained_parses: Arc<dyn ResidentOwnerV1> =
             Arc::new(RetainedParsesOwnerV1(Arc::clone(&self)));
+        let outgoing_graph: Arc<dyn ResidentOwnerV1> =
+            Arc::new(OutgoingGraphOwnerV1(Arc::clone(&self)));
         let graph_engine: Arc<dyn ResidentOwnerV1> = Arc::new(GraphEngineOwnerV1(self));
         let registrations = [
             (ResidentOwnerKindV1::RetainedParses, &retained_parses),
@@ -180,6 +186,7 @@ impl WorktreeResidencyV1 {
             (ResidentOwnerKindV1::SupersededGeneration, &superseded),
             (ResidentOwnerKindV1::GraphCatalog, &graph_catalog),
             (ResidentOwnerKindV1::GraphEngine, &graph_engine),
+            (ResidentOwnerKindV1::GraphEngine, &outgoing_graph),
         ]
         .into_iter()
         .filter_map(|(kind, owner)| {
@@ -203,6 +210,7 @@ impl WorktreeResidencyV1 {
                 superseded,
                 graph_catalog,
                 graph_engine,
+                outgoing_graph,
             ],
             _registrations: registrations,
         }
@@ -211,7 +219,7 @@ impl WorktreeResidencyV1 {
 
 /// Keeps a mount's owners registered until the mount drops.
 pub(super) struct WorktreeResidencyRegistrationV1 {
-    _owners: [Arc<dyn ResidentOwnerV1>; 5],
+    _owners: [Arc<dyn ResidentOwnerV1>; 6],
     _registrations: Vec<ResidentOwnerRegistrationV1>,
 }
 
@@ -420,7 +428,6 @@ impl ResidentOwnerV1 for GraphCatalogOwnerV1 {
         let Some(store) = self
             .0
             .serving_text()
-            .inspect(LatestCodeTextGenerationV1::release_graph_predecessor)
             .and_then(|text| text.interactive_graph_store().ok())
         else {
             return ResidentOwnerReleaseV1::Empty;
@@ -459,7 +466,6 @@ impl ResidentOwnerV1 for GraphEngineOwnerV1 {
         let Some(store) = self
             .0
             .serving_text()
-            .inspect(LatestCodeTextGenerationV1::release_graph_predecessor)
             .and_then(|text| text.interactive_graph_store().ok())
         else {
             return ResidentOwnerReleaseV1::Empty;
@@ -481,6 +487,78 @@ impl ResidentOwnerV1 for GraphEngineOwnerV1 {
                 );
                 ResidentOwnerReleaseV1::Busy
             }
+        }
+    }
+}
+
+/// The outgoing generation's warm graph, which the serving text holds so
+/// graph reads keep answering while its own graph publishes and warms. It is
+/// not the serving graph: a refresh refused for memory takes it back first.
+struct OutgoingGraphOwnerV1(Arc<WorktreeResidencyV1>);
+
+impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        let held = self.0.serving_text()?.held_graph_predecessor()?;
+        let store = held.interactive_graph_store().ok()?;
+        let catalog = store.interactive_catalog_bytes();
+        let bytes = match store.serving_engine_bytes() {
+            Ok(None) if catalog.is_none() => return None,
+            Ok(engine) => ResidentOwnerBytesV1::Measured(
+                engine.unwrap_or(0).saturating_add(catalog.unwrap_or(0)),
+            ),
+            Err(_) => ResidentOwnerBytesV1::Unmeasured,
+        };
+        Some(ResidentOwnerSampleV1 {
+            holding: ResidentHoldingV1::Generation(
+                held.metadata().manifest().generation_id.clone(),
+            ),
+            bytes,
+            last_used: self.0.last_used(),
+            serving: false,
+            shared: None,
+        })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        let Some(text) = self.0.serving_text() else {
+            return ResidentOwnerReleaseV1::Empty;
+        };
+        let Some(store) = text
+            .held_graph_predecessor()
+            .and_then(|held| held.interactive_graph_store().ok())
+        else {
+            return ResidentOwnerReleaseV1::Empty;
+        };
+        let catalog = match store.release_interactive_catalog() {
+            CodeGraphCatalogReleaseV1::Released { bytes } => bytes,
+            CodeGraphCatalogReleaseV1::Busy => return ResidentOwnerReleaseV1::Busy,
+            CodeGraphCatalogReleaseV1::NotReady => 0,
+        };
+        let engine = match store.release_serving_engine() {
+            Ok(CodeGraphEngineReleaseV1::Released { bytes }) => bytes,
+            Ok(CodeGraphEngineReleaseV1::NotPinned) => Some(0),
+            busy => {
+                if let Err(error) = busy {
+                    tracing::warn!(
+                        event = "code_graph_engine_release_failed",
+                        error = %error,
+                        "the outgoing graph engine could not be released; it stays resident"
+                    );
+                }
+                return if catalog > 0 {
+                    ResidentOwnerReleaseV1::Released {
+                        bytes: ResidentOwnerBytesV1::Measured(catalog),
+                    }
+                } else {
+                    ResidentOwnerReleaseV1::Busy
+                };
+            }
+        };
+        text.release_graph_predecessor();
+        ResidentOwnerReleaseV1::Released {
+            bytes: engine.map_or(ResidentOwnerBytesV1::Unmeasured, |engine| {
+                ResidentOwnerBytesV1::Measured(engine.saturating_add(catalog))
+            }),
         }
     }
 }

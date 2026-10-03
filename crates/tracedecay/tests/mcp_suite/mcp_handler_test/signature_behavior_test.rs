@@ -147,7 +147,7 @@ async fn tracedecay_signature_returns_the_declared_signature() {
         )
         .await,
     );
-    assert_eq!(missing_markdown, "_None._\n");
+    assert_eq!(missing_markdown, "freshness: fresh\n_None._\n");
     let unknown_node = signature_json(&server, json!({"node_id": "missing-symbol"})).await;
     assert_eq!(unknown_node, json!([]));
 
@@ -285,6 +285,7 @@ fn impl_surface() -> Value {
 fn fetch_markdown(node_id: &str) -> String {
     format!(
         "\
+freshness: fresh
 - **fetch_value**
   **kind:** function
   **file:** src/lib.rs

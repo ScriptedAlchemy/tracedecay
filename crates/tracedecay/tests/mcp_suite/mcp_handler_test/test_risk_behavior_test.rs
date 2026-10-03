@@ -9,13 +9,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::common::fixture::git_run as git;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
-use crate::support::{TestTempDir, test_temp_dir};
+use crate::support::{TestTempDir, harness_wait_for_readiness, test_temp_dir};
 
 const LIB_RS: &str = r#"pub fn wide(flag: bool) -> i32 {
     if flag { 1 } else { 2 }
@@ -57,6 +58,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&default_report),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
                 risk_item("narrow", 5, 1, 0, false, "none", None, 3.17),
@@ -73,6 +75,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&missing_file),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [],
             "summary": {
                 "total_functions": 0,
@@ -105,6 +108,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&limited),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
             ],
@@ -115,6 +119,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&with_tested),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
                 risk_item("narrow", 5, 1, 0, false, "none", None, 3.17),
@@ -262,6 +267,7 @@ async fn open_ranked_project() -> RankedProject {
     ))
     .await
     .expect("production composition harness");
+    harness_wait_for_readiness(&harness, &project_root, "ready", Duration::from_secs(20)).await;
     RankedProject {
         harness,
         project_root,

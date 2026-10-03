@@ -253,11 +253,18 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     assert!(registrations.contains(&HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp));
     assert!(registrations.contains(&HostRegistrationRouteV1::Mcp));
     assert!(registrations.contains(&HostRegistrationRouteV1::Cli));
-    for operation in [
-        "feedback_diagnostics",
-        "feedback_get",
-        "feedback_expand",
-        "feedback_list",
+    let callable = BTreeSet::from([
+        BindingSurface::Cli,
+        BindingSurface::Mcp,
+        BindingSurface::Http,
+    ]);
+    let mut dashboard_routed = callable.clone();
+    dashboard_routed.insert(BindingSurface::Dashboard);
+    for (operation, expected) in [
+        ("feedback_diagnostics", &callable),
+        ("feedback_get", &dashboard_routed),
+        ("feedback_expand", &dashboard_routed),
+        ("feedback_list", &dashboard_routed),
     ] {
         let bindings = feedback
             .bindings()
@@ -266,14 +273,8 @@ async fn authentic_callback_to_all_delivery_surfaces() {
             .map(|binding| binding.surface())
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            bindings,
-            BTreeSet::from([
-                BindingSurface::Cli,
-                BindingSurface::Mcp,
-                BindingSurface::Http,
-                BindingSurface::Dashboard,
-            ]),
-            "{operation} must bind every canonical publication read surface"
+            &bindings, expected,
+            "{operation} must bind exactly the surfaces that mount it"
         );
     }
 }

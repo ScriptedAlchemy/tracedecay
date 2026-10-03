@@ -160,13 +160,5 @@ mod tests {
             assert_eq!(work_operation_for_tool(&name), Some(operation));
         }
         assert_eq!(work_operation_for_tool("tracedecay_work_missing"), None);
-        for retired in [
-            "tracedecay_work_snapshot",
-            "tracedecay_work_delta",
-            "tracedecay_work_replan_dependencies",
-            "tracedecay_work_accept_task",
-        ] {
-            assert_eq!(work_operation_for_tool(retired), None, "{retired}");
-        }
     }
 }

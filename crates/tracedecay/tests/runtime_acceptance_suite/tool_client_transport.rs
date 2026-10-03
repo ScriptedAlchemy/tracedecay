@@ -547,12 +547,26 @@ fn generic_tool_rejects_unrepresentable_deadline() {
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
     assert!(!result.killed_by_harness);
     assert!(!result.output.status.success());
-    assert!(result.output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&result.output.stderr);
+    let refusal: Value = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json deadline refusal must be one JSON document ({error}): {}",
+            String::from_utf8_lossy(&result.output.stdout)
+        )
+    });
+    assert_eq!(
+        (&refusal["problem"]["kind"], &refusal["problem"]["code"],),
+        (
+            &json!("invalid_request"),
+            &json!("application.surface.invalid_request"),
+        ),
+        "deadline validation must be a typed invalid request: {refusal}"
+    );
     assert!(
-        stderr.contains("TRACEDECAY_TOOL_DEADLINE_MS")
-            && stderr.contains("monotonic deadline range"),
-        "unexpected deadline validation error: {stderr}"
+        refusal["problem"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TRACEDECAY_TOOL_DEADLINE_MS")
+                && message.contains("monotonic deadline range")),
+        "typed deadline refusal must retain its diagnostic: {refusal}"
     );
 }
 

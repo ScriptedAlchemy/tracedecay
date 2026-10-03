@@ -46,11 +46,13 @@ pub(crate) async fn handle_projects_action(
                 ..
             } = &context
             else {
-                return Err(TraceDecayError::Config {
-                    message: format!(
+                return Err(TraceDecayError::project_route(
+                    "project_route_not_found",
+                    false,
+                    format!(
                         "registered project not found for '{selector}'; try `tracedecay projects search {selector}`"
                     ),
-                });
+                ));
             };
             if json {
                 println!(

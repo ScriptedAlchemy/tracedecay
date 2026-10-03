@@ -37,7 +37,7 @@ use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
     diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
-    now_observed, omitted_evidence, open_code_graph, refused,
+    now_observed, omitted_evidence, open_code_graph, refused, unpublished_file_outcome,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -528,6 +528,14 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
                     }
                 };
+                if let Some(outcome) = unpublished_file_outcome(
+                    &reader,
+                    &request.file,
+                    EvidenceDomain::Graph,
+                    Arc::clone(&cancellation),
+                ) {
+                    return outcome.with_cost(cost.receipt());
+                }
                 let query = GraphQueryManager::new(&reader, cancellation);
                 let dependents = match query.get_file_dependents(&request.file).await {
                     Ok(dependents) => dependents,
@@ -661,6 +669,14 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
                     }
                 };
+                if let Some(outcome) = unpublished_file_outcome(
+                    &reader,
+                    &request.file,
+                    EvidenceDomain::Source,
+                    Arc::clone(&cancellation),
+                ) {
+                    return outcome;
+                }
                 let nodes =
                     match reader.symbols_in_logical_file(&request.file, 100_000, cancellation) {
                         Ok(nodes) => nodes,

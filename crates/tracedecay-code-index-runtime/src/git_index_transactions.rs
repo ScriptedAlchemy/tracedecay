@@ -441,7 +441,7 @@ impl FixedGitIndexRunner {
         if !matches!(
             preview.disposition,
             GitIndexPreviewDispositionV1::Applicable
-        ) || preview.operation.hunk_direction() != Some(direction)
+        ) || preview.operation.hunk_direction() != direction
         {
             return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
         }

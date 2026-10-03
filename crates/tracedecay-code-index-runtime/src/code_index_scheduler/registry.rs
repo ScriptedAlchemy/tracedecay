@@ -461,6 +461,14 @@ fn serving_swap_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Holds a complete-seat probe right after its read missed.
+#[cfg(test)]
+fn complete_seat_probe_miss_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Holds a worker's graph prepare before and after it decodes the active
 /// generation.
 #[cfg(test)]

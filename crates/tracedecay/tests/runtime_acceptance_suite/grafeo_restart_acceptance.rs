@@ -502,7 +502,11 @@ async fn assert_selected_project_write_denied(
         .expect("selected-project write denial problem");
     serde_json::from_value::<tracedecay_contracts::ApplicationProblemEnvelope>(problem.clone())
         .unwrap_or_else(|error| panic!("invalid selected-project denial envelope: {error}"));
-    assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
+    assert_eq!(problem["problem"]["kind"], "unsupported");
+    assert_eq!(
+        problem["problem"]["code"],
+        "memory.cross_project_write_unsupported"
+    );
 }
 
 fn telemetry(fact: &Value) -> Value {

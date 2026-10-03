@@ -1,10 +1,12 @@
 #![cfg(feature = "test-transport")]
 
 mod callers_coverage;
+mod go_interface_satisfaction;
 mod relation_page_cost;
 mod restart_seat;
 mod typed_evidence_trailers;
 mod typescript_module_resolution;
+mod unknown_file;
 mod unsealed_graph;
 
 use crate::support::*;
@@ -1704,18 +1706,28 @@ async fn test_rank_invalid_direction() {
 #[tokio::test]
 async fn test_unknown_tool() {
     let cg = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await;
-    match result {
-        Err(err) => {
-            let err_msg = format!("{}", err);
-            assert!(
-                err_msg.contains("unknown tool"),
-                "error should mention 'unknown tool', got: {}",
-                err_msg,
-            );
-        }
-        Ok(_) => panic!("unknown tool should produce an error"),
-    }
+    let problem = crate::support::expect_tool_refusal(
+        call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await,
+    );
+    assert_eq!(
+        (
+            &problem["kind"],
+            &problem["diagnostic"]["code"],
+            &problem["retryable"]
+        ),
+        (
+            &json!("invalid_request"),
+            &json!("unknown_tool"),
+            &json!(false)
+        ),
+        "{problem}"
+    );
+    assert!(
+        problem["diagnostic"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown tool")),
+        "{problem}"
+    );
 }
 
 #[tokio::test]
@@ -1918,6 +1930,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&lib),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/lib.rs",
             "total_undocumented": 3,
             "returned_count": 3,
@@ -1957,6 +1970,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&other),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/other.rs",
             "total_undocumented": 1,
             "returned_count": 1,
@@ -1982,6 +1996,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         done,
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src/done.rs",
             "total_undocumented": 0,
             "returned_count": 0,
@@ -1998,6 +2013,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
     assert_eq!(
         census_without_ids(&limited),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src",
             "total_undocumented": 4,
             "returned_count": 1,

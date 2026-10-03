@@ -116,6 +116,7 @@ fn palette_kinds() -> Value {
 
 fn src_summary() -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "path_filter": "src",
         "mode": "summary",
         "total_kinds": 7,
@@ -144,6 +145,7 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
     assert_eq!(
         per_file,
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "src",
             "mode": "per_file",
             "file_count": 2,
@@ -165,6 +167,7 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
     assert_eq!(summary, src_summary());
 
     let limited = json!({
+        "freshness": {"state": "fresh"},
         "path_filter": "src",
         "mode": "per_file",
         "file_count": 1,
@@ -201,6 +204,7 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
                 .expect("unmatched path")
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": "vendor",
             "mode": "per_file",
             "file_count": 0,
@@ -218,6 +222,7 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
                 .expect("unscoped per-file distribution")
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "path_filter": null,
             "mode": "per_file",
             "file_count": 3,
@@ -231,14 +236,12 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
         })
     );
 
-    let rejected = fixture
-        .call(json!([]))
-        .await
-        .expect_err("non-object arguments");
-    assert!(
-        rejected
-            .to_string()
-            .contains("invalid arguments: tracedecay_distribution expects a JSON object"),
+    let rejected = crate::support::expect_tool_refusal(fixture.call(json!([])).await);
+    assert_eq!(
+        crate::support::refusal_summary(&rejected),
+        crate::support::application_invalid_request_error(
+            "invalid arguments: tracedecay_distribution expects a JSON object"
+        ),
         "{rejected}"
     );
 

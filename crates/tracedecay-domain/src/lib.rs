@@ -191,15 +191,14 @@ pub use feedback::{
 };
 pub use framed_log::{CHECKSUM_BYTES, checksum, partial_tail_matches_prefix};
 pub use git::{
-    BranchGraphPublicationEpochV1, GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1,
-    GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1, GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1,
-    GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1, GitBlameAvailabilityV1, GitBlameLineV1,
-    GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1, GitChangeKindV1, GitCommitIdentityV1,
-    GitCommitMetadataV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1, GitFileDiffV1,
-    GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitHunkV1, GitIndexCommitIntentV1,
-    GitIndexEntryExpectationV1, GitIndexIdempotencyKey, GitIndexJournalPhaseV1,
+    BranchGraphPublicationEpochV1, GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1,
+    GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1, GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1,
+    GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
+    GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
+    GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHeadStateV1, GitHistoryV1,
+    GitHunkV1, GitIndexEntryExpectationV1, GitIndexIdempotencyKey, GitIndexJournalPhaseV1,
     GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
     GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
     GitIndexUnsupportedStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitStatusEntryV1,
     GitStatusV1, GitTrackedStatusV1, HUNK_REF_DIGEST_DOMAIN, HUNK_REF_SCHEMA_VERSION_V1,

@@ -1757,12 +1757,9 @@ async fn assert_legacy_selectors_cannot_reroute_the_active_project() {
     for (offset, (case, _)) in spoof_cases.iter().enumerate() {
         let response = response_with_id(&responses, json!(10 + offset as u64));
         assert_eq!(
-            response["error"]["code"], -32602,
-            "{case} must be rejected as invalid parameters instead of rerouting: {response}"
-        );
-        assert!(
-            response["result"].is_null(),
-            "{case} must not return a tool result after invalid-parameter rejection: {response}"
+            crate::support::route_refusal(&response)["kind"],
+            "invalid_request",
+            "{case} must be refused as an invalid request instead of rerouting: {response}"
         );
         assert!(
             !response.to_string().contains("src/target.rs"),

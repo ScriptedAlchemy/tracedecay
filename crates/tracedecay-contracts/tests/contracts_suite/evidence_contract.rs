@@ -81,6 +81,7 @@ fn code_graph_evidence_names_its_served_generation_on_the_envelope() {
         served.code_graph,
         Some(ServedCodeGraphGenerationV1 {
             generation: "generation.envelope.7".to_owned(),
+            worktree: None,
             freshness: stale,
         })
     );

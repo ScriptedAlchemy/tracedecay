@@ -177,7 +177,6 @@ fn recovery_proof_at(
             .then(|| proof.final_snapshot_digest.clone()),
         proof.new_index_tree.clone(),
         proof.new_head.clone(),
-        proof.created_commit.clone(),
         proof.outcome,
         observed_at,
     )
@@ -199,7 +198,6 @@ fn unobserved_needs_inspection(
         None,
         record.preview.repository_snapshot.index.tree_id.clone(),
         record.preview.repository_snapshot.head.commit().cloned(),
-        None,
         GitIndexReceiptOutcomeV1::NeedsInspection,
         observed_at,
     )
@@ -216,10 +214,7 @@ where
     S: GitIndexTransactionStore,
 {
     let mut journal = record.journal.clone();
-    if !journal
-        .phase
-        .permits_recovered_outcome(journal.operation, outcome)
-    {
+    if !journal.phase.permits_recovered_outcome(outcome) {
         return Err(GitIndexRecoveryError::Indeterminate);
     }
     let phases: &[GitIndexJournalPhaseV1] = match outcome {
@@ -227,9 +222,7 @@ where
             &[]
         }
         GitIndexReceiptOutcomeV1::Committed => match journal.phase {
-            GitIndexJournalPhaseV1::IndexCommitted | GitIndexJournalPhaseV1::RefCommitted => {
-                &[GitIndexJournalPhaseV1::Verifying]
-            }
+            GitIndexJournalPhaseV1::IndexCommitted => &[GitIndexJournalPhaseV1::Verifying],
             GitIndexJournalPhaseV1::Verifying => &[],
             _ => return Err(GitIndexRecoveryError::Indeterminate),
         },

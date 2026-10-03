@@ -134,17 +134,5 @@ mod tests {
             post(&router, "/api/work/not-an-operation").await,
             StatusCode::NOT_FOUND
         );
-        for retired in [
-            "/api/work/snapshot",
-            "/api/work/delta",
-            "/api/work/replan-dependencies",
-            "/api/work/accept-task",
-        ] {
-            assert_eq!(
-                post(&router, retired).await,
-                StatusCode::NOT_FOUND,
-                "{retired}"
-            );
-        }
     }
 }

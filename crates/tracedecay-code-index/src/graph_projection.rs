@@ -1369,7 +1369,10 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
             .validate()
             .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
         if reference.from_occurrence != record.occurrence
-            || reference.kind != RelationEdgeKindV1::Calls
+            || !matches!(
+                reference.kind,
+                RelationEdgeKindV1::Calls | RelationEdgeKindV1::Implements
+            )
         {
             return Err(CodeGraphProjectionError::Corrupt(
                 "unresolved call does not belong to its source symbol".to_owned(),

@@ -159,24 +159,23 @@ fn assert_problem(
 }
 
 fn assert_schema_refusal(response: &JsonRpcResponse) {
-    let error = response
-        .error
-        .as_ref()
-        .unwrap_or_else(|| panic!("unknown field must fail before admission: {response:?}"));
     assert!(
-        response.result.is_none(),
-        "schema refusal is not a tool result"
+        response.error.is_none(),
+        "unknown field is a typed tool refusal before admission: {response:?}"
     );
-    assert_eq!(error.code, -32602);
-    let data = error.data.as_ref().expect("schema refusal data");
-    assert_eq!(data["tool"], "tracedecay_configuration_batch");
-    assert_eq!(data["reason_code"], "application_surface_invalid_request");
-    assert_eq!(data["kind"], "invalid_request");
-    assert_eq!(data["code"], "application_surface_invalid_request");
-    assert_eq!(data["retryable"], false);
+    let result = response.result.as_ref().expect("schema refusal result");
+    assert_eq!(result["isError"], true);
+    let problem = &result["structuredContent"]["problem"];
+    assert_eq!(problem["kind"], "invalid_request", "{problem}");
+    assert_eq!(problem["code"], "application_surface_invalid_request");
+    assert_eq!(problem["retryable"], false);
+    assert_eq!(problem["terminality"], "pre_admission");
     assert_eq!(
-        error.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract"
+        problem["diagnostic"],
+        json!({
+            "code": "application_surface_invalid_request",
+            "message": "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract"
+        })
     );
 }
 

@@ -1192,12 +1192,14 @@ impl McpServer {
     }
 
     #[tracing::instrument(name = "mcp.server.tools_call.complete", level = "trace", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     async fn complete_tool_call(
         self: &Arc<Self>,
         id: Value,
         tool_name: String,
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
+        refusal_arguments: &Value,
         dispatch: DispatchedToolCall,
         connection_server: &Self,
     ) -> JsonRpcResponse {
@@ -1244,7 +1246,12 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        refusal_arguments,
+                    );
                 }
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1288,7 +1295,12 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    tool_error_response(id, &tool_name, &error)
+                    crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        refusal_arguments,
+                    )
                 }
             }
         }
@@ -1348,6 +1360,7 @@ impl McpServer {
     fn finish_unavailable_tool_call(
         id: Value,
         tool_name: &str,
+        refusal_arguments: &Value,
         dispatch: DispatchedToolCall,
     ) -> JsonRpcResponse {
         let DispatchedToolCall {
@@ -1361,7 +1374,9 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(error) => tool_error_response(id, tool_name, &error),
+            Err(error) => {
+                crate::mcp::tools::tool_refusal_response(id, tool_name, &error, refusal_arguments)
+            }
         }
     }
 
@@ -1451,6 +1466,7 @@ impl McpServer {
             Ok(call) => call,
             Err(response) => return response,
         };
+        let refusal_arguments = json!({ "format": arguments.get("format") });
         let memory_request_scope = connection.memory_request_scope().to_owned();
         // Resolve the exact execution server before creating cancellation,
         // deadline, settlement, or accounting state. A failed/ambiguous route
@@ -1477,7 +1493,14 @@ impl McpServer {
         .await
         {
             Some(Ok(routed)) => routed,
-            Some(Err(error)) => return tool_error_response(id, &tool_name, &error),
+            Some(Err(error)) => {
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    &error,
+                    &refusal_arguments,
+                );
+            }
             // Cancel won before route selection installed dispatch authority.
             // That is transport abandonment, not an admitted tool cancel:
             // emit the same -32800 / request_cancelled terminal the RMCP and
@@ -1501,7 +1524,12 @@ impl McpServer {
                         true,
                         "MCP server was released before retained dispatch admission",
                     );
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        &refusal_arguments,
+                    );
                 }
             },
         };
@@ -1529,7 +1557,14 @@ impl McpServer {
             caller_deadline,
         ) {
             Ok(prepared) => prepared,
-            Err(error) => return tool_error_response(id, &tool_name, &error),
+            Err(error) => {
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    &error,
+                    &refusal_arguments,
+                );
+            }
         };
 
         // Acquire exactly one response lease from the execution server. The
@@ -1551,7 +1586,7 @@ impl McpServer {
             biased;
             guard = tracing::Instrument::instrument(response_gate.read_owned(), tracing::trace_span!("mcp.server.response_gate.wait")) => guard,
             () = request_cancelled => {
-                return tool_error_response(
+                return crate::mcp::tools::tool_refusal_response(
                     id,
                     &tool_name,
                     &dispatch_cancelled_error(
@@ -1559,6 +1594,7 @@ impl McpServer {
                         DispatchSettlement::NotStarted,
                         tool_carries_effect(&tool_name),
                     ),
+                    &refusal_arguments,
                 );
             }
         };
@@ -1571,7 +1607,12 @@ impl McpServer {
                         true,
                         "the retained project server was retired before response admission",
                     );
-                    tool_error_response(id, &tool_name, &error)
+                    crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        &refusal_arguments,
+                    )
                 });
         }
         connection.install_selected_response_lease(
@@ -1647,7 +1688,12 @@ impl McpServer {
             Ok(dispatch) => dispatch,
             Err(failure) => {
                 connection.clear_selected_response_lease();
-                return tool_error_response(id, &tool_name, failure.error());
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    failure.error(),
+                    &refusal_arguments,
+                );
             }
         };
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {
@@ -1655,7 +1701,12 @@ impl McpServer {
             return response;
         }
         if fast_unavailable {
-            return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
+            return Self::finish_unavailable_tool_call(
+                id,
+                &tool_name,
+                &refusal_arguments,
+                dispatch,
+            );
         }
         let response = dispatch_server
             .complete_tool_call(
@@ -1663,6 +1714,7 @@ impl McpServer {
                 tool_name.clone(),
                 analytics_arguments,
                 analytics_session_id,
+                &refusal_arguments,
                 dispatch,
                 self,
             )

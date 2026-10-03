@@ -87,6 +87,7 @@ impl TemporalState {
     pub fn served_code_graph(&self) -> Option<crate::retrieval::ServedCodeGraphGenerationV1> {
         Some(crate::retrieval::ServedCodeGraphGenerationV1 {
             generation: self.source_generation.as_ref()?.as_str().to_owned(),
+            worktree: None,
             freshness: self.code_graph_freshness?,
         })
     }
