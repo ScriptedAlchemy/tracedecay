@@ -512,9 +512,6 @@ fn push_page_trailer(payload: &Value, rendered: &mut String) -> Option<()> {
         let reason = gap.get("reason").and_then(Value::as_str)?;
         writeln!(rendered, "support gap: {reason}").ok()?;
     }
-    if let Some(cursor) = payload.get("next_cursor").and_then(Value::as_str) {
-        writeln!(rendered, "next_cursor: {cursor}").ok()?;
-    }
     Some(())
 }
 
@@ -738,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn implementation_preview_carries_each_body_and_the_continuation() {
+    fn implementation_preview_carries_each_body_and_its_support_gaps() {
         let preview = payload_preview(
             "code_implementations",
             Some(&json!({
@@ -757,7 +754,7 @@ mod tests {
         assert_eq!(
             preview,
             "src/lib.rs::area (method) src/lib.rs:3 node_id=m\n  | fn area() {\n  |     1\n  | }\n\
-             support gap: partial\nnext_cursor: cursor.next"
+             support gap: partial"
         );
     }
 
