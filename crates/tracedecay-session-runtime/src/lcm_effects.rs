@@ -101,25 +101,6 @@ impl DaemonLcmEffectService {
 
     pub(super) async fn compress(
         &self,
-        request: LcmCompressionRequest,
-    ) -> Result<LcmCompressionResponse, LcmError> {
-        let result = self.compress_phases(request).await;
-        result
-    }
-
-    pub(super) async fn compress_retained_page(
-        &self,
-        request: LcmCompressionRequest,
-        convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
-    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-        let result = self
-            .compress_retained_phases(request, convergence_candidate)
-            .await;
-        result
-    }
-
-    async fn compress_phases(
-        &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         // Observation-projected sessions land raw rows without ingest
@@ -182,7 +163,7 @@ impl DaemonLcmEffectService {
         self.commit_compression(&request).await
     }
 
-    async fn compress_retained_phases(
+    pub(super) async fn compress_retained_page(
         &self,
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,

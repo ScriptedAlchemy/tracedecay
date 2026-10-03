@@ -87,7 +87,6 @@ struct SessionTemporalRefreshWorkerTelemetry {
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
-    depths_published: bool,
     /// The worker went idle with no dirty flag and no queued request, and
     /// nothing has requeued work since.
     quiescent: bool,
@@ -114,7 +113,6 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
-            depths_published: true,
             quiescent: false,
             convergence_epoch: 0,
             converged_at_unix_micros: None,
@@ -213,13 +211,11 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn take_dirty(&self) -> bool {
-        let dirty = self.dirty.swap(false, Ordering::AcqRel);
-        dirty
+        self.dirty.swap(false, Ordering::AcqRel)
     }
 
     pub fn take_historical_dirty(&self) -> bool {
-        let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
-        dirty
+        self.historical_dirty.swap(false, Ordering::AcqRel)
     }
 
     pub fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
@@ -529,7 +525,6 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let previous = telemetry.durable_backlog;
         telemetry.durable_backlog = durable_backlog;
         telemetry.last_pass_made_progress = made_progress;
         if made_progress {
@@ -660,22 +655,10 @@ impl SessionTemporalRefreshWakeState {
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.completion_control.cancel();
             self.clear_worker_instrumentation();
-            self.clear_depth_instrumentation();
             self.mark_stopped();
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
         }
-    }
-
-    fn clear_depth_instrumentation(&self) {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !telemetry.depths_published {
-            return;
-        }
-        telemetry.depths_published = false;
     }
 
     pub fn completion_control(&self) -> ExecutionControl {
@@ -701,7 +684,6 @@ impl SessionTemporalRefreshWakeState {
 impl Drop for SessionTemporalRefreshWakeState {
     fn drop(&mut self) {
         self.clear_worker_instrumentation();
-        self.clear_depth_instrumentation();
     }
 }
 
@@ -742,10 +724,6 @@ fn convergence_status(
         epoch: telemetry.convergence_epoch,
         converged_at_unix_micros: telemetry.converged_at_unix_micros,
     }
-}
-
-fn bounded_depth(depth: usize) -> f64 {
-    depth.min(u32::MAX as usize) as f64
 }
 
 pub(crate) struct TerminalAttemptGuard<'a> {

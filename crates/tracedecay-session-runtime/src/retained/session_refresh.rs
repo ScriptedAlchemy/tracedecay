@@ -61,18 +61,6 @@ pub fn admitted_session_refresh_command(
     cancellation_signal: &CancellationSignal,
     mounted: &MountedSessionRefreshAuthorityV1<'_>,
 ) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
-    let admitted = session_refresh_command(request, context, cancellation_signal, mounted);
-    // Refused admissions are recorded so trigger volume that never reaches
-    // refresh execution stays visible in profiles.
-    admitted
-}
-
-fn session_refresh_command(
-    request: &SessionRefreshRequestV1,
-    context: &RequestContext,
-    cancellation_signal: &CancellationSignal,
-    mounted: &MountedSessionRefreshAuthorityV1<'_>,
-) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
     if cancellation_signal.context().token_id != context.cancellation().token_id {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }

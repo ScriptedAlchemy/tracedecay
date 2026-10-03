@@ -94,18 +94,6 @@ struct SessionTemporalRefreshSchedulerEntry {
     task: tokio::task::JoinHandle<()>,
 }
 
-struct SessionTemporalRefreshSupervisorInstrumentation;
-
-impl SessionTemporalRefreshSupervisorInstrumentation {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
-    fn drop(&mut self) {}
-}
-
 impl SessionTemporalRefreshSchedulerEntry {
     async fn shutdown(self) {
         if let Some(history) = self
@@ -260,7 +248,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     worker_state.mark_stopped();
                     return;
                 }
-                let _instrumentation = SessionTemporalRefreshSupervisorInstrumentation::new();
                 let mut workers = tokio::task::JoinSet::new();
                 let mut panic_attempt = 0u32;
                 loop {
