@@ -52,7 +52,7 @@ async fn sessions_for_lists_a_claude_session_by_its_cwd() {
     let db = open_project_session_db(&project).await.unwrap();
     ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Claude)).await;
     db.runtime()
-        .converge_git_evidence_for_test(&SystemGit)
+        .converge_git_evidence_for_test(&SystemGit, Some(&project))
         .await
         .unwrap();
 
