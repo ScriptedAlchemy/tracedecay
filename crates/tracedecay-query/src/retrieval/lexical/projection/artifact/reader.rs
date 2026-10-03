@@ -1879,31 +1879,15 @@ struct NgramSelectivityV1 {
 }
 
 /// One query's n-gram budget: the encoded-byte allowance every intersection
-/// charges against, plus the totals it consumed.
+/// charges against.
 struct NgramListBudgetV1 {
     remaining_encoded_bytes: usize,
-
-    observed_lists: u64,
-
-    observed_bytes: u64,
 }
 
 impl NgramListBudgetV1 {
     fn for_query() -> Self {
         Self {
             remaining_encoded_bytes: ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1,
-
-            observed_lists: 0,
-
-            observed_bytes: 0,
-        }
-    }
-
-    #[inline(always)]
-    fn observe_list(&mut self, encoded_bytes: usize) {
-        {
-            self.observed_lists = self.observed_lists.saturating_add(1);
-            self.observed_bytes = self.observed_bytes.saturating_add(encoded_bytes as u64);
         }
     }
 }
@@ -1975,7 +1959,6 @@ fn ngram_bitmap_candidates(
             _metrics.observe_ngram_list();
             _metrics.observe_ngram_candidates(list.len());
         }
-        budget.observe_list(encoded.len());
         let exhausted = list.is_empty();
         candidates = Some(list);
         if exhausted {
@@ -2867,7 +2850,6 @@ impl<'a> ArtifactQueryV1<'a> {
             let mut rows = statement
                 .query(params_from_iter(terms.iter()))
                 .map_err(map_query_sql_error)?;
-            let mut observed_rows = 0u64;
             let mut remaining_bytes = ARTIFACT_TERM_POSTING_QUERY_BYTES_V1;
             while let Some(row) = rows.next().map_err(map_query_sql_error)? {
                 let term: String = row.get(0).map_err(map_query_sql_error)?;
@@ -2895,7 +2877,6 @@ impl<'a> ArtifactQueryV1<'a> {
                         field,
                         postings: list.to_vec(),
                     });
-                    observed_rows = observed_rows.saturating_add(1);
                 }
             }
             drop(rows);

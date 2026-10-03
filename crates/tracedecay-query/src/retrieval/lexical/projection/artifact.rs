@@ -217,10 +217,9 @@ pub(super) enum BuilderDurabilityV1 {
 /// authority: the connection thread occupies one admitted worker and SQLite
 /// may use only the memory-backed remainder. Corpus-wide CREATE INDEX runs use
 /// in-memory temporary b-trees only when the same budget holds their modeled
-/// reservation; otherwise they spill to files. The modeled-reservation gauge
-/// reports the caller plus effective helpers at the canonical 128 MiB worker
-/// charge; it is a subset of the scheduler's existing admission, not another
-/// cache or a second memory authority.
+/// reservation; otherwise they spill to files. The modeled
+/// reservation is a subset of the scheduler's existing admission, not
+/// another cache or a second memory authority.
 fn open_builder_connection(
     path: &Path,
     durability: BuilderDurabilityV1,

@@ -373,8 +373,6 @@ impl TaskSessionCandidateExportPortV1 for CanonicalTaskSessionCandidateExportPor
             }),
         };
         batch.validate().map_err(contract_error)?;
-        // This lane emits every admitted candidate unfiltered, so a separate
-        // results gauge would always mirror this one.
         Ok(RetrieverOutcome::Complete(batch))
     }
 }

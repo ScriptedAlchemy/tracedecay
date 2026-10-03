@@ -848,55 +848,6 @@ impl PersistedFinalizationPhaseV1 {
     }
 }
 
-struct FinalizationWakeMetricsV1 {
-    rows: usize,
-}
-
-struct FinalizationTransactionMetricsV1 {
-    committed: bool,
-}
-
-impl FinalizationTransactionMetricsV1 {
-    #[inline(always)]
-    const fn new() -> Self {
-        Self { committed: false }
-    }
-
-    #[inline(always)]
-    fn mark_committed(&mut self) {
-        {
-            self.committed = true;
-        }
-    }
-}
-
-impl Drop for FinalizationTransactionMetricsV1 {
-    fn drop(&mut self) {
-        if !self.committed {
-            // Dropping an uncommitted rusqlite transaction rolls it back.
-        }
-    }
-}
-
-impl FinalizationWakeMetricsV1 {
-    #[inline(always)]
-    fn new() -> Self {
-        Self { rows: 0 }
-    }
-
-    #[inline(always)]
-    fn probe(&self) {}
-
-    #[inline(always)]
-    fn add_rows(&mut self, rows: usize) {
-        self.rows = self.rows.saturating_add(rows);
-    }
-}
-
-impl Drop for FinalizationWakeMetricsV1 {
-    fn drop(&mut self) {}
-}
-
 /// Stable identity of the private staging authority, captured from an exact
 /// no-follow file handle rather than mutable path metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1343,11 +1294,8 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[VerifiedSealedLexicalPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = (|| {
-            let prepared = self.prepare_pages(pages, control)?;
-            self.append_prepared_pages_inner(&prepared, control)
-        })();
-        result
+        let prepared = self.prepare_pages(pages, control)?;
+        self.append_prepared_pages(&prepared, control)
     }
 
     /// Prepare the fresh suffix of one ordered source batch outside SQLite.
@@ -1535,15 +1483,6 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[PreparedCodeLexicalArtifactPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = self.append_prepared_pages_inner(pages, control);
-        result
-    }
-
-    fn append_prepared_pages_inner(
-        &mut self,
-        pages: &[PreparedCodeLexicalArtifactPageV1],
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
         if read_receipt_with_control(&self.connection, control)?.is_some() {
@@ -1635,11 +1574,11 @@ impl CodeLexicalArtifactBuilderV1 {
                     }?;
                     return Err(error);
                 }
-                let commit = {
+
+                {
                     let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
-                };
-                commit
+                }
             }
         })?;
         // Do not observe cancellation between durable COMMIT and publishing
@@ -1704,7 +1643,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization work budget must be non-zero".to_owned(),
             ));
         }
-        let mut wake_metrics = FinalizationWakeMetricsV1::new();
         checkpoint(control)?;
         self.verify_path_binding()?;
         verify_artifact_state_metadata(
@@ -1749,7 +1687,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 ));
             };
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             // The sorted pass and the count aggregation are the heaviest
             // sorter statements in finalization; run them under the same
@@ -1775,7 +1712,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 )?,
             )?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
                 completed_sections: 0,
@@ -1786,7 +1723,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let mut state = load_finalization_state(&transaction)?.ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact finalization marker disappeared".to_owned(),
@@ -1815,7 +1751,7 @@ impl CodeLexicalArtifactBuilderV1 {
             })??;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: 0,
@@ -1833,10 +1769,8 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
-            wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
-            wake_metrics.add_rows(rows);
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
@@ -1886,7 +1820,7 @@ impl CodeLexicalArtifactBuilderV1 {
         if state.section_ordinal < section_count {
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: u64::try_from(state.completed_sections.len())
@@ -1909,7 +1843,7 @@ impl CodeLexicalArtifactBuilderV1 {
         // of the content alone, which is what lets worktrees share one file.
         // A crash before the seal commits repeats this rewrite on resume.
         store_finalization_state(&transaction, &state)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        commit_finalization_transaction(transaction)?;
         {
             let _span =
                 tracing::trace_span!("query.artifact.finalization.canonical_layout").entered();
@@ -1917,7 +1851,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }?;
         checkpoint(control)?;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let sections = state.completed_sections;
         let summary = CodeLexicalSourceSummaryV1::of_staged_pages(
             &transaction,
@@ -1959,7 +1892,7 @@ impl CodeLexicalArtifactBuilderV1 {
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        commit_finalization_transaction(transaction)?;
         self.canonicalize_sealed_header()?;
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
@@ -6716,16 +6649,9 @@ fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,
-    metrics: &mut FinalizationTransactionMetricsV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let result = {
-        let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
-        transaction.commit().map_err(sqlite_error)
-    };
-    if result.is_ok() {
-        metrics.mark_committed();
-    }
-    result
+    let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
+    transaction.commit().map_err(sqlite_error)
 }
 
 #[tracing::instrument(
