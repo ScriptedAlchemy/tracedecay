@@ -74,7 +74,6 @@ mod lsp_support;
 mod managed_test_runs;
 pub mod native_integration;
 pub mod observability;
-mod observe;
 pub mod operation_stream;
 pub mod pr_tracking;
 pub mod primitives;
