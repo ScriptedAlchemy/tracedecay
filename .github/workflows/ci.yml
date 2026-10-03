@@ -241,8 +241,11 @@ jobs:
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
-      - name: Check the superseded-entry selection
-        run: python3 scripts/test-prune-superseded-actions-caches.py
+      - name: Check Rust cache key lineage and the superseded-entry selection
+        run: |
+          python3 scripts/test-prune-superseded-actions-caches.py
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
 
       # Packager unit tests. They do not need a release binary, so they run
       # once here instead of once per release matrix target.
