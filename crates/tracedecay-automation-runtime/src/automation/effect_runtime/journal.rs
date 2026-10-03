@@ -277,7 +277,7 @@ impl ReservationClaimState {
 
 impl Drop for AutomationReservationClaim {
     fn drop(&mut self) {
-        // Each claim incremented the in-flight gauge exactly once at
+        // Each claim registered itself exactly once at
         // acquisition; dropping the owner (settled, abandoned, panicked, or
         // cancelled) is the one release point.
         let mut claims = reservation_claims_guard();

@@ -529,7 +529,7 @@ async fn scheduler_gate_with_lock_retention(
     )
     .await?
     else {
-        super::scheduler_metrics::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
+        super::scheduler_trace::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
         let summary = if scheduled {
             Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
         } else {
@@ -568,11 +568,11 @@ async fn scheduler_gate_with_lock_retention(
         )
     };
     if let Some(reason) = decision.skip_reason() {
-        super::scheduler_metrics::observe_skip_reason(reason);
+        super::scheduler_trace::observe_skip_reason(reason);
         return Ok((SchedulerGate::Skip(reason), Some(summary)));
     }
 
-    super::scheduler_metrics::observe_due();
+    super::scheduler_trace::observe_due();
     Ok((SchedulerGate::Proceed(lock), Some(summary)))
 }
 
@@ -653,7 +653,7 @@ async fn task_run_gate_with_lock_retention(
                 Some(reason) => {
                     // The scheduler gate above already reported "due"; the
                     // enablement refusal is the decision that actually stands.
-                    super::scheduler_metrics::observe_skip_reason(reason);
+                    super::scheduler_trace::observe_skip_reason(reason);
                     SchedulerGate::Skip(reason)
                 }
                 None => SchedulerGate::Proceed(lock),
