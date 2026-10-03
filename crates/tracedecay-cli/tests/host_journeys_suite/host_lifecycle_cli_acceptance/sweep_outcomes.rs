@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Output;
 
-use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
+use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -900,4 +900,86 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
         "{doctor_stderr}"
     );
     assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
+}
+
+/// An installed file whose bytes moved is drift the daemon reports; the
+/// finding names the component and the command that converges it.
+#[cfg(unix)]
+#[test]
+fn doctor_names_the_drifted_host_component_and_its_remedy() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    let receipt = latest_receipt(&cli, HostKindV1::Cline);
+    let artifact = cli.home.path().join(
+        &receipt
+            .component_receipts
+            .iter()
+            .find(|receipt| receipt.component == HostComponentV1::ContextMcp)
+            .expect("cline installs its context MCP component")
+            .artifacts[0]
+            .relative_path,
+    );
+    let mut bytes = fs::read(&artifact).unwrap();
+    bytes.push(b'\n');
+    fs::write(&artifact, bytes).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+    // Daemon findings are reported for an enrolled project.
+    fs::write(cli.project.path().join("lib.rs"), "fn probe() {}\n").unwrap();
+    assert_success("project", "init", cli.run(&["init"]));
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert!(
+        doctor_stderr.contains(
+            "advisory: cline/context-mcp has drifted from its installed shape; run `tracedecay \
+             reinstall --component context-mcp` (refreshes tracedecay-owned files) \
+             (host.conformance.drifted)"
+        ),
+        "{doctor_stderr}"
+    );
+}
+
+/// Gemini CLI and Pi are CLIs. `~/.gemini` is also Antigravity's directory and
+/// `~/.pi/agent` outlives an uninstalled `pi`, so neither directory detects its
+/// host; the host's own executable does.
+#[cfg(unix)]
+#[test]
+fn doctor_detects_cli_hosts_by_their_executable_not_their_directory() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    fs::create_dir_all(cli.home.path().join(".pi/agent")).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let absent = cli.run(&["doctor"]);
+    let absent_stderr = stderr(&absent);
+    assert_eq!(absent.status.code(), Some(0), "{absent_stderr}");
+    for name in ["Gemini CLI", "Pi"] {
+        assert!(
+            !absent_stderr.contains(&format!("{name} detected")),
+            "a host whose CLI is absent is not detected:\n{absent_stderr}"
+        );
+    }
+
+    install_host_cli(&cli, "gemini", "exit 0");
+    install_host_cli(&cli, "pi", "exit 0");
+    let present = cli.run(&["doctor"]);
+    let present_stderr = stderr(&present);
+    assert_eq!(present.status.code(), Some(0), "{present_stderr}");
+    assert!(
+        present_stderr.contains(
+            "Gemini CLI detected but tracedecay is not integrated, run `tracedecay install \
+             --agent gemini`\n"
+        ),
+        "{present_stderr}"
+    );
+    assert!(
+        present_stderr.contains(&format!(
+            "Pi detected ({}) but tracedecay is not integrated, run `tracedecay install --agent \
+             pi`\n",
+            cli.home.path().join(".pi/agent").display()
+        )),
+        "{present_stderr}"
+    );
 }

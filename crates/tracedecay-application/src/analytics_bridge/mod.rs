@@ -356,7 +356,7 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::hook_row_to_analytics_event;
+    use super::{RegisteredGlobalDb, hook_row_to_analytics_event};
 
     fn aliased_root() -> (tempfile::TempDir, String, std::path::PathBuf) {
         let root = tempfile::tempdir().expect("project root");
@@ -368,10 +368,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &alias).expect("alias root");
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&real, &alias).expect("alias root");
-        let canonical = std::fs::canonicalize(&real)
-            .expect("canonical root")
-            .to_string_lossy()
-            .into_owned();
+        let canonical = RegisteredGlobalDb::canonical_project_key(&real);
         (root, canonical, alias)
     }
 
