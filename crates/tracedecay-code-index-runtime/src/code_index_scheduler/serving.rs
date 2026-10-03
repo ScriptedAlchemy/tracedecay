@@ -3016,9 +3016,45 @@ impl LatestCodeTextGenerationV1 {
     /// both sealed sources cut the same files and at most an eighth of them
     /// changed: only the changed files are decoded and re-encoded. `None`
     /// means a cold build: no retained ancestor with a published artifact, a
-    /// different file roster, a larger change, or an ancestor artifact of
-    /// another layout.
+    /// different file roster, a larger change, or an ancestor that cannot be
+    /// carried. The carry is only an optimisation over the child's own
+    /// source, so any failure but an interruption builds cold: a damaged,
+    /// missing, or foreign ancestor artifact must not fail the child's build
+    /// on every retry while that ancestor stays retained.
     fn carry_parent_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        match self.carry_nearest_ancestor_text_artifact(
+            staging_path,
+            source,
+            metadata,
+            builder_budget,
+            control,
+        ) {
+            Ok(carried) => Ok(carried),
+            Err(error @ (RetrievalPortError::Cancelled | RetrievalPortError::BudgetExceeded)) => {
+                Err(error)
+            }
+            Err(error) => {
+                tracing::info!(
+                    event = "code_text_artifact_parent_not_carried",
+                    generation = %self.metadata.manifest().generation_id,
+                    %error,
+                    "the parent text artifact cannot be carried; building cold"
+                );
+                self.text_artifact_store
+                    .discard_incompatible_staging(staging_path, control)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn carry_nearest_ancestor_text_artifact(
         &self,
         staging_path: &Path,
         source: &mut VerifiedSealedLexicalPageSourceV1,
@@ -3031,7 +3067,7 @@ impl LatestCodeTextGenerationV1 {
         // that superseded its parent before the parent's text sealed carries
         // from the generation before.
         let mut ancestor = self.metadata.manifest().parent_generation.clone();
-        let (parent_id, descriptor, parent_source) = loop {
+        let (descriptor, parent_source) = loop {
             let Some(ancestor_id) = ancestor.take() else {
                 return Ok(None);
             };
@@ -3042,7 +3078,7 @@ impl LatestCodeTextGenerationV1 {
             };
             let ancestor_source = store.open_sealed_source(&identity, control)?;
             if let Some(descriptor) = store.published_descriptor(&ancestor_id)? {
-                break (ancestor_id, descriptor, ancestor_source);
+                break (descriptor, ancestor_source);
             }
             ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
         };
@@ -3070,9 +3106,11 @@ impl LatestCodeTextGenerationV1 {
             let _lock = store.acquire_store_write_lock()?;
             std::fs::File::open(&parent_path).map_err(text_artifact_unavailable)?
         };
-        let carried = CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
+        CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
             staging_path,
             parent_file,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
             metadata.clone(),
             builder_budget,
             source_state_digest,
@@ -3080,21 +3118,9 @@ impl LatestCodeTextGenerationV1 {
             &changed,
             &mut stage_file_pages,
             control,
-        );
-        match carried {
-            Ok(builder) => Ok(Some(builder)),
-            Err(CodeLexicalArtifactErrorV1::Incompatible(reason)) => {
-                tracing::info!(
-                    event = "code_text_artifact_parent_not_carried",
-                    parent_generation = %parent_id,
-                    %reason,
-                    "the parent text artifact cannot be carried; building cold"
-                );
-                store.discard_incompatible_staging(staging_path, control)?;
-                Ok(None)
-            }
-            Err(error) => Err(map_text_artifact_error(error)),
-        }
+        )
+        .map(Some)
+        .map_err(map_text_artifact_error)
     }
 
     /// One claimed head-open pass, run with the slot lock released: reopen
