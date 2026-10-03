@@ -347,18 +347,14 @@ async fn fact_store_remove_deletes_only_the_named_fact() {
         call_tool(&server, TOOL, json!({"fact_id": "not-a-fact"})).await,
         hidden_fact_problem(),
     );
-    let missing = payload(
+    assert_problem(
         call_tool(
             &server,
             TOOL,
             json!({"fact_id": missing_sibling_id(&removed.fact_id)}),
         )
         .await,
-    );
-    assert_eq!(
-        missing,
-        json!({"outcome": "not_found", "remaining_fact_count": 2}),
-        "{missing}"
+        hidden_fact_problem(),
     );
 
     assert_problem(
