@@ -268,8 +268,8 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
     exact_candidate.exact_admission_proof = Some(exact_proof());
     let exact = context
         .exact(
-            RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
-            "run_query",
+            RetrieverOutcome::Complete(batch(exact_candidate.clone(), exact_evidence())),
+            &exact_evidence().matched_literals,
             Some(ExactTechnicalTermKindV1::WholeSymbol),
             |path| path.starts_with("src/query/"),
         )
@@ -286,6 +286,26 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
             total_eligible: 1,
             coverage: coverage(),
         })
+    );
+
+    let other_field = ExactLiteralV1 {
+        field: ExactFieldV1::ToolName,
+        ..exact_evidence().matched_literals[0].clone()
+    };
+    let NativeLaneOutcomeV1::Complete(page) = context
+        .exact(
+            RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
+            &[other_field],
+            None,
+            |_| true,
+        )
+        .expect("exact translation")
+    else {
+        panic!("a complete batch stays complete");
+    };
+    assert!(
+        page.items.is_empty(),
+        "identical bytes admitted under another field must not match: {page:?}"
     );
 
     let lexical = context
@@ -365,7 +385,7 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
         context
             .exact(
                 RetrieverOutcome::Stale(stale.clone()),
-                "run_query",
+                &exact_evidence().matched_literals,
                 None,
                 |_| true,
             )

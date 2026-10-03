@@ -2789,7 +2789,7 @@ fn execute_prepared_exact_query(
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
-                native_context.exact(outcome, &request.literal, request.kind, |path| {
+                native_context.exact(outcome, &lane_request.literals, request.kind, |path| {
                     path_is_in_code_query_scope(path, &request.scope)
                 })
             else {
