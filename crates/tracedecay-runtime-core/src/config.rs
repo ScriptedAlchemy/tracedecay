@@ -638,20 +638,24 @@ mod profile_root_tests {
 
     #[test]
     fn config_home_prefers_an_absolute_xdg_directory() {
-        let home = ProfileRoot::under_home("/home/owner");
-        assert_eq!(
-            home.config_home(),
-            Some(std::path::PathBuf::from("/home/owner/.config"))
-        );
+        // Absolute only in the platform's convention: a `/`-rooted path is
+        // not absolute to Windows, so each side tests its own spelling.
+        #[cfg(unix)]
+        let (home_dir, xdg_dir, data_dir) = ("/home/owner", "/xdg", "/data");
+        #[cfg(windows)]
+        let (home_dir, xdg_dir, data_dir) = (r"C:\home\owner", r"D:\xdg", r"E:\data");
+        let home = ProfileRoot::under_home(home_dir);
+        let home_config = std::path::PathBuf::from(home_dir).join(".config");
+        assert_eq!(home.config_home(), Some(home_config.clone()));
         assert_eq!(
             home.clone().with_xdg_config_home("relative").config_home(),
-            Some(std::path::PathBuf::from("/home/owner/.config"))
+            Some(home_config)
         );
         assert_eq!(
-            home.with_xdg_config_home("/xdg").config_home(),
-            Some(std::path::PathBuf::from("/xdg"))
+            home.with_xdg_config_home(xdg_dir).config_home(),
+            Some(std::path::PathBuf::from(xdg_dir))
         );
-        assert_eq!(ProfileRoot::new("/data").config_home(), None);
+        assert_eq!(ProfileRoot::new(data_dir).config_home(), None);
     }
 }
 

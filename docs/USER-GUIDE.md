@@ -1133,6 +1133,10 @@ empty. Nothing is migrated or backed up. The stores it resets on their own:
 | project sessions `<id>` | `~/.tracedecay/projects/<id>/sessions.db` family | that project's session history and stored configuration |
 | profile / project hook admissions | the Hook V2 admission ledgers | pending hook admissions |
 
+The profile authority holds no session data, so a session-feature schema
+change (LCM, git correlation, workflows) resets only the session stores and
+never the registry.
+
 A profile authority reset keeps every project store (code index, graph,
 sessions, memory) byte-identical. The registry it recreates is empty, so the
 reset prints one `tracedecay init <path>` command per project store whose root

@@ -217,7 +217,10 @@ async fn malformed_session_file_is_refused_with_a_typed_failure() {
         .map(|stored| stored.observation().payload().to_string())
         .collect::<String>();
     let project = layout.project.to_string_lossy().into_owned();
-    let normalized = payloads.replace(&project, "/project");
+    // The payloads are serialized JSON: match the path's escaped spelling,
+    // which doubles the `\\` separators on Windows.
+    let escaped = serde_json::to_string(&project).unwrap();
+    let normalized = payloads.replace(&escaped[1..escaped.len() - 1], "/project");
     assert_eq!(
         normalized,
         format!(

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row, Statement, params};
 use serde_json::Value;
 use tracedecay_capture::opencode as opencode_capture;
 use tracedecay_domain::{
@@ -602,33 +602,43 @@ fn scan_message_reference_page(
     let matcher = source.scope_matcher();
     let mut statement = connection
         .prepare(
-            "SELECT m.rowid,
-                    CASE WHEN length(m.id) <= ?1 THEN m.id ELSE NULL END AS message_id,
-                    CASE WHEN length(m.session_id) <= ?1 THEN m.session_id ELSE NULL END
+            "WITH page AS (
+                 SELECT m.rowid, m.id, m.session_id, s.directory,
+                        length(m.data) AS message_bytes
+                 FROM message m
+                 JOIN session s ON s.id = m.session_id
+                 WHERE m.rowid > ?2
+                 ORDER BY m.rowid
+                 LIMIT ?3
+             ),
+             part_sums AS (
+                 SELECT p.message_id,
+                        SUM(length(p.data)) AS part_bytes,
+                        MAX(length(p.data)) AS max_part_bytes,
+                        COUNT(*) AS part_count
+                 FROM part p
+                 WHERE p.message_id IN (SELECT id FROM page)
+                 GROUP BY p.message_id
+             )
+             SELECT page.rowid,
+                    CASE WHEN length(page.id) <= ?1 THEN page.id ELSE NULL END AS message_id,
+                    CASE WHEN length(page.session_id) <= ?1 THEN page.session_id ELSE NULL END
                         AS session_id,
-                    CASE WHEN length(s.directory) <= ?1 THEN s.directory ELSE NULL END
+                    CASE WHEN length(page.directory) <= ?1 THEN page.directory ELSE NULL END
                         AS directory,
-                    length(m.data) AS message_bytes,
-                    COALESCE((
-                        SELECT SUM(length(p.data)) FROM part p WHERE p.message_id = m.id
-                    ), 0) AS part_bytes,
-                    COALESCE((
-                        SELECT MAX(length(p.data)) FROM part p WHERE p.message_id = m.id
-                    ), 0) AS max_part_bytes,
-                    (
-                        SELECT COUNT(*) FROM part p WHERE p.message_id = m.id
-                    ) AS part_count,
+                    page.message_bytes,
+                    COALESCE(part_sums.part_bytes, 0) AS part_bytes,
+                    COALESCE(part_sums.max_part_bytes, 0) AS max_part_bytes,
+                    COALESCE(part_sums.part_count, 0) AS part_count,
                     (
                         SELECT COUNT(*) - 1
                         FROM message ordered
-                        WHERE ordered.session_id = m.session_id
-                          AND ordered.rowid <= m.rowid
+                        WHERE ordered.session_id = page.session_id
+                          AND ordered.rowid <= page.rowid
                     ) AS source_order
-             FROM message m
-             JOIN session s ON s.id = m.session_id
-             WHERE m.rowid > ?2
-             ORDER BY m.rowid
-             LIMIT ?3",
+             FROM page
+             LEFT JOIN part_sums ON part_sums.message_id = page.id
+             ORDER BY page.rowid",
         )
         .map_err(|error| {
             scan_error(
@@ -751,6 +761,25 @@ fn materialize_reference_page(
     install_progress_handler(connection, &source.source_path, &budget)?;
     let max_native_json_bytes =
         u64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?;
+    let mut payload_statement = connection
+        .prepare(
+            "SELECT CASE WHEN length(m.data) <= ?1 THEN m.data ELSE NULL END,
+                    CASE WHEN length(s.parent_id) <= ?3 THEN s.parent_id ELSE NULL END,
+                    length(s.parent_id)
+             FROM message m LEFT JOIN session s ON s.id = m.session_id
+             WHERE m.rowid = ?2",
+        )
+        .map_err(|error| scan_error("prepare message payload query", &source.source_path, error))?;
+    let mut parts_statement = connection
+        .prepare(
+            "SELECT id, length(data),
+                    CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
+             FROM part
+             WHERE message_id = ?2
+             ORDER BY id
+             LIMIT ?3",
+        )
+        .map_err(|error| scan_error("prepare part query", &source.source_path, error))?;
     let before = budget.consumed_input_bytes();
     let mut records = Vec::with_capacity(references.len());
     let mut fully_processed = true;
@@ -771,7 +800,12 @@ fn materialize_reference_page(
             fully_processed = false;
             break;
         }
-        match load_record(connection, &reference, &source.source_path)? {
+        match load_record(
+            &mut payload_statement,
+            &mut parts_statement,
+            &reference,
+            &source.source_path,
+        )? {
             Some(record) => records.push(record),
             None => budget.mark_non_durable(),
         }
@@ -787,20 +821,12 @@ fn materialize_reference_page(
 }
 
 fn load_record(
-    connection: &Connection,
+    payload_statement: &mut Statement<'_>,
+    parts_statement: &mut Statement<'_>,
     reference: &OpenCodeMessageRef,
     database_path: &Path,
 ) -> TranscriptIngestResult<Option<OpenCodeRecord>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT CASE WHEN length(m.data) <= ?1 THEN m.data ELSE NULL END,
-                    CASE WHEN length(s.parent_id) <= ?3 THEN s.parent_id ELSE NULL END,
-                    length(s.parent_id)
-             FROM message m LEFT JOIN session s ON s.id = m.session_id
-             WHERE m.rowid = ?2",
-        )
-        .map_err(|error| scan_error("prepare message payload query", database_path, error))?;
-    let mut rows = statement
+    let mut rows = payload_statement
         .query(params![
             i64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?,
             reference.rowid,
@@ -836,7 +862,7 @@ fn load_record(
     message_fields
         .entry("sessionID")
         .or_insert_with(|| Value::String(reference.session_id.clone()));
-    let parts = load_parts(connection, &reference.id, database_path)?;
+    let parts = load_parts(parts_statement, &reference.id, database_path)?;
     if parts.deferred {
         return Ok(None);
     }
@@ -865,20 +891,10 @@ struct LoadedParts {
 }
 
 fn load_parts(
-    connection: &Connection,
+    statement: &mut Statement<'_>,
     message_id: &str,
     database_path: &Path,
 ) -> TranscriptIngestResult<LoadedParts> {
-    let mut statement = connection
-        .prepare(
-            "SELECT id, length(data),
-                    CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
-             FROM part
-             WHERE message_id = ?2
-             ORDER BY id
-             LIMIT ?3",
-        )
-        .map_err(|error| scan_error("prepare part query", database_path, error))?;
     let mut query = statement
         .query(params![
             i64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?,

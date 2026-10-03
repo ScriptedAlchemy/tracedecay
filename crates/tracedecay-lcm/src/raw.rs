@@ -873,9 +873,7 @@ pub async fn commit_staged_raw_message(
     message: &SessionMessageRecord,
     staged: StagedRawMessageIngest,
 ) -> Result<RawMessageUpsert, LcmError> {
-    for payload_ref in &staged.prepared.pending_payload_refs {
-        payload::upsert_payload_metadata(conn, payload_ref).await?;
-    }
+    payload::upsert_payload_metadata_batch(conn, &staged.prepared.pending_payload_refs).await?;
     let Some(whole_message) = staged.whole_message else {
         let projection_text = derived_text_for_index(&staged.prepared.text);
         upsert_inline_raw_message(
