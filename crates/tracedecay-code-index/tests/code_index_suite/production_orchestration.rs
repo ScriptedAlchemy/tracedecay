@@ -21,12 +21,14 @@ use tracedecay_code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
-        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-        VerifiedSealedLexicalPageV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedBuildV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemorySealedPublicationStoreV1,
+        SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentPublicationV1,
+        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
+        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+        advance_import_dictionary_digest, initial_import_dictionary_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -47,22 +49,36 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
-use crate::support::{PartitionedSealV1, RUST_SOURCE, id, reseal_manifest};
+use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
 
 mod parallel_equivalence;
 
 #[derive(Clone, Default)]
 pub(super) struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
+    sealed: MemorySealedPublicationStoreV1,
 }
 
 impl SharedPublicationStore {
     fn scope_count(&self) -> usize {
-        self.active.lock().expect("publication lock").len()
+        self.sealed.active_scopes()
     }
 
     fn shares_repository_store(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.active, &other.active)
+        self.sealed.shares_state_with(&other.sealed)
+    }
+
+    /// The generation `published` sealed, decoded whole from this store.
+    pub(super) fn generation(
+        &self,
+        published: &CodeIndexPublishedBuildV1,
+    ) -> Arc<CodeIndexPublishedGenerationV1> {
+        published.decoded().map(Arc::clone).unwrap_or_else(|| {
+            Arc::new(
+                self.sealed
+                    .decode(published.manifest_bytes())
+                    .expect("published generation decodes"),
+            )
+        })
     }
 }
 
@@ -70,32 +86,18 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("publication lock")
-            .get(scope)
-            .map(Arc::clone))
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        self.sealed.load_active(scope)
     }
 
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("publication lock");
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        self.sealed
+            .publish_atomically(scope, expected_active_generation, generation)
     }
 }
 
@@ -104,39 +106,36 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
 /// the generation sealed for one branch/worktree is answered for every scope.
 #[derive(Clone, Default)]
 struct PartialKeyPublicationStore {
-    active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+    sealed: MemorySealedPublicationStoreV1,
+    pointer: Arc<Mutex<Option<CodeIndexGenerationScopeV1>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("publication lock")
-            .as_ref()
-            .map(Arc::clone))
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        let pointer = self.pointer.lock().expect("publication lock").clone();
+        match pointer {
+            Some(scope) => self.sealed.load_active(&scope),
+            None => Ok(None),
+        }
     }
 
     fn publish_atomically(
         &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("publication lock");
-        if active
-            .as_ref()
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        *active = Some(generation);
-        Ok(())
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        let pointer = self
+            .pointer
+            .lock()
+            .expect("publication lock")
+            .get_or_insert_with(|| scope.clone())
+            .clone();
+        self.sealed
+            .publish_atomically(&pointer, expected_active_generation, generation)
     }
 }
 
@@ -462,6 +461,7 @@ fn cross_file_edges_require_path_binding_evidence() {
     .expect("production owner")
     .build_and_publish(request, &ActiveControl)
     .expect("generation publishes");
+    let generation = cold_generation(&generation);
     let occurrence = |qualified_name: &str| {
         generation
             .symbols()
@@ -570,35 +570,40 @@ fn cross_file_edges_require_path_binding_evidence() {
 
 /// A full build retains no parse tree; an increment retains the files it
 /// re-extracts, and the next increment editing one of them reparses only the
-/// changed region.
+/// changed region. The fillers keep each one-file edit an increment over its
+/// sealed parent rather than a cold rebuild.
 #[test]
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
-    let build = |owner: &mut CodeIndexProductionOwnerV1<
-        SharedPublicationStore,
-        ApplyingProjectionSink,
-    >,
-                 ordinal: i64,
-                 edited: u32| {
-        owner
-            .build_and_publish(
-                request_with_source(
-                    &format!("file.retained.{ordinal}"),
-                    1_000_000 + ordinal * 100_000,
-                    &format!("commit.retained.{ordinal}"),
-                    &format!("tree.retained.{ordinal}"),
-                    &format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n"),
-                ),
-                &ActiveControl,
-            )
-            .expect("generation");
-    };
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let build =
+        |owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
+         ordinal: i64,
+         edited: u32| {
+            let occurrence = format!("file.retained.{ordinal}");
+            let source =
+                format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n");
+            let mut sources = SPARSE_FILLERS.to_vec();
+            sources.push((&occurrence, "src/lib.rs", &source));
+            sources.sort_by_key(|&(_, path, _)| path);
+            owner
+                .build_and_publish(
+                    partitioned_request(
+                        &sources,
+                        BTreeSet::from(["src/lib.rs".to_owned()]),
+                        1_000_000 + ordinal * 100_000,
+                    ),
+                    &ActiveControl,
+                )
+                .expect("generation");
+        };
+    let fillers = SPARSE_FILLERS.len() as u64;
     build(&mut owner, 1, 2);
     let cold = owner.retained_parse_stats();
-    assert_eq!(cold.initial_parses, 1);
-    assert_eq!(cold.full_extractions, 1);
+    assert_eq!(cold.initial_parses, fillers + 1);
+    assert_eq!(cold.full_extractions, fillers + 1);
     assert_eq!(cold.retained_documents, 0);
     let initial_clone_stats = owner.physical_artifact_pool_stats();
     assert_eq!(initial_clone_stats.clone_payloads_computed, 2);
@@ -606,16 +611,16 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
 
     build(&mut owner, 2, 20);
     let first_increment = owner.retained_parse_stats();
-    assert_eq!(first_increment.initial_parses, 2);
+    assert_eq!(first_increment.initial_parses, fillers + 2);
     assert_eq!(first_increment.incremental_parses, 0);
-    assert_eq!(first_increment.full_extractions, 2);
+    assert_eq!(first_increment.full_extractions, fillers + 2);
     assert_eq!(first_increment.retained_documents, 1);
 
     build(&mut owner, 3, 200);
     let stats = owner.retained_parse_stats();
-    assert_eq!(stats.initial_parses, 2);
+    assert_eq!(stats.initial_parses, fillers + 2);
     assert_eq!(stats.incremental_parses, 1);
-    assert_eq!(stats.full_extractions, 2);
+    assert_eq!(stats.full_extractions, fillers + 2);
     assert_eq!(stats.incremental_extractions, 1);
     assert_eq!(stats.reset_extractions, 0);
     assert_eq!(stats.retained_documents, 1);
@@ -627,11 +632,9 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     assert_eq!(clone_stats.clone_payloads_computed, 4);
 }
 
-/// Carry-forward rematerialize already succeeds for unchanged files, including
-/// after restore. `code_index_reused_parses` is the matching hotpath success
-/// event (`add_reused_parses(1)`); these extract counts are the readable
-/// re-extract dual on the default (non-hotpath) path. No carry-forward miss
-/// to fix, this locks the counter floor so a later fallback would fail.
+/// An unchanged file is carried by its sealed descriptor, including after
+/// restore: the increment neither parses nor extracts it and builds no clone
+/// payload for it, so a later fallback to re-extraction fails these counts.
 #[test]
 fn unchanged_increment_does_not_reextract_carried_files() {
     let store = SharedPublicationStore::default();
@@ -651,7 +654,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_first.noop_parses, 0);
 
     owner
-        .build_and_publish(request("file.carry.2", 1_200_000), &ActiveControl)
+        .build_and_publish(request("file.carry.1", 1_200_000), &ActiveControl)
         .expect("unchanged increment");
     let after_second = owner.retained_parse_stats();
     let clone_after_second = owner.physical_artifact_pool_stats();
@@ -674,16 +677,20 @@ fn unchanged_increment_does_not_reextract_carried_files() {
         clone_after_second.clone_payloads_computed,
         clone_after_first.clone_payloads_computed
     );
-    assert!(clone_after_second.clone_payloads_reused > clone_after_first.clone_payloads_reused);
+    assert_eq!(
+        clone_after_second.clone_payloads_reused,
+        clone_after_first.clone_payloads_reused
+    );
 
-    let mut restarted = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("restart owner");
+    let mut restarted =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("restart owner");
     let after_restart = restarted.retained_parse_stats();
     assert_eq!(after_restart.full_extractions, 0);
     assert_eq!(after_restart.initial_parses, 0);
 
     restarted
-        .build_and_publish(request("file.carry.3", 1_300_000), &ActiveControl)
+        .build_and_publish(request("file.carry.1", 1_300_000), &ActiveControl)
         .expect("unchanged increment after restore");
     let after_restored = restarted.retained_parse_stats();
     let clone_after_restored = restarted.physical_artifact_pool_stats();
@@ -696,7 +703,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(after_restored.incremental_parses, 0);
     assert_eq!(after_restored.noop_parses, 0);
     assert_eq!(clone_after_restored.clone_payloads_computed, 0);
-    assert!(clone_after_restored.clone_payloads_reused > 0);
+    assert_eq!(clone_after_restored.clone_payloads_reused, 0);
 }
 
 /// The physical reuse pool is an index over immutable generation-owned
@@ -708,12 +715,14 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
     {
         let store = SharedPublicationStore::default();
-        let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-            .expect("production owner")
-            .with_physical_artifact_pool(pool.clone());
+        let mut owner =
+            CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+                .expect("production owner")
+                .with_physical_artifact_pool(pool.clone());
         let generation = owner
             .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
             .expect("generation publishes");
+        let generation = store.generation(&generation);
 
         assert_eq!(pool.stats().resident, 1);
         drop(generation);
@@ -744,6 +753,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let source = source_owner
         .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
         .expect("source generation publishes");
+    let source = cold_generation(&source);
     assert_eq!(pool.stats().reused, 0);
     assert_eq!(pool.stats().inserted, 1);
 
@@ -757,6 +767,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let reused = reused_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("physically reused generation publishes");
+    let reused = cold_generation(&reused);
     assert_eq!(
         pool.stats().reused,
         1,
@@ -772,6 +783,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let cold = cold_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("cold comparison generation publishes");
+    let cold = cold_generation(&cold);
 
     let foreign_occurrence = id::<FileOccurrenceId>("file.physical.foreign");
     let mut foreign_owner = CodeIndexProductionOwnerV1::new(
@@ -784,6 +796,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let foreign = foreign_owner
         .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
         .expect("foreign occurrence rematerializes from the shared artifact");
+    let foreign = cold_generation(&foreign);
     assert_eq!(
         pool.stats().reused,
         2,
@@ -883,9 +896,10 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
     })
     .expect("retained parse pool");
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner")
-        .with_retained_parse_pool(pool);
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner")
+            .with_retained_parse_pool(pool);
 
     let fast_source = "fn fast() -> u32 { 1 }\n";
     let slow_source = (0..2_000)
@@ -945,6 +959,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("admitted parsing resumes to completion");
+    let generation = store.generation(&generation);
     assert_eq!(generation.coverage().files_eligible, 2);
     assert_eq!(generation.coverage().files_unsupported, 0);
     let admitted = generation.admitted_chunks().expect("published chunks");
@@ -962,6 +977,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
     let cold = cold_owner
         .build_and_publish(cold_request, &ActiveControl)
         .expect("cold generation");
+    let cold = store.generation(&cold);
     assert_eq!(
         PartitionedSealV1::of(&generation),
         PartitionedSealV1::of(&cold)
@@ -1038,6 +1054,7 @@ fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
         let recovered = owner
             .build_and_publish(request, &ActiveControl)
             .expect("retry after cancellation resets parser");
+        let recovered = store.generation(&recovered);
         assert_eq!(recovered.coverage().files_unsupported, 0);
         assert!(
             !recovered
@@ -1051,8 +1068,9 @@ fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
 #[test]
 fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1065,6 +1083,7 @@ fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
             &ActiveControl,
         )
         .expect("partial generation publishes");
+    let generation = store.generation(&generation);
 
     assert_eq!(generation.coverage().files_partial, 1);
 }
@@ -1072,14 +1091,16 @@ fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
 #[test]
 fn published_generation_serves_current_conservative_test_attribution() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_at_path("file.production.test", "tests/production.rs", 1_100_000),
             &ActiveControl,
         )
         .expect("test generation publishes");
+    let generation = store.generation(&generation);
     let authority = generation
         .test_attribution_authority()
         .expect("attribution authority");
@@ -1133,8 +1154,9 @@ fn published_generation_serves_current_conservative_test_attribution() {
 #[test]
 fn published_generation_attributes_inline_rust_tests_to_called_symbols() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1167,6 +1189,7 @@ fn root_feedback_entry_test() {
             &ActiveControl,
         )
         .expect("test generation publishes");
+    let generation = store.generation(&generation);
     let authority = generation
         .test_attribution_authority()
         .expect("attribution authority");
@@ -1238,6 +1261,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     let first = owner
         .build_and_publish(request("file.production.1", 1_100_000), &ActiveControl)
         .expect("first generation publishes");
+    let first = store.generation(&first);
 
     assert_eq!(first.coverage().files_eligible, 1);
     assert!(first.edges().len() + first.edge_abstentions().len() > 0);
@@ -1274,11 +1298,18 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         ))
         .expect("active generation loads")
         .expect("published generation survives restart");
-    assert_eq!(restored.manifest(), first.manifest());
+    assert_eq!(
+        restored
+            .metadata()
+            .expect("sealed manifest parses")
+            .manifest(),
+        first.manifest()
+    );
 
     let second = restarted
-        .build_and_publish(request("file.production.2", 1_200_000), &ActiveControl)
+        .build_and_publish(request("file.production.1", 1_200_000), &ActiveControl)
         .expect("unchanged source carries forward");
+    let second = store.generation(&second);
     assert_eq!(
         second.manifest().parent_generation,
         Some(first.manifest().generation_id.clone())
@@ -1325,36 +1356,6 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
 }
 
 #[test]
-fn active_generation_loads_share_the_published_allocation() {
-    let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
-    let published = owner
-        .build_and_publish(
-            request("file.production.shared-active", 1_100_000),
-            &ActiveControl,
-        )
-        .expect("generation publishes");
-    let scope = published.sealed_scope();
-
-    let first = store
-        .load_active(&scope)
-        .expect("first active read")
-        .expect("active generation");
-    let second = store
-        .load_active(&scope)
-        .expect("second active read")
-        .expect("active generation");
-
-    assert_eq!(
-        first.chunks().chunks().as_ptr(),
-        second.chunks().chunks().as_ptr(),
-        "active reads must share the immutable generation instead of cloning its complete indices"
-    );
-}
-
-#[test]
 fn sealed_store_drops_whitespace_only_window_chunks() {
     const FUNCTIONS: usize = 32;
     let source: String = (0..FUNCTIONS)
@@ -1378,6 +1379,7 @@ fn sealed_store_drops_whitespace_only_window_chunks() {
             &ActiveControl,
         )
         .expect("whitespace-heavy fixture publishes");
+    let generation = cold_generation(&generation);
     let chunks = generation.chunks().chunks();
     assert!(
         chunks.iter().all(|chunk| {
@@ -1404,11 +1406,13 @@ fn sealed_store_drops_whitespace_only_window_chunks() {
 #[test]
 fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_identically() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let projector_revision =
         GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision");
@@ -1476,11 +1480,13 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
 #[test]
 fn an_interrupted_graph_build_fails_typed_and_the_next_build_completes() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request("file.graph-interrupt", 1_260_000), &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let projector_revision =
         GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision");
@@ -1538,11 +1544,13 @@ fn an_interrupted_graph_build_fails_typed_and_the_next_build_completes() {
 #[test]
 fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request("file.project-binding", 1_200_000), &ActiveControl)
         .expect("valid generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     assert_eq!(PartitionedSealV1::of(&generation).manifest, sealed.manifest);
 
@@ -1567,8 +1575,9 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
 #[test]
 fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1581,6 +1590,7 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
             &ActiveControl,
         )
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let expected_state_digest = sealed.state_digest();
     let control = MutableCancellationControl::default();
@@ -1697,11 +1707,13 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         .expect("two-file TypeScript snapshot is canonical");
 
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
 
     let mut initial = sealed
@@ -1776,6 +1788,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
             &ActiveControl,
         )
         .expect("foreign generation publishes");
+    let foreign = store.generation(&foreign);
     let foreign = PartitionedSealV1::of(&foreign);
     let mut foreign_source = foreign
         .lexical_source(64, 1024 * 1024)
@@ -1803,8 +1816,9 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
         ));
     }
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1817,6 +1831,7 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
             &ActiveControl,
         )
         .expect("large generation publishes");
+    let generation = store.generation(&generation);
     let expected_chunks = generation
         .admitted_chunks()
         .expect("published generation retains exact chunks")
@@ -1905,10 +1920,11 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
 }
 
 #[test]
-fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent() {
+fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let mut request = request_with_source(
         "file.lexical-imports",
         1_265_000,
@@ -1927,6 +1943,7 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     assert!(
         !generation.imports().is_empty(),
         "the fixture must contain parser-backed import evidence"
@@ -1938,6 +1955,7 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
             .lexical_source(maximum_page_chunks, 1024 * 1024)
             .expect("verified import page source opens");
         let mut imports = Vec::new();
+        let mut folded = initial_import_dictionary_digest().expect("initial import dictionary");
         let receipt = loop {
             match source
                 .next_page(&ActiveControl)
@@ -1953,15 +1971,17 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
                         assert!(page.import_payload_bytes() > 0);
                     }
                     imports.extend(page.imports().iter().cloned());
+                    folded = advance_import_dictionary_digest(&folded, page.import_digest())
+                        .expect("fold page import digest");
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
             }
         };
-        (imports, receipt)
+        (imports, receipt, folded)
     };
 
-    let (split_imports, split_receipt) = read(1);
-    let (wide_imports, wide_receipt) = read(64);
+    let (split_imports, split_receipt, split_folded) = read(1);
+    let (wide_imports, wide_receipt, wide_folded) = read(64);
     assert_eq!(split_imports, generation.imports());
     assert_eq!(wide_imports, generation.imports());
     assert_eq!(
@@ -1969,11 +1989,11 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
         generation.imports().len() as u64
     );
     assert!(split_receipt.import_payload_bytes() > 0);
-    assert_eq!(
-        split_receipt.import_dictionary_digest(),
-        wide_receipt.import_dictionary_digest(),
-        "the exact import dictionary cannot depend on page boundaries"
-    );
+    // The dictionary is the page-order fold of the emitted pages' own
+    // import digests, which is what a lexical artifact re-derives from its
+    // stored pages.
+    assert_eq!(split_receipt.import_dictionary_digest(), &split_folded);
+    assert_eq!(wide_receipt.import_dictionary_digest(), &wide_folded);
     assert_eq!(
         split_receipt.import_payload_bytes(),
         wide_receipt.import_payload_bytes()
@@ -2017,11 +2037,13 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
         .expect("two-file TypeScript snapshot is canonical");
 
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let import_files = generation
         .imports()
         .iter()
@@ -2082,11 +2104,13 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
 #[test]
 fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let mut source = sealed
         .lexical_source(usize::MAX, 1024 * 1024)
@@ -2166,8 +2190,9 @@ fn sealed_lexical_page_bytes(page: &VerifiedSealedLexicalPageV1) -> Vec<u8> {
 #[test]
 fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let mut request = request_with_source(
         "file.lexical-import-capacity",
         1_267_000,
@@ -2186,6 +2211,7 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let mut source = sealed
         .lexical_source(usize::MAX, 1024 * 1024)
@@ -2233,11 +2259,13 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
 #[test]
 fn published_generation_validation_is_amortized_per_loaded_generation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(request("file.validation.memo", 1_300_000), &ActiveControl)
         .expect("valid generation publishes");
+    let generation = store.generation(&generation);
 
     // Publication already ran the full gate, so the generation carries a
     // verified mark and later seals reuse it instead of re-verifying.
@@ -2287,14 +2315,16 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
 #[test]
 fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request("file.source-commitments", 1_350_000),
             &ActiveControl,
         )
         .expect("valid generation publishes");
+    let generation = store.generation(&generation);
     let sealed = PartitionedSealV1::of(&generation);
     let envelope = sealed.envelope();
 
@@ -2327,14 +2357,16 @@ fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history(
 #[test]
 fn corrupted_chunk_evidence_fails_the_first_validation_of_a_restored_generation() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(
             request("file.validation.corrupt", 1_400_000),
             &ActiveControl,
         )
         .expect("valid generation publishes");
+    let generation = store.generation(&generation);
     // Break the chunk's canonical identity so it no longer matches the document
     // membership its file artifact claims, then re-address the segment and
     // reseal the manifest so neither digest can be what rejects it.
@@ -2378,6 +2410,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     let primary = owner
         .build_and_publish(primary_request, &ActiveControl)
         .expect("primary generation publishes");
+    let primary = store.generation(&primary);
 
     let linked_request = request_in_scope(
         "file.linked.1",
@@ -2390,6 +2423,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     let linked = owner
         .build_and_publish(linked_request, &ActiveControl)
         .expect("linked-worktree generation publishes");
+    let linked = store.generation(&linked);
 
     assert_ne!(primary_scope, linked_scope);
     assert_ne!(
@@ -2403,6 +2437,8 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
             .load_active(&primary_scope)
             .expect("primary scope read")
             .expect("primary remains active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         primary.manifest()
     );
@@ -2411,6 +2447,8 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
             .load_active(&linked_scope)
             .expect("linked scope read")
             .expect("linked remains active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         linked.manifest()
     );
@@ -2434,10 +2472,11 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             &ActiveControl,
         )
         .expect("first linked-worktree generation");
+    let first = store.generation(&first);
     let second = owner
         .build_and_publish(
             request_in_scope(
-                "file.linked.2",
+                "file.linked.1",
                 1_200_000,
                 "refs/heads/feature",
                 Some("worktree.feature"),
@@ -2446,6 +2485,7 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
             &ActiveControl,
         )
         .expect("no-op linked-worktree generation");
+    let second = store.generation(&second);
 
     assert_eq!(
         second.manifest().parent_generation,
@@ -2487,6 +2527,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
     let sealed = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("git-identified generation publishes");
+    let sealed = cold_generation(&sealed);
 
     let non_git = request("file.identity.non-git", 1_200_000);
     let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git.snapshot);
@@ -2524,6 +2565,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
         .load_active(&hawk_scope)
         .expect("read publication state")
         .expect("the sealed generation is never dropped by the refusal");
+    let retained = retained.metadata().expect("sealed manifest parses");
     assert_eq!(retained.manifest(), sealed.manifest());
     assert_eq!(retained.sealed_scope(), hawk_scope);
 }
@@ -2548,12 +2590,14 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("git-identified generation publishes");
+    let hawk = store.generation(&hawk);
 
     let non_git_request = request("file.terminal.non-git", 1_200_000);
     let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git_request.snapshot);
     let non_git = owner
         .build_and_publish(non_git_request, &ActiveControl)
         .expect("a non-git snapshot indexes as its own terminal outcome");
+    let non_git = store.generation(&non_git);
 
     assert!(non_git.manifest().parent_generation.is_none());
     assert_eq!(store.scope_count(), 2);
@@ -2562,6 +2606,8 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
             .active_generation(&hawk_scope)
             .expect("hawk scope read")
             .expect("hawk stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         hawk.manifest()
     );
@@ -2570,6 +2616,8 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
             .active_generation(&non_git_scope)
             .expect("non-git scope read")
             .expect("non-git stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         non_git.manifest()
     );
@@ -2584,8 +2632,9 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
 #[test]
 fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let store = PartialKeyPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let hawk_request = request_in_scope(
         "file.dispatch.hawk",
         1_100_000,
@@ -2597,6 +2646,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let hawk = owner
         .build_and_publish(hawk_request, &ActiveControl)
         .expect("hawk generation publishes");
+    let hawk = cold_generation(&hawk);
 
     let pr_worktree_scope = CodeIndexGenerationScopeV1 {
         repository: hawk_scope.repository.clone(),
@@ -2636,6 +2686,8 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
             .active_generation(&hawk_scope)
             .expect("exact scope read")
             .expect("hawk stays active for its own scope")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         hawk.manifest()
     );
@@ -2652,6 +2704,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
             &ActiveControl,
         )
         .expect("label-move publish must CAS against the prior-label incumbent");
+    let moved = cold_generation(&moved);
     assert_ne!(
         moved.manifest().generation_id,
         hawk.manifest().generation_id,
@@ -2681,6 +2734,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("first hawk generation publishes");
+    let first = store.generation(&first);
     let second = owner
         .build_and_publish(
             request_in_scope(
@@ -2693,6 +2747,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("second hawk generation publishes");
+    let second = store.generation(&second);
 
     // A new generation id under the same sealed branch label reuses the slot.
     assert_ne!(
@@ -2715,6 +2770,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             &ActiveControl,
         )
         .expect("pr generation publishes");
+    let pr = store.generation(&pr);
     assert_eq!(pr.sealed_scope().worktree, first.sealed_scope().worktree);
     assert_ne!(pr.sealed_scope(), first.sealed_scope());
     assert_eq!(
@@ -2728,6 +2784,8 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
             .active_generation(&second.sealed_scope())
             .expect("hawk slot read")
             .expect("hawk slot stays active")
+            .metadata()
+            .expect("sealed manifest parses")
             .manifest(),
         second.manifest()
     );
@@ -2892,8 +2950,48 @@ fn partitioned_request(
     }
 }
 
+/// Files no fixture edit touches. With them a one-file edit stays within the
+/// share of a corpus an increment seals over its parent.
+const SPARSE_FILLERS: [(&str, &str, &str); 7] = [
+    (
+        "file.filler.0",
+        "src/filler_0.rs",
+        "pub const FILLER_0: u64 = 0;\n",
+    ),
+    (
+        "file.filler.1",
+        "src/filler_1.rs",
+        "pub const FILLER_1: u64 = 1;\n",
+    ),
+    (
+        "file.filler.2",
+        "src/filler_2.rs",
+        "pub const FILLER_2: u64 = 2;\n",
+    ),
+    (
+        "file.filler.3",
+        "src/filler_3.rs",
+        "pub const FILLER_3: u64 = 3;\n",
+    ),
+    (
+        "file.filler.4",
+        "src/filler_4.rs",
+        "pub const FILLER_4: u64 = 4;\n",
+    ),
+    (
+        "file.filler.5",
+        "src/filler_5.rs",
+        "pub const FILLER_5: u64 = 5;\n",
+    ),
+    (
+        "file.filler.6",
+        "src/filler_6.rs",
+        "pub const FILLER_6: u64 = 6;\n",
+    ),
+];
+
 fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
-    let sources = [
+    let mut sources = vec![
         (
             "file.partitioned.alpha",
             "src/alpha.rs",
@@ -2914,6 +3012,8 @@ fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildR
             "pub fn unresolved() { missing_external(); }\n",
         ),
     ];
+    sources.extend(SPARSE_FILLERS);
+    sources.sort_by_key(|&(_, path, _)| path);
     let changed_files = if beta_value == 1 {
         BTreeSet::new()
     } else {
@@ -2937,7 +3037,8 @@ fn collect_published_segments<'a>(
                 *published_files += 1;
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
-            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -2968,11 +3069,13 @@ fn partitioned_codec_fixture() -> (
     BTreeMap<String, Vec<u8>>,
 ) {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("partitioned fixture owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("partitioned fixture owner");
     let first = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("partitioned parent generation");
+    let first = store.generation(&first);
     let mut segments = BTreeMap::new();
     let mut parent_file_segments = 0;
     let parent_manifest = first
@@ -2984,6 +3087,7 @@ fn partitioned_codec_fixture() -> (
     let second = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("partitioned child generation");
+    let second = store.generation(&second);
     let mut child_file_segments = 0;
     let manifest = second
         .encode_partitioned_sealed_with_parent(
@@ -3007,7 +3111,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:4782468f156875fa1594ddd15231c2aa2e2e9350c3184e38f18d00ff0469a3bd";
+    "sha256:354e653caa2c7a90979ca40f1499e8773a8581bebb80bc5e16391d52548b7db9";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:8e9ad377067c5f3b8f967a8b6e0ebe75c061683b6a33e83502b7a324373fec72",
@@ -3018,24 +3122,48 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_261,
     ),
     (
+        "sha256:72ba1636f87140dea312d95e797b5257ee1834eeca3c86a62b1bd1ba48548fed",
+        1_075,
+    ),
+    (
+        "sha256:6c4b0954e7a09347cfc05055e6e1262dad9c161363919c4bc1ccc1b5780285ac",
+        1_080,
+    ),
+    (
+        "sha256:afddc8a153ac4f3ddade5e08efbf637183c349ac313ddfd1d8925f91c3b4407c",
+        1_081,
+    ),
+    (
+        "sha256:12a4e7c1d46a3ebf5eff4b465848cb18dcc4f60af58b0a4f78c75ae5e40f7920",
+        1_077,
+    ),
+    (
+        "sha256:c5884e4b070d0cb02d586de98055e952ea87fbe1ee92b2dd93e2f6d4e50821f9",
+        1_075,
+    ),
+    (
+        "sha256:26ff63f50b1b661f25b5a76fe005af23e32526c28c1c0f8fcc5030eef118d367",
+        1_078,
+    ),
+    (
+        "sha256:f3703fac6c245334d2da8ce79f91588026ed45f1932f204b1f068bd9cef26ce5",
+        1_075,
+    ),
+    (
         "sha256:209c0686cb2ca402c068a08b8fba0fc9d445d224d6bb7c4dddc78447e282f171",
         1_311,
     ),
     (
-        "sha256:503071aa2c514bfd4eb177635588bd79a397c3450786253e7ca72240a012e745",
-        154,
+        "sha256:808085bc4aeb5167f643382c4c493d1853848941967d2efeb08646e2f009c912",
+        122,
     ),
     (
-        "sha256:8ae06385771d7dd84fce8fcc8b5d121e61377d51cdeaee9d476108642b961340",
-        453,
+        "sha256:87f1e94d43dae3fa0256e39ab475dd6ad75f46163066459678f3b7cc0501d502",
+        466,
     ),
     (
-        "sha256:d1e36c4262092e3559137ea442b600d4e36211663ed0f1d533f30c40d7e0119b",
-        54,
-    ),
-    (
-        "sha256:7fb4402e22813952a093efba38018d1f10a28e05c9924ab6ab5b8d4c3c4852b5",
-        1_921,
+        "sha256:15737484014bb520305aaa3d57015146f73217a473f84c7c992ca9e4753b6a07",
+        1_858,
     ),
     (
         "sha256:43cb26ecd5d8a87a7907b2cad1f77466b080a8d5cd504d5ef5869fcc51d5fe3f",
@@ -3046,8 +3174,48 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_329,
     ),
     (
+        "sha256:273097cb57adc4f92277d3e1238825105adf9a23bd4494a43d5cda0bee510e51",
+        1_338,
+    ),
+    (
+        "sha256:40e0101a2244ae4d1a6232d909356b8577bb3606b95575dee2639fd65eb6213e",
+        1_338,
+    ),
+    (
+        "sha256:82df89e24eb0771ca1c6c31d05c262d1b971356e2ab26bf876eefc1c501edca8",
+        1_338,
+    ),
+    (
+        "sha256:84ad00e4dd24d6f67d4a2fa8379aefdeaf94c5fe3b525d7e4e0048e4e9ac700b",
+        1_338,
+    ),
+    (
+        "sha256:ffe8998ec315fd8954d2f0e5c05f56e6e5403afbb7c2a02882a60a9ffd3dcce2",
+        1_338,
+    ),
+    (
+        "sha256:f4ccf95c125276ed143d69c9d478f91ceb4107d8fb5c8bb1801cda81d8e4eaf1",
+        1_338,
+    ),
+    (
+        "sha256:a45cee5d0ac5b5e2da64db826421b5b414d7c96a75a18f68b71dc1a9fcbc2f04",
+        1_338,
+    ),
+    (
         "sha256:e303343adb9c31758c787fe148e8e88cff01d183e26650d682a7013dbd042187",
         1_370,
+    ),
+    (
+        "sha256:4ae2068fdf1dc444f1c34af2f270d0ce1313e6acef3a4c4cc2e797469796be7a",
+        2_565,
+    ),
+    (
+        "sha256:a222088a3f8a3b846e44eb924fe09389f047fe4fcb6957d31a1b5d308426661f",
+        84,
+    ),
+    (
+        "sha256:4e28da181f8c91d90cd5eccd0899f0bdf35c00e2591f2d342afb7428da3ceeac",
+        4,
     ),
 ];
 
@@ -3135,6 +3303,25 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 .to_owned()
         })
         .collect::<BTreeSet<_>>();
+    let index = &envelope["generation"]["resolution_index"];
+    let resolution_index_digests = index["definitions"]
+        .as_array()
+        .expect("definition page descriptors")
+        .iter()
+        .chain(
+            index["references"]
+                .as_array()
+                .expect("reference page descriptors"),
+        )
+        .chain([&index["import_aliases"]])
+        .map(|page| {
+            page["segment_digest"]
+                .as_str()
+                .expect("resolution index page digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(!resolution_index_digests.is_empty());
     assert_eq!(
         identities
             .iter()
@@ -3242,6 +3429,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             let start = usize::try_from(offset).expect("segment range offset");
             let end = start + usize::try_from(length).expect("segment range length");
             buffer.clear();
+            // Exact growth, so a buffer's capacity records the largest read
+            // it served rather than the allocator's amortized doubling.
+            buffer.reserve_exact(end - start);
             buffer.extend_from_slice(&bytes[start..end]);
             if reading_file && file_evidence_digests.contains(digest.as_str()) {
                 largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
@@ -3272,15 +3462,23 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         segment_reads.borrow().is_disjoint(&graph_page_digests),
         "text decode must leave independently served graph pages untouched"
     );
+    assert!(
+        segment_reads
+            .borrow()
+            .is_disjoint(&resolution_index_digests),
+        "text decode must leave the resolution index to successor builds"
+    );
     let eagerly_decoded_digests = identities
         .iter()
         .map(|identity| identity.digest.as_str().to_owned())
-        .filter(|digest| !graph_page_digests.contains(digest))
+        .filter(|digest| {
+            !graph_page_digests.contains(digest) && !resolution_index_digests.contains(digest)
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(
         *segment_reads.borrow(),
         eagerly_decoded_digests,
-        "decode must read every non-graph segment and defer only graph pages"
+        "decode must read every segment but graph pages and resolution index pages"
     );
     let largest_file_segment = largest_file_segment.get();
     assert_eq!(
@@ -3375,8 +3573,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             &SharedDecodedContentPoolV1::default(),
             flip,
         );
-        if graph_page_digests.contains(*corrupted) {
-            decoded.expect("text decode must not materialize a graph page");
+        if graph_page_digests.contains(*corrupted) || resolution_index_digests.contains(*corrupted)
+        {
+            decoded.expect("text decode must not read a graph or resolution index page");
         } else {
             decoded.expect_err("a consumed corrupt segment must fail text decode");
         }
@@ -3388,7 +3587,8 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -3602,17 +3802,20 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
 #[test]
 fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("retired-parent fixture owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("retired-parent fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");
+    let parent = store.generation(&parent);
     let parent_manifest = parent
         .encode_partitioned_sealed(|_| Ok(()))
         .expect("parent encoding");
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("child generation");
+    let child = store.generation(&child);
 
     let encode = |parent_manifest_bytes: Option<&[u8]>| {
         let mut segments = BTreeMap::new();
@@ -3625,7 +3828,8 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
                         file_segments += 1;
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                     }
-                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -3932,11 +4136,13 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
 #[test]
 fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("revision fixture owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("revision fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("revision parent generation");
+    let parent = store.generation(&parent);
     let parent_manifest = parent
         .encode_partitioned_sealed(|_| Ok(()))
         .expect("revision parent encoding");
@@ -3960,6 +4166,7 @@ fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("revision child generation");
+    let child = store.generation(&child);
     let mut published_files = 0;
     child
         .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
@@ -4033,17 +4240,20 @@ fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("delta fixture owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("delta fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("delta parent generation");
+    let parent = store.generation(&parent);
     let parent_manifest = parent
         .encode_partitioned_sealed(|_| Ok(()))
         .expect("delta parent encoding");
     let child = owner
         .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
         .expect("delta child generation");
+    let child = store.generation(&child);
 
     let mut published_files = Vec::new();
     let mut published_evidence_pages = BTreeSet::new();
@@ -4055,6 +4265,7 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
                 }
                 SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
                 | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                     page_ordinal,
@@ -4202,11 +4413,13 @@ fn sealed_clone_bindings(
 #[test]
 fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("increment owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("increment owner");
     let parent = owner
         .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");
+    let parent = store.generation(&parent);
     let mut segments = BTreeMap::new();
     let mut parent_file_segments = 0;
     let parent_manifest = parent
@@ -4223,6 +4436,7 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let child = owner
         .build_and_publish(increment_wedge_request(2, 1_200_000), &ActiveControl)
         .expect("child generation");
+    let child = store.generation(&child);
     let mut child_file_segments = 0;
     let child_manifest = child
         .encode_partitioned_sealed_with_parent(
@@ -4396,6 +4610,7 @@ fn a_500_file_generation_holds_its_clone_streams_within_the_resident_budget() {
     .expect("production owner")
     .build_and_publish(request, &ActiveControl)
     .expect("generation publishes");
+    let generation = cold_generation(&generation);
 
     assert_eq!(generation.symbols().symbols.len(), 1_000);
     let retained = generation.retained_bytes();

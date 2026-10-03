@@ -1386,6 +1386,20 @@ impl GraphDb {
         Ok(guard)
     }
 
+    /// Runs `read` against the open database and refuses its answer as
+    /// corrupt when the read touched a sealed page that failed verification.
+    pub(crate) fn read_intact<T>(
+        &self,
+        cancellation: &dyn GraphCancellation,
+        read: impl FnOnce(&GrafeoDB) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        let guard = self.read_database(cancellation)?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let answer = read(database);
+        ensure_intact(database)?;
+        answer
+    }
+
     pub(crate) fn approve_projection(
         &self,
         namespace: &GraphNamespace,
@@ -1470,7 +1484,8 @@ impl GraphDb {
             )
             .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
             self.ensure_available()?;
-            if guard.is_some() {
+            if let Some(database) = guard.as_ref() {
+                ensure_intact(database)?;
                 return Ok(guard);
             }
             // A non-blocking hibernation pass can win after `ensure_opened`
@@ -1832,10 +1847,12 @@ fn open_validated_graph(
 ) -> Result<OpenedGraphState, GraphDbError> {
     // The engine call is where a persistent open pays for corpus size:
     // grafeo replays the whole serialized LPG block log through the live
-    // mutation path, rebuilds every catalog-listed property index with a
-    // full node scan each, and replays any sidecar WAL an unclean
-    // shutdown left behind. The phases after it are O(labels), not
-    // O(rows), so this span is what a slow open decomposes into first.
+    // mutation path and any sidecar WAL an unclean shutdown left behind.
+    // A sealed compact container is the exception: its rows, id maps, and
+    // property-index orders are served in place and verified page by page
+    // as reads touch them, so its open reads metadata and adjacency only.
+    // The phases after it are O(labels), not O(rows), so this span is what
+    // a slow open decomposes into first.
     let container_bytes = validated
         .config
         .path
@@ -1875,6 +1892,19 @@ fn open_validated_graph(
         quarantined_projections,
         identity,
     })
+}
+
+/// A sealed compact base is read in place and verifies each page the first
+/// time a read touches it, so a corrupt page surfaces at a read, not at open.
+/// The engine latches the first failure; from then on every read of this
+/// open is refused as corrupt rather than answered without the page.
+pub(crate) fn ensure_intact(database: &GrafeoDB) -> Result<(), GraphDbError> {
+    match database.compact_base_integrity_fault() {
+        Some(fault) => Err(GraphDbError::Corrupt {
+            message: format!("sealed graph page failed verification: {fault}"),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn durability_uncertain() -> GraphDbError {

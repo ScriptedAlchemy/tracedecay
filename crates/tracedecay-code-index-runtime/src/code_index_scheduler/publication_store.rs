@@ -47,7 +47,8 @@ use crate::code_index::{
         CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
         CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
         SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
         VerifiedSealedTextGenerationMetadataV1,
     },
@@ -597,7 +598,19 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     /// Last generation handed to `publish_atomically`. A transient store
     /// failure must not drop it: the next undecoded retry republishes this
     /// candidate instead of extracting the whole worktree again.
-    pub(super) unpublished_candidate: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+    pub(super) unpublished_candidate: Arc<Mutex<Option<CodeIndexSealedPublicationV1>>>,
+    /// The active pointer's authenticated manifest, by its state digest, so
+    /// builds and status over one publication read and parse it once.
+    active_manifest_memo: Arc<Mutex<Option<ActiveSealedManifestV1>>>,
+}
+
+/// The durable active generation's sealed manifest and its authenticated
+/// metadata, read without decoding any segment.
+#[derive(Clone)]
+pub(super) struct ActiveSealedManifestV1 {
+    state_digest: String,
+    pub(super) manifest_bytes: Arc<[u8]>,
+    pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -957,6 +970,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             #[cfg(test)]
             segments_dir_sync_observer: None,
             unpublished_candidate: Arc::new(Mutex::new(None)),
+            active_manifest_memo: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1278,6 +1292,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
         truncated: bool,
     ) -> Result<String, CodeIndexPublicationStoreErrorV1> {
         durable_generation_index_digest(entries, truncated).map_err(Self::unavailable)
+    }
+
+    fn publication_cardinality(
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<DurableGenerationCardinalityV1, CodeIndexPublicationStoreErrorV1> {
+        Ok(DurableGenerationCardinalityV1 {
+            file_count: u64::try_from(generation.snapshot().files.len())
+                .map_err(Self::unavailable)?,
+            chunk_count: generation.chunk_count(),
+            symbol_count: generation.statistics().symbol_count,
+        })
     }
 
     fn generation_cardinality(
@@ -1603,9 +1628,26 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.read_partitioned_segment(request, buffer)
     }
 
-    #[hotpath::measure(label = "code_index.generation.decode.segment")]
     fn read_partitioned_segment(
         &self,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        Self::read_segment_under(&self.segments_root, request, buffer)
+    }
+
+    /// A reader over this store's segments that outlives any one borrow of
+    /// the store, for a build over the sealed active generation.
+    pub(super) fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        let segments_root = self.segments_root.clone();
+        Arc::new(move |request, buffer: &mut Vec<u8>| {
+            Self::read_segment_under(&segments_root, request, buffer)
+        })
+    }
+
+    #[hotpath::measure(label = "code_index.generation.decode.segment")]
+    fn read_segment_under(
+        segments_root: &Path,
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
@@ -1631,9 +1673,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let digest_hex = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
         })?;
-        let path = self
-            .segments_root
-            .join(format!("segment-{digest_hex}.json"));
+        let path = segments_root.join(format!("segment-{digest_hex}.json"));
         let metadata = path.symlink_metadata().map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation segment is unavailable: {error}"
@@ -2207,6 +2247,97 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.cache_state().decoded.drain(..).collect()
     }
 
+    /// The durable active generation's sealed manifest and metadata, read and
+    /// authenticated against its pointer without decoding a segment. `None`
+    /// without an active pointer, or for a generation this build abstains
+    /// from: a retired revision, one without source commitments, or one
+    /// sealed under another sanitizer.
+    #[hotpath::measure(label = "daemon.code_index.generation.load_active_manifest")]
+    pub(super) fn load_active_manifest(
+        &self,
+    ) -> Result<Option<ActiveSealedManifestV1>, CodeIndexPublicationStoreErrorV1> {
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(None);
+        };
+        if let Some(memo) = self
+            .active_manifest_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|memo| memo.state_digest == pointer.state_digest)
+        {
+            return Ok(Some(memo.clone()));
+        }
+        Self::validate_generation_file(&pointer.generation_file)?;
+        let entry = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == pointer.generation_id)
+            .ok_or_else(|| {
+                Self::corruption(
+                    "durable code-generation index does not contain its active generation",
+                )
+            })?;
+        let _read_lock = self.acquire_generation_read_lock()?;
+        let path = self.generations_root.join(&pointer.generation_file);
+        let metadata = path.symlink_metadata().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Self::corruption("active code-generation target is missing")
+            } else {
+                Self::unavailable(error)
+            }
+        })?;
+        if !metadata.file_type().is_file()
+            || metadata.len() != entry.size_bytes
+            || metadata.len() > MAX_DURABLE_GENERATION_INDEX_BYTES_V1
+        {
+            return Err(Self::corruption(
+                "active code-generation byte size does not match its durable entry",
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(Self::unavailable)?;
+        if Self::state_digest(&bytes) != pointer.state_digest {
+            return Err(Self::corruption(
+                "active code-generation manifest digest does not verify",
+            ));
+        }
+        let manifest = match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
+            Ok(manifest) => manifest,
+            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => return Ok(None),
+            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
+                tracing::warn!(
+                    target: "tracedecay::code_index",
+                    sealed_format_revision = revision,
+                    "{}",
+                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(Self::corruption(error)),
+        };
+        if manifest.manifest().sanitizer_revision != self.expected_sanitizer_revision {
+            return Ok(None);
+        }
+        if manifest.manifest().generation_id.as_str() != pointer.generation_id
+            || manifest.snapshot().content_identity.as_str() != pointer.snapshot_content_identity
+            || manifest.manifest().seal.sealed_at.0 != pointer.sealed_at_micros
+        {
+            return Err(Self::corruption(
+                "active code-generation pointer does not match the sealed generation",
+            ));
+        }
+        let active = ActiveSealedManifestV1 {
+            state_digest: pointer.state_digest,
+            manifest_bytes: Arc::from(bytes),
+            metadata: Arc::new(manifest),
+        };
+        *self
+            .active_manifest_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(active.clone());
+        Ok(Some(active))
+    }
+
     /// Serve the active generation, decoding it at most once per publication.
     ///
     /// The first caller claims the decode lease and pays the O(store) sweep with
@@ -2625,6 +2756,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         *self
+            .active_manifest_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
             .unpublished_candidate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
@@ -2632,14 +2767,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(receipt)
     }
 
-    pub(super) fn take_unpublished(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+    pub(super) fn take_unpublished(&self) -> Option<CodeIndexSealedPublicationV1> {
         self.unpublished_candidate
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
 
-    pub(super) fn restore_unpublished(&self, generation: Arc<CodeIndexPublishedGenerationV1>) {
+    pub(super) fn restore_unpublished(&self, generation: CodeIndexSealedPublicationV1) {
         let mut candidate = self
             .unpublished_candidate
             .lock()
@@ -2654,11 +2789,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         if self.undecoded_active_expectation.is_some() {
             return Ok(None);
         }
-        self.load_active_shared()
+        Ok(self.load_active_manifest()?.map(|active| {
+            CodeIndexSealedGenerationV1::new(active.manifest_bytes, self.segment_reader())
+        }))
     }
 
     #[hotpath::measure(label = "code_index.generation.publish")]
@@ -2666,12 +2803,12 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         &mut self,
         _scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         *self
             .unpublished_candidate
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&generation));
+            .unwrap_or_else(PoisonError::into_inner) = Some(generation.clone());
         if self
             .reconcile_publication_fence
             .as_ref()
@@ -2686,10 +2823,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let undecoded_expectation = match self.undecoded_active_expectation.clone() {
             Some(expectation) => Some(expectation),
             None => {
-                // Cold hydration takes the store lock itself. Complete it
-                // before entering the publication transaction, then recheck
-                // the exact expected pointer under the writer lock below.
-                match self.load_active_shared()? {
+                // Reading the active manifest takes the store lock itself.
+                // Complete it before entering the publication transaction,
+                // then recheck the exact expected pointer under the writer
+                // lock below.
+                match self.load_active_manifest()? {
                     Some(_) => None,
                     // An active pointer whose sealed generation this build
                     // abstains from decoding, a retired format revision, a
@@ -2741,38 +2879,39 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
+        // A decode cached for another generation than the pointer names is
+        // a stale read the publication must not race; an empty cache is the
+        // ordinary state after a sparse successor or a released decode.
         let state = self.cache.lock_state()?;
         let cached_active = state
             .active
             .as_ref()
             .map(|current| &current.manifest().generation_id);
-        let cache_matches = undecoded_expectation.as_ref().map_or(
-            cached_active == expected_active_generation,
-            |expected| {
-                cached_active
-                    .is_none_or(|generation| generation.as_str() == expected.generation_id.as_str())
-            },
-        );
+        let cache_matches = cached_active.is_none_or(|cached| {
+            undecoded_expectation
+                .as_ref()
+                .map_or(Some(cached) == expected_active_generation, |expected| {
+                    cached.as_str() == expected.generation_id.as_str()
+                })
+        });
         if !cache_matches {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
+        drop(state);
         if self.disposition == CodeIndexPublicationDispositionV1::RetainedHistory
-            && state.active.is_none()
+            && prior_pointer.is_none()
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
         if self.disposition == CodeIndexPublicationDispositionV1::RetainedHistory
-            && state.active.as_ref().is_some_and(|active| {
-                active.manifest().generation_id == generation.manifest().generation_id
+            && prior_pointer.as_ref().is_some_and(|pointer| {
+                pointer.generation_id == generation.manifest().generation_id.as_str()
             })
         {
             return Err(Self::unavailable(
                 "retained history generation aliases the active generation identity",
             ));
         }
-        // Encode and fsync without the decoded-generation cache lock so
-        // readers are not parked across the durable write.
-        drop(state);
         let parent_manifest_bytes = expected_active_generation
             .filter(|expected| generation.manifest().parent_generation.as_ref() == Some(*expected))
             .and_then(|expected| {
@@ -2844,111 +2983,100 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .store(0, Ordering::Relaxed);
         let manifest_bytes = hotpath::measure_block!(
             "code_index.generation.publish.segment_encode",
-            generation.encode_partitioned_sealed_with_parent(
-                parent_manifest_bytes.as_deref(),
-                |publication| {
-                    self.seal_checkpoint()?;
-                    match publication {
-                        SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                            let segment_size = u64::try_from(bytes.len()).map_err(|_| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed segment length exceeds u64".to_owned(),
-                                )
-                            })?;
-                            hotpath::measure_block!(
-                                "code_index.generation.publish.segment_durable",
-                                self.stage_segment(digest, bytes, &mut staged_segments)
+            generation.encode(parent_manifest_bytes.as_deref(), |publication| {
+                self.seal_checkpoint()?;
+                match publication {
+                    SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                        let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed segment length exceeds u64".to_owned(),
                             )
-                            .map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })?;
-                            #[cfg(test)]
-                            if let Some(observer) = self.seal_segment_observer.as_ref() {
-                                observer();
-                            }
-                            referenced_segment_bytes =
-                                referenced_segment_bytes.saturating_add(segment_size);
-                            self.seal_encoded_segment_bytes
-                                .fetch_add(segment_size, Ordering::Relaxed);
+                        })?;
+                        hotpath::measure_block!(
+                            "code_index.generation.publish.segment_durable",
+                            self.stage_segment(digest, bytes, &mut staged_segments)
+                        )
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        #[cfg(test)]
+                        if let Some(observer) = self.seal_segment_observer.as_ref() {
+                            observer();
                         }
-                        SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
-                            let segment_size = u64::try_from(bytes.len()).map_err(|_| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed file evidence length exceeds u64".to_owned(),
-                                )
-                            })?;
-                            hotpath::measure_block!(
-                                "code_index.generation.publish.file_evidence_durable",
-                                self.stage_segment(digest, bytes, &mut staged_segments)
+                        referenced_segment_bytes =
+                            referenced_segment_bytes.saturating_add(segment_size);
+                        self.seal_encoded_segment_bytes
+                            .fetch_add(segment_size, Ordering::Relaxed);
+                    }
+                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                        let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed file evidence length exceeds u64".to_owned(),
                             )
-                            .map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })?;
-                            referenced_segment_bytes =
-                                referenced_segment_bytes.saturating_add(segment_size);
-                        }
-                        SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                            page_digest,
-                            bytes,
-                            ..
-                        } => {
-                            let segment_size = u64::try_from(bytes.len()).map_err(|_| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed graph page length exceeds u64".to_owned(),
-                                )
-                            })?;
-                            hotpath::measure_block!(
-                                "code_index.generation.publish.graph_page_durable",
-                                self.stage_segment(page_digest, bytes, &mut staged_segments)
+                        })?;
+                        hotpath::measure_block!(
+                            "code_index.generation.publish.file_evidence_durable",
+                            self.stage_segment(digest, bytes, &mut staged_segments)
+                        )
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        referenced_segment_bytes =
+                            referenced_segment_bytes.saturating_add(segment_size);
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed graph page length exceeds u64".to_owned(),
                             )
-                            .map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })?;
-                            referenced_segment_bytes =
-                                referenced_segment_bytes.saturating_add(segment_size);
-                        }
-                        SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-                            page_ordinal,
-                            page_digest,
-                            bytes,
-                        } => {
-                            hotpath::measure_block!(
-                                "code_index.generation.publish.evidence_page_append",
-                                evidence_pack.append_page(page_ordinal, page_digest, bytes)
+                        })?;
+                        hotpath::measure_block!(
+                            "code_index.generation.publish.graph_page_durable",
+                            self.stage_segment(page_digest, bytes, &mut staged_segments)
+                        )
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        referenced_segment_bytes =
+                            referenced_segment_bytes.saturating_add(segment_size);
+                    }
+                    SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                        page_ordinal,
+                        page_digest,
+                        bytes,
+                    } => {
+                        hotpath::measure_block!(
+                            "code_index.generation.publish.evidence_page_append",
+                            evidence_pack.append_page(page_ordinal, page_digest, bytes)
+                        )
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        self.seal_evidence_page_count
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                        segment_digest,
+                        segment_size_bytes,
+                        page_count,
+                    } => {
+                        if hotpath::measure_block!(
+                            "code_index.generation.publish.evidence_commit",
+                            evidence_pack.commit(
+                                &self.segments_root,
+                                segment_digest,
+                                segment_size_bytes,
+                                page_count,
                             )
-                            .map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })?;
-                            self.seal_evidence_page_count
+                        )
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?
+                        {
+                            self.seal_evidence_durable_transaction_count
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                            segment_digest,
-                            segment_size_bytes,
-                            page_count,
-                        } => {
-                            if hotpath::measure_block!(
-                                "code_index.generation.publish.evidence_commit",
-                                evidence_pack.commit(
-                                    &self.segments_root,
-                                    segment_digest,
-                                    segment_size_bytes,
-                                    page_count,
-                                )
-                            )
-                            .map_err(|error| {
-                                CodeIndexProductionErrorV1::Contract(error.to_string())
-                            })? {
-                                self.seal_evidence_durable_transaction_count
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            referenced_segment_bytes =
-                                referenced_segment_bytes.saturating_add(segment_size_bytes);
-                        }
+                        referenced_segment_bytes =
+                            referenced_segment_bytes.saturating_add(segment_size_bytes);
                     }
-                    Ok(())
-                },
-            )
+                }
+                Ok(())
+            },)
         );
         let manifest_bytes = match manifest_bytes {
             Ok(bytes) => bytes,
@@ -3063,7 +3191,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         evidence_pack.attach_to_manifest();
         drop(segments_lock);
 
-        let exact_git_evidence = self.exact_git_evidence(&generation)?;
+        let exact_git_evidence = self.exact_git_evidence(generation.snapshot())?;
         let mut generation_index = prior_pointer
             .as_ref()
             .map(|pointer| pointer.generation_index.clone())
@@ -3093,7 +3221,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .as_ref()
                 .map(|(_, revision, _)| revision.clone()),
             source_tree: exact_git_evidence.map(|(_, _, tree)| tree),
-            cardinality: Some(Self::generation_cardinality(&generation)?),
+            cardinality: Some(Self::publication_cardinality(generation)?),
             text_artifact: None,
         });
         generation_index.sort_by(|left, right| {
@@ -3168,15 +3296,17 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             self.commit_observed_pointer(&_store_lock, prior_bytes.as_deref(), &pointer, &bytes)
         })?;
         drop(source_fence);
-        let charges = matches!(self.disposition, CodeIndexPublicationDispositionV1::Active)
-            .then(|| Self::active_generation_charges(&generation));
+        let charges = generation
+            .decoded()
+            .filter(|_| matches!(self.disposition, CodeIndexPublicationDispositionV1::Active))
+            .map(|decoded| Self::active_generation_charges(decoded));
         let mut state = self.cache.lock_state()?;
         if undecoded_expectation.is_none() {
             let cached_active = state
                 .active
                 .as_ref()
                 .map(|current| &current.manifest().generation_id);
-            if cached_active != expected_active_generation {
+            if cached_active.is_some_and(|cached| Some(cached) != expected_active_generation) {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
             }
         }
@@ -3198,20 +3328,27 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 if let Some(charges) = charges {
                     self.record_active_generation_charges(charges);
                 }
-                state.active = Some(generation);
+                state.active = generation.decoded().map(Arc::clone);
             }
             CodeIndexPublicationDispositionV1::RetainedHistory => {
-                state.decoded.push_back(generation);
+                if let Some(decoded) = generation.decoded() {
+                    state.decoded.push_back(Arc::clone(decoded));
+                }
                 while state.decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
                     state.decoded.pop_front();
                 }
             }
         }
+        drop(state);
+        *self
+            .active_manifest_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         *self
             .unpublished_candidate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
-        Ok(())
+        Ok(Arc::from(manifest_bytes))
     }
 }
 

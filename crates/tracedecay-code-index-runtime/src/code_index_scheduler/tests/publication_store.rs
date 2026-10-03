@@ -38,17 +38,18 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::super::publication_store::ActiveGenerationDecodeChargeV1;
-
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
     execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
     retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
+    with_untouched_fillers,
 };
 use crate::{
     code_index::production::{
-        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
-        CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexColdBuildReasonV1,
+        CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+        CodeIndexSealedPublicationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
         SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
         UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
     },
@@ -57,6 +58,10 @@ use crate::{
         SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     },
 };
+
+fn cold(generation: &Arc<CodeIndexPublishedGenerationV1>) -> CodeIndexSealedPublicationV1 {
+    CodeIndexSealedPublicationV1::Cold(Arc::clone(generation), CodeIndexColdBuildReasonV1::NoParent)
+}
 
 #[test]
 fn selected_graph_build_bound_reserves_transient_memory_and_retries_after_release() {
@@ -330,6 +335,28 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
                     .expect("code graph page digest")
                     .to_owned(),
                 page["size_bytes"].as_u64().expect("code graph page size"),
+            );
+        }
+        let index = &manifest["generation"]["resolution_index"];
+        for page in index["definitions"]
+            .as_array()
+            .expect("resolution definition pages")
+            .iter()
+            .chain(
+                index["references"]
+                    .as_array()
+                    .expect("resolution reference pages"),
+            )
+            .chain([&index["import_aliases"]])
+        {
+            components.insert(
+                page["segment_digest"]
+                    .as_str()
+                    .expect("resolution index page digest")
+                    .to_owned(),
+                page["segment_size_bytes"]
+                    .as_u64()
+                    .expect("resolution index page size"),
             );
         }
         components
@@ -783,7 +810,10 @@ fn publish_multi_page_evidence(
 #[test]
 fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
     let source = evidence_fixture_source("evidence", '+');
-    let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
+        "src/evidence.rs",
+        source.as_str(),
+    )]));
     let store = TempDir::new().expect("store root");
     let (generation_id, evidence_pack_path) = {
         let mut scheduler = scheduler(
@@ -793,8 +823,8 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
         );
         publish_multi_page_evidence(&fixture, &mut scheduler, "evidence");
         let latest = scheduler
-            .latest_complete_already_decoded()
-            .expect("multi-page generation remains decoded");
+            .latest_complete()
+            .expect("multi-page generation decodes");
         let generation_id = latest.generation.manifest().generation_id.clone();
         let pointer: serde_json::Value = serde_json::from_slice(
             &std::fs::read(store.path().join("active-code-generation-v1.json"))
@@ -1043,7 +1073,7 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
     }));
 
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
         .expect_err("shutdown signalled mid-seal must stop the publication");
     assert!(
         matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -1149,7 +1179,7 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
     }));
 
     publication
-        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
         .expect("publish a fresh multi-segment generation");
 
     let segment_count = published_segments.load(std::sync::atomic::Ordering::Acquire);
@@ -1168,7 +1198,10 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
 #[test]
 fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let source = evidence_fixture_source("failed_evidence", '+');
-    let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
+        "src/evidence.rs",
+        source.as_str(),
+    )]));
     let source_store = TempDir::new().expect("source store root");
     let generation = {
         let mut scheduler = scheduler(
@@ -1179,8 +1212,8 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         publish_multi_page_evidence(&fixture, &mut scheduler, "failed_evidence");
         Arc::clone(
             &scheduler
-                .latest_complete_already_decoded()
-                .expect("multi-page generation remains decoded")
+                .latest_complete()
+                .expect("multi-page generation decodes")
                 .generation,
         )
     };
@@ -1237,7 +1270,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         .expect("seed corrupt immutable evidence target");
 
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
         .expect_err("a conflicting aggregate pack must fail publication");
     assert!(
         error
@@ -1294,7 +1327,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     std::fs::write(&colliding_manifest, b"wrong immutable generation manifest")
         .expect("seed corrupt immutable generation target");
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
         .expect_err("a post-pack manifest collision must fail publication");
     assert!(
         error
@@ -2247,8 +2280,11 @@ fn restart_decode_census_reaches_partitioned_decode_and_matches_durable_identity
     );
 }
 
+/// A restart activates the retained generation from its authenticated
+/// manifest alone; the segment digests are proven when a reader first
+/// decodes them, so a corrupt segment never becomes serving state.
 #[test]
-fn restart_rejects_corrupt_partitioned_file_segment() {
+fn restart_never_serves_a_corrupt_partitioned_file_segment() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     {
@@ -2294,12 +2330,19 @@ fn restart_rejects_corrupt_partitioned_file_segment() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("foreground open defers segment validation");
+    reopened
+        .activate_or_reconcile()
+        .expect("retained activation reads only the sealed manifest");
+    let decode = reopened.publication.load_active_shared();
     assert!(
-        reopened.activate_or_reconcile().is_err(),
-        "retained activation must reject a corrupt file segment"
+        matches!(
+            decode,
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ),
+        "the first decode must refuse the corrupt file segment: {decode:?}"
     );
     assert!(
-        reopened.latest_complete_already_decoded().is_none(),
+        reopened.latest_complete().is_none(),
         "a generation with a corrupt segment never becomes serving state"
     );
 }
@@ -2356,7 +2399,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
         .publish_atomically(
             &latest.generation.sealed_scope(),
             Some(&active_generation),
-            Arc::clone(&latest.generation),
+            &cold(&latest.generation),
         )
         .expect("identical immutable generation republishes");
     assert_eq!(
@@ -2647,7 +2690,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
 
         let mut refusing = publication.for_undecoded_active_rebuild(&observed);
         let error = refusing
-            .publish_atomically(&scope, None, Arc::clone(&seeded))
+            .publish_atomically(&scope, None, &cold(&seeded))
             .expect_err("a pointer that moved under the writer must refuse the publication");
         assert!(
             matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -2667,7 +2710,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     write_repaired_pointer(&pointer_path, &mut restored);
     let mut admitting = publication.for_undecoded_active_rebuild(&observed);
     admitting
-        .publish_atomically(&scope, None, seeded)
+        .publish_atomically(&scope, None, &cold(&seeded))
         .expect("the observed identity still admits the rebuild");
 }
 
@@ -2821,7 +2864,9 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
 
 struct ActiveSegmentDigests {
     files: BTreeSet<String>,
+    file_evidence: BTreeSet<String>,
     graph_pages: BTreeSet<String>,
+    resolution_index: BTreeSet<String>,
     evidence: String,
 }
 
@@ -2850,6 +2895,27 @@ fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
             .iter()
             .map(|segment| digest(&segment["segment_digest"]))
             .collect(),
+        file_evidence: manifest["generation"]["file_evidence"]
+            .as_array()
+            .expect("active file evidence")
+            .iter()
+            .map(|segment| digest(&segment["segment_digest"]))
+            .collect(),
+        resolution_index: {
+            let index = &manifest["generation"]["resolution_index"];
+            index["definitions"]
+                .as_array()
+                .expect("resolution definition pages")
+                .iter()
+                .chain(
+                    index["references"]
+                        .as_array()
+                        .expect("resolution reference pages"),
+                )
+                .chain([&index["import_aliases"]])
+                .map(|page| digest(&page["segment_digest"]))
+                .collect()
+        },
         graph_pages: manifest["generation"]["code_graph_pages"]
             .as_array()
             .expect("active graph pages")
@@ -2866,7 +2932,9 @@ fn active_segment_digests(scope: &Path) -> Vec<String> {
     segments
         .files
         .into_iter()
+        .chain(segments.file_evidence)
         .chain(segments.graph_pages)
+        .chain(segments.resolution_index)
         .chain(std::iter::once(segments.evidence))
         .collect()
 }
@@ -3040,10 +3108,14 @@ fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
     );
     assert_ne!(first.evidence, linked.evidence);
     let mut expected = first.files;
+    expected.extend(first.file_evidence);
     expected.extend(first.graph_pages);
+    expected.extend(first.resolution_index);
     expected.insert(first.evidence);
     expected.extend(linked.files);
+    expected.extend(linked.file_evidence);
     expected.extend(linked.graph_pages);
+    expected.extend(linked.resolution_index);
     expected.insert(linked.evidence);
     assert_eq!(
         segment_files(&segments_root),
@@ -3539,7 +3611,7 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
     }));
 
     publication
-        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
         .expect("publish while sibling sweeps run");
 
     let sweeps = sweeps.lock().expect("sweep observations");

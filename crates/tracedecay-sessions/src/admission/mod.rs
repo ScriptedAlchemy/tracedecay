@@ -19,7 +19,8 @@ use std::pin::Pin;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1,
 };
 use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -407,6 +408,28 @@ pub trait HostAdmission: Send + Sync {
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>>;
 
+    /// Starts a rewrite of a file-byte source from `previous` to
+    /// `generation`. The records before `retained_through` are the previous
+    /// layout's retained prefix; every later record must be offered again
+    /// before [`Self::complete_source_rewrite`] keeps it.
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> AdmissionFuture<'a, ()>;
+
+    /// Called once `generation` was read to the end of its source: retires
+    /// the records a pending rewrite did not offer again and returns how many.
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64>;
+
     /// Drains up to `max` queued projections for one provider.
     fn drain_projection_queue<'a>(
         &'a self,
@@ -632,6 +655,26 @@ pub(crate) mod test_support {
             _scope: &'a ObservationScopeV1,
         ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
             panic!("pre-cancelled ingest attempted committed cursor read")
+        }
+
+        fn begin_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _previous: ObservationSourceGenerationV1,
+            _generation: ObservationSourceGenerationV1,
+            _retained_through: u64,
+        ) -> AdmissionFuture<'a, ()> {
+            panic!("pre-cancelled ingest attempted source rewrite")
+        }
+
+        fn complete_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _generation: ObservationSourceGenerationV1,
+        ) -> AdmissionFuture<'a, u64> {
+            panic!("pre-cancelled ingest attempted source rewrite completion")
         }
 
         fn drain_projection_queue<'a>(
@@ -1156,6 +1199,28 @@ pub(crate) mod test_support {
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
             })
+        }
+
+        // The memory store keeps no projection, so a rewrite has nothing to
+        // retire.
+        fn begin_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _previous: ObservationSourceGenerationV1,
+            _generation: ObservationSourceGenerationV1,
+            _retained_through: u64,
+        ) -> AdmissionFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn complete_source_rewrite<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+            _generation: ObservationSourceGenerationV1,
+        ) -> AdmissionFuture<'a, u64> {
+            Box::pin(async { Ok(0) })
         }
 
         fn drain_projection_queue<'a>(

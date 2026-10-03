@@ -15,9 +15,9 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationFileWindowsV1,
-    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-    SharedDecodedContentPoolV1, VerifiedSealedLexicalPageSourceV1,
+    CodeIndexProductionErrorV1, CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageSourceV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest,
@@ -87,6 +87,17 @@ pub fn validated_rust_file(source: &[u8]) -> ReceiptBoundCodeFileV1 {
         .expect("receipt-bound rust source")
 }
 
+/// The generation a first build holds: with no sealed parent it ran cold.
+pub fn cold_generation(
+    published: &CodeIndexPublishedBuildV1,
+) -> Arc<CodeIndexPublishedGenerationV1> {
+    Arc::clone(
+        published
+            .decoded()
+            .expect("a build without a parent runs cold"),
+    )
+}
+
 /// A partitioned sealed generation held in memory: the manifest plus every
 /// published segment under its digest, evidence pages assembled into their
 /// pack under the commit digest.
@@ -104,7 +115,8 @@ impl PartitionedSealV1 {
             .encode_partitioned_sealed(|publication| {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                    | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                    | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::CodeGraphPage {

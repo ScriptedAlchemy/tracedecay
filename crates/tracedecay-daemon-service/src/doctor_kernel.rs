@@ -22,14 +22,15 @@ use tracedecay_contracts::doctor::{
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
     DoctorSourceFuture, DoctorStorageFamilyReadV1, GitHubSourceDoctorPort, GitHubSourceReadV1,
-    HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
-    LanguageServerAnalyzerStateV1, LanguageServerAnalyzerV1, LanguageServerDoctorPort,
-    LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1,
-    OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryHolderReadV1,
-    ResidentMemoryOwnerReadV1, ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    StorageDoctorPort, UnappliedConfigurationSettingV1, advisory_feedback_read_from_publication,
-    merge_storage_reads, runtime_health_read, storage_family_read,
+    HostComponentDriftV1, HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1,
+    IngestRefusalCensusReadV1, LanguageServerAnalyzerStateV1, LanguageServerAnalyzerV1,
+    LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1,
+    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+    ProfileAuthorityReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
+    ResidentMemoryHolderReadV1, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    UnappliedConfigurationSettingV1, advisory_feedback_read_from_publication, merge_storage_reads,
+    runtime_health_read, storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -134,30 +135,37 @@ fn host_integration_read_from_report(
     if report.components.is_empty() {
         return HostIntegrationReadV1::Absent;
     }
-    let conformance = if report.components.iter().any(|component| {
-        matches!(
-            component.state,
-            HostBundleComponentDoctorStateV1::Corrupt
-                | HostBundleComponentDoctorStateV1::OwnershipConflict
-        )
-    }) {
-        HostConformanceV1::ProtocolDrift
-    } else if report.components.iter().any(|component| {
-        // `Drifted`, `OrphanedRegistration`, `ActivationDeferred`, and
-        // `ReinstallRequired` are repairable conformance, not protocol drift:
-        // an ordinary or adopting install, or the host's own activation,
-        // converges each, so none may escalate to `ProtocolDrift`.
-        matches!(
-            component.state,
-            HostBundleComponentDoctorStateV1::Repairable
-                | HostBundleComponentDoctorStateV1::Missing
-                | HostBundleComponentDoctorStateV1::Drifted
-                | HostBundleComponentDoctorStateV1::OrphanedRegistration
-                | HostBundleComponentDoctorStateV1::ActivationDeferred
-                | HostBundleComponentDoctorStateV1::ReinstallRequired
-        )
-    }) {
-        HostConformanceV1::Drifted
+    let components_where = |states: &[HostBundleComponentDoctorStateV1]| {
+        report
+            .components
+            .iter()
+            .filter(|component| states.contains(&component.state))
+            .map(|component| HostComponentDriftV1 {
+                component: component.label(),
+                remedy: component.repair_action.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let contested = components_where(&[
+        HostBundleComponentDoctorStateV1::Corrupt,
+        HostBundleComponentDoctorStateV1::OwnershipConflict,
+    ]);
+    // `Drifted`, `OrphanedRegistration`, `ActivationDeferred`, and
+    // `ReinstallRequired` are repairable conformance, not protocol drift: an
+    // ordinary or adopting install, or the host's own activation, converges
+    // each, so none may escalate to `ProtocolDrift`.
+    let repairable = components_where(&[
+        HostBundleComponentDoctorStateV1::Repairable,
+        HostBundleComponentDoctorStateV1::Missing,
+        HostBundleComponentDoctorStateV1::Drifted,
+        HostBundleComponentDoctorStateV1::OrphanedRegistration,
+        HostBundleComponentDoctorStateV1::ActivationDeferred,
+        HostBundleComponentDoctorStateV1::ReinstallRequired,
+    ]);
+    let conformance = if !contested.is_empty() {
+        HostConformanceV1::ProtocolDrift(contested)
+    } else if !repairable.is_empty() {
+        HostConformanceV1::Drifted(repairable)
     } else {
         HostConformanceV1::Conformant
     };

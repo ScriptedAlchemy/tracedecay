@@ -123,6 +123,10 @@ impl CaptureObservationRequest {
         self.identity.scope()
     }
 
+    pub fn identity(&self) -> &ObservationIdentityMaterialV1 {
+        &self.identity
+    }
+
     #[must_use]
     pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
         self.resume_checkpoint = Some((file_identity, resume_fingerprint));

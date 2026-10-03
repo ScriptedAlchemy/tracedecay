@@ -238,6 +238,35 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
     assert!(plan.unverifiable.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn an_owner_root_spelled_through_a_symlink_keeps_its_vanished_store_live() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let real = real.canonicalize().unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let census = vec![entry(
+        "owned",
+        real.join("retired-checkout"),
+        None,
+        None,
+        PathBuf::from("/profile/stores/owned"),
+        0,
+        4096,
+    )];
+
+    let unowned = classify_stores(&census, 1_000 * DAY, &BTreeSet::new());
+    assert_eq!(unowned[0].disposition, StoreDisposition::Orphaned);
+    let owned = classify_stores(
+        &census,
+        1_000 * DAY,
+        &BTreeSet::from([alias.join("retired-checkout")]),
+    );
+    assert_eq!(owned[0].disposition, StoreDisposition::Live);
+}
+
 #[test]
 fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
     // A linked worktree's own root can vanish while the repository stays live,
