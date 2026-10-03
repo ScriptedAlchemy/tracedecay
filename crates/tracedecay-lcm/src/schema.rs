@@ -25,9 +25,11 @@ use super::util;
 /// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
-/// scope as project fields (version 14); older stores hold rows with an
-/// invented project and require a profile reset.
-pub const LCM_SCHEMA_VERSION: i64 = 14;
+/// scope as project fields (version 14). A message whose host content is a
+/// block array is stored as its text (version 15); version 14 stored the
+/// array's JSON, and its session-temporal effects bind that rendering's
+/// digests immutably. Older stores require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 15;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's
@@ -818,7 +820,7 @@ mod tests {
                     .await
                     .expect_err("a shipped v13 store must refuse admission")
             )?,
-            (Some(13), 14)
+            (Some(13), LCM_SCHEMA_VERSION)
         );
         assert_eq!(
             refusal(
@@ -826,7 +828,7 @@ mod tests {
                     .await
                     .expect_err("opening a shipped v13 store must refuse, not upgrade it")
             )?,
-            (Some(13), 14)
+            (Some(13), LCM_SCHEMA_VERSION)
         );
         assert_eq!(
             util::fetch_i64(

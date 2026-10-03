@@ -25,6 +25,7 @@ mod git_correlation;
 mod hermes;
 mod kiro;
 mod pi;
+mod projector_upgrade;
 mod provider_contract;
 mod restart_atomicity;
 mod session_ingest;
