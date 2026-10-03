@@ -316,16 +316,16 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         "admission returns only after graph activation completes for the generation it minted: \
          {readiness:?}"
     );
-    tokio::time::timeout(Duration::from_mins(2), async {
-        while matches!(
-            serving.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Warming { .. }
-        ) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let graph = serving
+        .interactive_graph_store()
+        .expect("activated serving generation owns an interactive graph");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while graph.interactive_catalog_is_warm() != Ok(true) {
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the background graph catalog warm settles");
+    .expect("background graph catalog warm completes");
     assert_eq!(
         serving.code_graph_serving_readiness(),
         CodeGraphServingReadinessV1::Ready,
