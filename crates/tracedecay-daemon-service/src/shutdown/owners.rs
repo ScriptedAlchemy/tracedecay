@@ -239,10 +239,6 @@ impl PreparedShutdownOwners {
 }
 
 #[tracing::instrument(name = "daemon.shutdown.phase.join", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Shutdown-phase join waits out one named owner group under the shared budget."
-)]
 async fn join_shutdown_phase(
     deadline: Instant,
     owners: Vec<(usize, &'static str, Option<String>, ShutdownJoinFactory)>,
