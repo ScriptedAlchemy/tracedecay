@@ -97,17 +97,21 @@ pub fn compare_direct(
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let path = workload_path.map_or_else(|| default_workload_path(repo_root), Path::to_path_buf);
     let workload = load_candidate_workload(&path)?;
-    let generated = hotpath::measure_block!("search_eval.compare.generate", {
-        generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root,
-            workload_path: Some(&path),
-            profile_ids,
-            admitted_scope,
-        })
-    })?;
-    hotpath::measure_block!("search_eval.compare", {
+    let generated = {
+        let _span = tracing::trace_span!("search_eval.compare.generate").entered();
+        {
+            generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+                repo_root,
+                workload_path: Some(&path),
+                profile_ids,
+                admitted_scope,
+            })
+        }
+    }?;
+    {
+        let _span = tracing::trace_span!("search_eval.compare").entered();
         evaluate_generated_outputs(repo_root, &workload, &generated)
-    })
+    }
 }
 
 /// Run the packaged workload and corpus through production retrieval and
@@ -116,15 +120,19 @@ pub fn compare_default_direct(
     profile_ids: Option<&[String]>,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let assets = packaged_assets::materialize()?;
-    let generated = hotpath::measure_block!("search_eval.compare.generate", {
-        generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: assets.root(),
-            workload_path: Some(&assets.workload_path()),
-            profile_ids,
-            admitted_scope: packaged_assets::admitted_scope,
-        })
-    })?;
-    hotpath::measure_block!("search_eval.compare", {
+    let generated = {
+        let _span = tracing::trace_span!("search_eval.compare.generate").entered();
+        {
+            generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+                repo_root: assets.root(),
+                workload_path: Some(&assets.workload_path()),
+                profile_ids,
+                admitted_scope: packaged_assets::admitted_scope,
+            })
+        }
+    }?;
+    {
+        let _span = tracing::trace_span!("search_eval.compare").entered();
         evaluate_generated_outputs(assets.root(), assets.workload(), &generated)
-    })
+    }
 }

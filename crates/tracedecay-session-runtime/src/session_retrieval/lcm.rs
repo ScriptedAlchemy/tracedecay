@@ -202,7 +202,11 @@ impl DaemonSessionRetrievalService {
         self.historically_converging_unavailable()
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.lcm_describe", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_retrieval.lcm_describe",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn execute_lcm_describe_admitted(
         &self,
         context: &RequestContext,
@@ -435,7 +439,11 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_retrieval.lcm_expand", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_retrieval.lcm_expand",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn execute_lcm_expand_admitted(
         &self,
         context: &RequestContext,
@@ -569,7 +577,7 @@ impl DaemonSessionRetrievalService {
                     ),
                 );
             };
-            match hotpath::future!(
+            match tracing::Instrument::instrument(
                 executor.hydrate_lcm_external_payload(
                     &result.snapshot,
                     &direct.anchor_id,
@@ -578,7 +586,7 @@ impl DaemonSessionRetrievalService {
                     payload_ref,
                     max_bytes,
                 ),
-                label = "daemon.session_retrieval.payload_hydrate"
+                tracing::trace_span!("daemon.session_retrieval.payload_hydrate"),
             )
             .await
             {

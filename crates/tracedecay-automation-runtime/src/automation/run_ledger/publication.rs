@@ -103,7 +103,7 @@ fn validate_product_artifact_chain(
     Ok(descriptors)
 }
 
-#[hotpath::measure(label = "automation.run_artifact.chain_read", future = true)]
+#[tracing::instrument(name = "automation.run_artifact.chain_read", level = "trace", skip_all)]
 pub async fn read_published_artifact_chain(
     dashboard_root: &Path,
     run_id: &str,
@@ -180,7 +180,11 @@ pub async fn read_published_artifact_chain(
 
 // The fsync-heavy durable phase of run publication (per-artifact writes plus
 // directory syncs); slow terminals show up here rather than in the ledger append.
-#[hotpath::measure(label = "automation.run_artifact.chain_publish", future = true)]
+#[tracing::instrument(
+    name = "automation.run_artifact.chain_publish",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn publish_run_artifact_chain(
     dashboard_root: &Path,
     run_id: &str,

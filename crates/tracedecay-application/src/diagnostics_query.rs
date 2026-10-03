@@ -266,7 +266,11 @@ impl<'a> DiagnosticsQuery<'a> {
     /// Reads the clean-generation publication pointer. A completed empty
     /// publication returns `Some(generation)` even when it contains no
     /// findings; no pointer is distinct from a clean result.
-    #[hotpath::measure(label = "usecases.diagnostics_query.current_generation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_query.current_generation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
         let operation = "diagnostics query current_generation";
         match self.store.current_generation().await {
@@ -286,9 +290,10 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records bound to `generation`, paged in ascending anchor
     /// order.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.current_by_generation",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.diagnostics_query.current_by_generation",
+        level = "trace",
+        skip_all
     )]
     pub async fn current_by_generation(
         &self,
@@ -315,7 +320,11 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Current records for one file occurrence inside `generation`, paged in
     /// ascending anchor order.
-    #[hotpath::measure(label = "usecases.diagnostics_query.current_by_file", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_query.current_by_file",
+        level = "trace",
+        skip_all
+    )]
     pub async fn current_by_file(
         &self,
         generation: &CodeGenerationId,
@@ -342,20 +351,21 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Fetches one record by its retrieval anchor. A miss is `Complete` with
     /// no record; a store failure is typed `StoreUnavailable`.
-    #[hotpath::measure(label = "usecases.diagnostics_query.by_anchor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.diagnostics_query.by_anchor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn by_anchor(
         &self,
         anchor: &RetrievalAnchorId,
     ) -> Result<DiagnosticAnchorLookup, DiagnosticQueryError> {
         let operation = "diagnostics query by_anchor";
         match self.store.record_by_anchor(anchor).await {
-            Ok(record) => {
-                crate::hotpath_observe::diagnostics_query(usize::from(record.is_some()), 1);
-                Ok(DiagnosticAnchorLookup {
-                    record,
-                    coverage: DiagnosticQueryCoverage::Complete,
-                })
-            }
+            Ok(record) => Ok(DiagnosticAnchorLookup {
+                record,
+                coverage: DiagnosticQueryCoverage::Complete,
+            }),
             Err(error) => Ok(DiagnosticAnchorLookup {
                 record: None,
                 coverage: DiagnosticQueryCoverage::StoreUnavailable {
@@ -371,9 +381,10 @@ impl<'a> DiagnosticsQuery<'a> {
     /// finding key the overlay entry wins; every entry carries typed
     /// provenance (persisted vs overlay). The overlay lane is session-only
     /// and is never written back.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.merged_current_with_overlay",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.diagnostics_query.merged_current_with_overlay",
+        level = "trace",
+        skip_all
     )]
     pub async fn merged_current_with_overlay(
         &self,
@@ -495,7 +506,6 @@ fn page_from_bounded_records(
                 .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
         })
         .flatten();
-    crate::hotpath_observe::diagnostics_query(records.len(), total);
     DiagnosticPage {
         records,
         total,

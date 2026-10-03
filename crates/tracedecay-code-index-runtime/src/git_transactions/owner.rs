@@ -35,8 +35,6 @@ use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
-type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
-type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
 type ApplicationCatalogComposer =
     Arc<dyn Fn() -> Result<CatalogSnapshotV1, CatalogCompositionError> + Send + Sync>;
 
@@ -78,7 +76,7 @@ struct ProductionDaemonGitAuthoritySource {
 }
 
 impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
-    #[hotpath::measure(label = "daemon.git.tx.authority")]
+    #[tracing::instrument(name = "daemon.git.tx.authority", level = "trace", skip_all)]
     fn current_capability(
         &self,
         capability_id: &CapabilityId,
@@ -214,16 +212,13 @@ enum DaemonGitAuthority {
 /// A slot is only ever constructed around an installed source, so a mounted
 /// owner always carries authority until shutdown revokes it.
 struct DaemonGitAuthoritySlot {
-    source: ProfiledStdRwLock<DaemonGitAuthority>,
+    source: std::sync::RwLock<DaemonGitAuthority>,
 }
 
 impl DaemonGitAuthoritySlot {
     fn new(source: Arc<dyn DaemonGitAuthoritySource>) -> Self {
         Self {
-            source: hotpath::rw_lock!(
-                std::sync::RwLock::new(DaemonGitAuthority::Installed(source)),
-                label = "daemon.git.tx.authority_source"
-            ),
+            source: std::sync::RwLock::new(DaemonGitAuthority::Installed(source)),
         }
     }
 
@@ -268,7 +263,7 @@ impl DaemonGitIndexPolicyRecheck {
 }
 
 impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
-    #[hotpath::measure(label = "daemon.git.tx.recheck")]
+    #[tracing::instrument(name = "daemon.git.tx.recheck", level = "trace", skip_all)]
     fn recheck(
         &self,
         request: &GitIndexApplyRequestV1,
@@ -442,10 +437,10 @@ pub struct DaemonGitIndexTransactionServiceRegistry {
     catalog: ApplicationCatalogComposer,
     stores: GitIndexTransactionStoreRegistry,
     mutation_queue: Arc<RepositoryMutationQueue>,
-    services: ProfiledTokioMutex<HashMap<ServiceKey, ServiceEntry>>,
-    creation_gate: ProfiledTokioMutex<()>,
+    services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
+    creation_gate: tokio::sync::Mutex<()>,
     shutdown_fenced: AtomicBool,
-    shutdown_receipt: ProfiledTokioMutex<Option<DaemonGitIndexShutdownReceiptV1>>,
+    shutdown_receipt: tokio::sync::Mutex<Option<DaemonGitIndexShutdownReceiptV1>>,
 }
 
 impl DaemonGitIndexTransactionServiceRegistry {
@@ -459,19 +454,10 @@ impl DaemonGitIndexTransactionServiceRegistry {
             catalog: Arc::new(catalog),
             stores: GitIndexTransactionStoreRegistry::default(),
             mutation_queue: Arc::new(RepositoryMutationQueue::default()),
-            services: hotpath::mutex!(
-                tokio::sync::Mutex::new(HashMap::new()),
-                label = "daemon.git.tx.services"
-            ),
-            creation_gate: hotpath::mutex!(
-                tokio::sync::Mutex::new(()),
-                label = "daemon.git.tx.creation_gate"
-            ),
+            services: tokio::sync::Mutex::new(HashMap::new()),
+            creation_gate: tokio::sync::Mutex::new(()),
             shutdown_fenced: AtomicBool::new(false),
-            shutdown_receipt: hotpath::mutex!(
-                tokio::sync::Mutex::new(None),
-                label = "daemon.git.tx.shutdown_receipt"
-            ),
+            shutdown_receipt: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -487,7 +473,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
     /// a single publication: the service starts around an already installed
     /// authority and becomes resolvable only once both exist. Remounting the
     /// same identity reuses the started service and replaces its authority.
-    #[hotpath::measure(label = "daemon.git.tx.mount", future = true)]
+    #[tracing::instrument(name = "daemon.git.tx.mount", level = "trace", skip_all)]
     pub async fn mount(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -603,7 +589,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
     /// database. The caller has already fenced admission with a durable
     /// tombstone; dropping these process-local owners prevents a stale actor
     /// from retaining the deleted database.
-    #[hotpath::measure(label = "daemon.git.tx.retire", future = true)]
+    #[tracing::instrument(name = "daemon.git.tx.retire", level = "trace", skip_all)]
     pub async fn retire_project_database(
         &self,
         project_id: &ProjectId,
@@ -642,7 +628,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         Ok(Some(entry.owner()))
     }
 
-    #[hotpath::measure(label = "daemon.git.tx.shutdown", future = true)]
+    #[tracing::instrument(name = "daemon.git.tx.shutdown", level = "trace", skip_all)]
     pub async fn shutdown(
         &self,
     ) -> Result<DaemonGitIndexShutdownReceiptV1, GitIndexTransactionPortError> {

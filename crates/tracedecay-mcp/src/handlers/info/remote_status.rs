@@ -7,7 +7,7 @@ use tracedecay_contracts::remote::status::RemoteOperationalStatusReaderV1;
 ///
 /// Absence of the provider is the typed unmounted-authority outcome
 /// [`RemoteOperationalStatusReadV1::Unavailable`], never an empty success.
-#[hotpath::measure(label = "mcp.info.remote_status.total")]
+#[tracing::instrument(name = "mcp.info.remote_status.total", level = "trace", skip_all)]
 pub fn read_remote_status(
     provider: Option<&RemoteOperationalStatusReaderV1>,
 ) -> RemoteOperationalStatusReadV1 {

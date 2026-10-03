@@ -29,7 +29,11 @@ use crate::session_retrieval::SessionTemporalMetadataView;
 
 use super::super::wire::{coverage, source_coverage, temporal_watermarks};
 
-#[hotpath::measure(label = "daemon.retained.lcm.hydrate_temporal")]
+#[tracing::instrument(
+    name = "daemon.retained.lcm.hydrate_temporal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporalFieldsV1 {
     LcmTemporalFieldsV1 {
         anchors: value
@@ -238,7 +242,11 @@ pub(super) fn description(value: LcmDescribeResponse) -> LcmDescriptionV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.retained.lcm.hydrate_expansion")]
+#[tracing::instrument(
+    name = "daemon.retained.lcm.hydrate_expansion",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
     LcmExpansionV1 {
         kind: value.kind,
@@ -561,7 +569,7 @@ fn summary_node(value: LcmSummaryNode) -> LcmSummaryNodeV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.retained.lcm.assemble_query")]
+#[tracing::instrument(name = "daemon.retained.lcm.assemble_query", level = "trace", skip_all)]
 pub(super) fn assemble_query(
     prompt: &str,
     query: Option<&str>,

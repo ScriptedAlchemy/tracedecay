@@ -238,7 +238,7 @@ where
         request: &'a FeedbackDiagnosticsRequest,
     ) -> super::FeedbackPortFuture<'a, Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>>
     {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.validate().is_err() {
                     return Vec::new();
@@ -262,7 +262,7 @@ where
                 }
                 results
             },
-            label = "application.feedback.adapter.diagnostics"
+            tracing::trace_span!("application.feedback.adapter.diagnostics"),
         ))
     }
 
@@ -272,7 +272,7 @@ where
         request: &'a FeedbackDiagnosticsRequest,
         runtime: &'a FeedbackRuntimeStateV1,
     ) -> super::FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.validate().is_err()
                     || request.input.request.durability() != FeedbackDurabilityV1::Durable
@@ -292,7 +292,7 @@ where
                 }
                 baselines
             },
-            label = "application.feedback.adapter.history"
+            tracing::trace_span!("application.feedback.adapter.history"),
         ))
     }
 }

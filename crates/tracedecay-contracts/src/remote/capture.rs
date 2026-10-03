@@ -103,7 +103,6 @@ pub enum RemoteCaptureStateV1 {
 }
 
 impl RemoteCaptureStateV1 {
-    #[hotpath::skip]
     pub const fn permits_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
@@ -171,7 +170,6 @@ impl<P> RemoteCaptureServiceV1<P>
 where
     P: RemoteCapturePortV1,
 {
-    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }

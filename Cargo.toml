@@ -26,7 +26,6 @@ members = [
     "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
-    "crates/tracedecay-hotpath-guard",
     "crates/tracedecay-lcm",
     "crates/tracedecay-lsp",
     "crates/tracedecay-maintenance",
@@ -53,7 +52,6 @@ members = [
     "crates/tracedecay-application",
 ]
 exclude = [
-    "vendor/hotpath-macros",
     ".worktrees",
     ".codex-worktrees",
 ]
@@ -67,14 +65,6 @@ edition = "2024"
 version = "1.0.0-beta.66"
 
 [workspace.dependencies]
-# Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
-# the macros must always resolve, and with no profiling feature selected the
-# crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
-# explicit feature-off comparison build carries no measurable profiler weight.
-# Backend selection (`hotpath/hotpath`, `-alloc`, `-cpu`, `-mcp`) lives on the
-# roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
-# build across the graph, so no member needs a feature just to be measured.
-hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, branch
 # perf/compact-direct-build). The published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an
@@ -218,6 +208,4 @@ opt-level = 3
 # `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
-# Keep profiled async bodies in one frame; see vendor/hotpath-macros/PATCH.md.
-hotpath-macros = { path = "vendor/hotpath-macros" }
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }

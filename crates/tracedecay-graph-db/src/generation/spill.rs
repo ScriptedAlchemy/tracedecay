@@ -535,7 +535,7 @@ impl GraphGenerationRowSpill {
         for run in self.entities.runs.iter().chain(&self.relations.runs) {
             std::fs::remove_file(run).map_err(|error| spill_io("run remove", error))?;
         }
-        crate::hotpath_observe::record_counts(entity_count, relation_count, 0, 0);
+        crate::observe::record_counts(entity_count, relation_count, 0, 0);
         Ok(SpilledGraphGeneration {
             identity,
             directory: self.directory,

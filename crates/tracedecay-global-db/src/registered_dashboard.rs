@@ -58,7 +58,11 @@ impl RegisteredGlobalDb {
     /// Reads the dashboard project registry through the retained registered
     /// runtime. Query failures stay typed so callers never mistake an
     /// unavailable registry for an empty one.
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.list")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.list",
+        level = "trace",
+        skip_all
+    )]
     pub async fn list_code_projects(&self, limit: usize) -> Result<Vec<CodeProjectRecord>> {
         let snapshot = self.dashboard_snapshot("list code projects").await?;
         let mut rows = snapshot
@@ -86,7 +90,11 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.list_page")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.list_page",
+        level = "trace",
+        skip_all
+    )]
     pub async fn list_code_projects_after(
         &self,
         after_project_id: Option<&str>,
@@ -136,7 +144,6 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
-    #[hotpath::skip]
     pub async fn code_project_exists(&self, project_id: &str) -> Result<bool> {
         let snapshot = self
             .dashboard_snapshot("check code project registration")
@@ -156,7 +163,11 @@ impl RegisteredGlobalDb {
 
     /// Resolves a bounded set of project IDs through one registry snapshot and
     /// one membership query.
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.membership")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.membership",
+        level = "trace",
+        skip_all
+    )]
     pub async fn registered_code_project_ids(
         &self,
         project_ids: &[String],
@@ -187,7 +198,11 @@ impl RegisteredGlobalDb {
         Ok(registered)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.context")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.context",
+        level = "trace",
+        skip_all
+    )]
     pub async fn project_registry_context_by_id(
         &self,
         project_id: &str,
@@ -221,7 +236,11 @@ impl RegisteredGlobalDb {
     /// Read every registered checkout spelling for one project from a single
     /// database snapshot. The `LIMIT + 1` row is a fail-closed overflow
     /// sentinel: callers never receive a truncated live-root set.
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.inventory")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.inventory",
+        level = "trace",
+        skip_all
+    )]
     pub async fn registered_project_root_inventory(
         &self,
         project_id: &str,
@@ -323,7 +342,6 @@ impl RegisteredGlobalDb {
         }))
     }
 
-    #[hotpath::skip]
     pub async fn project_registry_contexts_for_projects(
         &self,
         projects: &[CodeProjectRecord],
@@ -334,7 +352,6 @@ impl RegisteredGlobalDb {
         contexts_for_projects(&snapshot, projects).await
     }
 
-    #[hotpath::skip]
     pub async fn try_list_store_instances_for_project(
         &self,
         project_id: &str,
@@ -372,7 +389,11 @@ impl RegisteredGlobalDb {
     /// written before commit and restored if commit fails, so retries can
     /// safely resume either side of an interrupted filesystem/database pair.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(future = true, label = "global_db.registered.dashboard.relink")]
+    #[tracing::instrument(
+        name = "global_db.registered.dashboard.relink",
+        level = "trace",
+        skip_all
+    )]
     pub async fn relink_orphan_store_instance(
         &self,
         source_project_id: &str,
@@ -642,7 +663,6 @@ impl RegisteredGlobalDb {
         Ok(true)
     }
 
-    #[hotpath::skip]
     async fn dashboard_snapshot(
         &self,
         operation: &'static str,

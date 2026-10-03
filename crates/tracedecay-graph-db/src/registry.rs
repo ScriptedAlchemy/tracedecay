@@ -688,7 +688,7 @@ impl GraphDbRegistry {
     /// via the publication surface; the native runtime lease is for graphs
     /// whose state is itself the authority (for example daemon-owned session
     /// relation graphs) and for direct storage tests.
-    #[hotpath::measure(label = "graph_db.registry.resolve", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.resolve", level = "trace", skip_all)]
     pub fn resolve(
         &self,
         registration: GraphDbRegistration,
@@ -934,7 +934,7 @@ impl GraphDbRegistry {
     /// capacity accounting keeps the materializing runtime occupied. A plain
     /// open failure releases the slot for remount; `ResetRequired`,
     /// `Corrupt`, and `DurabilityUncertain` retain a terminal `Faulted` slot.
-    #[hotpath::measure(label = "graph_db.registry.attach", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.attach", level = "trace", skip_all)]
     pub fn resolve_owner_attachment(
         &self,
         registration: GraphDbOwnerRegistrationV1,
@@ -1047,9 +1047,7 @@ impl GraphDbRegistry {
                             (&binding, &verified_locator, &path, expected_format),
                         )?;
                         // Same-identity attach against a mounted (or still
-                        // materializing) runtime: no native open runs, so a
-                        // profile can separate these hits from full opens.
-                        hotpath::gauge!("graph_db.registry.attach.already_mounted").inc(1.0);
+                        // materializing) runtime: no native open runs.
                         return Err(GraphDbError::conflict("registry.resolve_owner_attachment"));
                     }
                     Some(RegistryEntry::Faulted {
@@ -1121,11 +1119,6 @@ impl GraphDbRegistry {
                 }
             }
         };
-        if matches!(open_mode, OwnerOpenMode::Eager) {
-            hotpath::gauge!("graph_db.registry.attach.full_open").inc(1.0);
-        } else {
-            hotpath::gauge!("graph_db.registry.attach.lazy").inc(1.0);
-        }
         // Dropped on every exit below: releases the in-flight slot after a
         // plain open failure or unwind; a no-op once `Ready`/`Faulted` truth
         // has overwritten it.
@@ -1346,7 +1339,7 @@ impl GraphDbRegistry {
         self.reopen(registration)
     }
 
-    #[hotpath::measure(label = "graph_db.registry.close", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.close", level = "trace", skip_all)]
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(
             registration.cancellation.as_ref(),
@@ -1401,10 +1394,7 @@ impl GraphDbRegistry {
         self.close_retained_inner(binding, verified_locator, true)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.registry.close_retained",
-        impl_type = "GraphDbRegistry"
-    )]
+    #[tracing::instrument(name = "graph_db.registry.close_retained", level = "trace", skip_all)]
     fn close_retained_inner(
         &self,
         binding: &StoreRuntimeBindingV1,
@@ -1420,7 +1410,7 @@ impl GraphDbRegistry {
         Ok(true)
     }
 
-    #[hotpath::measure(label = "graph_db.registry.evict", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.registry.evict", level = "trace", skip_all)]
     pub fn evict_idle(
         &self,
         minimum_idle: Duration,
@@ -1573,10 +1563,7 @@ impl GraphDbRegistry {
     /// Identity and client-lease checks complete under one registry-state lock,
     /// so failure leaves every target ready and success denies new resolution
     /// for the entire selected set until commit or drop.
-    #[hotpath::measure(
-        label = "graph_db.registry.retire.reserve",
-        impl_type = "GraphDbRegistry"
-    )]
+    #[tracing::instrument(name = "graph_db.registry.retire.reserve", level = "trace", skip_all)]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<GraphDbRetirementTarget>,
@@ -2094,7 +2081,7 @@ impl GraphDbRegistry {
     }
 
     fn state_lock(&self) -> Result<MutexGuard<'_, RegistryState>, GraphDbError> {
-        crate::hotpath_observe::wait_lock(crate::hotpath_observe::LOCK_WAIT_REGISTRY, || {
+        crate::observe::wait_lock(crate::observe::LOCK_WAIT_REGISTRY, || {
             self.inner.state.lock()
         })
         .map_err(|_| GraphDbError::unavailable("graph registry state lock is poisoned"))

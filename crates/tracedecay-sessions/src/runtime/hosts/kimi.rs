@@ -103,230 +103,234 @@ impl KimiSource {
         mut budget: HostScanBudget,
         convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
-        hotpath::measure_block!("sessions.hosts.kimi.discover", {
-            let mut discovery = KimiDiscoveryReport {
-                files: bound_path_list(Vec::new(), bounds),
-                failures: Vec::new(),
-                failure_count: 0,
-                scan_complete: true,
-                reached_end: true,
-                state_gates: Vec::new(),
-            };
-            let matcher = TranscriptScopeMatcher::for_scope(
-                project_root,
-                self.user_registered_roots.as_deref(),
-            );
-            let sessions_root = self.share_dir.join("sessions");
-            let root_metadata = match std::fs::symlink_metadata(&sessions_root) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    return Ok((discovery, budget));
-                }
-                Err(source) => {
+        {
+            let _span = tracing::trace_span!("sessions.hosts.kimi.discover").entered();
+            {
+                let mut discovery = KimiDiscoveryReport {
+                    files: bound_path_list(Vec::new(), bounds),
+                    failures: Vec::new(),
+                    failure_count: 0,
+                    scan_complete: true,
+                    reached_end: true,
+                    state_gates: Vec::new(),
+                };
+                let matcher = TranscriptScopeMatcher::for_scope(
+                    project_root,
+                    self.user_registered_roots.as_deref(),
+                );
+                let sessions_root = self.share_dir.join("sessions");
+                let root_metadata = match std::fs::symlink_metadata(&sessions_root) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Ok((discovery, budget));
+                    }
+                    Err(source) => {
+                        return Err(TranscriptIngestError::ScanIo {
+                            operation: "stat Kimi sessions root",
+                            path: sessions_root,
+                            source,
+                        });
+                    }
+                };
+                if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
                     return Err(TranscriptIngestError::ScanIo {
                         operation: "stat Kimi sessions root",
                         path: sessions_root,
-                        source,
+                        source: io::Error::other(
+                            "Kimi sessions root must be a real directory, not a link",
+                        ),
                     });
                 }
-            };
-            if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-                return Err(TranscriptIngestError::ScanIo {
-                    operation: "stat Kimi sessions root",
-                    path: sessions_root,
-                    source: io::Error::other(
-                        "Kimi sessions root must be a real directory, not a link",
-                    ),
-                });
-            }
-            let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
-            let mut paths = BinaryHeap::with_capacity(limit);
-            let mut has_more = false;
-            let work_dirs = read_real_directories(
-                &sessions_root,
-                KimiDiscoveryFailureKind::DirectoryUnavailable,
-                &mut discovery,
-                &mut budget,
-            )?;
-            'session_dirs: for work_dir in work_dirs {
-                let session_dirs = read_real_directories(
-                    &work_dir,
+                let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
+                let mut paths = BinaryHeap::with_capacity(limit);
+                let mut has_more = false;
+                let work_dirs = read_real_directories(
+                    &sessions_root,
                     KimiDiscoveryFailureKind::DirectoryUnavailable,
                     &mut discovery,
                     &mut budget,
                 )?;
-                for session_dir in session_dirs {
-                    if !budget.checkpoint() {
-                        discovery.scan_complete = false;
-                        discovery.reached_end = false;
-                        break 'session_dirs;
-                    }
-                    let state_path = session_dir.join("state.json");
-                    let CandidateConvergence::Pending(state_pending) = converging_candidate(
-                        convergence,
-                        &state_path,
+                'session_dirs: for work_dir in work_dirs {
+                    let session_dirs = read_real_directories(
+                        &work_dir,
+                        KimiDiscoveryFailureKind::DirectoryUnavailable,
                         &mut discovery,
                         &mut budget,
-                    )?
-                    else {
-                        continue;
-                    };
-                    let Some(state) =
-                        read_session_state(&session_dir, &mut discovery, &mut budget)?
-                    else {
-                        continue;
-                    };
-                    if state.session_id(&session_dir).is_none() {
-                        continue;
-                    }
-                    if !matcher.accepts(state.working_directory()) {
-                        if matcher.membership(state.working_directory())
-                            == ProjectMembership::NoMatch
-                        {
-                            state_pending.finished(&state_path)?;
+                    )?;
+                    for session_dir in session_dirs {
+                        if !budget.checkpoint() {
+                            discovery.scan_complete = false;
+                            discovery.reached_end = false;
+                            break 'session_dirs;
                         }
-                        continue;
-                    }
-                    // Finish state.json in this pass once every agent it
-                    // names is already converged or gets admitted below.
-                    // Waiting for a later wake re-opens the file under load,
-                    // after the transcripts themselves are already skipped.
-                    let agents = state.agents.len();
-                    let mut converged_agents = 0_usize;
-                    let mut queued_wires = Vec::new();
-                    let agents_dir = session_dir.join("agents");
-                    if !validate_real_directory(
-                        &agents_dir,
-                        KimiDiscoveryFailureKind::InvalidAgentPartition,
-                        &mut discovery,
-                        &mut budget,
-                    ) {
-                        continue;
-                    }
-                    for (agent_id, agent) in state.agents {
-                        if !matches!(agent.kind.as_str(), "main" | "sub")
-                            || !safe_component(&agent_id)
-                        {
-                            if matches!(agent.kind.as_str(), "main" | "sub") {
-                                discovery.record_failure(
-                                    KimiDiscoveryFailureKind::InvalidAgentPartition,
-                                    &session_dir,
-                                    &io::Error::new(
-                                        io::ErrorKind::InvalidInput,
-                                        "unsafe Kimi agent id",
-                                    ),
-                                    &mut budget,
-                                );
+                        let state_path = session_dir.join("state.json");
+                        let CandidateConvergence::Pending(state_pending) = converging_candidate(
+                            convergence,
+                            &state_path,
+                            &mut discovery,
+                            &mut budget,
+                        )?
+                        else {
+                            continue;
+                        };
+                        let Some(state) =
+                            read_session_state(&session_dir, &mut discovery, &mut budget)?
+                        else {
+                            continue;
+                        };
+                        if state.session_id(&session_dir).is_none() {
+                            continue;
+                        }
+                        if !matcher.accepts(state.working_directory()) {
+                            if matcher.membership(state.working_directory())
+                                == ProjectMembership::NoMatch
+                            {
+                                state_pending.finished(&state_path)?;
                             }
                             continue;
                         }
-                        let agent_dir = agents_dir.join(agent_id);
+                        // Finish state.json in this pass once every agent it
+                        // names is already converged or gets admitted below.
+                        // Waiting for a later wake re-opens the file under load,
+                        // after the transcripts themselves are already skipped.
+                        let agents = state.agents.len();
+                        let mut converged_agents = 0_usize;
+                        let mut queued_wires = Vec::new();
+                        let agents_dir = session_dir.join("agents");
                         if !validate_real_directory(
-                            &agent_dir,
+                            &agents_dir,
                             KimiDiscoveryFailureKind::InvalidAgentPartition,
                             &mut discovery,
                             &mut budget,
                         ) {
                             continue;
                         }
-                        let candidate = agent_dir.join("wire.jsonl");
-                        match std::fs::symlink_metadata(&candidate) {
-                            Ok(metadata)
-                                if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-                            Ok(_) => continue,
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                            Err(error) => {
-                                discovery.record_failure(
-                                    KimiDiscoveryFailureKind::SessionMetadataUnavailable,
-                                    &candidate,
-                                    &error,
-                                    &mut budget,
-                                );
+                        for (agent_id, agent) in state.agents {
+                            if !matches!(agent.kind.as_str(), "main" | "sub")
+                                || !safe_component(&agent_id)
+                            {
+                                if matches!(agent.kind.as_str(), "main" | "sub") {
+                                    discovery.record_failure(
+                                        KimiDiscoveryFailureKind::InvalidAgentPartition,
+                                        &session_dir,
+                                        &io::Error::new(
+                                            io::ErrorKind::InvalidInput,
+                                            "unsafe Kimi agent id",
+                                        ),
+                                        &mut budget,
+                                    );
+                                }
                                 continue;
                             }
-                        }
-                        // A wire behind the discovery frontier is already
-                        // queued. It still counts once it has converged, so a
-                        // partial sweep can finish state.json instead of
-                        // re-reading it on every later pass.
-                        if frontier_path
-                            .as_ref()
-                            .is_some_and(|frontier| candidate <= *frontier)
-                        {
+                            let agent_dir = agents_dir.join(agent_id);
+                            if !validate_real_directory(
+                                &agent_dir,
+                                KimiDiscoveryFailureKind::InvalidAgentPartition,
+                                &mut discovery,
+                                &mut budget,
+                            ) {
+                                continue;
+                            }
+                            let candidate = agent_dir.join("wire.jsonl");
+                            match std::fs::symlink_metadata(&candidate) {
+                                Ok(metadata)
+                                    if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                                }
+                                Ok(_) => continue,
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                                Err(error) => {
+                                    discovery.record_failure(
+                                        KimiDiscoveryFailureKind::SessionMetadataUnavailable,
+                                        &candidate,
+                                        &error,
+                                        &mut budget,
+                                    );
+                                    continue;
+                                }
+                            }
+                            // A wire behind the discovery frontier is already
+                            // queued. It still counts once it has converged, so a
+                            // partial sweep can finish state.json instead of
+                            // re-reading it on every later pass.
+                            if frontier_path
+                                .as_ref()
+                                .is_some_and(|frontier| candidate <= *frontier)
+                            {
+                                match converging_candidate(
+                                    convergence,
+                                    &candidate,
+                                    &mut discovery,
+                                    &mut budget,
+                                )? {
+                                    CandidateConvergence::Finished => converged_agents += 1,
+                                    CandidateConvergence::Pending(_) => {
+                                        queued_wires.push(candidate);
+                                    }
+                                    CandidateConvergence::Unreadable => {}
+                                }
+                                continue;
+                            }
                             match converging_candidate(
                                 convergence,
                                 &candidate,
                                 &mut discovery,
                                 &mut budget,
                             )? {
-                                CandidateConvergence::Finished => converged_agents += 1,
-                                CandidateConvergence::Pending(_) => {
-                                    queued_wires.push(candidate);
+                                CandidateConvergence::Pending(_) => {}
+                                CandidateConvergence::Finished => {
+                                    converged_agents += 1;
+                                    continue;
                                 }
-                                CandidateConvergence::Unreadable => {}
+                                CandidateConvergence::Unreadable => continue,
                             }
-                            continue;
-                        }
-                        match converging_candidate(
-                            convergence,
-                            &candidate,
-                            &mut discovery,
-                            &mut budget,
-                        )? {
-                            CandidateConvergence::Pending(_) => {}
-                            CandidateConvergence::Finished => {
-                                converged_agents += 1;
-                                continue;
+                            queued_wires.push(candidate.clone());
+                            if !charge_discovered_path(&mut budget, &candidate)? {
+                                discovery.scan_complete = false;
+                                discovery.reached_end = false;
+                                break 'session_dirs;
                             }
-                            CandidateConvergence::Unreadable => continue,
-                        }
-                        queued_wires.push(candidate.clone());
-                        if !charge_discovered_path(&mut budget, &candidate)? {
-                            discovery.scan_complete = false;
-                            discovery.reached_end = false;
-                            break 'session_dirs;
-                        }
-                        if paths.len() < limit {
-                            paths.push(candidate);
-                        } else {
-                            has_more = true;
-                            if paths.peek().is_some_and(|largest| candidate < *largest) {
-                                let _ = paths.pop();
+                            if paths.len() < limit {
                                 paths.push(candidate);
+                            } else {
+                                has_more = true;
+                                if paths.peek().is_some_and(|largest| candidate < *largest) {
+                                    let _ = paths.pop();
+                                    paths.push(candidate);
+                                }
                             }
                         }
-                    }
-                    if agents > 0 && converged_agents == agents {
-                        state_pending.finished(&state_path)?;
-                    } else if agents > 0
-                        && converged_agents.saturating_add(queued_wires.len()) == agents
-                        && let Some(settled) = state_pending.settled()
-                    {
-                        discovery.state_gates.push(KimiStateGate {
-                            path: state_path,
-                            settled,
-                            pending_wires: queued_wires,
-                        });
+                        if agents > 0 && converged_agents == agents {
+                            state_pending.finished(&state_path)?;
+                        } else if agents > 0
+                            && converged_agents.saturating_add(queued_wires.len()) == agents
+                            && let Some(settled) = state_pending.settled()
+                        {
+                            discovery.state_gates.push(KimiStateGate {
+                                path: state_path,
+                                settled,
+                                pending_wires: queued_wires,
+                            });
+                        }
                     }
                 }
+                let paths = paths.into_sorted_vec();
+                discovery.files = bound_path_list(
+                    paths,
+                    TranscriptDiscoveryBounds {
+                        max_files: limit,
+                        ..bounds
+                    },
+                );
+                if has_more {
+                    discovery.files.truncated = Some(FileDiscoveryLimit::FileCount);
+                    discovery.reached_end = false;
+                }
+                if discovery.files.is_truncated() {
+                    discovery.reached_end = false;
+                }
+                Ok((discovery, budget))
             }
-            let paths = paths.into_sorted_vec();
-            discovery.files = bound_path_list(
-                paths,
-                TranscriptDiscoveryBounds {
-                    max_files: limit,
-                    ..bounds
-                },
-            );
-            if has_more {
-                discovery.files.truncated = Some(FileDiscoveryLimit::FileCount);
-                discovery.reached_end = false;
-            }
-            if discovery.files.is_truncated() {
-                discovery.reached_end = false;
-            }
-            Ok((discovery, budget))
-        })
+        }
     }
 }
 
@@ -512,7 +516,7 @@ pub async fn capture_kimi_observations(
     cancellation: &ObservationCancellation,
     convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             let discovery_frontier = facade
                 .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
@@ -547,7 +551,7 @@ pub async fn capture_kimi_observations(
             let owned_project_root = project_root.to_path_buf();
             let owned_convergence =
                 convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
-            let discovered = hotpath::future!(
+            let discovered = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     owned_source.discover(
                         &owned_project_root,
@@ -559,7 +563,7 @@ pub async fn capture_kimi_observations(
                             .map(|(hub, consumer)| (hub, consumer.as_str())),
                     )
                 }),
-                label = "sessions.hosts.kimi.discover_task"
+                tracing::trace_span!("sessions.hosts.kimi.discover_task"),
             )
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
@@ -693,10 +697,12 @@ pub async fn capture_kimi_observations(
                 let canonical_session_id =
                     protect_sensitive_structural_id(&session_id).map_err(|_| invalid_frame())?;
                 let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
-                let file_identity = match hotpath::measure_block!(
-                    "sessions.hosts.kimi.identity_blocking",
+                let match_result = {
+                    let _span =
+                        tracing::trace_span!("sessions.hosts.kimi.identity_blocking").entered();
                     run_blocking_transcript_section(|| jsonl_file_identity(&path))
-                ) {
+                };
+                let file_identity = match match_result {
                     Ok(file_identity) => file_identity,
                     Err(error) => {
                         warn_isolated_source(&path, "source_identity_unavailable");
@@ -874,7 +880,7 @@ pub async fn capture_kimi_observations(
             .await?;
             Ok(outcome)
         },
-        label = "sessions.hosts.kimi.capture"
+        tracing::trace_span!("sessions.hosts.kimi.capture"),
     )
     .await
 }

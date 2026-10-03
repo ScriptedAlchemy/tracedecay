@@ -524,7 +524,6 @@ where
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(
         roots: R,
         owner_authority: A,
@@ -543,7 +542,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.work.evidence.retrieve", future = true)]
+    #[tracing::instrument(name = "application.work.evidence.retrieve", level = "trace", skip_all)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,

@@ -662,7 +662,7 @@ pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     parse_json_object_prefix(candidate)
 }
 
-#[hotpath::measure(label = "automation.backend.extract_json")]
+#[tracing::instrument(name = "automation.backend.extract_json", level = "trace", skip_all)]
 pub fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
     let mut schema_error = None;
     for (start, _) in text.char_indices().filter(|(_, ch)| *ch == '{') {

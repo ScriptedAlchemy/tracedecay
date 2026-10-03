@@ -55,7 +55,7 @@ pub async fn collect_rows(
 /// the error message so handlers can surface it in the payload's `error`
 /// field (mirroring the Python APIs, which never 500 on a bad/missing DB).
 ///
-/// One static hotpath bucket per helper: direct rusqlite has no SQL adapter,
+/// One static metrics bucket per helper: direct rusqlite has no SQL adapter,
 /// so these seams are where per-request store-read demand (and N+1 call
 /// storms) become visible without leaking query text into labels.
 pub async fn query_rows(
@@ -63,12 +63,12 @@ pub async fn query_rows(
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<Vec<Value>, String> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
             collect_rows(rows).await.map_err(|e| e.to_string())
         },
-        label = "dashboard_api.store.query_rows"
+        tracing::trace_span!("dashboard_api.store.query_rows"),
     )
     .await
 }
@@ -80,7 +80,7 @@ pub async fn query_i64_result(
     sql: &str,
     params: impl IntoParams,
 ) -> std::result::Result<i64, String> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
             let row = rows
@@ -90,7 +90,7 @@ pub async fn query_i64_result(
                 .ok_or_else(|| "scalar query returned no rows".to_string())?;
             row.get::<i64>(0).map_err(|e| e.to_string())
         },
-        label = "dashboard_api.store.query_scalar_result"
+        tracing::trace_span!("dashboard_api.store.query_scalar_result"),
     )
     .await
 }

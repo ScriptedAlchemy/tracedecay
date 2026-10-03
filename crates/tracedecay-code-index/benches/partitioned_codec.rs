@@ -56,13 +56,6 @@ fn env_usize(key: &str, default: usize) -> Result<usize, Box<dyn Error>> {
         Err(error) => Err(error.into()),
     }
 }
-const DEFAULT_HOTPATH_BYTES_PATH: &str = "/tmp/tracedecay-partitioned-codec-bytes.json";
-const DEFAULT_HOTPATH_COUNT_PATH: &str = "/tmp/tracedecay-partitioned-codec-count.json";
-
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 #[derive(Clone)]
 struct SourceFile {
     logical_path: String,
@@ -142,7 +135,6 @@ struct Distribution {
 #[derive(Serialize)]
 struct Measurement {
     schema_version: u32,
-    allocation_metric: &'static str,
     corpus_files: usize,
     corpus_bytes: usize,
     replicas: usize,
@@ -164,8 +156,6 @@ struct Measurement {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let count_allocations = std::env::args().any(|argument| argument == "--alloc-count");
-    let output_path = configure_hotpath(count_allocations);
     let replicas = env_usize(REPLICAS_ENV, REPLICAS)?;
     let warmups = env_usize(WARMUPS_ENV, WARMUPS)?;
     let measured = env_usize(MEASURED_ENV, MEASURED)?;
@@ -180,33 +170,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     reset_peak_rss()?;
-    let guard = hotpath::HotpathGuardBuilder::new("partitioned-codec-bench")
-        .format(hotpath::Format::Json)
-        .output_path(output_path)
-        .build();
     let mut encode_wall = Vec::with_capacity(measured);
     let mut decode_wall = Vec::with_capacity(measured);
     let mut lexical_drain_wall = Vec::with_capacity(measured);
     for _ in 0..measured {
         let started = Instant::now();
-        let encoded = hotpath::measure_block!(
-            "code_index.generation.publish.segment_encode",
+        let encoded = {
+            let _span =
+                tracing::trace_span!("code_index.generation.publish.segment_encode").entered();
             encode_once(&generation)?
-        );
+        };
         encode_wall.push(duration_ns(started.elapsed())?);
         assert_fixture_identity(&fixture, &encoded)?;
 
         let started = Instant::now();
-        hotpath::measure_block!(
-            "code_index.generation.decode.bundle",
+        {
+            let _span = tracing::trace_span!("code_index.generation.decode.bundle").entered();
             decode_and_open(&fixture)?
-        );
+        };
         decode_wall.push(duration_ns(started.elapsed())?);
         let started = Instant::now();
-        hotpath::measure_block!("code_index.lexical.drain", drain_lexical(&fixture)?);
+        {
+            let _span = tracing::trace_span!("code_index.lexical.drain").entered();
+            drain_lexical(&fixture)?
+        };
         lexical_drain_wall.push(duration_ns(started.elapsed())?);
     }
-    drop(guard);
 
     let segment_bytes = fixture.segments.values().map(Vec::len).sum::<usize>();
     let mut segments_digest = Sha256::new();
@@ -215,8 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         segments_digest.update(bytes);
     }
     let measurement = Measurement {
-        schema_version: 2,
-        allocation_metric: if count_allocations { "count" } else { "bytes" },
+        schema_version: 3,
         corpus_files: sources.len(),
         corpus_bytes,
         replicas,
@@ -234,30 +222,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     println!("{}", serde_json::to_string_pretty(&measurement)?);
     Ok(())
-}
-
-fn configure_hotpath(count_allocations: bool) -> PathBuf {
-    let output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(if count_allocations {
-                DEFAULT_HOTPATH_COUNT_PATH
-            } else {
-                DEFAULT_HOTPATH_BYTES_PATH
-            })
-        });
-    unsafe {
-        std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        if std::env::var_os("HOTPATH_REPORT").is_none() {
-            std::env::set_var("HOTPATH_REPORT", "functions-alloc");
-        }
-        std::env::set_var("HOTPATH_OUTPUT_PATH", &output_path);
-        std::env::set_var(
-            "HOTPATH_ALLOC_METRIC",
-            if count_allocations { "count" } else { "bytes" },
-        );
-    }
-    output_path
 }
 
 fn replicated_sources(replicas: usize) -> Result<Vec<SourceFile>, Box<dyn Error>> {
@@ -479,7 +443,7 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
     Ok(())
 }
 
-#[hotpath::measure(label = "code_index.lexical.open")]
+#[tracing::instrument(name = "code_index.lexical.open", level = "trace", skip_all)]
 fn open_lexical(
     fixture: &EncodedFixture,
 ) -> Result<VerifiedSealedLexicalPageSourceV1, CodeIndexProductionErrorV1> {

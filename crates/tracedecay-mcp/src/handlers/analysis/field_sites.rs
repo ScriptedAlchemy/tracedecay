@@ -8,7 +8,7 @@ use tracedecay_domain::{ContentDigest, LanguageId};
 
 use super::*;
 
-#[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
+#[tracing::instrument(name = "mcp.analysis.field_sites.total", level = "trace", skip_all)]
 pub(super) async fn compute_field_sites(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -25,8 +25,9 @@ pub(super) async fn compute_field_sites(
         None => (None, raw.to_string()),
     };
 
-    let (symbols_by_file, sealed_files, qualified_scope) =
-        hotpath::measure_block!("mcp.analysis.field_sites.graph", {
+    let (symbols_by_file, sealed_files, qualified_scope) = {
+        let _span = tracing::trace_span!("mcp.analysis.field_sites.graph").entered();
+        {
             let symbols = verified_analysis_symbols(graph, scope_prefix)?;
             let sealed_files = graph
                 .files(ANALYSIS_SYMBOL_BUDGET)?
@@ -48,12 +49,12 @@ pub(super) async fn compute_field_sites(
                     .push(symbol);
             }
             (symbols_by_file, sealed_files, qualified_scope)
-        });
+        }
+    };
     // Graph phase is done. The source walk reads every candidate file, so it
     // belongs on a blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let (writes, reads, touched) = hotpath::future!(
-        tokio::task::spawn_blocking(move || {
+    let (writes, reads, touched) = tracing::Instrument::instrument(tokio::task::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
             let mut writes: Vec<FieldSiteV1> = Vec::new();
@@ -162,9 +163,7 @@ pub(super) async fn compute_field_sites(
                 }
             }
             Ok((writes, reads, touched))
-        }),
-        label = "mcp.analysis.field_sites.scan"
-    )
+        }), tracing::trace_span!("mcp.analysis.field_sites.scan"))
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_field_sites scan failed to join: {join_error}"),

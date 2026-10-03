@@ -242,7 +242,7 @@ pub(crate) async fn try_admit_profile_registry(
 /// stops the installed service (the supervisor bounds the stop and SIGKILLs a
 /// hung daemon), waits a bounded interval for the lease, and restores the
 /// captured service state when the caller finishes.
-#[hotpath::measure(label = "cli.profile.offline_acquire")]
+#[tracing::instrument(name = "cli.profile.offline_acquire", level = "trace", skip_all)]
 pub(crate) fn take_profile_offline(
     profile: &ProfileRoot,
     profile_root: &Path,
@@ -482,7 +482,7 @@ mod wipe_safety_tests {
 /// non-interactive acceptance every other destructive first-party command
 /// takes, so a scripted caller no longer has to feed `go!` through a pipe on
 /// stdin to reach the wipe.
-#[hotpath::measure(label = "cli.wipe.run", future = true)]
+#[tracing::instrument(name = "cli.wipe.run", level = "trace", skip_all)]
 pub(crate) async fn handle_wipe(
     profile: &ProfileRoot,
     all: bool,
@@ -732,7 +732,7 @@ async fn wipe_under_profile_offline(
 }
 
 /// Handles the `list` and `list --all` commands.
-#[hotpath::measure(label = "cli.list.run", future = true)]
+#[tracing::instrument(name = "cli.list.run", level = "trace", skip_all)]
 pub(crate) async fn handle_list(
     profile: &ProfileRoot,
     all: bool,

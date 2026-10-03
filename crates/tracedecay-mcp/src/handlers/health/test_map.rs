@@ -11,7 +11,7 @@ const MAX_TEST_MAP_FILE_SYMBOLS: usize = 50_000;
 const MAX_TEST_MAP_IMPACT_SYMBOLS: usize = 20_000;
 const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 
-#[hotpath::measure(label = "mcp.health.test_risk.total")]
+#[tracing::instrument(name = "mcp.health.test_risk.total", level = "trace", skip_all)]
 pub async fn compute_test_risk(
     graph: &VerifiedGraphQuery,
     args: Value,
@@ -23,14 +23,14 @@ pub async fn compute_test_risk(
     let path_prefix = request.path.as_deref().or(scope_prefix);
     let include_tested = request.include_tested.unwrap_or(false);
 
-    let report = hotpath::future!(
+    let report = tracing::Instrument::instrument(
         tracedecay_graph_query::test_risk::analyze_test_risk(
             graph,
             path_prefix,
             include_tested,
             limit,
         ),
-        label = "mcp.health.test_risk.graph"
+        tracing::trace_span!("mcp.health.test_risk.graph"),
     )
     .await?;
     Ok(graph_tool_completion(
@@ -39,38 +39,44 @@ pub async fn compute_test_risk(
     ))
 }
 
-#[hotpath::measure(label = "mcp.health.test_map.total")]
+#[tracing::instrument(name = "mcp.health.test_map.total", level = "trace", skip_all)]
 pub async fn compute_test_map(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: TestMapSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_test_map")?;
-    let source_nodes = hotpath::measure_block!("mcp.health.test_map.graph", {
-        match test_map_target(&request)? {
-            TestMapTarget::File(file) => {
-                let nodes = graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
-                if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
-                    return Err(test_map_unavailable(
-                        "verified test-map file census exceeded its symbol budget",
-                    ));
-                }
-                nodes
-            }
-            TestMapTarget::NodeId(node_id) => {
-                let occurrence = SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("invalid test-map symbol occurrence: {error}"),
+    let source_nodes = {
+        let _span = tracing::trace_span!("mcp.health.test_map.graph").entered();
+        {
+            match test_map_target(&request)? {
+                TestMapTarget::File(file) => {
+                    let nodes =
+                        graph.symbols_in_logical_file(file, MAX_TEST_MAP_FILE_SYMBOLS + 1)?;
+                    if nodes.len() > MAX_TEST_MAP_FILE_SYMBOLS {
+                        return Err(test_map_unavailable(
+                            "verified test-map file census exceeded its symbol budget",
+                        ));
                     }
-                })?;
-                graph.symbol_summary(&occurrence)?.into_iter().collect()
+                    nodes
+                }
+                TestMapTarget::NodeId(node_id) => {
+                    let occurrence =
+                        SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
+                            TraceDecayError::Config {
+                                message: format!("invalid test-map symbol occurrence: {error}"),
+                            }
+                        })?;
+                    graph.symbol_summary(&occurrence)?.into_iter().collect()
+                }
             }
         }
-    });
+    };
 
     let test_callers = batched_test_callers(graph, &source_nodes)?;
 
-    let (coverage, uncovered, all_test_files) =
-        hotpath::measure_block!("mcp.health.test_map.compute", {
+    let (coverage, uncovered, all_test_files) = {
+        let _span = tracing::trace_span!("mcp.health.test_map.compute").entered();
+        {
             let mut coverage: Vec<TestMapSourceCoverageV1> = Vec::new();
             let mut uncovered: Vec<TestMapUncoveredV1> = Vec::new();
             let mut all_test_files: HashSet<String> = HashSet::new();
@@ -112,7 +118,8 @@ pub async fn compute_test_map(
                 }
             }
             (coverage, uncovered, all_test_files)
-        });
+        }
+    };
 
     let mut test_files: Vec<String> = all_test_files.into_iter().collect();
     test_files.sort();

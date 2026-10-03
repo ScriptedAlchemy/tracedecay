@@ -3,8 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(feature = "hotpath")]
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use gix::bstr::ByteSlice;
@@ -160,134 +158,6 @@ pub(super) fn representable_logical_path(git_path: &[u8]) -> Option<&str> {
         .filter(|path| validate_code_logical_path(path).is_ok())
 }
 
-/// Publish capture progress at a coarse cadence so a large tree does not
-/// turn one file into one profiler event. The final values are always flushed
-/// by `Drop`, including cancellation and other early-return paths.
-#[cfg(feature = "hotpath")]
-const CAPTURE_PROGRESS_UPDATE_PERIOD: u64 = 32;
-
-pub struct CaptureProgressV1 {
-    #[cfg(feature = "hotpath")]
-    candidate_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
-    candidate_bytes: AtomicU64,
-    #[cfg(feature = "hotpath")]
-    processed_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
-    processed_bytes: AtomicU64,
-    #[cfg(feature = "hotpath")]
-    captured_files: AtomicU64,
-    #[cfg(feature = "hotpath")]
-    captured_bytes: AtomicU64,
-}
-
-impl CaptureProgressV1 {
-    #[hotpath::skip]
-    pub const fn new() -> Self {
-        Self {
-            #[cfg(feature = "hotpath")]
-            candidate_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
-            candidate_bytes: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
-            processed_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
-            processed_bytes: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
-            captured_files: AtomicU64::new(0),
-            #[cfg(feature = "hotpath")]
-            captured_bytes: AtomicU64::new(0),
-        }
-    }
-
-    #[inline]
-    pub fn observe_candidate(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
-        {
-            let candidate_files = self
-                .candidate_files
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            self.candidate_bytes
-                .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(candidate_files, false);
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
-    }
-
-    #[inline]
-    pub fn observe_processed(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
-        {
-            let processed_files = self
-                .processed_files
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            self.processed_bytes
-                .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(processed_files, false);
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
-    }
-
-    #[inline]
-    pub fn observe_captured(&self, bytes: usize) {
-        #[cfg(feature = "hotpath")]
-        {
-            let captured_files = self
-                .captured_files
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            self.captured_bytes
-                .fetch_add(bytes as u64, Ordering::Relaxed);
-            self.publish_at_cadence(captured_files, false);
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = bytes;
-    }
-
-    #[cfg(feature = "hotpath")]
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn publish_at_cadence(&self, observation_count: u64, force: bool) {
-        if !force && !Self::cadence_is_due(observation_count) {
-            return;
-        }
-        let candidate_files = self.candidate_files.load(Ordering::Relaxed);
-        let processed_files = self.processed_files.load(Ordering::Relaxed);
-        let captured_files = self.captured_files.load(Ordering::Relaxed);
-        hotpath::gauge!("daemon.code_index.capture.candidate_files").set(candidate_files);
-        hotpath::gauge!("daemon.code_index.capture.candidate_bytes")
-            .set(self.candidate_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("daemon.code_index.capture.processed_files").set(processed_files);
-        hotpath::gauge!("daemon.code_index.capture.processed_bytes")
-            .set(self.processed_bytes.load(Ordering::Relaxed));
-        hotpath::gauge!("daemon.code_index.capture.captured_files").set(captured_files);
-        hotpath::gauge!("daemon.code_index.capture.captured_bytes")
-            .set(self.captured_bytes.load(Ordering::Relaxed));
-    }
-
-    #[cfg(feature = "hotpath")]
-    // Cadence arithmetic on the capture hot loop; the profiling build must not
-    // pay a call for it.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn cadence_is_due(observation_count: u64) -> bool {
-        observation_count != 0 && observation_count.is_multiple_of(CAPTURE_PROGRESS_UPDATE_PERIOD)
-    }
-}
-
-impl Drop for CaptureProgressV1 {
-    fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
-        self.publish_at_cadence(0, true);
-    }
-}
-
 impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadControlV1 {
     fn is_cancelled(&self) -> bool {
         self.cancellation
@@ -428,93 +298,84 @@ impl CodeIndexWorktreeSchedulerV1 {
         })
     }
 
-    pub(super) fn capture_candidate_bytes_with_progress(
+    pub(super) fn capture_candidate_bytes(
         &self,
         registry: &StaticLanguageRegistry,
         git_path: &[u8],
         raw_bytes: &[u8],
-        progress: Option<&CaptureProgressV1>,
         explicitly_admitted: bool,
     ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if let Some(progress) = progress {
-            progress.observe_candidate(raw_bytes.len());
+        let Some(logical_path) = representable_logical_path(git_path) else {
+            return Ok(CapturedFileOutcomeV1::Unrepresentable(git_path.to_vec()));
+        };
+        if !explicitly_admitted && self.path_policy.excludes(logical_path) {
+            return self
+                .omitted_source_file(
+                    logical_path,
+                    raw_bytes,
+                    SnapshotFileDispositionV1::Generated,
+                )
+                .map(CapturedFileOutcomeV1::Omitted);
         }
-        let result = (|| {
-            let Some(logical_path) = representable_logical_path(git_path) else {
-                return Ok(CapturedFileOutcomeV1::Unrepresentable(git_path.to_vec()));
+        let descriptor = Path::new(logical_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .and_then(|extension| registry.descriptor_for_extension(&extension.to_lowercase()));
+        let Some(descriptor) = descriptor else {
+            return self
+                .omitted_source_file(
+                    logical_path,
+                    raw_bytes,
+                    SnapshotFileDispositionV1::UnsupportedLanguage,
+                )
+                .map(CapturedFileOutcomeV1::Omitted);
+        };
+        let (sanitized_bytes, sensitivity_level, receipt_id) =
+            match privacy::sanitize_code_file(&descriptor.language, raw_bytes) {
+                Ok(sanitized) => sanitized,
+                Err(CodeIndexSchedulerErrorV1::Privacy(reason)) => {
+                    return Ok(CapturedFileOutcomeV1::Withheld {
+                        file: self.omitted_source_file(
+                            logical_path,
+                            raw_bytes,
+                            SnapshotFileDispositionV1::Ignored,
+                        )?,
+                        reason,
+                    });
+                }
+                Err(error) => return Err(error),
             };
-            if !explicitly_admitted && self.path_policy.excludes(logical_path) {
-                return self
-                    .omitted_source_file(
-                        logical_path,
-                        raw_bytes,
-                        SnapshotFileDispositionV1::Generated,
-                    )
-                    .map(CapturedFileOutcomeV1::Omitted);
-            }
-            let descriptor = Path::new(logical_path)
-                .extension()
-                .and_then(|value| value.to_str())
-                .and_then(|extension| registry.descriptor_for_extension(&extension.to_lowercase()));
-            let Some(descriptor) = descriptor else {
-                return self
-                    .omitted_source_file(
-                        logical_path,
-                        raw_bytes,
-                        SnapshotFileDispositionV1::UnsupportedLanguage,
-                    )
-                    .map(CapturedFileOutcomeV1::Omitted);
-            };
-            let (sanitized_bytes, sensitivity_level, receipt_id) =
-                match privacy::sanitize_code_file(&descriptor.language, raw_bytes) {
-                    Ok(sanitized) => sanitized,
-                    Err(CodeIndexSchedulerErrorV1::Privacy(reason)) => {
-                        return Ok(CapturedFileOutcomeV1::Withheld {
-                            file: self.omitted_source_file(
-                                logical_path,
-                                raw_bytes,
-                                SnapshotFileDispositionV1::Ignored,
-                            )?,
-                            reason,
-                        });
-                    }
-                    Err(error) => return Err(error),
-                };
-            let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
-            let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
-            let occurrence =
-                file_occurrence_id(&self.repository_id, logical_path, &digest, &receipt_id)?;
-            Ok(CapturedFileOutcomeV1::Present(CapturedCandidateV1 {
-                file: SanitizedCodeFileV1 {
-                    file_occurrence_id: occurrence.clone(),
-                    logical_path: logical_path.to_owned(),
-                    language: Some(descriptor.language.clone()),
-                    content_digest: digest,
-                    disposition: SnapshotFileDispositionV1::Present,
-                },
-                captured: CodeIndexCapturedFileV1 {
-                    file_occurrence_id: occurrence,
-                    sanitized_bytes: Arc::clone(&shared),
-                    sensitivity_level,
-                },
-                receipt_id,
-                retained: shared,
-                retained_reservation,
-            }))
-        })();
-        if let Some(progress) = progress {
-            progress.observe_processed(raw_bytes.len());
-            if let Ok(CapturedFileOutcomeV1::Present(candidate)) = result.as_ref() {
-                progress.observe_captured(candidate.captured.sanitized_bytes.len());
-            }
-        }
-        result
+        let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
+        let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
+        let occurrence =
+            file_occurrence_id(&self.repository_id, logical_path, &digest, &receipt_id)?;
+        Ok(CapturedFileOutcomeV1::Present(CapturedCandidateV1 {
+            file: SanitizedCodeFileV1 {
+                file_occurrence_id: occurrence.clone(),
+                logical_path: logical_path.to_owned(),
+                language: Some(descriptor.language.clone()),
+                content_digest: digest,
+                disposition: SnapshotFileDispositionV1::Present,
+            },
+            captured: CodeIndexCapturedFileV1 {
+                file_occurrence_id: occurrence,
+                sanitized_bytes: Arc::clone(&shared),
+                sensitivity_level,
+            },
+            receipt_id,
+            retained: shared,
+            retained_reservation,
+        }))
     }
 
-    #[hotpath::measure(label = "daemon.code_index.capture.exact_git_tree")]
+    #[tracing::instrument(
+        name = "daemon.code_index.capture.exact_git_tree",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn capture_exact_git_tree_snapshot(
         &self,
         source: &ExactGitTreeSourceV1,
@@ -571,7 +432,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
-    #[hotpath::measure(label = "daemon.code_index.capture.native_candidate_tree")]
+    #[tracing::instrument(
+        name = "daemon.code_index.capture.native_candidate_tree",
+        level = "trace",
+        skip_all
+    )]
     fn capture_native_candidate_tree_snapshot(
         &self,
         reference: tracedecay_domain::RefId,
@@ -614,13 +479,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
-        let progress = CaptureProgressV1::new();
         let mut roster = CapturedFileRosterV1::default();
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         visit(&mut |git_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
-            let outcome = self.capture_candidate_bytes_with_progress(
-                &registry, git_path, raw_bytes, Some(&progress), false,
+            let outcome = self.capture_candidate_bytes(
+                &registry, git_path, raw_bytes, false,
             ).map_err(|error| {
                 if self.shutting_down.load(Ordering::Acquire) {
                     CodeIndexSearchUnavailableReasonV1::Cancelled
@@ -998,43 +862,6 @@ mod tests {
     };
     use crate::code_index_scheduler::SharedCodeIndexBytePoolV1;
 
-    #[cfg(feature = "hotpath")]
-    use super::{CAPTURE_PROGRESS_UPDATE_PERIOD, CaptureProgressV1};
-
-    #[cfg(feature = "hotpath")]
-    #[test]
-    fn zero_captured_large_tree_uses_bounded_candidate_cadence() {
-        let candidate_count = CAPTURE_PROGRESS_UPDATE_PERIOD * 64;
-        let progress = CaptureProgressV1::new();
-        for _ in 0..candidate_count {
-            progress.observe_candidate(1);
-        }
-        assert_eq!(
-            progress
-                .candidate_files
-                .load(std::sync::atomic::Ordering::Relaxed),
-            candidate_count
-        );
-        assert_eq!(
-            progress
-                .captured_files
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-
-        let publish_points = (1..=candidate_count)
-            .filter(|count| CaptureProgressV1::cadence_is_due(*count))
-            .collect::<Vec<_>>();
-
-        assert_eq!(publish_points.len(), 64);
-        assert_eq!(
-            publish_points.first().copied(),
-            Some(CAPTURE_PROGRESS_UPDATE_PERIOD)
-        );
-        assert_eq!(publish_points.last().copied(), Some(candidate_count));
-        assert!(!CaptureProgressV1::cadence_is_due(0));
-    }
-
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(
             tracedecay_runtime_core::git::try_git_program()
@@ -1149,11 +976,10 @@ mod tests {
     fn a_privacy_refusal_withholds_only_its_own_path() {
         let (_project, _store, scheduler) = generated_source_fixture();
         let outcome = scheduler
-            .capture_candidate_bytes_with_progress(
+            .capture_candidate_bytes(
                 &super::StaticLanguageRegistry::new(),
                 b"malformed.json",
                 b"{broken",
-                None,
                 false,
             )
             .expect("privacy refusal is a file outcome");
@@ -1725,11 +1551,10 @@ mod tests {
             .shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
         assert!(matches!(
-            scheduler.capture_candidate_bytes_with_progress(
+            scheduler.capture_candidate_bytes(
                 &super::StaticLanguageRegistry::new(),
                 b"src/lib.rs",
                 b"pub fn kept() {}",
-                None,
                 false,
             ),
             Err(CodeIndexSchedulerErrorV1::Production(

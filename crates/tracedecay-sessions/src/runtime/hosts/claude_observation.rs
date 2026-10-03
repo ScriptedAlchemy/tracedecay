@@ -624,10 +624,10 @@ where
     if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
-    let identity = hotpath::measure_block!(
-        "sessions.hosts.claude.identify_blocking",
+    let identity = {
+        let _span = tracing::trace_span!("sessions.hosts.claude.identify_blocking").entered();
         run_blocking_transcript_section(|| identify_claude_source(path))
-    )
+    }
     .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
         provider: "claude",
         path: path.to_path_buf(),
@@ -651,8 +651,8 @@ where
     });
     let mut prefix_recovery = JsonlPrefixRecovery::Report;
     let scan = loop {
-        let scan = hotpath::measure_block!(
-            "sessions.hosts.claude.scan_blocking",
+        let scan = {
+            let _span = tracing::trace_span!("sessions.hosts.claude.scan_blocking").entered();
             run_blocking_transcript_section(|| {
                 try_scan_claude_source_frames_with_resume(
                     identity.clone(),
@@ -662,7 +662,7 @@ where
                     prefix_recovery.clone(),
                 )
             })
-        )?;
+        }?;
         // Only `Report` stops at a diverged prefix, and the retry supplies
         // checkpoints, so this runs at most twice.
         if !scan.as_ref().is_some_and(|scan| scan.prefix_diverged) {
@@ -708,14 +708,14 @@ where
             end_offset: covered_through,
         };
     }
-    let retained = hotpath::measure_block!(
-        "sessions.hosts.claude.scope_blocking",
+    let retained = {
+        let _span = tracing::trace_span!("sessions.hosts.claude.scope_blocking").entered();
         run_blocking_transcript_section(|| {
             context
                 .source_adapter
                 .retain_scoped_frames(&mut scan, context.project_root)
         })
-    );
+    };
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(
@@ -1189,7 +1189,11 @@ fn merge_committed_into_error(
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.claude.drain_projection", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.claude.drain_projection",
+    level = "trace",
+    skip_all
+)]
 pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
@@ -1264,12 +1268,12 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
 ) -> Result<(Vec<PathBuf>, usize, bool), ClaudeObservationIngestError> {
-    let discovery = hotpath::measure_block!(
-        "sessions.hosts.claude.discover_blocking",
+    let discovery = {
+        let _span = tracing::trace_span!("sessions.hosts.claude.discover_blocking").entered();
         run_blocking_transcript_section(|| {
             source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
-    );
+    };
     let discovery_truncated = discovery.is_truncated();
     let mut paths = discovery.paths;
     paths.sort();
@@ -1320,7 +1324,11 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
-#[hotpath::measure(label = "sessions.hosts.claude.ingest_source", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.claude.ingest_source",
+    level = "trace",
+    skip_all
+)]
 pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,

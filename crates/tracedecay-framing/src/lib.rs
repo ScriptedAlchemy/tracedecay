@@ -146,7 +146,7 @@ fn capture_inspect_prefix(retained: &[u8], next: &[u8]) -> Vec<u8> {
 /// there instead of draining to EOF: a writer that crosses the cap and keeps
 /// its end open (a hook host holding stdin) must not be able to hold the
 /// caller, and total work is bounded by the cap, not by the input size.
-#[hotpath::measure(label = "sessions.admission.read_end")]
+#[tracing::instrument(name = "sessions.admission.read_end", level = "trace", skip_all)]
 pub fn read_bounded_to_end(
     reader: &mut impl Read,
     max_bytes: usize,
@@ -203,7 +203,6 @@ pub struct BoundedLineReader<R> {
 
 impl<R> BoundedLineReader<R> {
     /// Wrap a buffered source. No frame state is carried across sources.
-    #[hotpath::skip]
     pub const fn new(inner: R) -> Self {
         Self {
             inner,
@@ -215,7 +214,6 @@ impl<R> BoundedLineReader<R> {
 
     /// Borrow the underlying source. Bypassing the reader for a read would
     /// strand any retained partial frame, so this is for non-read access only.
-    #[hotpath::skip]
     pub const fn get_mut(&mut self) -> &mut R {
         &mut self.inner
     }
@@ -228,7 +226,6 @@ impl<R> BoundedLineReader<R> {
     /// True while bytes of an unterminated frame are held across calls. This is
     /// exactly the state a non-resumable reader would have lost on cancellation.
     #[must_use]
-    #[hotpath::skip]
     pub const fn has_partial_frame(&self) -> bool {
         !self.retained.is_empty() || self.oversized
     }
@@ -271,7 +268,6 @@ where
     /// Oversized input is discarded through newline/EOF and returned as the
     /// typed IO error carrying only a bounded leading prefix for request-id
     /// inspection.
-    #[hotpath::skip]
     pub async fn read_mcp_line(&mut self) -> io::Result<Option<String>> {
         match self.read_bounded(MAX_MCP_JSONRPC_FRAME_BYTES).await? {
             BoundedLineOutcome::Ready(line) => Ok(line),
@@ -285,7 +281,6 @@ where
     /// content (excluding the terminating newline). On overflow, discards until
     /// newline or EOF and reports [`WireReadOutcome::Oversized`].
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn read_line(
         &mut self,
         max_bytes: usize,
@@ -296,7 +291,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "sessions.admission.read_line", future = true)]
+    #[tracing::instrument(name = "sessions.admission.read_line", level = "trace", skip_all)]
     async fn read_bounded(
         &mut self,
         max_bytes: usize,

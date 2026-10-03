@@ -786,7 +786,7 @@ where
     A: ExactAdmissionAuthority,
     P: ExactTermPostingReadPort,
 {
-    #[hotpath::measure(label = "query.lane.exact")]
+    #[tracing::instrument(name = "query.lane.exact", level = "trace", skip_all)]
     fn retrieve_exact(
         &self,
         request: &ExactLaneRequest<'_>,
@@ -815,13 +815,7 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.exact.candidates",
-            "query.lane.exact.examined",
-            "query.lane.exact.results",
-            "query.lane.exact.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.exact.residency", &outcome);
         Ok(outcome)
     }
 }

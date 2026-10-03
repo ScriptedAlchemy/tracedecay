@@ -161,24 +161,36 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(Some(session_ids))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.txn.ensure_cursor_key")]
+    #[tracing::instrument(
+        name = "session_temporal.txn.ensure_cursor_key",
+        level = "trace",
+        skip_all
+    )]
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
         const OPERATION: &str = "provision registered session cursor authentication key";
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| query::storage(OPERATION, error))?
-        });
+        let transaction = {
+            use tracing::Instrument as _;
+            {
+                self.begin_write_transaction()
+                    .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                    .await
+                    .map_err(|error| query::storage(OPERATION, error))?
+            }
+        };
         let key =
             cursor_keys::ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| query::storage(OPERATION, error))?
-        });
+        {
+            use tracing::Instrument as _;
+            {
+                transaction
+                    .commit()
+                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                    .await
+                    .map_err(|error| query::storage(OPERATION, error))?
+            }
+        };
         Ok(key)
     }
 
@@ -192,7 +204,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// read view that includes it. Every other read-side refusal, multiple
     /// active keys, invalid id/version/material, retention, is returned as is
     /// and never becomes a reason to mint a replacement.
-    #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<SessionTemporalCursorKeyProvider, cursor_keys::SessionTemporalCursorKeyProviderError>
@@ -227,7 +238,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         })
     }
 
-    #[hotpath::skip]
     pub async fn load_preprovisioned_session_cursor_key_provider_result(
         &self,
     ) -> Result<SessionTemporalCursorKeyProvider, cursor_keys::SessionTemporalCursorKeyProviderError>
@@ -265,7 +275,6 @@ pub enum SessionPageReconstructionRequest<'a> {
 }
 
 impl<'a> SessionPageReconstructionRequest<'a> {
-    #[hotpath::skip]
     pub const fn occurrence(
         snapshot: &'a TemporalExecutionSnapshot,
         anchor_id: &'a RetrievalAnchorId,
@@ -282,7 +291,6 @@ impl<'a> SessionPageReconstructionRequest<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn summary(
         snapshot: &'a TemporalExecutionSnapshot,
         provider: &'a str,
@@ -321,7 +329,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         SessionTemporalAccess::new(self.db)
     }
 
-    #[hotpath::skip]
     pub const fn new(db: &'db D) -> Self {
         Self { db }
     }
@@ -330,7 +337,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     /// Every request must carry the exact same authorized root; accepting a
     /// mixed-root batch would make a registered shard an implicit cross-project
     /// cache.
-    #[hotpath::skip]
     pub async fn reconstruct_session_page<'a>(
         &self,
         requests: impl IntoIterator<Item = SessionPageReconstructionRequest<'a>>,
@@ -446,7 +452,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok(reconstructed)
     }
 
-    #[hotpath::skip]
     pub async fn resolve_lcm_describe_target(
         &self,
         provider: &str,
@@ -463,7 +468,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .await
     }
 
-    #[hotpath::skip]
     pub async fn resolve_lcm_expand_target(
         &self,
         provider: &str,
@@ -480,7 +484,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .await
     }
 
-    #[hotpath::skip]
     pub async fn render_lcm_describe(
         &self,
         request: LcmDescribeRequest,
@@ -498,7 +501,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(map_lcm_error)
     }
 
-    #[hotpath::skip]
     pub async fn render_lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -515,7 +517,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(map_lcm_error)
     }
 
-    #[hotpath::skip]
     /// Reads one bounded batch of active summary relations, checkpointing the
     /// control on both sides of the read so a cancelled or deadlined execution
     /// stays typed as such rather than as a storage failure.
@@ -619,7 +620,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok(relations)
     }
 
-    #[hotpath::skip]
     pub async fn hydrate_lcm_external_payload(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -711,7 +711,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .map_err(map_lcm_error)
     }
 
-    #[hotpath::skip]
     pub async fn hydrate_lcm_summary_sources(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -835,7 +834,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         })
     }
 
-    #[hotpath::skip]
     pub async fn encode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -861,7 +859,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         .map_err(map_lcm_cursor_error)
     }
 
-    #[hotpath::skip]
     pub async fn decode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -897,7 +894,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .map_err(|error| SessionTemporalExecutionError::storage("open read snapshot", error))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.execution.freeze")]
+    #[tracing::instrument(name = "session_temporal.execution.freeze", level = "trace", skip_all)]
     async fn freeze(
         &self,
         request: &AuthorizedTemporalExecutionRequest,
@@ -985,7 +982,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         Ok((read, snapshot, readiness))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.execution.execute")]
+    #[tracing::instrument(name = "session_temporal.execution.execute", level = "trace", skip_all)]
     pub async fn execute<E>(
         &self,
         request: AuthorizedTemporalExecutionRequest,
@@ -994,7 +991,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     where
         E: VersionedTokenEstimator + Sync,
     {
-        hotpath::gauge!("session_temporal.execution").inc(1u32);
         let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
         let authenticator =
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
@@ -1052,7 +1048,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTemporalExe
     where
         E: VersionedTokenEstimator + Sync,
     {
-        hotpath::gauge!("session_temporal.execution").inc(1u32);
         let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
         let authenticator =
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)

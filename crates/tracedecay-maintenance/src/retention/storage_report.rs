@@ -355,7 +355,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// Filesystem sizing, `SQLite` family copy, and per-store probes run on the
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
-#[hotpath::measure(label = "maintenance.storage_report.build", future = true)]
+#[tracing::instrument(name = "maintenance.storage_report.build", level = "trace", skip_all)]
 pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
@@ -543,7 +543,11 @@ fn storage_report_cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDec
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
 /// census performs an unbounded profile-wide scan.
-#[hotpath::measure(label = "maintenance.storage_report.build_page", future = true)]
+#[tracing::instrument(
+    name = "maintenance.storage_report.build_page",
+    level = "trace",
+    skip_all
+)]
 pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
@@ -586,8 +590,6 @@ pub async fn build_storage_report_page_from_registered_global_db(
     })
     .await
     .map_err(|error| report_error("join storage directory page", error))??;
-    hotpath::gauge!("maintenance.storage_report.directory_entries_scanned_total")
-        .inc(directory_page.entries_scanned as u64);
     let project_ids = directory_page
         .directories
         .iter()
@@ -697,6 +699,7 @@ async fn project_storage_report_page(
 struct ProjectDirectoryPage {
     directories: Vec<(String, PathBuf)>,
     next_cursor: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     entries_scanned: usize,
 }
 
@@ -800,7 +803,7 @@ async fn resolve_retention_protection(
 /// it passes it here. Inventory-less surfaces pass the reason it is missing,
 /// and the retention dry run reports itself unavailable with that reason
 /// rather than planning against an unproven protection set.
-#[hotpath::measure(label = "maintenance.storage_report.project")]
+#[tracing::instrument(name = "maintenance.storage_report.project", level = "trace", skip_all)]
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,
@@ -1143,7 +1146,11 @@ fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
 /// Count every regular file under a profile root without following symlinks.
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
-#[hotpath::measure(label = "maintenance.storage_report.scan_profile_size")]
+#[tracing::instrument(
+    name = "maintenance.storage_report.scan_profile_size",
+    level = "trace",
+    skip_all
+)]
 pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     let mut total_bytes = 0u64;
     let unavailable_entry_count = walk_regular_files(profile_root, &mut |_, bytes| {

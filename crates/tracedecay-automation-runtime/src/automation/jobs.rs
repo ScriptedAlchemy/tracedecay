@@ -186,7 +186,7 @@ pub(super) async fn try_acquire_job_task_lock(
     .await
 }
 
-#[hotpath::measure(label = "automation.jobs.load", future = true)]
+#[tracing::instrument(name = "automation.jobs.load", level = "trace", skip_all)]
 pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let path = jobs_path(dashboard_root);
     match tokio::fs::read(&path).await {
@@ -217,7 +217,7 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     }
 }
 
-#[hotpath::measure(label = "automation.jobs.save", future = true)]
+#[tracing::instrument(name = "automation.jobs.save", level = "trace", skip_all)]
 pub async fn save_jobs(dashboard_root: &Path, jobs: &[AutomationJob]) -> Result<()> {
     let path = jobs_path(dashboard_root);
     if let Some(parent) = path.parent() {
@@ -454,7 +454,7 @@ fn latest_terminal_job_record<'a>(
 /// Executes one user job through the automation backend, delivering its
 /// output and recording the run in the shared ledger under
 /// `user_job:<job_id>`.
-#[hotpath::measure(label = "automation.run.user_job", future = true)]
+#[tracing::instrument(name = "automation.run.user_job", level = "trace", skip_all)]
 pub async fn run_user_job_with_backend(
     dashboard_root: &Path,
     config: &AutomationConfig,
@@ -504,8 +504,6 @@ async fn run_user_job_with_backend_publication(
     ledger_publication: AutomationRunLedgerPublication,
     settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
-    let _run = super::scheduler_metrics::RunningGuard::enter();
-    let _duration = super::scheduler_metrics::DurationGuard::run();
     validate_job(job)?;
     let UserJobRunOptions {
         trigger,

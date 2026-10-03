@@ -1369,16 +1369,6 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
         published(seed.reconcile_now().expect("seed retained generation"));
     }
 
-    #[cfg(feature = "hotpath-alloc")]
-    let hotpath_output = std::env::temp_dir().join(format!(
-        "tracedecay-preseat-scale-{}.json",
-        std::process::id()
-    ));
-    #[cfg(feature = "hotpath-alloc")]
-    let hotpath_guard = hotpath::HotpathGuardBuilder::new("preseat-code-index-scale")
-        .format(hotpath::Format::Json)
-        .output_path(hotpath_output.clone())
-        .build();
     #[cfg(target_os = "linux")]
     std::fs::write("/proc/self/clear_refs", b"5\n").expect("reset process peak RSS");
     let baseline_rss_bytes = sampled_process_resident_bytes_v1();
@@ -1476,11 +1466,6 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
         peak_rss_bytes < existing_high_watermark_bytes,
         "pre-seat pipeline peak {peak_rss_bytes} exceeded the existing {existing_high_watermark_bytes}-byte high watermark"
     );
-    #[cfg(feature = "hotpath-alloc")]
-    {
-        drop(hotpath_guard);
-        println!("hotpath_output={}", hotpath_output.display());
-    }
 }
 
 /// Committing content the dirty index already serves re-seals for provenance
@@ -6779,8 +6764,6 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_releases_indexed_generation_and_scheduler_owners() {
-    #[cfg(feature = "hotpath")]
-    let _measurement = hotpath::HotpathGuardBuilder::new("indexed-registry-shutdown").build();
     let sources = (0..128)
         .map(|file| {
             let source = (0..16).fold(String::new(), |mut source, symbol| {

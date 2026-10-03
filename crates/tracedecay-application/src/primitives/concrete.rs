@@ -81,7 +81,7 @@ impl SourceReadPrimitivePort for SourceReadAdapter {
         context: SourceReadPortContext<'a>,
         request: &'a SourceReadPrimitiveRequest,
     ) -> SourceReadPortFuture<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if context.request.scope() != &self.scope || request.validate().is_err() {
                     return source_read_failed(context.observed_at);
@@ -95,7 +95,7 @@ impl SourceReadPrimitivePort for SourceReadAdapter {
                     Err(()) => source_read_failed(context.observed_at),
                 }
             },
-            label = "usecases.primitives.source_read"
+            tracing::trace_span!("usecases.primitives.source_read"),
         ))
     }
 }
@@ -262,7 +262,7 @@ where
         cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 reauthorize_cursor_context(context, observed_at)?;
                 let lane = binding.operation();
@@ -294,7 +294,7 @@ where
                 };
                 Ok(SymbolGraphPageClaim { snapshot, offset })
             },
-            label = "usecases.primitives.cursor.claim"
+            tracing::trace_span!("usecases.primitives.cursor.claim"),
         ))
     }
 
@@ -308,7 +308,7 @@ where
         has_more: bool,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 reauthorize_cursor_context(context, observed_at)?;
                 let lane = binding.operation();
@@ -357,7 +357,7 @@ where
                     })
                     .map(Some)
             },
-            label = "usecases.primitives.cursor.finish"
+            tracing::trace_span!("usecases.primitives.cursor.finish"),
         ))
     }
 }

@@ -9,12 +9,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
 test-helpers = [
@@ -29,7 +23,6 @@ futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"
 hmac = { version = "0.13.0", features = ["zeroize"] }
-hotpath.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -80,16 +73,6 @@ required-features = ["test-helpers"]
 name = "lcm_expansion"
 harness = false
 required-features = ["test-helpers"]
-
-# Exercises this crate's existing `#[hotpath::measure]` labels in both
-# feature modes; needs the registered-store harness, never `default`.
-[[test]]
-name = "hotpath_coverage"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "schema_convergence_hotpath"
-required-features = ["test-helpers", "hotpath-alloc"]
 
 [[bench]]
 name = "stack_delivery_batch"

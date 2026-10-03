@@ -104,7 +104,7 @@ pub struct RunListParams {
 /// The newest automation runs from the ledger, projected to the fields the
 /// run-history surface reads. Heavy per-run payloads (proposed/applied ops,
 /// validation reports) stay behind the per-run artifact routes.
-#[hotpath::measure(label = "dashboard_api.runs.list", future = true)]
+#[tracing::instrument(name = "dashboard_api.runs.list", level = "trace", skip_all)]
 pub async fn run_list(
     State(state): State<DashboardState>,
     axum::extract::Query(params): axum::extract::Query<RunListParams>,
@@ -112,12 +112,12 @@ pub async fn run_list(
     let limit = super::util::coerce_limit(params.limit, 50, 200) as usize;
     // The locked ledger tail read is this route's only I/O; row projection
     // after it is linear in the (bounded) page.
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         tracedecay_automation_runtime::automation::run_ledger::load_run_records_page(
             &state.dashboard_root,
             limit,
         ),
-        label = "dashboard_api.runs.ledger_read"
+        tracing::trace_span!("dashboard_api.runs.ledger_read"),
     )
     .await
     {
@@ -170,7 +170,7 @@ fn run_history_row(record: &AutomationRunLedgerRecord) -> AutomationRunRowV1 {
     }
 }
 
-#[hotpath::measure(label = "dashboard_api.runs.artifacts", future = true)]
+#[tracing::instrument(name = "dashboard_api.runs.artifacts", level = "trace", skip_all)]
 pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
@@ -180,9 +180,9 @@ pub async fn artifact_list(
             let count = record.artifacts.len();
             // Integrity verification re-reads the publication chain from disk
             // on every list call; measure it apart from the record lookup.
-            let integrity = hotpath::future!(
+            let integrity = tracing::Instrument::instrument(
                 read_published_artifact_chain(&state.dashboard_root, &run_id, None),
-                label = "dashboard_api.runs.chain_verify"
+                tracing::trace_span!("dashboard_api.runs.chain_verify"),
             )
             .await;
             let integrity_status = match integrity {
@@ -211,7 +211,7 @@ pub async fn artifact_list(
     }
 }
 
-#[hotpath::measure(label = "dashboard_api.runs.artifact", future = true)]
+#[tracing::instrument(name = "dashboard_api.runs.artifact", level = "trace", skip_all)]
 pub async fn artifact_payload(
     State(state): State<DashboardState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,
@@ -240,9 +240,9 @@ pub async fn artifact_payload(
     // Heavy per-run payloads (proposed/applied ops, validation reports) are
     // read and parsed here; this span scales with artifact size while the
     // surrounding handler phases stay fixed-price.
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         read_run_artifact_payload(&state.dashboard_root, &run_id, artifact),
-        label = "dashboard_api.runs.artifact_read"
+        tracing::trace_span!("dashboard_api.runs.artifact_read"),
     )
     .await
     {

@@ -15,13 +15,11 @@ pub struct ReadSnapshot {
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
-        hotpath::gauge!("runtime_core.db.snapshots_active").inc(1.0);
         Self {
             runtime: Arc::new(runtime),
         }
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -34,12 +32,6 @@ impl ReadSnapshot {
         .await
         .map_err(join_error)??;
         Ok(Rows::from_exact(rows))
-    }
-}
-
-impl Drop for ReadSnapshot {
-    fn drop(&mut self) {
-        hotpath::gauge!("runtime_core.db.snapshots_active").dec(1.0);
     }
 }
 

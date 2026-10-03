@@ -15,13 +15,11 @@ pub struct MonotonicDeadline(Instant);
 
 impl MonotonicDeadline {
     #[must_use]
-    #[hotpath::skip]
     pub const fn at(deadline: Instant) -> Self {
         Self(deadline)
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn instant(self) -> Instant {
         self.0
     }
@@ -114,7 +112,6 @@ impl CancellationToken {
     }
 
     /// Resolves once the token is cancelled.
-    #[hotpath::skip]
     pub async fn cancelled(&self) {
         self.inner.cancelled().await;
     }

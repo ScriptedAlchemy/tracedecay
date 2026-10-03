@@ -614,7 +614,7 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
 # Packaged crates resolve outside the workspace, so the workspace manifest's
 # patches must be re-applied here for the extracted trees to see the same
 # patched dependencies: git patches (e.g. the pinned tree-sitter-rust fork)
-# verbatim, and path patches (e.g. the vendored hotpath-macros) against the
+# verbatim, and path patches against the
 # staged workspace root, which carries the same `vendor` tree.
 staged_root = pathlib.Path(sys.argv[3]).parent
 for name, spec in workspace_manifest.get("patch", {}).get("crates-io", {}).items():

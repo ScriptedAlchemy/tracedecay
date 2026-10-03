@@ -57,7 +57,6 @@ impl LcmEffectControl {
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn execute<T>(
         &self,
         execution: &ExecutionControl,
@@ -100,31 +99,7 @@ impl DaemonLcmEffectService {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn compress(
-        &self,
-        request: LcmCompressionRequest,
-    ) -> Result<LcmCompressionResponse, LcmError> {
-        let result = self.compress_phases(request).await;
-        observe_compression_outcome(result.as_ref());
-        result
-    }
-
-    #[hotpath::skip]
-    pub(super) async fn compress_retained_page(
-        &self,
-        request: LcmCompressionRequest,
-        convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
-    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-        let result = self
-            .compress_retained_phases(request, convergence_candidate)
-            .await;
-        observe_compression_outcome(result.as_ref().map(|bounded| &bounded.response));
-        result
-    }
-
-    #[hotpath::skip]
-    async fn compress_phases(
         &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
@@ -136,10 +111,10 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     self.db
                         .lcm_protect_session_raw_messages(&request.provider, &request.session_id),
-                    label = "daemon.lcm.hydrate"
+                    tracing::trace_span!("daemon.lcm.hydrate"),
                 ),
             )
             .await?;
@@ -188,7 +163,7 @@ impl DaemonLcmEffectService {
         self.commit_compression(&request).await
     }
 
-    async fn compress_retained_phases(
+    pub(super) async fn compress_retained_page(
         &self,
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
@@ -276,7 +251,6 @@ impl DaemonLcmEffectService {
         Ok(committed)
     }
 
-    #[hotpath::skip]
     async fn commit_compression(
         &self,
         request: &LcmCompressionRequest,
@@ -286,11 +260,11 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     self.db.lcm_compress_guarded(request, &execution, move || {
                         before_commit.checkpoint()
                     }),
-                    label = "daemon.lcm.commit"
+                    tracing::trace_span!("daemon.lcm.commit"),
                 ),
             )
             .await
@@ -314,7 +288,7 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     self.db.lcm_compress_retained_page_guarded(
                         request,
                         &execution,
@@ -326,7 +300,7 @@ impl DaemonLcmEffectService {
                         },
                         convergence_candidate,
                     ),
-                    label = "daemon.lcm.retained_commit"
+                    tracing::trace_span!("daemon.lcm.retained_commit"),
                 ),
             )
             .await
@@ -364,7 +338,6 @@ impl DaemonLcmEffectService {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub(super) async fn session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,
@@ -374,11 +347,10 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                hotpath::future!(
-                    self.db.lcm_session_boundary_guarded(request, move || {
-                        before_commit.checkpoint()
-                    }),
-                    label = "daemon.lcm.boundary"
+                tracing::Instrument::instrument(
+                    self.db
+                        .lcm_session_boundary_guarded(request, move || before_commit.checkpoint()),
+                    tracing::trace_span!("daemon.lcm.boundary"),
                 ),
             )
             .await
@@ -405,36 +377,6 @@ pub async fn lcm_session_boundary_for_test(
     DaemonLcmEffectService::new(db, None, None)
         .session_boundary(request)
         .await
-}
-
-/// Terminal compression outcomes for profiling, including deferrals and
-/// failures: a lane that only counts commits hides exactly the retried and
-/// cancelled work a compaction investigation needs to see. Borrows the
-/// outcome so classifying a retained page never copies its response payload.
-fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
-    match result {
-        Ok(response) if response.retry_status.is_some() => {
-            hotpath::gauge!("daemon.lcm.compress.deferred").inc(1.0);
-        }
-        Ok(response) if response.status == "needs_summary" => {
-            hotpath::gauge!("daemon.lcm.compress.needs_summary").inc(1.0);
-        }
-        Ok(response) if response.summary_nodes_created > 0 => {
-            hotpath::gauge!("daemon.lcm.compress.committed").inc(1.0);
-        }
-        Ok(_) => {
-            hotpath::gauge!("daemon.lcm.compress.noop").inc(1.0);
-        }
-        Err(LcmError::Cancelled) => {
-            hotpath::gauge!("daemon.lcm.compress.cancelled").inc(1.0);
-        }
-        Err(LcmError::DeadlineExceeded) => {
-            hotpath::gauge!("daemon.lcm.compress.deadline").inc(1.0);
-        }
-        Err(_) => {
-            hotpath::gauge!("daemon.lcm.compress.failed").inc(1.0);
-        }
-    }
 }
 
 fn summary_unavailable(

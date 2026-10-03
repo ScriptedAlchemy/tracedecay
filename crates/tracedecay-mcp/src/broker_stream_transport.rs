@@ -185,7 +185,6 @@ impl BrokerStreamTransport {
         self
     }
 
-    #[hotpath::skip]
     async fn write_all_and_flush(
         writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
         bytes: Vec<u8>,
@@ -268,7 +267,6 @@ impl BrokerStreamTransport {
         }
     }
 
-    #[hotpath::skip]
     async fn observe_incoming_message(&self, value: &serde_json::Value) {
         let Some(method) = value.get("method").and_then(serde_json::Value::as_str) else {
             return;
@@ -335,7 +333,7 @@ impl BrokerStreamTransport {
     /// it could ever deliver, so waiting for the peer's full close would only
     /// strand clients that hold their read half open awaiting the daemon's EOF
     /// (a cancelling client does exactly that).
-    #[hotpath::measure(label = "daemon.broker.eof_settled_wait", future = true)]
+    #[tracing::instrument(name = "daemon.broker.eof_settled_wait", level = "trace", skip_all)]
     async fn wait_for_accepted_requests_settled(
         active_requests: Arc<
             std::sync::Mutex<
@@ -355,7 +353,6 @@ impl BrokerStreamTransport {
         }
     }
 
-    #[hotpath::skip]
     async fn wait_for_peer_full_close(writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>) {
         loop {
             let full_close = {
@@ -390,7 +387,6 @@ impl BrokerStreamTransport {
 }
 
 impl McpTransport for BrokerStreamTransport {
-    #[hotpath::skip]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
@@ -398,7 +394,6 @@ impl McpTransport for BrokerStreamTransport {
         self.reader.read_mcp_line().await
     }
 
-    #[hotpath::skip]
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         let mut writer = self.writer.lock().await;
         let writer = writer.as_mut().ok_or_else(|| {
@@ -410,7 +405,6 @@ impl McpTransport for BrokerStreamTransport {
         writer.write_all(line.as_bytes()).await
     }
 
-    #[hotpath::skip]
     async fn flush(&mut self) -> std::io::Result<()> {
         let mut writer = self.writer.lock().await;
         let writer = writer.as_mut().ok_or_else(|| {
@@ -442,7 +436,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let response_lifecycle = self.response_lifecycle.clone();
         let selected_project_responses = self.selected_project_responses.clone();
         let work_delivery_settlement = self.work_delivery_settlement.clone();
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async move {
                 let response_id = Self::outbound_response_id(&item);
                 let is_response = matches!(
@@ -539,11 +533,11 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     result => result.map_err(RmcpResponseWriteFailure::into_io_error),
                 }
             },
-            label = "daemon.broker.send"
+            tracing::trace_span!("daemon.broker.send"),
         )
     }
 
-    #[hotpath::measure(label = "daemon.broker.receive", future = true)]
+    #[tracing::instrument(name = "daemon.broker.receive", level = "trace", skip_all)]
     async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>> {
         loop {
             let line = match self.read_line().await {
@@ -563,10 +557,8 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     let peer_full_close = self.peer_fully_closed_after_eof();
                     tokio::select! {
                         () = peer_full_close => {
-                            hotpath::gauge!("daemon.broker.eof_peer_close_total").inc(1_u64);
                         }
                         () = settled => {
-                            hotpath::gauge!("daemon.broker.eof_settled_close_total").inc(1_u64);
                         }
                     }
                     return None;
@@ -605,7 +597,6 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         }
     }
 
-    #[hotpath::skip]
     async fn close(&mut self) -> std::result::Result<(), Self::Error> {
         self.writer.lock().await.take();
         Ok(())

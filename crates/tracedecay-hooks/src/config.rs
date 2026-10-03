@@ -119,28 +119,8 @@ impl HookConfigurationSubscriberV1 {
     /// Every native capture re-reads the published binding through this
     /// bounded read, so its cost and outcome mix are what separate "hook is
     /// unbound/stale" from a spool refusal when hooks fall silent.
-    #[hotpath::measure(label = "hooks.config.load")]
+    #[tracing::instrument(name = "hooks.config.load", level = "trace", skip_all)]
     pub fn load_current(
-        &self,
-        host: NativeHostIdentityV1,
-        now: UtcMicros,
-    ) -> HookConfigurationReadOutcomeV1 {
-        let outcome = self.load_current_inner(host, now);
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!(match &outcome {
-                HookConfigurationReadOutcomeV1::Bound(_) => "hooks.config.read.bound",
-                HookConfigurationReadOutcomeV1::Missing => "hooks.config.read.missing",
-                HookConfigurationReadOutcomeV1::Stale => "hooks.config.read.stale",
-                HookConfigurationReadOutcomeV1::Corrupted => "hooks.config.read.corrupted",
-                HookConfigurationReadOutcomeV1::Unavailable => "hooks.config.read.unavailable",
-            })
-            .inc(1);
-        }
-        outcome
-    }
-
-    fn load_current_inner(
         &self,
         host: NativeHostIdentityV1,
         now: UtcMicros,

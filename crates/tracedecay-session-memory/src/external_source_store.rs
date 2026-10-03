@@ -372,7 +372,6 @@ impl RuntimeExternalSourceStore {
         Self { runtime }
     }
 
-    #[hotpath::skip]
     pub async fn capture_host_observations(
         &self,
         receipts: &[tracedecay_store::ObservationCommitReceipt],
@@ -533,7 +532,6 @@ impl RuntimeExternalSourceStore {
             .collect()
     }
 
-    #[hotpath::skip]
     pub async fn capture_host_observation(
         &self,
         receipt: &tracedecay_store::ObservationCommitReceipt,
@@ -548,7 +546,6 @@ impl RuntimeExternalSourceStore {
     /// The daemon-owned host-admission drain invokes this bounded operation;
     /// capture never creates detached replay tasks. Restart resumes from the
     /// durable predecessor chain on the next admission drain.
-    #[hotpath::skip]
     pub async fn drain_host_projection_replay(
         &self,
         max: usize,
@@ -563,7 +560,6 @@ impl RuntimeExternalSourceStore {
         .await
     }
 
-    #[hotpath::skip]
     async fn drain_projection_replay_outcome(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
@@ -780,7 +776,6 @@ impl RuntimeExternalSourceStore {
         }
     }
 
-    #[hotpath::skip]
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
@@ -813,7 +808,6 @@ impl RuntimeExternalSourceStore {
         }
     }
 
-    #[hotpath::skip]
     async fn read_pending_projection(
         &self,
         binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
@@ -844,7 +838,6 @@ impl RuntimeExternalSourceStore {
         }
     }
 
-    #[hotpath::skip]
     async fn submit_projection(
         &self,
         projection: SourceProjectionCommitV1,
@@ -879,7 +872,6 @@ impl RuntimeExternalSourceStore {
         }
     }
 
-    #[hotpath::skip]
     pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,

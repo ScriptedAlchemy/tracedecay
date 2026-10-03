@@ -66,7 +66,7 @@ where
     finalize_with_format(response_handle_root, parse_format(args), value, md)
 }
 
-#[hotpath::measure(label = "mcp.server.response.render")]
+#[tracing::instrument(name = "mcp.server.response.render", level = "trace", skip_all)]
 pub fn finalize_with_format<F>(
     response_handle_root: Option<&Path>,
     format: RequestedOutputFormat,
@@ -405,10 +405,11 @@ fn prepare_truncated_response_handle(
     text: &str,
 ) -> TruncatedResponseHandle {
     if let Some(root) = response_handle_root {
-        match hotpath::measure_block!(
-            "mcp.server.response.handle_store",
+        let match_result = {
+            let _span = tracing::trace_span!("mcp.server.response.handle_store").entered();
             run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))
-        ) {
+        };
+        match match_result {
             Ok(record) => TruncatedResponseHandle {
                 record: Some(record),
                 unavailable: None,

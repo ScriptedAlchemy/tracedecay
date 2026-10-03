@@ -11,7 +11,7 @@ use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 use crate::McpToolContext;
 use crate::handlers::dependency_hints;
 
-#[hotpath::measure(future = true, label = "mcp.graph.search_race")]
+#[tracing::instrument(name = "mcp.graph.search_race", level = "trace", skip_all)]
 pub(super) async fn race_primary_search_with_graph<S, G>(
     search: S,
     graph: G,
@@ -129,7 +129,7 @@ impl<'a> SearchGraphEvidence<'a> {
         self.unavailable.as_ref()
     }
 
-    #[hotpath::measure(label = "mcp.graph.import_hint")]
+    #[tracing::instrument(name = "mcp.graph.import_hint", level = "trace", skip_all)]
     pub(super) fn external_import_hint(
         &self,
         ctx: &McpToolContext<'_>,

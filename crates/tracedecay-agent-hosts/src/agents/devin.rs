@@ -138,7 +138,7 @@ impl AgentIntegration for DevinIntegration {
         }
     }
 
-    #[hotpath::measure(label = "devin_mcp_install")]
+    #[tracing::instrument(name = "devin_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle::HostComponentV1],

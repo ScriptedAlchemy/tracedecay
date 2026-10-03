@@ -8,7 +8,7 @@
 //! primitives, journaling, rollback, recovery, and reconciliation are owned
 //! here. This crate's only consumer is the composition root.
 //!
-//! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
+//! Metric names stay `usecases.edit.*` for dashboard continuity. A later
 //! dual-rename to `source_edit.*` can land with the dashboard cutover.
 
 use tracedecay_contracts::{

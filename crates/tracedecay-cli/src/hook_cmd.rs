@@ -1,7 +1,7 @@
 use crate::cli::Commands;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-#[hotpath::measure(label = "cli.hook.dispatch", future = true)]
+#[tracing::instrument(name = "cli.hook.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_hook_command(
     profile: ProfileRoot,
     command: Commands,

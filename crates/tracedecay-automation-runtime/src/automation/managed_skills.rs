@@ -258,7 +258,7 @@ fn stage_skill_directory(
     Ok(entry)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.persist")]
+#[tracing::instrument(name = "automation.managed_skill.persist", level = "trace", skip_all)]
 fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSkill]) -> Result<()> {
     let root = managed_skill_root(profile_root);
     let mut ids = BTreeSet::new();
@@ -311,7 +311,11 @@ fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSki
 /// Re-loads and checksum-validates both revisions under one store lock, then
 /// publishes target and archived source through one crash-recoverable directory
 /// transaction. Source content is never deleted.
-#[hotpath::measure(label = "automation.managed_skill.consolidate", future = true)]
+#[tracing::instrument(
+    name = "automation.managed_skill.consolidate",
+    level = "trace",
+    skip_all
+)]
 pub async fn apply_managed_skill_consolidation(
     profile_root: &Path,
     target_id: Option<&str>,
@@ -491,7 +495,7 @@ pub fn managed_skill_dir(profile_root: &Path, id: &str) -> Result<PathBuf> {
     Ok(managed_skill_root(profile_root).join(id))
 }
 
-#[hotpath::measure(label = "automation.managed_skill.save", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.save", level = "trace", skip_all)]
 pub async fn save_managed_skill(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
     let lock = lock_skill_store_async(profile_root).await?;
     let destination = managed_skill_dir(profile_root, &skill.metadata.id)?;
@@ -509,7 +513,7 @@ pub async fn save_managed_skill(profile_root: &Path, skill: &ManagedSkill) -> Re
     Ok(())
 }
 
-#[hotpath::measure(label = "automation.managed_skill.create", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.create", level = "trace", skip_all)]
 pub async fn create_managed_skill(
     profile_root: &Path,
     draft: ManagedSkillDraft,
@@ -556,7 +560,7 @@ impl From<ManagedSkillReadError> for TraceDecayError {
     }
 }
 
-#[hotpath::measure(label = "automation.managed_skill.load", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.load", level = "trace", skip_all)]
 pub async fn load_managed_skill(
     profile_root: &Path,
     id: &str,
@@ -622,7 +626,7 @@ fn is_summary_only_record(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.list", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.list", level = "trace", skip_all)]
 pub async fn list_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
     if !managed_skill_root(profile_root).exists() {
         return Ok(Vec::new());
@@ -743,7 +747,7 @@ pub async fn set_managed_skill_pinned(
     Ok(skill)
 }
 
-#[hotpath::measure(label = "automation.managed_skill.update", future = true)]
+#[tracing::instrument(name = "automation.managed_skill.update", level = "trace", skip_all)]
 pub async fn apply_managed_skill_update(
     profile_root: &Path,
     id: &str,

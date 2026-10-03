@@ -32,7 +32,6 @@ pub use settlement::{
     DeferredSettledOutcome, DeferredSettlementOutcome, DeferredSettlementPairSubmission,
     DeferredSettlementRequest, RetainedAutomationSettlementOutcome,
     RetainedAutomationSettlementProjection, RetainedSettlementPairWaiter, RetainedSettlementWaiter,
-    ReusedSchedulerSkipStartError, observe_admission_decision,
-    pinned_automation_configuration_digest,
+    ReusedSchedulerSkipStartError, pinned_automation_configuration_digest,
 };
 pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal, curate_receipt_outcome};

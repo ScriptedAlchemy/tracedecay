@@ -38,7 +38,7 @@ pub(super) fn missing_retained_runtime_problem(
     )
 }
 
-#[hotpath::measure(label = "daemon.service.retained.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.retained.execute", level = "trace", skip_all)]
 pub(super) async fn execute_retained_application(
     request_id: String,
     registered: RegisteredRetainedRuntime,
@@ -90,15 +90,14 @@ pub(super) async fn execute_retained_application(
     let service = tracedecay_contracts::retained_surfaces::RetainedSurfaceServiceV1::new(
         registered.ports.as_ref().clone(),
     );
-    let execution = hotpath::future!(
+    let execution = tracing::Instrument::instrument(
         service.execute(&context, &cancellation_signal, observed_at, &request),
-        label = "daemon.service.retained.handler"
+        tracing::trace_span!("daemon.service.retained.handler"),
     );
     tokio::pin!(execution);
     let outcome = tokio::select! {
         outcome = &mut execution => outcome,
         () = request_cancellation.cancelled() => {
-            hotpath::gauge!("daemon.service.retained.cancelled_total").inc(1_u64);
             cancellation_signal.cancel(now_micros());
             execution.await
         }

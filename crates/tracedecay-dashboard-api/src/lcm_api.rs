@@ -411,7 +411,7 @@ pub async fn overview(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             lcm_read(
                 &state,
@@ -423,7 +423,7 @@ pub async fn overview(
             )
             .await
         },
-        label = "dashboard_api.lcm.overview"
+        tracing::trace_span!("dashboard_api.lcm.overview"),
     )
     .await
 }
@@ -452,7 +452,7 @@ pub async fn search(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let since = match parse_optional_i64(&params.since) {
                 Ok(since) => since,
@@ -478,7 +478,7 @@ pub async fn search(
             )
             .await
         },
-        label = "dashboard_api.lcm.search"
+        tracing::trace_span!("dashboard_api.lcm.search"),
     )
     .await
 }
@@ -496,7 +496,7 @@ pub async fn session(
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             lcm_read(
                 &state,
@@ -509,7 +509,7 @@ pub async fn session(
             )
             .await
         },
-        label = "dashboard_api.lcm.session"
+        tracing::trace_span!("dashboard_api.lcm.session"),
     )
     .await
 }
@@ -528,7 +528,7 @@ pub async fn timeline(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
                 "" | "day" => DashboardLcmTimelineBucketV1::Day,
@@ -546,7 +546,7 @@ pub async fn timeline(
             )
             .await
         },
-        label = "dashboard_api.lcm.timeline"
+        tracing::trace_span!("dashboard_api.lcm.timeline"),
     )
     .await
 }

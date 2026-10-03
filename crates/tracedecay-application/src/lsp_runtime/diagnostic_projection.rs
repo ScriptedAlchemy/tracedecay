@@ -223,7 +223,7 @@ where
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>> {
         let records = Arc::clone(&self.records);
         let documents = Arc::clone(&self.documents);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let document = documents.snapshot(root, document_uri.clone()).await?;
                 let Some(document_content_digest) = scope.document_content_digest.as_ref() else {
@@ -348,7 +348,7 @@ where
                 }
                 Ok(diagnostics)
             },
-            label = "usecases.lsp.diagnostics.project"
+            tracing::trace_span!("usecases.lsp.diagnostics.project"),
         ))
     }
 }

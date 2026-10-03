@@ -73,7 +73,6 @@ impl ClaudeSourceFrame {
         self.parsed_record.take()
     }
 
-    #[hotpath::skip]
     pub(super) const fn scope_value(&self) -> &Value {
         &self.scope_record
     }
@@ -136,7 +135,11 @@ pub fn scan_claude_source_frames(
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.claude.scan_frames_resume")]
+#[tracing::instrument(
+    name = "sessions.hosts.claude.scan_frames_resume",
+    level = "trace",
+    skip_all
+)]
 pub fn try_scan_claude_source_frames_with_resume(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,

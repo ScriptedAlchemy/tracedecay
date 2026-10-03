@@ -95,7 +95,11 @@ impl tracedecay_api::MultiRootApplicationOwner for MultiRootExecutorOwner {
     }
 }
 
-#[hotpath::measure(label = "application_surface.multi_root.http_invoke", future = true)]
+#[tracing::instrument(
+    name = "application_surface.multi_root.http_invoke",
+    level = "trace",
+    skip_all
+)]
 async fn invoke_operation(
     executor: Arc<dyn DaemonInvocationExecutor>,
     request: tracedecay_api::MultiRootHttpRequest,

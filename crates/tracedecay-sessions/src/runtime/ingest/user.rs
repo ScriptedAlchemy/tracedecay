@@ -539,7 +539,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
     .await
 }
 
-#[hotpath::measure(label = "sessions.ingest.user", future = true)]
+#[tracing::instrument(name = "sessions.ingest.user", level = "trace", skip_all)]
 async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     A: SessionIngestAuthority,
 >(

@@ -1,7 +1,8 @@
-//! Static Hotpath names and record helpers for graph-db operation boundaries.
+//! Static span names and record helpers for graph-db operation
+//! boundaries.
 //!
 //! Lock-wait labels stay separate from generation, read, and traversal work.
-//! Gauges and `val!` keys are bounded: counts and enumerated hydration sources
+//! Span and event fields are bounded: counts and enumerated hydration sources
 //! only, never paths, digests, query text, or identifiers.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,8 +30,6 @@ pub(crate) enum GrafeoMemoryPhase {
 }
 
 impl GrafeoMemoryPhase {
-    #[cfg(feature = "hotpath")]
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -45,8 +44,6 @@ impl GrafeoMemoryPhase {
 }
 
 impl HydrationSource {
-    #[cfg(any(feature = "hotpath", test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",
@@ -75,14 +72,11 @@ pub(crate) const LOCK_WAIT_VERIFIED_GENERATIONS: &str = "graph_db.lock.wait.veri
 
 #[inline(always)]
 pub(crate) fn wait_lock<T>(label: &'static str, acquire: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!(label, acquire())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = label;
-        acquire()
+        {
+            let _span = tracing::trace_span!("graph_db.lock.wait", label = label).entered();
+            acquire()
+        }
     }
 }
 
@@ -95,24 +89,13 @@ pub(crate) fn record_counts(
 ) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record(nodes, edges, replay_rows, generation_bytes);
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("graph_db.nodes").set(nodes as f64);
-        hotpath::gauge!("graph_db.edges").set(edges as f64);
-        hotpath::gauge!("graph_db.replay_rows").set(replay_rows as f64);
-        hotpath::gauge!("graph_db.generation_bytes").set(generation_bytes as f64);
-    }
-    #[cfg(not(any(feature = "hotpath", test, feature = "test-helpers")))]
-    {
-        let _ = (nodes, edges, replay_rows, generation_bytes);
-    }
 }
 
 /// Records how one sealed generation's recovered digest was established.
 ///
 /// `canonical_bytes` is the size of the canonical row stream the full proof
 /// hashes. A marker hit reports the byte count the earlier proof recorded, so
-/// the two gauges are directly comparable: `marker_hit` bytes are the bytes
+/// the two outcomes are directly comparable: `marker_hit` bytes are the bytes
 /// *not* re-hashed on this open.
 #[inline(always)]
 pub(crate) fn record_generation_verification(
@@ -121,27 +104,12 @@ pub(crate) fn record_generation_verification(
 ) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record_verification(outcome, canonical_bytes);
-    #[cfg(feature = "hotpath")]
-    {
-        use crate::verified_marker::GenerationVerification;
-        match outcome {
-            GenerationVerification::VerifiedFresh => {
-                hotpath::gauge!("graph_db.generation.verify.marker_hit").inc(1);
-                hotpath::gauge!("graph_db.generation.verify.marker_hit_bytes")
-                    .set(canonical_bytes as f64);
-            }
-            GenerationVerification::Reverified => {
-                hotpath::gauge!("graph_db.generation.verify.full").inc(1);
-                hotpath::gauge!("graph_db.generation.verify.full_bytes")
-                    .set(canonical_bytes as f64);
-            }
-        }
-        hotpath::val!("graph_db.generation.verify.outcome").set(&outcome.as_str());
-    }
-    #[cfg(not(any(feature = "hotpath", test, feature = "test-helpers")))]
-    {
-        let _ = (outcome, canonical_bytes);
-    }
+
+    tracing::trace!(
+        name: "graph_db.generation.verify.outcome",
+        value = ?outcome.as_str(),
+        canonical_bytes
+    );
 }
 
 /// Records how one sealed per-generation copy's recovered digest was
@@ -156,69 +124,44 @@ pub(crate) fn record_sealed_copy_verification(
     outcome: crate::verified_marker::GenerationVerification,
     canonical_bytes: u64,
 ) {
-    #[cfg(feature = "hotpath")]
-    {
-        use crate::verified_marker::GenerationVerification;
-        match outcome {
-            GenerationVerification::VerifiedFresh => {
-                hotpath::gauge!("graph_db.sealed_store.verify.marker_hit").inc(1);
-                hotpath::gauge!("graph_db.sealed_store.verify.marker_hit_bytes")
-                    .set(canonical_bytes as f64);
-            }
-            GenerationVerification::Reverified => {
-                hotpath::gauge!("graph_db.sealed_store.verify.full").inc(1);
-                hotpath::gauge!("graph_db.sealed_store.verify.full_bytes")
-                    .set(canonical_bytes as f64);
-            }
-        }
-        hotpath::val!("graph_db.sealed_store.verify.outcome").set(&outcome.as_str());
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = (outcome, canonical_bytes);
-    }
+    tracing::trace!(
+        name: "graph_db.sealed_store.verify.outcome",
+        value = ?outcome.as_str(),
+        canonical_bytes
+    );
 }
 
 #[inline(always)]
 pub(crate) fn record_hydration_source(source: HydrationSource) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record_source(source);
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::val!("graph_db.hydration_source").set(&source.as_str());
-    }
-    #[cfg(not(any(feature = "hotpath", test, feature = "test-helpers")))]
-    {
-        let _ = source;
-    }
+
+    tracing::trace!(name: "graph_db.hydration_source", value = ?source.as_str());
 }
 
-/// Records Grafeo's own memory census at coarse lifecycle boundaries. The
-/// census walks internal store structures, so it runs only in opt-in Hotpath
-/// builds and never on graph query paths.
+/// Whether a memory census can be observed. The census walks Grafeo's
+/// internal stores, so callers skip it, and the guard it needs, otherwise.
 #[inline(always)]
-#[cfg(feature = "hotpath")]
+pub(crate) fn grafeo_memory_census_enabled() -> bool {
+    tracing::enabled!(tracing::Level::DEBUG)
+}
+
+/// Records Grafeo's own memory census at coarse lifecycle boundaries, never
+/// on graph query paths. Callers gate on [`grafeo_memory_census_enabled`].
+#[inline(always)]
 pub(crate) fn record_grafeo_memory(
     database: &grafeo_engine::GrafeoDB,
     phase: GrafeoMemoryPhase,
     container: &str,
 ) {
-    let usage = hotpath::measure_block!("graph_db.memory.census", database.memory_usage());
-    hotpath::val!("graph_db.memory.phase").set(&phase.as_str());
-    hotpath::gauge!("graph_db.memory.total_bytes").set(usage.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.store_bytes").set(usage.store.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.index_bytes").set(usage.indexes.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.mvcc_bytes").set(usage.mvcc.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.cache_bytes").set(usage.caches.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.string_pool_bytes").set(usage.string_pool.total_bytes as f64);
-    hotpath::gauge!("graph_db.memory.buffer_budget_bytes")
-        .set(usage.buffer_manager.budget_bytes as f64);
-    hotpath::gauge!("graph_db.memory.buffer_allocated_bytes")
-        .set(usage.buffer_manager.allocated_bytes as f64);
-    // Measurement-build only: gauges keep the last census, so a daemon with
-    // several resident engines needs each census on the operator log to
+    let usage = {
+        let _span = tracing::trace_span!("graph_db.memory.census").entered();
+        database.memory_usage()
+    };
+    tracing::trace!(name: "graph_db.memory.phase", value = ?phase.as_str());
+    // A daemon with several resident engines needs each census in the log to
     // attribute retained bytes per container.
-    tracing::info!(
+    tracing::debug!(
         event = "graph_engine_memory_census",
         phase = phase.as_str(),
         container,

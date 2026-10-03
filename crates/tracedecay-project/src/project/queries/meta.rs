@@ -34,7 +34,7 @@ impl TraceDecay {
     }
 
     /// Checkpoints the WAL and closes the database connection.
-    #[hotpath::measure(label = "daemon.store_meta.checkpoint", future = true)]
+    #[tracing::instrument(name = "daemon.store_meta.checkpoint", level = "trace", skip_all)]
     pub async fn checkpoint(&self) -> Result<()> {
         self.db.checkpoint().await
     }
@@ -61,7 +61,7 @@ impl TraceDecay {
     }
 
     /// Run the quick integrity check and return the first problem row, if any.
-    #[hotpath::measure(label = "daemon.store_meta.quick_check", future = true)]
+    #[tracing::instrument(name = "daemon.store_meta.quick_check", level = "trace", skip_all)]
     pub async fn quick_check_report(&self) -> Result<Option<String>> {
         self.db.quick_check_report().await
     }

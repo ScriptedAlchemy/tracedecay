@@ -58,7 +58,6 @@ impl DaemonClientDeadline {
             })
     }
 
-    #[hotpath::skip]
     pub(crate) async fn run<F, T>(
         &self,
         stage: &'static str,
@@ -149,7 +148,6 @@ impl ParkableConnectionAdmission {
     /// Tokio hands a released permit to a queued waiter before any newly arriving
     /// `try_acquire`, so a request resuming from a park is served ahead of a fresh
     /// connection rather than being starved by the load that made it park.
-    #[hotpath::skip]
     async fn reacquire(&self) {
         let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
             return;
@@ -555,7 +553,11 @@ pub(crate) async fn reject_reserved_bulk_request(
     .await
 }
 
-#[hotpath::measure(label = "daemon.engine.admission.reject_request", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.admission.reject_request",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn reject_admitted_request(
     transport: &mut impl tracedecay_mcp::McpTransport,
     request: &AuthenticatedFirstRequest,
@@ -622,7 +624,11 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
     read_line_handling_wire_oversized(transport).await
 }
 
-#[hotpath::measure(label = "daemon.engine.admission.reject_saturated", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.admission.reject_saturated",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn reject_saturated_daemon_client(
     stream: BrokerStream,
     response: DaemonClientSaturationResponse,

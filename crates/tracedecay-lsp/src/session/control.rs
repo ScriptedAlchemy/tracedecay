@@ -163,7 +163,6 @@ impl LspSessionControl {
 
     pub fn exit(&mut self) -> Result<(), LifecycleError> {
         self.transition(SessionLifecycle::Shutdown, SessionLifecycle::Exited, "exit")?;
-        self.release_pending_gauge();
         self.pending.clear();
         self.publications.clear();
         self.publication_payload_digests.clear();
@@ -210,7 +209,6 @@ impl LspSessionControl {
     pub fn expire(&mut self) {
         self.lifecycle = SessionLifecycle::Expired;
         self.detached_from = None;
-        self.release_pending_gauge();
         self.pending.clear();
         self.publications.clear();
         self.publication_payload_digests.clear();
@@ -227,7 +225,7 @@ impl LspSessionControl {
     /// Admits a request with a daemon-supplied monotonic deadline. The session
     /// owns cancellation and response suppression even when an upstream
     /// analyzer cannot stop a request immediately.
-    #[hotpath::measure(label = "lsp_session_admit_request", impl_type = "LspSessionControl")]
+    #[tracing::instrument(name = "lsp_session_admit_request", level = "trace", skip_all)]
     pub fn admit_request_with_deadline(
         &mut self,
         id: LspRequestId,
@@ -253,7 +251,6 @@ impl LspSessionControl {
                 deadline_at_ms,
             },
         );
-        hotpath::gauge!("lsp.session.requests.pending").inc(1_u64);
         RequestAdmission::Accepted
     }
 
@@ -265,7 +262,6 @@ impl LspSessionControl {
             return CancellationOutcome::AlreadyCancelled;
         }
         request.state = PendingState::Cancelled;
-        hotpath::gauge!("lsp.session.requests.cancelled_total").inc(1_u64);
         CancellationOutcome::Accepted
     }
 
@@ -297,32 +293,20 @@ impl LspSessionControl {
                 expired.push(id.clone());
             }
         }
-        if !expired.is_empty() {
-            hotpath::gauge!("lsp.session.requests.timed_out_total").inc(expired.len() as u64);
-        }
         expired
     }
 
-    #[hotpath::measure(
-        label = "lsp_session_complete_request",
-        impl_type = "LspSessionControl"
-    )]
+    #[tracing::instrument(name = "lsp_session_complete_request", level = "trace", skip_all)]
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         let removed = self.pending.remove(id).map(|request| request.state);
-        if removed.is_some() {
-            hotpath::gauge!("lsp.session.requests.pending").dec(1_u64);
-        }
-        let disposition = match removed {
+
+        match removed {
             Some(PendingState::Active) => CompletionDisposition::Publish,
             Some(PendingState::Cancelled) => CompletionDisposition::SuppressCancelled,
             Some(PendingState::ContentModified) => CompletionDisposition::SuppressContentModified,
             Some(PendingState::TimedOut) => CompletionDisposition::SuppressTimedOut,
             None => CompletionDisposition::UnknownRequest,
-        };
-        if disposition.failure().is_some() {
-            hotpath::gauge!("lsp.session.requests.suppressed_total").inc(1_u64);
         }
-        disposition
     }
 
     pub fn admit_publication(
@@ -480,23 +464,5 @@ impl LspSessionControl {
         };
         publication.delivery = delivery;
         true
-    }
-
-    /// Releases this session's remaining share of the process-wide in-flight
-    /// request gauge before the pending set is discarded wholesale.
-    fn release_pending_gauge(&self) {
-        if !self.pending.is_empty() {
-            hotpath::gauge!("lsp.session.requests.pending").dec(self.pending.len() as u64);
-        }
-    }
-}
-
-/// RAII backstop for the in-flight gauge: a session actor dropped without an
-/// `exit`/`expire` transition (panic, abort, daemon teardown) still returns
-/// its admitted-but-unsettled requests, so the gauge cannot leak. The gauge is
-/// a compile-time no-op until the binary selects the profiler backend.
-impl Drop for LspSessionControl {
-    fn drop(&mut self) {
-        self.release_pending_gauge();
     }
 }

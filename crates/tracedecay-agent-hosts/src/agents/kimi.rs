@@ -108,7 +108,7 @@ impl AgentIntegration for KimiIntegration {
         true
     }
 
-    #[hotpath::measure(label = "hosts.agent.kimi.project_install")]
+    #[tracing::instrument(name = "hosts.agent.kimi.project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],

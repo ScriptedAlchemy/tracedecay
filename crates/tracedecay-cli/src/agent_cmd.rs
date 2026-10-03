@@ -398,9 +398,9 @@ pub(crate) async fn handle_host_lifecycle_command(
         {
             let automation_result = match validate_codex_automation_project_path() {
                 Ok(project_path) => {
-                    hotpath::future!(
+                    tracing::Instrument::instrument(
                         install_codex_daemon_automation(profile, &project_path, &home, automation),
-                        label = "cli.agent.automation"
+                        tracing::trace_span!("cli.agent.automation"),
                     )
                     .await
                 }
@@ -926,7 +926,7 @@ impl ComponentSetApplyContext {
     }
 }
 
-#[hotpath::measure(label = "cli.agent.component.apply")]
+#[tracing::instrument(name = "cli.agent.component.apply", level = "trace", skip_all)]
 fn apply_canonical_component_set(
     profile: &ProfileRoot,
     agent_id: &str,

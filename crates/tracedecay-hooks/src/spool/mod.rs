@@ -127,47 +127,6 @@ pub struct HookSpoolV1 {
     recovery_required: bool,
     /// Frames this handle wrote or deduplicated against, not yet committed.
     uncommitted: Option<UncommittedExtentV1>,
-    /// Held for its `Drop` only: closes the writer-lease hold observation.
-    #[cfg(feature = "hotpath")]
-    _lease_hold: SpoolLeaseHoldObservationV1,
-}
-
-#[cfg(feature = "hotpath")]
-static SPOOL_LEASES_HELD: AtomicU64 = AtomicU64::new(0);
-
-/// Writer-lease hold observation. Acquisition wait is the
-/// `hooks.spool.acquire_lease` span; this records how long the sole writer
-/// lease is then *held* (open handle lifetime), which is what other writers
-/// contend against. Drop-based so panic or early return cannot leak the gauge.
-#[cfg(feature = "hotpath")]
-#[derive(Debug)]
-struct SpoolLeaseHoldObservationV1 {
-    acquired: std::time::Instant,
-}
-
-#[cfg(feature = "hotpath")]
-impl SpoolLeaseHoldObservationV1 {
-    fn enter() -> Self {
-        let held = SPOOL_LEASES_HELD
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        hotpath::gauge!("hooks.spool.lease.held").set(held);
-        Self {
-            acquired: std::time::Instant::now(),
-        }
-    }
-}
-
-#[cfg(feature = "hotpath")]
-impl Drop for SpoolLeaseHoldObservationV1 {
-    fn drop(&mut self) {
-        let _ = SPOOL_LEASES_HELD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-            held.checked_sub(1)
-        });
-        hotpath::gauge!("hooks.spool.lease.held").set(SPOOL_LEASES_HELD.load(Ordering::Relaxed));
-        hotpath::gauge!("hooks.spool.lease.hold_micros")
-            .set(u64::try_from(self.acquired.elapsed().as_micros()).unwrap_or(u64::MAX));
-    }
 }
 
 /// The prefix of one records file a handle must make durable before its
@@ -198,7 +157,7 @@ impl HookSpoolV1 {
     /// metadata, records, or cursors. The normal writer lease still fences a
     /// live adapter, and only the incompatible transport-owned files are
     /// removed.
-    #[hotpath::measure(label = "hooks.spool.reset")]
+    #[tracing::instrument(name = "hooks.spool.reset", level = "trace", skip_all)]
     pub fn reset(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
@@ -219,9 +178,10 @@ impl HookSpoolV1 {
             remove_spool_member(&path)?;
         }
         commit_lock.invalidate()?;
-        hotpath::measure_block!("hooks.spool.fsync.directory", {
+        {
+            let _span = tracing::trace_span!("hooks.spool.fsync.directory").entered();
             shared_sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-        })?;
+        }?;
         lease_file.release().map_err(|_| HookSpoolError::Io)?;
         Ok(())
     }
@@ -257,7 +217,7 @@ impl HookSpoolV1 {
     /// to drop it and reopen, which is lossless because every acknowledgement
     /// is durable before its call returns and appended records stay in the
     /// records file for the next committer.
-    #[hotpath::measure(label = "hooks.spool.open")]
+    #[tracing::instrument(name = "hooks.spool.open", level = "trace", skip_all)]
     pub fn open(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
@@ -273,7 +233,7 @@ impl HookSpoolV1 {
     /// Wait only for writer admission, for at most `wait_budget` measured from
     /// the lock attempt (after the spool root and lease file exist). Once
     /// admitted, recovery and append retain their existing durable semantics.
-    #[hotpath::measure(label = "hooks.spool.open_within")]
+    #[tracing::instrument(name = "hooks.spool.open_within", level = "trace", skip_all)]
     pub fn open_within(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
@@ -288,7 +248,7 @@ impl HookSpoolV1 {
         Self::open_after_lease(root, config, lease, lease_file, now)
     }
 
-    #[hotpath::measure(label = "hooks.spool.open_after_lease")]
+    #[tracing::instrument(name = "hooks.spool.open_after_lease", level = "trace", skip_all)]
     fn open_after_lease(
         root: PathBuf,
         config: HookSpoolConfigV1,
@@ -471,11 +431,7 @@ impl HookSpoolV1 {
             replay_claims: BTreeMap::new(),
             recovery_required: false,
             uncommitted: None,
-            #[cfg(feature = "hotpath")]
-            _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
-        hotpath::gauge!("hooks.spool.pending.frame_count").set(report.pending_records);
-        hotpath::gauge!("hooks.spool.pending.bytes").set(report.pending_bytes);
         Ok((spool, report))
     }
 
@@ -513,7 +469,7 @@ impl HookSpoolV1 {
     /// different envelope is rejected. Only the frame and the rebuildable
     /// checkpoint transition are written here: the record, new or duplicate,
     /// is durable and may be acknowledged only once [`Self::commit`] returns.
-    #[hotpath::measure(label = "hooks.spool.append")]
+    #[tracing::instrument(name = "hooks.spool.append", level = "trace", skip_all)]
     pub fn append(
         &mut self,
         envelope: HookEventEnvelopeV2,
@@ -523,7 +479,7 @@ impl HookSpoolV1 {
         self.append_with_native_lifecycle(envelope, None, binding, now)
     }
 
-    #[hotpath::measure(label = "hooks.spool.append_with_lifecycle")]
+    #[tracing::instrument(name = "hooks.spool.append_with_lifecycle", level = "trace", skip_all)]
     pub fn append_with_native_lifecycle(
         &mut self,
         envelope: HookEventEnvelopeV2,
@@ -623,12 +579,7 @@ impl HookSpoolV1 {
                 return Err(error);
             }
         }
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame_len);
-            hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
-            hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
-        }
+
         Ok(record)
     }
 
@@ -636,7 +587,7 @@ impl HookSpoolV1 {
     /// deduplicated against durable. Concurrent committers share one sync of
     /// the records file, so the lease covers only writing frames; a caller
     /// acknowledges its records only after this returns.
-    #[hotpath::measure(label = "hooks.spool.commit")]
+    #[tracing::instrument(name = "hooks.spool.commit", level = "trace", skip_all)]
     pub fn commit(self) -> Result<(), HookSpoolError> {
         let root = self.root.clone();
         let uncommitted = self.uncommitted;
@@ -663,7 +614,7 @@ impl HookSpoolV1 {
 
     /// Return up to four fair session batches. FIFO is preserved inside each
     /// session; a session with an in-flight claim is skipped until released.
-    #[hotpath::measure(label = "hooks.spool.claim_replay")]
+    #[tracing::instrument(name = "hooks.spool.claim_replay", level = "trace", skip_all)]
     pub fn claim_replay_batches(
         &mut self,
         now: UtcMicros,
@@ -717,27 +668,7 @@ impl HookSpoolV1 {
                 byte_count,
             });
         }
-        #[cfg(feature = "hotpath")]
-        {
-            let frame_count = batches
-                .iter()
-                .map(|batch| batch.records.len())
-                .sum::<usize>();
-            let frame_bytes = batches
-                .iter()
-                .map(|batch| u64::from(batch.byte_count))
-                .sum::<u64>();
-            let queue_wait_micros = batches
-                .iter()
-                .flat_map(|batch| batch.records.iter())
-                .map(|record| now.0.saturating_sub(record.queued_at.0))
-                .max()
-                .unwrap_or(0);
-            hotpath::gauge!("hooks.spool.replay.batch_count").set(batches.len());
-            hotpath::gauge!("hooks.spool.replay.frame_count").set(frame_count);
-            hotpath::gauge!("hooks.spool.replay.frame_bytes").set(frame_bytes);
-            hotpath::gauge!("hooks.spool.queue_wait_micros").set(queue_wait_micros);
-        }
+
         Ok(batches)
     }
 
@@ -775,14 +706,13 @@ impl HookSpoolV1 {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let expired = self.hydrate_many(&indices)?;
-        hotpath::gauge!("hooks.spool.expired.frame_count").set(expired.len());
         Ok(expired)
     }
 
     /// Persist one daemon acknowledgement and compact logically deleted
     /// frames. Out-of-order session acknowledgements are supported so fair
     /// replay never waits behind another session's transient saturation.
-    #[hotpath::measure(label = "hooks.spool.acknowledge")]
+    #[tracing::instrument(name = "hooks.spool.acknowledge", level = "trace", skip_all)]
     pub fn acknowledge(
         &mut self,
         acknowledgement: HookSpoolAckV1,
@@ -802,7 +732,7 @@ impl HookSpoolV1 {
     /// Each acknowledgement is validated on its own: a conflicting one is
     /// reported in its slot and leaves the others to persist. Only a failed
     /// publication fails the call, and then nothing was acknowledged.
-    #[hotpath::measure(label = "hooks.spool.acknowledge_many")]
+    #[tracing::instrument(name = "hooks.spool.acknowledge_many", level = "trace", skip_all)]
     pub fn acknowledge_many(
         &mut self,
         acknowledgements: &[HookSpoolAckV1],
@@ -853,32 +783,8 @@ impl HookSpoolV1 {
             return Ok(outcomes);
         }
         normalize_acknowledgements(&mut next_meta)?;
-        #[cfg(feature = "hotpath")]
-        let settled = acknowledged_indices
-            .iter()
-            .map(|(index, disposition)| {
-                let record = &self.pending[*index];
-                (record.framed_len, record.queued_at, *disposition)
-            })
-            .collect::<Vec<_>>();
         self.publish_meta(&next_meta, now)?;
-        #[cfg(feature = "hotpath")]
-        {
-            for (framed_len, queued_at, disposition) in settled {
-                // A tombstone is a delivery that expired or was refused, not a
-                // success; the disposition mix keeps those failures visible.
-                hotpath::gauge!(match disposition {
-                    HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
-                    HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
-                })
-                .inc(1);
-                hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(framed_len));
-                hotpath::gauge!("hooks.spool.queue_wait_micros")
-                    .set(now.0.saturating_sub(queued_at.0));
-            }
-            hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
-            hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
-        }
+
         // Reclaim rewrites every remaining frame, so draining N records must
         // not rewrite the file once per acknowledgement (O(N^2) bytes).
         // Reclaim only when acknowledged frames occupy at least as much of
@@ -911,19 +817,21 @@ impl HookSpoolV1 {
             if let Some((identity, end)) = records {
                 commit_records(root, identity, end, COMMIT_WAIT)?;
             }
-            hotpath::measure_block!("hooks.spool.fsync.meta", {
-                StagedReplacement::stage(&meta_path(root), "meta", &bytes)
-                    .map_err(|_| HookSpoolError::Io)
-            })
+            {
+                let _span = tracing::trace_span!("hooks.spool.fsync.meta").entered();
+                {
+                    StagedReplacement::stage(&meta_path(root), "meta", &bytes)
+                        .map_err(|_| HookSpoolError::Io)
+                }
+            }
         })?;
         if read_bounded(&meta_path(&self.root), MAX_META_BYTES)? != settled_against {
             return Err(HookSpoolError::WriterLeaseLost);
         }
         staged.publish().map_err(|_| HookSpoolError::Io)?;
         self.without_lease(now, |root| {
-            hotpath::measure_block!("hooks.spool.fsync.directory", {
-                shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-            })
+            let _span = tracing::trace_span!("hooks.spool.fsync.directory").entered();
+            shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
         })
     }
 
@@ -932,7 +840,7 @@ impl HookSpoolV1 {
     /// writer changed the spool meanwhile; otherwise a later reclaim retries.
     /// A lost rename leaves the old file, which still holds every pending
     /// frame, and the first commit to the replacement makes its name durable.
-    #[hotpath::measure(label = "hooks.spool.reclaim")]
+    #[tracing::instrument(name = "hooks.spool.reclaim", level = "trace", skip_all)]
     fn reclaim(&mut self, now: UtcMicros) -> Result<(), HookSpoolError> {
         let (bytes, rebuilt) = self.pending_frames()?;
         let revision = self.observed_records_revision.clone();
@@ -945,13 +853,15 @@ impl HookSpoolV1 {
         let reclaimed = sequences(&rebuilt);
         let staged = self.without_lease(now, |root| {
             forget_synced_extent(root, COMMIT_WAIT)?;
-            hotpath::measure_block!("hooks.spool.fsync.compact", {
-                StagedReplacement::stage(&records_path(root), "records", &bytes)
-                    .map_err(|_| HookSpoolError::Io)
-            })
+            {
+                let _span = tracing::trace_span!("hooks.spool.fsync.compact").entered();
+                {
+                    StagedReplacement::stage(&records_path(root), "records", &bytes)
+                        .map_err(|_| HookSpoolError::Io)
+                }
+            }
         })?;
         if self.observed_records_revision != revision || sequences(&self.pending) != reclaimed {
-            hotpath::gauge!("hooks.spool.compact.raced").inc(1);
             return Ok(());
         }
         staged.publish().map_err(|_| HookSpoolError::Io)?;
@@ -969,8 +879,6 @@ impl HookSpoolV1 {
         self.records_prefix = records_prefix;
         self.checkpoint = Some(checkpoint);
         self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
-        hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
-        hotpath::gauge!("hooks.spool.compact.bytes").set(self.physical_len);
         Ok(())
     }
 
@@ -1188,7 +1096,7 @@ impl HookSpoolV1 {
             .sum()
     }
 
-    #[hotpath::measure(label = "hooks.spool.compact")]
+    #[tracing::instrument(name = "hooks.spool.compact", level = "trace", skip_all)]
     /// The pending frames' bytes, in order, and their entries at the offsets
     /// a file holding only those bytes gives them.
     fn pending_frames(&mut self) -> Result<(Vec<u8>, Vec<PendingRecordV1>), HookSpoolError> {
@@ -1303,9 +1211,10 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
         }
         Err(_) => return Err(HookSpoolError::Io),
     }
-    hotpath::measure_block!("hooks.spool.fsync.directory", {
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.directory").entered();
         shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-    })
+    }
 }
 
 fn ensure_existing_private_root(root: &Path) -> Result<(), HookSpoolError> {

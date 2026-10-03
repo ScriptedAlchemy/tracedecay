@@ -122,11 +122,6 @@ pub(crate) fn admit_candidate_sources<S>(
         admitted_documents = next;
         admitted.push(source);
     }
-    hotpath::gauge!("query.lane.lexical.candidate_sources_total").inc(total as u64);
-    hotpath::gauge!("query.lane.lexical.candidate_sources_pruned")
-        .inc((total - admitted.len()) as u64);
-    hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
-        .set(admitted_documents as u64);
     admitted
 }
 
@@ -660,7 +655,7 @@ impl<P> LexicalLaneRetriever for LexicalLane<P>
 where
     P: LexicalPostingReadPort,
 {
-    #[hotpath::measure(label = "query.lane.lexical")]
+    #[tracing::instrument(name = "query.lane.lexical", level = "trace", skip_all)]
     fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -688,13 +683,7 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }

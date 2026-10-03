@@ -149,7 +149,7 @@ impl DaemonLcmAuthority {
         Self { store: Some(store) }
     }
 
-    #[hotpath::measure(label = "daemon.lcm.execute", future = true)]
+    #[tracing::instrument(name = "daemon.lcm.execute", level = "trace", skip_all)]
     async fn execute_inner(&self, invocation: LcmAuthorityInvocation) -> LcmAuthorityResponse {
         let started_at = application_observed_at();
         let operation = invocation.request.operation();
@@ -283,7 +283,7 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::measure(label = "daemon.lcm.retained_read", future = true)]
+    #[tracing::instrument(name = "daemon.lcm.retained_read", level = "trace", skip_all)]
     async fn execute_retained_read(
         &self,
         context: &RequestContext,
@@ -365,7 +365,6 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::skip]
     async fn execute_retained_status(
         &self,
         context: &RequestContext,
@@ -394,7 +393,6 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::skip]
     async fn execute_retained_doctor(
         &self,
         context: &RequestContext,
@@ -423,7 +421,7 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::measure(label = "daemon.lcm.compact", future = true)]
+    #[tracing::instrument(name = "daemon.lcm.compact", level = "trace", skip_all)]
     async fn execute_compaction(
         &self,
         context: &RequestContext,
@@ -514,7 +512,7 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::measure(label = "daemon.lcm.status", future = true)]
+    #[tracing::instrument(name = "daemon.lcm.status", level = "trace", skip_all)]
     async fn execute_status(
         &self,
         context: &RequestContext,
@@ -550,7 +548,7 @@ impl DaemonLcmAuthority {
         }
     }
 
-    #[hotpath::measure(label = "daemon.lcm.doctor", future = true)]
+    #[tracing::instrument(name = "daemon.lcm.doctor", level = "trace", skip_all)]
     async fn execute_doctor(
         &self,
         context: &RequestContext,

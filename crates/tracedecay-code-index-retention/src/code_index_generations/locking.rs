@@ -230,7 +230,7 @@ pub fn acquire_generation_segments_publication_lock(
     }
 }
 
-#[hotpath::measure(label = "code_index_retention.lock")]
+#[tracing::instrument(name = "code_index_retention.lock", level = "trace", skip_all)]
 fn lock_file(
     store_root: &Path,
     lock_file: &str,

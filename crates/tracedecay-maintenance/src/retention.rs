@@ -206,7 +206,7 @@ impl std::error::Error for RetentionPassInterruption {
 /// The cutoff is captured once per table; each slice re-checks eligibility in its own transaction, so
 /// rows that gain or lose lineage between slices are judged by the current
 /// authority. Disabled windows never acquire the writer.
-#[hotpath::measure(label = "maintenance.retention.prune_global", future = true)]
+#[tracing::instrument(name = "maintenance.retention.prune_global", level = "trace", skip_all)]
 pub async fn prune_global_retention(
     database: &RegisteredGlobalDb,
     config: &RetentionConfig,

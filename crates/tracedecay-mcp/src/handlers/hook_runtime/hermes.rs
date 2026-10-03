@@ -55,13 +55,10 @@ async fn apply_projectless_hermes_receipt_plan(
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.replay")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Projectless Hermes replay is one receipt pass without a mounted project route."
-    )
+#[tracing::instrument(name = "mcp.hook_runtime.replay", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Projectless Hermes replay is one receipt pass without a mounted project route."
 )]
 async fn replay_projectless_hermes_receipts(
     broker: &SharedHostAdmissionBroker,
@@ -219,7 +216,7 @@ async fn continue_projectless_hermes_review(
     Err(user_review_unavailable())
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.hermes")]
+#[tracing::instrument(name = "mcp.hook_runtime.hermes", level = "trace", skip_all)]
 pub(super) async fn hermes_receipt(
     event_value: Value,
     profile_root: &Path,

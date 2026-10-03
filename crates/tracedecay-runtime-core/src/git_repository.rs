@@ -292,10 +292,10 @@ fn walk_checkout_topology(
     let guard = CheckoutResolutionGuard { slot, walk };
     #[cfg(any(test, feature = "test-helpers"))]
     observe_topology_resolution(path);
-    let resolved = hotpath::measure_block!(
-        "runtime_core.git.topology.resolve",
+    let resolved = {
+        let _span = tracing::trace_span!("runtime_core.git.topology.resolve").entered();
         GitRepositoryAuthority::discover_uncached(path)
-    )
+    }
     .map(|authority| Arc::new(authority.into_topology()));
     guard.publish(path, resolved.clone());
     resolved
@@ -880,10 +880,10 @@ impl GitRepositoryAuthority {
     /// Open a repository whose topology is already known, or `None` when the
     /// open fails and the full walk has to decide.
     fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
-        let repository = hotpath::measure_block!(
-            "runtime_core.git.repository_open_retained",
+        let repository = {
+            let _span = tracing::trace_span!("runtime_core.git.repository_open_retained").entered();
             crate::git_open::open(&topology.git_dir)
-        )
+        }
         .ok()?;
         Some(Self {
             repository: repository.into_sync(),
@@ -893,7 +893,11 @@ impl GitRepositoryAuthority {
         })
     }
 
-    #[hotpath::measure(label = "runtime_core.git.repository_discover")]
+    #[tracing::instrument(
+        name = "runtime_core.git.repository_discover",
+        level = "trace",
+        skip_all
+    )]
     fn discover_uncached(path: &Path) -> Result<Self, GitRepositoryError> {
         #[cfg(any(test, feature = "test-helpers"))]
         observe_repository_discovery(path);
@@ -904,10 +908,10 @@ impl GitRepositoryAuthority {
                 detail: "test-forced unreadable repository discovery".to_owned(),
             });
         }
-        let repository = hotpath::measure_block!(
-            "runtime_core.git.repository_discover.walk",
+        let repository = {
+            let _span = tracing::trace_span!("runtime_core.git.repository_discover.walk").entered();
             crate::git_open::discover(path)
-        )
+        }
         .map_err(|error| match error {
             // Like git without GIT_DISCOVERY_ACROSS_FILESYSTEM, a walk that
             // stops at a mount boundary (a tmpfs /tmp, say) or a ceiling has
@@ -924,8 +928,9 @@ impl GitRepositoryAuthority {
                 detail: error.to_string(),
             },
         })?;
-        let (worktree_root, git_dir, common_dir) = hotpath::measure_block!(
-            "runtime_core.git.repository_discover.canonicalize",
+        let (worktree_root, git_dir, common_dir) = {
+            let _span =
+                tracing::trace_span!("runtime_core.git.repository_discover.canonicalize").entered();
             (
                 repository
                     .workdir()
@@ -934,7 +939,7 @@ impl GitRepositoryAuthority {
                 canonical(repository.git_dir(), "Git directory"),
                 canonical(repository.common_dir(), "Git common directory"),
             )
-        );
+        };
         let worktree_root = worktree_root.map_err(|error| repository_error(path, error))?;
         let git_dir = git_dir.map_err(|error| repository_error(path, error))?;
         let common_dir = common_dir.map_err(|error| repository_error(path, error))?;
@@ -1022,7 +1027,7 @@ impl GitRepositoryAuthority {
     }
 
     /// Exact HEAD state for this repository or linked worktree.
-    #[hotpath::measure(label = "runtime_core.git.head")]
+    #[tracing::instrument(name = "runtime_core.git.head", level = "trace", skip_all)]
     pub fn head(&self) -> Result<GitHeadStateV1, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         head_from_gix(&repository)
@@ -1056,7 +1061,7 @@ impl GitRepositoryAuthority {
     }
 
     /// All ordinary repository refs in stable name order.
-    #[hotpath::measure(label = "runtime_core.git.references")]
+    #[tracing::instrument(name = "runtime_core.git.references", level = "trace", skip_all)]
     pub fn references(&self) -> Result<Vec<GitReference>, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
         let platform = repository
@@ -1113,7 +1118,7 @@ impl GitRepositoryAuthority {
 
     /// Live staged, unstaged, untracked, ignored, conflict, and submodule
     /// status directly from the current index and working tree.
-    #[hotpath::measure(label = "runtime_core.git.status")]
+    #[tracing::instrument(name = "runtime_core.git.status", level = "trace", skip_all)]
     pub fn status(&self) -> Result<GitRepositoryStatus, GitRepositoryError> {
         use gix::diff::index::ChangeRef;
         use gix::dir::entry::Status as DirectoryStatus;

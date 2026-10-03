@@ -499,7 +499,6 @@ impl ExecutionMetricUnavailableV1 {
     /// [`MetricValueV1::unavailable_reason`] so a transport that only reads
     /// the generic metric envelope sees the same typed reason.
     #[must_use]
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::StoreUnavailable => "store_unavailable",
@@ -545,7 +544,6 @@ impl ExecutionTopologyMeasurementV1 {
         self
     }
 
-    #[hotpath::skip]
     pub(in crate::execution_topology_metrics) const fn local_support(&self) -> u64 {
         self.local_support
     }
@@ -632,7 +630,6 @@ pub struct ExecutionTopologyMetricsRequestV1 {
 }
 
 impl ExecutionQuantityUnitV1 {
-    #[hotpath::skip]
     const fn wire_unit(self) -> &'static str {
         match self {
             Self::WallMicros => "microseconds",

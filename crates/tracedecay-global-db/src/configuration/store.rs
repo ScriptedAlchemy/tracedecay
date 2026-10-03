@@ -86,7 +86,6 @@ pub struct GlobalDbConfigurationControlStore<'db> {
 }
 
 impl<'db> GlobalDbConfigurationControlStore<'db> {
-    #[hotpath::skip]
     pub const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
@@ -163,7 +162,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
 
     /// Publishes the sole canonical first revision into an empty final-shape
     /// store. No legacy input, path, environment, or fallback value is read.
-    #[hotpath::skip]
     pub async fn initialize_canonical(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -175,7 +173,11 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.init")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.init",
+        level = "trace",
+        skip_all
+    )]
     async fn initialize_canonical_with_registry(
         &self,
         revision_id: &ConfigurationRevisionId,
@@ -255,7 +257,11 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     /// protected apply. The write is a compare-and-swap against the revision
     /// the caller read; concurrent mutation surfaces as a typed
     /// `RevisionConflict` and the caller re-reads.
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.rebind")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.rebind",
+        level = "trace",
+        skip_all
+    )]
     pub async fn publish_daemon_source_binding(
         &self,
         expected_revision_id: &ConfigurationRevisionId,
@@ -364,7 +370,11 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.converge")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.converge",
+        level = "trace",
+        skip_all
+    )]
     async fn converge_registry_shape(
         &self,
         expected_revision_id: &ConfigurationRevisionId,
@@ -708,7 +718,6 @@ impl<'db> ProfileConfigurationStore<'db> {
 
     /// The current profile configuration, initializing a fresh store from the
     /// registry defaults and converging one written by an earlier registry.
-    #[hotpath::skip]
     pub async fn read_or_initialize(
         &self,
         occurred_at: UtcMicros,
@@ -761,7 +770,7 @@ impl<'db> ProfileConfigurationStore<'db> {
         self.project(converged, &registry)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.query")]
+    #[tracing::instrument(name = "global_db.configuration.query", level = "trace", skip_all)]
     async fn current_state(&self) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
         let read = self
             .store
@@ -789,7 +798,11 @@ impl<'db> ProfileConfigurationStore<'db> {
         })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.profile")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.profile",
+        level = "trace",
+        skip_all
+    )]
     pub async fn commit_direct(
         &self,
         authority: &ConfigurationMutationAuthority,
@@ -827,7 +840,11 @@ impl<'db> ProfileConfigurationStore<'db> {
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.selection")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.selection",
+        level = "trace",
+        skip_all
+    )]
     pub async fn commit_selection(
         &self,
         authority: &ConfigurationMutationAuthority,
@@ -911,7 +928,6 @@ impl OwnedGlobalDbConfigurationControlStore {
     /// Revalidate mutation access by acquiring the exact guarded writer
     /// transaction. The capability carries the client-bound authority, so no
     /// path-derived authority can be substituted here.
-    #[hotpath::skip]
     async fn require_active_mutation_scope(
         db: &RegisteredGlobalDb,
     ) -> Result<(), ConfigurationError> {

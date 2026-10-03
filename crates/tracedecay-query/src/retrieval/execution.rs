@@ -277,7 +277,7 @@ where
         })
     }
 
-    #[hotpath::measure(label = "query.stream.translate")]
+    #[tracing::instrument(name = "query.stream.translate", level = "trace", skip_all)]
     fn translate<E, T>(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<E>>,
@@ -310,20 +310,8 @@ where
             RetrieverOutcome::TimedOut(usage) => Ok(NativeLaneOutcomeV1::TimedOut(usage)),
             RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
         };
-        if let Ok(ref outcome) = translated {
-            match outcome {
-                NativeLaneOutcomeV1::Complete(page) | NativeLaneOutcomeV1::Partial { page, .. } => {
-                    hotpath::gauge!("query.stream.results").set(page.items.len());
-                    hotpath::gauge!("query.stream.rows").set(page.coverage.examined);
-                }
-                NativeLaneOutcomeV1::Cancelled => {
-                    hotpath::gauge!("query.cancel.count").inc(1u32);
-                }
-                NativeLaneOutcomeV1::Stale(_) => {
-                    crate::hotpath_metrics::Residency::Rebuilding.record("query.stream.residency");
-                }
-                _ => {}
-            }
+        if let Ok(NativeLaneOutcomeV1::Stale(_)) = &translated {
+            crate::observe::Residency::Rebuilding.record("query.stream.residency");
         }
         translated
     }

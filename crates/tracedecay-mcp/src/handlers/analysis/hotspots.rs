@@ -11,7 +11,7 @@ use super::*;
 /// resolution; they have no call edges and are not code hotspots.
 static EXTRACTORS: LazyLock<LanguageRegistry> = LazyLock::new(LanguageRegistry::new);
 
-#[hotpath::measure(future = true, label = "mcp.analysis.hotspots.total")]
+#[tracing::instrument(name = "mcp.analysis.hotspots.total", level = "trace", skip_all)]
 pub(super) async fn compute_hotspots(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -21,37 +21,43 @@ pub(super) async fn compute_hotspots(
     let limit = request.limit.map_or(10, |v| v.min(100) as usize);
     require_positive_limit(limit, "tracedecay_hotspots")?;
 
-    let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.hotspots.graph", {
-        let symbols = verified_analysis_symbols(graph, scope_prefix)?;
-        let edges = verified_analysis_edges(graph, &symbols, &[])?;
-        (symbols, edges)
-    });
-    let (symbols, incoming, outgoing) = hotpath::measure_block!("mcp.analysis.hotspots.compute", {
-        let mut incoming = HashMap::<SymbolOccurrenceId, u64>::new();
-        let mut outgoing = HashMap::<SymbolOccurrenceId, u64>::new();
-        for edge in edges {
-            *outgoing.entry(edge.from_occurrence).or_default() += 1;
-            *incoming.entry(edge.to_occurrence).or_default() += 1;
+    let (mut symbols, edges) = {
+        let _span = tracing::trace_span!("mcp.analysis.hotspots.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, scope_prefix)?;
+            let edges = verified_analysis_edges(graph, &symbols, &[])?;
+            (symbols, edges)
         }
-        symbols.retain(|symbol| !EXTRACTORS.is_configuration_file(&symbol.path));
-        symbols.sort_by(|left, right| {
-            let left_total = incoming
-                .get(&left.occurrence)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(outgoing.get(&left.occurrence).copied().unwrap_or(0));
-            let right_total = incoming
-                .get(&right.occurrence)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(outgoing.get(&right.occurrence).copied().unwrap_or(0));
-            right_total
-                .cmp(&left_total)
-                .then_with(|| left.occurrence.cmp(&right.occurrence))
-        });
-        symbols.truncate(limit);
-        (symbols, incoming, outgoing)
-    });
+    };
+    let (symbols, incoming, outgoing) = {
+        let _span = tracing::trace_span!("mcp.analysis.hotspots.compute").entered();
+        {
+            let mut incoming = HashMap::<SymbolOccurrenceId, u64>::new();
+            let mut outgoing = HashMap::<SymbolOccurrenceId, u64>::new();
+            for edge in edges {
+                *outgoing.entry(edge.from_occurrence).or_default() += 1;
+                *incoming.entry(edge.to_occurrence).or_default() += 1;
+            }
+            symbols.retain(|symbol| !EXTRACTORS.is_configuration_file(&symbol.path));
+            symbols.sort_by(|left, right| {
+                let left_total = incoming
+                    .get(&left.occurrence)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(outgoing.get(&left.occurrence).copied().unwrap_or(0));
+                let right_total = incoming
+                    .get(&right.occurrence)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(outgoing.get(&right.occurrence).copied().unwrap_or(0));
+                right_total
+                    .cmp(&left_total)
+                    .then_with(|| left.occurrence.cmp(&right.occurrence))
+            });
+            symbols.truncate(limit);
+            (symbols, incoming, outgoing)
+        }
+    };
     let hotspots: Vec<HotspotV1> = symbols
         .into_iter()
         .map(|symbol| {

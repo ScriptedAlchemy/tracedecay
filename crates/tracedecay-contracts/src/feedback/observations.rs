@@ -220,7 +220,6 @@ pub struct FeedbackObservationDeliveryV1 {
 }
 
 impl FeedbackObservationDeliveryV1 {
-    #[hotpath::skip]
     pub const fn pending() -> Self {
         Self {
             emitted: 0,
@@ -230,7 +229,6 @@ impl FeedbackObservationDeliveryV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn delivered(dropped: u64) -> Self {
         Self {
             emitted: 1,
@@ -457,7 +455,6 @@ pub enum FeedbackSourceEventV1 {
 }
 
 impl FeedbackSourceEventV1 {
-    #[hotpath::skip]
     pub const fn event_kind(&self) -> &'static str {
         match self {
             Self::ArgumentRejected { .. } | Self::SurfaceArgumentRejected { .. } => {

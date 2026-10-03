@@ -5,7 +5,11 @@ use std::time::Duration;
 use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-#[hotpath::measure(label = "daemon.project.compose.join_sessions", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.compose.join_sessions",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn join_independent_session_opens<Project, Profile, ProjectOpen, ProfileOpen>(
     project_open: ProjectOpen,
     profile_open: ProfileOpen,
@@ -17,8 +21,14 @@ where
     // The two opens overlap under try_join, so the join span alone cannot say
     // which store owned a slow admission; each side keeps its own lifetime.
     tokio::try_join!(
-        hotpath::future!(project_open, label = "daemon.project.open.project_sessions"),
-        hotpath::future!(profile_open, label = "daemon.project.open.profile_sessions"),
+        tracing::Instrument::instrument(
+            project_open,
+            tracing::trace_span!("daemon.project.open.project_sessions")
+        ),
+        tracing::Instrument::instrument(
+            profile_open,
+            tracing::trace_span!("daemon.project.open.profile_sessions")
+        ),
     )
 }
 

@@ -79,9 +79,10 @@ impl GraphDbRegistry {
     /// database. Any absent, foreign, corrupt, dependency-bearing, or
     /// non-code replay fails closed so the caller can take the ordinary
     /// staging recovery path explicitly.
-    #[hotpath::measure(
-        label = "graph_db.generation.recover.direct_sealed",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.recover.direct_sealed",
+        level = "trace",
+        skip_all
     )]
     pub fn recover_verified_sealed_snapshot(
         &self,
@@ -238,7 +239,7 @@ impl GraphDbRegistry {
     /// deleted code index generation can no longer republish it. Pending
     /// publication, dependency, live-snapshot, known-generation, direct-sealed
     /// reader, and concurrent-retirement guards still retain the native rows.
-    #[hotpath::measure(label = "graph_db.replay_pool.retire", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.replay_pool.retire", level = "trace", skip_all)]
     pub fn retire_one_code_generation_replay(
         &self,
         registration: GraphDbRegistration,
@@ -584,9 +585,10 @@ impl GraphDbRegistry {
     /// diagnosis is refused with its evidence instead of deleted. On
     /// `Discarded` the journal position is open again and a fresh replay for
     /// the same generation can be journaled and published (issue #765).
-    #[hotpath::measure(
-        label = "graph_db.generation.discard_interrupted",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.discard_interrupted",
+        level = "trace",
+        skip_all
     )]
     pub fn discard_interrupted_publication(
         &self,
@@ -650,7 +652,7 @@ impl GraphDbRegistry {
         Ok(outcome)
     }
 
-    #[hotpath::measure(label = "graph_db.replay_pool.finalize", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.replay_pool.finalize", level = "trace", skip_all)]
     pub fn finalize_one_code_generation_replay_cleanup(
         &self,
         registration: GraphDbRegistration,
@@ -790,9 +792,10 @@ impl GraphDbRegistry {
     /// A sealed code generation retired here is still on disk in the code
     /// index; its later retention pass finds the replay absent and unlinks the
     /// replay-pool copy, the same order it already handles.
-    #[hotpath::measure(
-        label = "graph_db.replay_pool.retire_superseded",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.replay_pool.retire_superseded",
+        level = "trace",
+        skip_all
     )]
     pub fn retire_superseded_projection_replays(
         &self,
@@ -1319,7 +1322,7 @@ impl GraphDbRegistry {
         self.publish_verified_inner(&operation, authority, context, publication_key, None)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.publish", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.generation.publish", level = "trace", skip_all)]
     fn publish_verified_inner(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -1348,9 +1351,10 @@ impl GraphDbRegistry {
     /// head or installs a read-side lease, so a caller that serializes
     /// publication against readers holds its gate only across
     /// [`Self::complete_verified_publication`].
-    #[hotpath::measure(
-        label = "graph_db.generation.publish.prepare",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.publish.prepare",
+        level = "trace",
+        skip_all
     )]
     fn prepare_verified_publication_inner(
         &self,
@@ -1363,7 +1367,7 @@ impl GraphDbRegistry {
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
         let database = operation.database().clone();
-        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::PublishStart);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::PublishStart);
         let check = || operation.check(self, context);
         let replay = authority
             .replay(publication_key, context)
@@ -1419,8 +1423,7 @@ impl GraphDbRegistry {
             },
         };
         let apply_native = !metadata_only;
-        database
-            .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::ReplayHydrated);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::ReplayHydrated);
         // The identity and row counts are taken once, up front. Everything
         // after staging reads only these, so the bulk manifest can be handed
         // to staging and released there instead of living until this function
@@ -1428,13 +1431,13 @@ impl GraphDbRegistry {
         let identity = manifest.identity();
         let (entity_rows, relation_rows) = manifest.row_counts();
         let direct_seal_eligible = direct_seal_source && identity.dependencies.is_empty();
-        crate::hotpath_observe::record_counts(entity_rows, relation_rows, 1, 0);
-        crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
-            crate::hotpath_observe::HydrationSource::Supplied
+        crate::observe::record_counts(entity_rows, relation_rows, 1, 0);
+        crate::observe::record_hydration_source(if has_supplied_manifest {
+            crate::observe::HydrationSource::Supplied
         } else if metadata_only {
-            crate::hotpath_observe::HydrationSource::Metadata
+            crate::observe::HydrationSource::Metadata
         } else {
-            crate::hotpath_observe::HydrationSource::Replay
+            crate::observe::HydrationSource::Replay
         });
         let current = authority
             .verified_head(&publication_key.projection, context)
@@ -1844,8 +1847,7 @@ impl GraphDbRegistry {
                 return Err(error);
             }
         };
-        database
-            .record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::NativeVerified);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::NativeVerified);
         operation.check(self, context)?;
         Ok(GraphPublicationPreparationV1::Proven(Box::new(
             ProvenGraphPublicationV1 {
@@ -1864,9 +1866,10 @@ impl GraphDbRegistry {
     /// is the only publication phase that changes what readers observe, so a
     /// caller that gates publication against reads holds its gate across
     /// exactly this call.
-    #[hotpath::measure(
-        label = "graph_db.generation.publish.complete",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.publish.complete",
+        level = "trace",
+        skip_all
     )]
     fn complete_verified_publication_inner(
         &self,
@@ -1927,9 +1930,7 @@ impl GraphDbRegistry {
                     // looping Conflict on the incumbent.
                     let lease = generation_lease(&identity, head.clone(), dependencies);
                     database.install_verified_generation(Arc::clone(&lease))?;
-                    database.record_memory_checkpoint(
-                        crate::hotpath_observe::GrafeoMemoryPhase::Published,
-                    );
+                    database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Published);
                     let mut closure = BTreeMap::new();
                     collect_closure(&lease, &mut closure)?;
                     return Ok(VerifiedGraphCommit {
@@ -2012,7 +2013,7 @@ impl GraphDbRegistry {
         // deliberately not observed after it succeeds.
         let lease = generation_lease(&identity, head.clone(), dependencies);
         database.install_verified_generation(Arc::clone(&lease))?;
-        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Published);
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
         Ok(VerifiedGraphCommit {
@@ -2050,7 +2051,7 @@ impl GraphDbRegistry {
         self.recover_verified_snapshot_with_operation(&operation, authority, context, projection)
     }
 
-    #[hotpath::measure(label = "graph_db.generation.recover", impl_type = "GraphDbRegistry")]
+    #[tracing::instrument(name = "graph_db.generation.recover", level = "trace", skip_all)]
     fn recover_verified_snapshot_with_operation(
         &self,
         operation: &RegisteredGraphDbOperationV1,
@@ -2061,7 +2062,7 @@ impl GraphDbRegistry {
         operation.check(self, context)?;
         operation.require_projection_binding(projection)?;
         let database = operation.database().clone();
-        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::RecoveryStart);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::RecoveryStart);
         let head = authority
             .verified_head(projection, context)
             .map_err(GraphDbError::from)?
@@ -2078,16 +2079,17 @@ impl GraphDbRegistry {
             &mut visiting,
         )?;
         database.install_verified_generation(Arc::clone(&lease))?;
-        database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Recovered);
+        database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Recovered);
         operation.check(self, context)?;
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
-    #[hotpath::measure(
-        label = "graph_db.generation.recover.historical",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.recover.historical",
+        level = "trace",
+        skip_all
     )]
     pub fn verified_generation_snapshot(
         &self,
@@ -2160,9 +2162,10 @@ impl GraphDbRegistry {
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
-    #[hotpath::measure(
-        label = "graph_db.generation.load_dependencies",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.load_dependencies",
+        level = "trace",
+        skip_all
     )]
     fn load_dependencies(
         &self,
@@ -2237,9 +2240,10 @@ impl GraphDbRegistry {
         Ok(loaded)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.generation.load_verified_head",
-        impl_type = "GraphDbRegistry"
+    #[tracing::instrument(
+        name = "graph_db.generation.load_verified_head",
+        level = "trace",
+        skip_all
     )]
     fn load_verified_head(
         &self,
@@ -2511,7 +2515,11 @@ fn replay_row_spill(
 /// The lease is either freshly built from a digest proof this call just ran,
 /// or reused from this exact instance's verified-generation cache; both carry
 /// the same instance-bound proof, so seating is identical.
-#[hotpath::measure(label = "graph_db.generation.seat_historical")]
+#[tracing::instrument(
+    name = "graph_db.generation.seat_historical",
+    level = "trace",
+    skip_all
+)]
 fn seat_historical_verified_lease(
     database: GraphDbLeaseV1,
     lease: Arc<VerifiedGenerationLease>,
@@ -2530,7 +2538,7 @@ fn seat_historical_verified_lease(
     } else {
         database.remember_verified_generation(&lease)?;
     }
-    database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Published);
+    database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Published);
     let mut closure = BTreeMap::new();
     collect_closure(&lease, &mut closure)?;
     Ok(VerifiedGraphCommit {

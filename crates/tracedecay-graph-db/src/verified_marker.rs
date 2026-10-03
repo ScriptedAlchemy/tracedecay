@@ -143,8 +143,6 @@ pub(crate) enum GenerationVerification {
 }
 
 impl GenerationVerification {
-    #[cfg(feature = "hotpath")]
-    #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::VerifiedFresh => "verified_fresh",
@@ -427,7 +425,7 @@ impl GenerationMarkers {
     /// container the resident engine opened.
     ///
     /// Returns the canonical byte count the original proof hashed, for the
-    /// byte gauge, or `None` when the full proof has to run -- including
+    /// verify outcome event, or `None` when the full proof has to run -- including
     /// whenever no engine is resident. The caller's `expected` digest --
     /// which comes from the relational authority, never from the marker --
     /// must match exactly.

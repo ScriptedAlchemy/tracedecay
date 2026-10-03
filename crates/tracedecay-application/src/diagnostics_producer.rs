@@ -156,7 +156,11 @@ const CONCURRENT_CHECKS: usize = 4;
 ///
 /// A clean project publishes an empty snapshot, which is what lets a read
 /// answer "no diagnostics" as evidence instead of as a missing producer.
-#[hotpath::measure(label = "usecases.diagnostics.typescript_producer", future = true)]
+#[tracing::instrument(
+    name = "usecases.diagnostics.typescript_producer",
+    level = "trace",
+    skip_all
+)]
 pub async fn run_typescript_producer_v1(
     project_root: &Path,
     projects: &[TypeScriptProject],

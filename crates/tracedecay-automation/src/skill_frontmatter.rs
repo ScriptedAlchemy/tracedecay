@@ -79,7 +79,7 @@ impl SkillFrontmatterValue {
 }
 
 /// Parses leading `---`-fenced frontmatter, normalizing LF and CRLF input.
-#[hotpath::measure(label = "automation.skill.parse_frontmatter")]
+#[tracing::instrument(name = "automation.skill.parse_frontmatter", level = "trace", skip_all)]
 pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillFrontmatterValue>> {
     let mut lines = contents.lines();
     if lines.next().map(str::trim_end) != Some("---") {

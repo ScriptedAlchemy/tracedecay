@@ -9,7 +9,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use super::ApplicationSurfaceAdapterError;
 use crate::surface::GitReadSurfaceRequest;
 
-#[hotpath::measure(label = "application_surface.git.parse")]
+#[tracing::instrument(name = "application_surface.git.parse", level = "trace", skip_all)]
 pub(super) fn parse_git_read_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,

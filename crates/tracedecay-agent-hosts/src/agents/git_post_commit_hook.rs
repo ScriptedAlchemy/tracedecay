@@ -39,7 +39,11 @@ pub enum GitPostCommitHookInstall {
 ///
 /// Setting `core.hooksPath` redirects repositories away from `.git/hooks`, so
 /// that step stays behind `--git-hook`. Supervision is the printed receipt, not a prompt.
-#[hotpath::measure(label = "agent_hosts.agents.git.report_post_commit")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.git.report_post_commit",
+    level = "trace",
+    skip_all
+)]
 pub fn report_git_post_commit_hook_status(home: &Path) {
     match git_post_commit_hook_status(home) {
         GitPostCommitHookStatus::Present => {
@@ -56,7 +60,11 @@ pub fn report_git_post_commit_hook_status(home: &Path) {
 }
 
 /// Install the reversible sync hook. Never reads stdin.
-#[hotpath::measure(label = "agent_hosts.agents.git.install_post_commit")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.git.install_post_commit",
+    level = "trace",
+    skip_all
+)]
 pub fn install_git_post_commit_hook(
     home: &Path,
     tracedecay_bin: &str,

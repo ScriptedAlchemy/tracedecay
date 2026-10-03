@@ -19,7 +19,11 @@ enum HostReceiptReviewProgress {
     Idle,
 }
 
-#[hotpath::measure(label = "daemon.scheduler.host_receipt_review", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.host_receipt_review",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn run_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,

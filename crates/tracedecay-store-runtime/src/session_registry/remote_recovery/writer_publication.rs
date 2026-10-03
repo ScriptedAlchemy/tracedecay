@@ -27,7 +27,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Publishes `writer` as the first writer authority `node_id` serves for
     /// its Brain lineage, together with the replay policy admitting its
     /// frames. Publishing the identical writer again is an exact replay.
-    #[hotpath::skip]
     pub async fn publish_remote_writer_authority(
         &self,
         node_id: &BrainNodeId,

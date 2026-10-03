@@ -114,15 +114,15 @@ pub async fn correlate_hint_outcomes(
     let mut stats = HintOutcomeStats::default();
 
     // Hints that already carry an outcome: never re-resolve them.
-    let mut resolved = hotpath::future!(
+    let mut resolved = tracing::Instrument::instrument(
         port.resolved_hint_ids(project_id, HINT_EVENT_LIMIT),
-        label = "hosts.hooks.hint_outcomes.query_resolved"
+        tracing::trace_span!("hosts.hooks.hint_outcomes.query_resolved"),
     )
     .await
     .map(|ids| ids.into_iter().collect::<HashSet<_>>())?;
-    let emitted = hotpath::future!(
+    let emitted = tracing::Instrument::instrument(
         port.emitted_hints(project_id, HINT_EVENT_LIMIT),
-        label = "hosts.hooks.hint_outcomes.query_emitted"
+        tracing::trace_span!("hosts.hooks.hint_outcomes.query_emitted"),
     )
     .await?;
 
@@ -140,14 +140,14 @@ pub async fn correlate_hint_outcomes(
         stats.scanned += 1;
         resolved.insert(emission.hint_id.clone());
 
-        let steps = hotpath::future!(
+        let steps = tracing::Instrument::instrument(
             port.session_tool_activity(
                 session_provider(&emission.provider),
                 &emission.session_id,
                 emission.timestamp,
                 SESSION_SCAN_LIMIT,
             ),
-            label = "hosts.hooks.hint_outcomes.session_activity"
+            tracing::trace_span!("hosts.hooks.hint_outcomes.session_activity"),
         )
         .await
         .map(|activity| {
@@ -160,9 +160,11 @@ pub async fn correlate_hint_outcomes(
                 .collect::<Vec<_>>()
         })?;
 
-        match hotpath::measure_block!("hosts.hooks.hint_outcomes.resolve", {
+        let match_result = {
+            let _span = tracing::trace_span!("hosts.hooks.hint_outcomes.resolve").entered();
             resolve(emission.timestamp, &steps, expected, now_secs)
-        }) {
+        };
+        match match_result {
             Some(resolution) => {
                 let resolution = match resolution {
                     Resolution::Acted(tool) => {
@@ -185,9 +187,9 @@ pub async fn correlate_hint_outcomes(
     }
 
     if !pending.is_empty() {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             port.append_outcomes(&pending),
-            label = "hosts.hooks.hint_outcomes.append"
+            tracing::trace_span!("hosts.hooks.hint_outcomes.append"),
         )
         .await?;
     }

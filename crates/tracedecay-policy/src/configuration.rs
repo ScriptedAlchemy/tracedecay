@@ -94,7 +94,7 @@ pub trait ConfigurationMutationPolicyEvaluator {
 pub struct ConfigurationMutationPolicyEvaluatorV1;
 
 impl ConfigurationMutationPolicyEvaluator for ConfigurationMutationPolicyEvaluatorV1 {
-    #[hotpath::measure(label = "policy.configuration.evaluate")]
+    #[tracing::instrument(name = "policy.configuration.evaluate", level = "trace", skip_all)]
     fn evaluate(
         &self,
         current: &ConfigurationMutationGrantSnapshotV1,

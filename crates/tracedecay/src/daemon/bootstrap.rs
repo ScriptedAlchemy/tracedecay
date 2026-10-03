@@ -27,7 +27,7 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
     tokio::time::Duration::from_millis(100);
 
-#[hotpath::measure(label = "daemon.bootstrap.catalog_prewarm")]
+#[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
     if let Err(error) = prewarm_daemon_bootstrap_catalog() {
         tracing::warn!(
@@ -52,9 +52,9 @@ pub fn run_foreground(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         run_foreground_unix(profile, socket_path, remote_tls),
-        label = "daemon.bootstrap.run_foreground"
+        tracing::trace_span!("daemon.bootstrap.run_foreground"),
     ))
 }
 
@@ -64,9 +64,9 @@ pub fn run_foreground(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         run_foreground_loopback(profile, socket_path, remote_tls),
-        label = "daemon.bootstrap.run_foreground"
+        tracing::trace_span!("daemon.bootstrap.run_foreground"),
     ))
 }
 
@@ -80,12 +80,15 @@ async fn run_foreground_loopback(
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
-    let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
-        tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-            &profile_root,
-            "managed daemon database ownership",
-        )
-    })?;
+    let _lifecycle_lease = {
+        let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
+        {
+            tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                &profile_root,
+                "managed daemon database ownership",
+            )
+        }
+    }?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -124,9 +127,9 @@ async fn run_foreground_loopback(
     );
     worker_plan?;
     log_catalog_prewarm_task(catalog_prewarm);
-    let (listener, endpoint) = hotpath::future!(
+    let (listener, endpoint) = tracing::Instrument::instrument(
         BrokerListener::bind(authority.endpoint()),
-        label = "daemon.bootstrap.listener_bind"
+        tracing::trace_span!("daemon.bootstrap.listener_bind"),
     )
     .await?;
     authority.publish_endpoint(&endpoint)?;
@@ -145,13 +148,13 @@ async fn run_foreground_loopback(
         &invocation,
     )
     .await?;
-    let http_application_service = hotpath::future!(
+    let http_application_service = tracing::Instrument::instrument(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
         ),
-        label = "daemon.bootstrap.http_bind"
+        tracing::trace_span!("daemon.bootstrap.http_bind"),
     )
     .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
@@ -223,7 +226,7 @@ async fn run_foreground_loopback(
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        clients.spawn(hotpath::future!(
+        clients.spawn(tracing::Instrument::instrument(
             with_connection_admission(permit, async move {
                 Box::pin(serve_windows_broker_client_with_class_and_invocation(
                     stream,
@@ -240,7 +243,7 @@ async fn run_foreground_loopback(
                 ))
                 .await
             }),
-            label = "daemon.bootstrap.broker_connection"
+            tracing::trace_span!("daemon.bootstrap.broker_connection"),
         ));
     }
     lifecycle.begin_draining();
@@ -500,12 +503,15 @@ async fn run_foreground_unix(
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
-    let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
-        tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-            &profile_root,
-            "managed daemon database ownership",
-        )
-    })?;
+    let _lifecycle = {
+        let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
+        {
+            tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                &profile_root,
+                "managed daemon database ownership",
+            )
+        }
+    }?;
     let mut authority =
         authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version()?)?;
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -576,9 +582,9 @@ async fn run_foreground_unix(
     }
     prepare_socket_path(&authority).await?;
 
-    let (listener, bound_endpoint) = hotpath::future!(
+    let (listener, bound_endpoint) = tracing::Instrument::instrument(
         BrokerListener::bind(authority.endpoint()),
-        label = "daemon.bootstrap.listener_bind"
+        tracing::trace_span!("daemon.bootstrap.listener_bind"),
     )
     .await?;
     authority.publish_endpoint(&bound_endpoint)?;
@@ -599,13 +605,13 @@ async fn run_foreground_unix(
         &engine.invocation,
     )
     .await?;
-    let http_application_service = hotpath::future!(
+    let http_application_service = tracing::Instrument::instrument(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
             remote_tls.as_ref(),
         ),
-        label = "daemon.bootstrap.http_bind"
+        tracing::trace_span!("daemon.bootstrap.http_bind"),
     )
     .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
@@ -729,9 +735,9 @@ async fn run_foreground_unix(
             auth_token,
             admission_class,
         ));
-        client_tasks.spawn(hotpath::future!(
+        client_tasks.spawn(tracing::Instrument::instrument(
             with_connection_admission(permit, client),
-            label = "daemon.bootstrap.socket_connection"
+            tracing::trace_span!("daemon.bootstrap.socket_connection"),
         ));
     }
     engine.lifecycle.begin_draining();
@@ -810,7 +816,7 @@ async fn run_foreground_unix(
 /// daemon's resident-memory authority and the background CPU authority the
 /// worker plan just installed. Account-deletion-only boots return before this
 /// point and never start projectless capture work.
-#[hotpath::measure(label = "daemon.bootstrap.worker_plan", future = true)]
+#[tracing::instrument(name = "daemon.bootstrap.worker_plan", level = "trace", skip_all)]
 async fn install_profile_worker_plan(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -921,7 +927,7 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.bootstrap.prepare_socket", future = true)]
+#[tracing::instrument(name = "daemon.bootstrap.prepare_socket", level = "trace", skip_all)]
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {

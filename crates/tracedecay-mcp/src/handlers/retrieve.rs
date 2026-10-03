@@ -32,7 +32,7 @@ const RETRIEVE_PAGE_HEADER_ALLOWANCE: usize = 2_048;
 const RETRIEVE_FRAME_RESERVED_BYTES: usize = 256;
 const RETRY_INSTRUCTION: &str = "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.";
 
-#[hotpath::measure(future = true, label = "mcp.retrieve.handle.total")]
+#[tracing::instrument(name = "mcp.retrieve.handle.total", level = "trace", skip_all)]
 pub async fn compute_retrieve(
     response_handle_root: &Path,
     args: &Value,
@@ -57,11 +57,11 @@ pub async fn compute_retrieve(
     let lookup = {
         let root = response_handle_root.to_path_buf();
         let handle = request.handle.clone();
-        hotpath::future!(
+        tracing::Instrument::instrument(
             tokio::task::spawn_blocking(move || {
                 retrieve_response_handle(&root, &handle, current_timestamp())
             }),
-            label = "mcp.retrieve.handle.load"
+            tracing::trace_span!("mcp.retrieve.handle.load"),
         )
         .await
         .map_err(|join_error| TraceDecayError::Config {

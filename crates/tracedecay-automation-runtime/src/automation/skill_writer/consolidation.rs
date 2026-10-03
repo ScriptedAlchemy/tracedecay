@@ -69,7 +69,11 @@ fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<S
     Ok(reason)
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_consolidation.archive_proposal")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.archive_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn skill_archive_from_proposal(
     proposal: &Value,
     existing_skills: &BTreeMap<String, ManagedSkill>,
@@ -96,7 +100,11 @@ pub(super) fn skill_archive_from_proposal(
     })
 }
 
-#[hotpath::measure(label = "hosts.automation.skill_consolidation.merge_proposal")]
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.merge_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn skill_merge_from_proposal(
     proposal: &Value,
     existing_skills: &BTreeMap<String, ManagedSkill>,
@@ -176,9 +184,10 @@ pub(super) fn skill_merge_from_proposal(
 /// Applies an archive as one checksum-fenced, crash-recoverable lifecycle
 /// transaction whose committed revision durably carries the typed
 /// skill-overlap removal tombstone as its archived reason.
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.skill_consolidation.apply_archive"
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.apply_archive",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn apply_skill_archive(
     profile_root: &Path,
@@ -197,9 +206,10 @@ pub(super) async fn apply_skill_archive(
 /// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
 /// transaction. The source stays on disk in `Archived` state, preserving its
 /// provenance without leaving an intermediate revision behind.
-#[hotpath::measure(
-    future = true,
-    label = "hosts.automation.skill_consolidation.apply_merge"
+#[tracing::instrument(
+    name = "hosts.automation.skill_consolidation.apply_merge",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn apply_skill_merge(
     profile_root: &Path,

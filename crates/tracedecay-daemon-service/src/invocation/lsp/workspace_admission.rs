@@ -20,7 +20,11 @@ pub(super) enum CurrentLspWorkspaceAuthorityV1 {
 }
 
 impl DaemonInvocationService {
-    #[hotpath::measure(label = "daemon.service.lsp.workspace_authority", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.workspace_authority",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn current_lsp_workspace_authority(
         &self,
         workspace: &AuthorizedLspWorkspace,
@@ -89,7 +93,11 @@ impl DaemonInvocationService {
         Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.authorize_workspace", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.authorize_workspace",
+        level = "trace",
+        skip_all
+    )]
     pub async fn authorize_lsp_workspace(
         &self,
         mut roots: Vec<(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)>,
@@ -120,7 +128,11 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.service.lsp.authorize_federated", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.authorize_federated",
+        level = "trace",
+        skip_all
+    )]
     async fn authorize_federated_lsp_workspace(
         &self,
         roots: &[(PathBuf, String, ResolvedScope, RegisteredRootLocatorV1)],

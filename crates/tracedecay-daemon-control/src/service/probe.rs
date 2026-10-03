@@ -247,7 +247,11 @@ impl std::fmt::Display for DaemonProtocolState {
     }
 }
 
-#[hotpath::measure(label = "daemon.service.probe.protocol_state")]
+#[tracing::instrument(
+    name = "daemon.service.probe.protocol_state",
+    level = "trace",
+    skip_all
+)]
 // Only the Windows task path and the update-restore tests probe with an
 // explicit timeout since readiness unified on one authenticated connection.
 #[cfg(any(test, windows))]
@@ -290,7 +294,7 @@ fn classify_daemon_protocol_identity(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.service.probe.readiness")]
+#[tracing::instrument(name = "daemon.service.probe.readiness", level = "trace", skip_all)]
 pub(super) fn daemon_readiness_probe(
     profile: &ProfileRoot,
     socket_path: &Path,
@@ -349,7 +353,7 @@ pub(super) fn daemon_readiness_probe(
 }
 
 #[cfg(not(unix))]
-#[hotpath::measure(label = "daemon.service.probe.readiness")]
+#[tracing::instrument(name = "daemon.service.probe.readiness", level = "trace", skip_all)]
 pub(super) fn daemon_readiness_probe(
     profile: &ProfileRoot,
     transport_hint: &Path,

@@ -491,30 +491,33 @@ impl Worker {
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
         let mut hard_checkpoint_retry_due = None;
         loop {
-            hotpath::measure_block!("rusqlite.writer.drain_ingress", {
-                drain_ingress(
-                    &mut self.receiver,
-                    &mut queue,
-                    &mut inflight,
-                    &self.telemetry,
-                    &mut input_closed,
-                );
-                drain_command_ingress(
-                    &mut self.checkpoint_receiver,
-                    &mut checkpoint_queue,
-                    &mut checkpoint_closed,
-                );
-                drain_command_ingress(
-                    &mut self.exact_sql_receiver,
-                    &mut exact_sql_queue,
-                    &mut exact_sql_closed,
-                );
-                drain_command_ingress(
-                    &mut self.incremental_vacuum_receiver,
-                    &mut incremental_vacuum_queue,
-                    &mut incremental_vacuum_closed,
-                );
-            });
+            {
+                let _span = tracing::trace_span!("rusqlite.writer.drain_ingress").entered();
+                {
+                    drain_ingress(
+                        &mut self.receiver,
+                        &mut queue,
+                        &mut inflight,
+                        &self.telemetry,
+                        &mut input_closed,
+                    );
+                    drain_command_ingress(
+                        &mut self.checkpoint_receiver,
+                        &mut checkpoint_queue,
+                        &mut checkpoint_closed,
+                    );
+                    drain_command_ingress(
+                        &mut self.exact_sql_receiver,
+                        &mut exact_sql_queue,
+                        &mut exact_sql_closed,
+                    );
+                    drain_command_ingress(
+                        &mut self.incremental_vacuum_receiver,
+                        &mut incremental_vacuum_queue,
+                        &mut incremental_vacuum_closed,
+                    );
+                }
+            };
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
@@ -634,14 +637,21 @@ impl Worker {
                             .pop_front()
                             .expect("exact SQL queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            crate::hotpath_observe::record_exact_sql_dispatch();
                             let started = Instant::now();
                             let connection = checkpoint.connection_mut();
                             let rows_before = connection.total_changes();
                             let lock_work = LockWorkScope::enter();
-                            let reply = hotpath::measure_block!("rusqlite.writer.exact_sql", {
-                                run_writer_command(connection, command, &self.shutdown_requested)
-                            });
+                            let reply = {
+                                let _span =
+                                    tracing::trace_span!("rusqlite.writer.exact_sql").entered();
+                                {
+                                    run_writer_command(
+                                        connection,
+                                        command,
+                                        &self.shutdown_requested,
+                                    )
+                                }
+                            };
                             self.telemetry.exact_sql_command(
                                 1,
                                 connection.total_changes().saturating_sub(rows_before),
@@ -667,10 +677,14 @@ impl Worker {
                             .pop_front()
                             .expect("incremental vacuum queue checked non-empty");
                         if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            crate::hotpath_observe::record_incremental_vacuum_dispatch();
-                            hotpath::measure_block!("rusqlite.writer.incremental_vacuum", {
-                                run_incremental_vacuum(checkpoint.connection_mut(), command);
-                            });
+                            {
+                                let _span =
+                                    tracing::trace_span!("rusqlite.writer.incremental_vacuum")
+                                        .entered();
+                                {
+                                    run_incremental_vacuum(checkpoint.connection_mut(), command);
+                                }
+                            };
                         } else {
                             reject_incremental_vacuum(command);
                         }
@@ -732,26 +746,29 @@ impl Worker {
                 for item in selected {
                     let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                 }
-                hotpath::measure_block!("rusqlite.writer.batch_dwell", {
-                    runtime.block_on(dwell_for_batch(
-                        pending,
-                        &mut self.receiver,
-                        &mut self.exact_sql_receiver,
-                        &mut self.incremental_vacuum_receiver,
-                        &mut self.checkpoint_receiver,
-                        &mut self.shutdown_receiver,
-                        &mut queue,
-                        &mut inflight,
-                        &mut exact_sql_queue,
-                        &mut incremental_vacuum_queue,
-                        &mut checkpoint_queue,
-                        &self.telemetry,
-                        &mut input_closed,
-                        &mut exact_sql_closed,
-                        &mut incremental_vacuum_closed,
-                        &mut checkpoint_closed,
-                    ));
-                });
+                {
+                    let _span = tracing::trace_span!("rusqlite.writer.batch_dwell").entered();
+                    {
+                        runtime.block_on(dwell_for_batch(
+                            pending,
+                            &mut self.receiver,
+                            &mut self.exact_sql_receiver,
+                            &mut self.incremental_vacuum_receiver,
+                            &mut self.checkpoint_receiver,
+                            &mut self.shutdown_receiver,
+                            &mut queue,
+                            &mut inflight,
+                            &mut exact_sql_queue,
+                            &mut incremental_vacuum_queue,
+                            &mut checkpoint_queue,
+                            &self.telemetry,
+                            &mut input_closed,
+                            &mut exact_sql_closed,
+                            &mut incremental_vacuum_closed,
+                            &mut checkpoint_closed,
+                        ));
+                    }
+                };
                 // A probe cannot notify this actor directly, so every dwell
                 // wake and the hard deadline re-poll interruption and
                 // authority before auxiliary scheduling can add more delay.
@@ -848,11 +865,12 @@ impl Worker {
     }
 
     fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
-        crate::hotpath_observe::record_scheduled_checkpoint_dispatch();
         let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
-        match hotpath::measure_block!("rusqlite.writer.checkpoint", {
+        let match_result = {
+            let _span = tracing::trace_span!("rusqlite.writer.checkpoint").entered();
             checkpoint.evaluate_scheduled(snapshot_blockers)
-        }) {
+        };
+        match match_result {
             Ok(result) => self.publish_checkpoint_result(result),
             // A scheduled checkpoint that could not run this time because
             // readers still hold snapshots, the authority lapsed, or SQLite
@@ -876,7 +894,6 @@ impl Worker {
             command.settle(Err(error));
             return;
         }
-        crate::hotpath_observe::record_requested_checkpoint_dispatch();
         self.checkpoint_blockers.await_released_snapshots();
         let (snapshot_blockers, kind, authority, reply) = command.into_parts();
         let result = match kind {
@@ -1014,7 +1031,11 @@ fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
     }
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.writer.execution_batch")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.writer.execution_batch",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
     connection: &mut rusqlite::Connection,
     binding: &StoreRuntimeBindingV1,
@@ -1025,19 +1046,11 @@ pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
     watermark_publisher: &CommittedWatermarkPublisher,
 ) {
     // Freeze queue latency at the service boundary. It deliberately includes
-    // configured coalescing dwell, whose own Hotpath span is separate, and
+    // configured coalescing dwell, whose own span is separate, and
     // must not re-read `enqueued_at` after transaction work has elapsed.
     let dequeued_at = Instant::now();
     let queue_wait_micros =
         queue_wait_micros(batch.items.iter().map(|item| item.enqueued_at), dequeued_at);
-    if let Some(first) = batch.items.first() {
-        crate::hotpath_observe::record_writer_batch(
-            first.priority(),
-            u64::try_from(batch.items.len()).unwrap_or(u64::MAX),
-            batch.bytes,
-            queue_wait_micros,
-        );
-    }
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.
@@ -1080,9 +1093,11 @@ fn run_incremental_vacuum(
         }));
         return;
     }
-    let transaction = match hotpath::measure_block!("rusqlite.begin_immediate", {
+    let match_result = {
+        let _span = tracing::trace_span!("rusqlite.begin_immediate").entered();
         connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    }) {
+    };
+    let transaction = match match_result {
         Ok(transaction) => transaction,
         Err(error) => {
             command.settle(Err(WriterActorError::IncrementalVacuumFailed(

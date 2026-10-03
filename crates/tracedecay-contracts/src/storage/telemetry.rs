@@ -195,7 +195,6 @@ pub enum StoreBudgetEvaluationV1 {
 
 impl StoreBudgetEvaluationV1 {
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_over_budget(&self) -> bool {
         matches!(self, Self::OverBudget { .. })
     }
@@ -337,7 +336,6 @@ impl TableGrowthDoctorEvidenceV1 {
     /// Doctor health state for this evidence. Ordinary growth is informational:
     /// it remains healthy with complete coverage.
     #[must_use]
-    #[hotpath::skip]
     pub const fn state(&self) -> DoctorEvidenceStateV1 {
         match self {
             Self::SignificantGrowth { .. } => DoctorEvidenceStateV1::HealthyCompleteCoverage,

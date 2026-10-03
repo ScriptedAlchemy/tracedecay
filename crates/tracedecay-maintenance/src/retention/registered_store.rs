@@ -60,7 +60,11 @@ impl RegisteredStoreRetentionReportV1 {
 
 /// Runs every registered-store retention kernel without owning cadence,
 /// writer admission, or process logging.
-#[hotpath::measure(label = "maintenance.registered_store.retention", future = true)]
+#[tracing::instrument(
+    name = "maintenance.registered_store.retention",
+    level = "trace",
+    skip_all
+)]
 pub async fn run_registered_store_retention(
     database: &RegisteredGlobalDb,
     session_lcm: &LcmRetentionConfig,

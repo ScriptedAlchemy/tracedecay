@@ -42,7 +42,6 @@ const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 mod parent_dispatch_index;
 pub(in crate::runtime) mod projection;
 mod sweep_page;
-use parent_dispatch_index::record_dispatch_scan_gauges;
 pub use parent_dispatch_index::{
     DispatchScanReceipt, parent_dispatch_model_for_subagent,
     parent_dispatch_model_for_subagent_with_receipt,
@@ -228,20 +227,15 @@ fn admit_cursor_jsonl_observations<'a>(
         )
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
-        let subagent_model = hotpath::measure_block!(
-            "sessions.hosts.cursor.dispatch_model_blocking",
+        let subagent_model = {
+            let _span =
+                tracing::trace_span!("sessions.hosts.cursor.dispatch_model_blocking").entered();
             run_blocking_transcript_section(|| {
                 subagent.as_ref().and_then(|(_, agent_id)| {
-                    let (model, receipt) = parent_dispatch_model_for_subagent_with_receipt(
-                        path,
-                        parent_session_id,
-                        agent_id,
-                    );
-                    record_dispatch_scan_gauges(receipt);
-                    model
+                    parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
                 })
             })
-        );
+        };
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
@@ -431,7 +425,11 @@ pub async fn try_ingest_cursor_transcript_event_capped(
     .await
 }
 
-#[hotpath::measure(label = "sessions.hosts.cursor.ingest_event_capped", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.cursor.ingest_event_capped",
+    level = "trace",
+    skip_all
+)]
 pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     event_json: &str,
     project_id: ProjectId,
@@ -467,10 +465,10 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
+    let paths = {
+        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
         run_blocking_transcript_section(|| source.transcript_paths(&project_root))
-    );
+    };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, false);
@@ -616,10 +614,10 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
+    let paths = {
+        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
         run_blocking_transcript_section(|| source.transcript_paths(&placeholder))
-    );
+    };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
         let context = cursor_observation_context(&source.event, &path, true);
@@ -718,7 +716,7 @@ fn retryable_cursor_conflict(error: &TranscriptIngestError) -> bool {
     )
 }
 
-#[hotpath::measure(label = "sessions.hosts.cursor.sweep_admit", future = true)]
+#[tracing::instrument(name = "sessions.hosts.cursor.sweep_admit", level = "trace", skip_all)]
 async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
     project_root: &Path,
@@ -739,10 +737,10 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         .await
         .map_err(|outcome| host_admission_error("cursor", outcome))?
         .unwrap_or_default();
-    let page = hotpath::measure_block!(
-        "sessions.hosts.cursor.discover_blocking",
+    let page = {
+        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
         run_blocking_transcript_section(|| source.sweep_page(project_root, frontier.byte_offset))
-    );
+    };
     let mut admitted = CursorSourceAdmissionTally::default();
     let mut unfinished = None;
     for (offset, files) in page.sessions.iter().enumerate() {
@@ -947,7 +945,11 @@ impl CursorSweepSource {
     }
 
     /// The bounded sweep page that starts at corpus position `resume_at`.
-    #[hotpath::measure(label = "sessions.hosts.cursor.sweep_discover")]
+    #[tracing::instrument(
+        name = "sessions.hosts.cursor.sweep_discover",
+        level = "trace",
+        skip_all
+    )]
     fn sweep_page(&self, project_root: &Path, resume_at: u64) -> CursorSweepPage {
         let corpus = list_cursor_sweep_corpus(&self.transcripts_dirs(project_root));
         let user_scope = self.user_registered_slugs.is_some();

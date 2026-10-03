@@ -473,7 +473,7 @@ fn release_agent(
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        http_agent(super::instrument_github_ureq_agent(builder).build())
+        http_agent(builder.build())
     })
 }
 

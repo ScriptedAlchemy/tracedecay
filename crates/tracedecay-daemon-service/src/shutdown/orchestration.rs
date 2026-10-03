@@ -12,7 +12,7 @@ use super::lifecycle::{
     DaemonLifecycle, DaemonShutdownClaim,
 };
 use super::owners::{
-    DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
+    ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
 };
 use tracedecay_domain::errors::Result;
@@ -94,7 +94,7 @@ impl DaemonShutdownBudget {
     }
 }
 
-/// Operator receipts for one serial shutdown phase. Hotpath already measures
+/// Operator receipts for one serial shutdown phase. Spans already measure
 /// these windows (`daemon.shutdown.project_servers` / `store_close`; inner
 /// work includes `mcp.server.shutdown` and `graph_db.runtime.close.engine`).
 fn log_shutdown_phase(
@@ -172,9 +172,6 @@ pub struct DaemonShutdownReceipt {
 
 impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
-        // Coordinator-level failures never reach the per-phase counters, so
-        // they are recorded here or the waste is invisible to profiling.
-        hotpath::gauge!("daemon.shutdown.coordinator.failed_total").inc(1_u64);
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -184,7 +181,6 @@ impl DaemonShutdownReceipt {
     }
 
     fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
-        hotpath::gauge!("daemon.shutdown.coordinator.timed_out_total").inc(1_u64);
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
@@ -263,13 +259,10 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
     *status = ShutdownStatus::Failed(errors.join("; retry failed: "));
 }
 
-#[hotpath::measure(label = "daemon.shutdown.coordinate", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
-    )
+#[tracing::instrument(name = "daemon.shutdown.coordinate", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
 )]
 pub async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
@@ -343,13 +336,16 @@ where
                 // Publishing the terminal receipt is the shutdown checkpoint:
                 // once it lands, every concurrent waiter observes this
                 // outcome instead of racing a duplicate shutdown attempt.
-                hotpath::measure_block!("daemon.shutdown.checkpoint", {
-                    coordinator_lifecycle.finish_shutdown_attempt(
-                        &coordinator_attempt,
-                        Arc::new(receipt),
-                        coordinator_failures,
-                    );
-                });
+                {
+                    let _span = tracing::trace_span!("daemon.shutdown.checkpoint").entered();
+                    {
+                        coordinator_lifecycle.finish_shutdown_attempt(
+                            &coordinator_attempt,
+                            Arc::new(receipt),
+                            coordinator_failures,
+                        );
+                    }
+                };
                 // A timed-out runner may be inside synchronous third-party or
                 // filesystem work that cannot observe abort immediately. Keep
                 // the coordinator task owned until that runner actually exits;
@@ -400,13 +396,10 @@ where
     receipt
 }
 
-#[hotpath::measure(label = "daemon.shutdown.run", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Daemon shutdown is one ordered client-drain then owner-phase list."
-    )
+#[tracing::instrument(name = "daemon.shutdown.run", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon shutdown is one ordered client-drain then owner-phase list."
 )]
 async fn run_daemon_shutdown(
     lifecycle: DaemonLifecycle,
@@ -432,64 +425,65 @@ async fn run_daemon_shutdown(
         client_drain_started,
         client_drain_deadline,
     );
-    let (in_flight, clients) = hotpath::measure_block!("daemon.shutdown.client_drain", {
-        let _draining = DrainingGauge::arm("daemon.shutdown.draining.clients");
-        let in_flight = loop {
-            tokio::select! {
-                receipt = &mut background_shutdown, if background_receipt.is_none() => {
-                    background_receipt = Some(receipt);
+    let (in_flight, clients) = {
+        use tracing::Instrument as _;
+        async {
+            let in_flight = loop {
+                tokio::select! {
+                    receipt = &mut background_shutdown, if background_receipt.is_none() => {
+                        background_receipt = Some(receipt);
+                    }
+                    drained = &mut in_flight => {
+                        break match drained {
+                            Ok(()) => ShutdownStatus::Clean,
+                            Err(_) => ShutdownStatus::TimedOut,
+                        };
+                    }
                 }
-                drained = &mut in_flight => {
-                    break match drained {
-                        Ok(()) => ShutdownStatus::Clean,
-                        Err(_) => ShutdownStatus::TimedOut,
-                    };
-                }
-            }
-        };
+            };
 
-        plan.clients.abort_all();
-        let client_join_deadline = std::cmp::min(
-            tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE,
-            budget.client_drain(),
-        );
-        let clients = join_aborted_clients_until(&mut plan.clients, client_join_deadline).await;
-        let clients = if tokio::time::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
-            .await
-            .is_err()
-        {
-            ShutdownStatus::TimedOut
-        } else {
-            clients
-        };
-        (in_flight, clients)
-    });
+            plan.clients.abort_all();
+            let client_join_deadline = std::cmp::min(
+                tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE,
+                budget.client_drain(),
+            );
+            let clients = join_aborted_clients_until(&mut plan.clients, client_join_deadline).await;
+            let clients =
+                if tokio::time::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
+                    .await
+                    .is_err()
+                {
+                    ShutdownStatus::TimedOut
+                } else {
+                    clients
+                };
+            (in_flight, clients)
+        }
+        .instrument(tracing::trace_span!("daemon.shutdown.client_drain"))
+        .await
+    };
     log_shutdown_phase(
         "client_drain",
         "complete",
         client_drain_started,
         client_drain_deadline,
     );
-    // Forced vs graceful: graceful means in-flight client work idled out
-    // cooperatively before the drain deadline; forced means the deadline
-    // expired and the abort/join path did the draining.
-    if in_flight.is_clean() {
-        hotpath::gauge!("daemon.shutdown.client_drain.graceful_total").inc(1_u64);
-    } else {
-        hotpath::gauge!("daemon.shutdown.client_drain.forced_total").inc(1_u64);
-    }
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
     // span only measures the residual wait when it was not.
     let background_drain_started = tokio::time::Instant::now();
-    let mut background = hotpath::measure_block!("daemon.shutdown.background_drain", {
-        let _draining = DrainingGauge::arm("daemon.shutdown.draining.background");
-        match background_receipt {
-            Some(receipt) => receipt,
-            None => background_shutdown.await,
+    let mut background = {
+        use tracing::Instrument as _;
+        async {
+            match background_receipt {
+                Some(receipt) => receipt,
+                None => background_shutdown.await,
+            }
         }
-    });
+        .instrument(tracing::trace_span!("daemon.shutdown.background_drain"))
+        .await
+    };
     log_shutdown_phase(
         "background_drain",
         "complete",
@@ -508,21 +502,25 @@ async fn run_daemon_shutdown(
         project_servers_started,
         project_server_deadline,
     );
-    let project_servers = hotpath::measure_block!("daemon.shutdown.project_servers", {
-        let _draining = DrainingGauge::arm("daemon.shutdown.draining.project_servers");
-        // The drain gets its phase deadline, so it reaches its own bounded
-        // join and reports one outcome *per named server*. The outer sleep is
-        // only the backstop for a drain that ignores its deadline; it fires
-        // late enough that the named receipt normally wins the race.
-        let mut drain = (plan.project_server_shutdown)(project_server_deadline);
-        tokio::select! {
-            biased;
-            receipt = &mut drain => receipt,
-            () = tokio::time::sleep_until(
-                project_server_deadline + DAEMON_TASK_ABORT_DEADLINE,
-            ) => ShutdownTaskReceipt::timed_out("project_server_shutdown"),
+    let project_servers = {
+        use tracing::Instrument as _;
+        async {
+            // The drain gets its phase deadline, so it reaches its own bounded
+            // join and reports one outcome *per named server*. The outer sleep is
+            // only the backstop for a drain that ignores its deadline; it fires
+            // late enough that the named receipt normally wins the race.
+            let mut drain = (plan.project_server_shutdown)(project_server_deadline);
+            tokio::select! {
+                biased;
+                receipt = &mut drain => receipt,
+                () = tokio::time::sleep_until(
+                    project_server_deadline + DAEMON_TASK_ABORT_DEADLINE,
+                ) => ShutdownTaskReceipt::timed_out("project_server_shutdown"),
+            }
         }
-    });
+        .instrument(tracing::trace_span!("daemon.shutdown.project_servers"))
+        .await
+    };
     log_shutdown_phase(
         "project_servers",
         "complete",
@@ -542,12 +540,15 @@ async fn run_daemon_shutdown(
             store_close_started,
             store_close_deadline,
         );
-        let receipt = hotpath::measure_block!("daemon.shutdown.store_close", {
-            let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
-            prepare_shutdown_owner_phases(plan.terminal_owner_phases)
-                .join(store_close_deadline)
-                .await
-        });
+        let receipt = {
+            use tracing::Instrument as _;
+            {
+                prepare_shutdown_owner_phases(plan.terminal_owner_phases)
+                    .join(store_close_deadline)
+                    .instrument(tracing::trace_span!("daemon.shutdown.store_close"))
+                    .await
+            }
+        };
         log_shutdown_phase(
             "store_close",
             "complete",
@@ -565,28 +566,19 @@ async fn run_daemon_shutdown(
         ShutdownReceipt::timed_out(store_close_deadline, "memory_graph_reconciliation")
     };
     background.extend(terminal);
-    let receipt = DaemonShutdownReceipt {
+    DaemonShutdownReceipt {
         in_flight,
         clients,
         background,
         project_servers,
-    };
-    // Graceful means every lane drained cooperatively inside its budget;
-    // anything else, a timed-out owner, a forced client abort, a failed or
-    // timed-out project server, makes this attempt a forced shutdown.
-    if receipt.in_flight.is_clean()
-        && receipt.clients.is_clean()
-        && receipt.background.unfinished().is_empty()
-        && receipt.project_servers.is_clean()
-    {
-        hotpath::gauge!("daemon.shutdown.outcome.graceful_total").inc(1_u64);
-    } else {
-        hotpath::gauge!("daemon.shutdown.outcome.forced_total").inc(1_u64);
     }
-    receipt
 }
 
-#[hotpath::measure(label = "daemon.shutdown.join_aborted_clients", future = true)]
+#[tracing::instrument(
+    name = "daemon.shutdown.join_aborted_clients",
+    level = "trace",
+    skip_all
+)]
 async fn join_aborted_clients_until(
     clients: &mut JoinSet<Result<()>>,
     deadline: tokio::time::Instant,

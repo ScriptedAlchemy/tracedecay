@@ -277,10 +277,9 @@ impl ReservationClaimState {
 
 impl Drop for AutomationReservationClaim {
     fn drop(&mut self) {
-        // Each claim incremented the in-flight gauge exactly once at
+        // Each claim registered itself exactly once at
         // acquisition; dropping the owner (settled, abandoned, panicked, or
         // cancelled) is the one release point.
-        hotpath::gauge!("daemon.automation.effect.in_flight").dec(1_u64);
         let mut claims = reservation_claims_guard();
         if claims
             .get(&self.path)
@@ -314,7 +313,6 @@ fn acquire_reservation_claim(path: &Path) -> Result<AutomationReservationClaim> 
     }
     let token = Arc::new(ReservationClaimState::default());
     claims.insert(path.to_path_buf(), Arc::downgrade(&token));
-    hotpath::gauge!("daemon.automation.effect.in_flight").inc(1_u64);
     Ok(AutomationReservationClaim {
         path: path.to_path_buf(),
         token,
@@ -349,7 +347,11 @@ pub fn reserve_or_replay_blocking(
     reserve_or_replay_with_index(path, requested, || Ok(()), || Ok(()))
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.reserve_or_replay")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.reserve_or_replay",
+    level = "trace",
+    skip_all
+)]
 pub fn reserve_or_replay_indexed_blocking(
     path: &Path,
     requested: DurableAutomationAdmission,
@@ -597,7 +599,11 @@ pub fn unbound_reserved_cleanup_is_safe_blocking(
 /// Persists the terminal produced by canonical receipt reconciliation for a
 /// reservation owned by a prior process. This is the only path allowed to
 /// close a foreign reservation, and it retains the original admission bytes.
-#[hotpath::measure(label = "daemon.automation.effect.persist_recovered")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_recovered",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_recovered_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -665,7 +671,11 @@ pub fn persist_recovered_terminal_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.persist_prepared")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -777,7 +787,11 @@ pub fn replay_exact_binding_after_error_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.promote_prepared")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.promote_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn promote_prepared_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -889,7 +903,11 @@ fn promote_prepared_terminal_with_writers(
 }
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.persist_terminal")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_terminal",
+    level = "trace",
+    skip_all
+)]
 pub fn persist_terminal_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -962,7 +980,7 @@ pub fn persist_terminal_blocking(
     })
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.abandon")]
+#[tracing::instrument(name = "daemon.automation.effect.abandon", level = "trace", skip_all)]
 pub fn abandon_reservation_blocking(
     path: &Path,
     requested: &DurableAutomationAdmission,
@@ -1231,7 +1249,7 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 test_helpers_pub! {
-#[hotpath::measure(label = "daemon.automation.effect.journal_write")]
+#[tracing::instrument(name = "daemon.automation.effect.journal_write", level = "trace", skip_all)]
 fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
     let written = write_record_with_publisher(path, record, |temporary, destination| {
         replace_automation_file_atomically(temporary, destination, "automation terminal journal")
@@ -1342,7 +1360,7 @@ fn terminal_binding(
 }
 
 test_helpers_pub! {
-#[hotpath::measure(label = "daemon.automation.effect.sidecar_write")]
+#[tracing::instrument(name = "daemon.automation.effect.sidecar_write", level = "trace", skip_all)]
 fn write_terminal_sidecar(
     journal_path: &Path,
     terminal: &AutomationSettledTerminal,

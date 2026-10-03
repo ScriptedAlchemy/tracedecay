@@ -28,7 +28,11 @@ pub(super) fn payload_summary_query(
     (sql, scope.into_values())
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.payload_summary", future = true)]
+#[tracing::instrument(
+    name = "sessions.lcm.status.payload_summary",
+    level = "trace",
+    skip_all
+)]
 pub async fn payload_health_summary(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -91,7 +95,7 @@ pub async fn payload_health_summary(
     })
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.payload_detail", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.payload_detail", level = "trace", skip_all)]
 pub async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,

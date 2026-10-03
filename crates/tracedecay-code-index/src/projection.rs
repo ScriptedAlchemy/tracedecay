@@ -173,7 +173,11 @@ impl ProjectionPublicationHandoffV1 {
 /// private witness that its publication digest was sealed canonically against
 /// the verified request in this call chain. Every receipt's self-declared
 /// request digest is still compared against the recomputed expectation.
-#[hotpath::measure(label = "code_index.build.project_publication")]
+#[tracing::instrument(
+    name = "code_index.build.project_publication",
+    level = "trace",
+    skip_all
+)]
 pub fn project_for_publication<S: CodeChunkProjectionSink>(
     sink: &mut S,
     request: ProjectionBatchRequestV1,

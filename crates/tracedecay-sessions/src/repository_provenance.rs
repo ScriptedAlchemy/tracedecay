@@ -205,7 +205,7 @@ impl RepositoryProvenanceAdmissionContext {
     /// The mutex covers the miss and capture, coalescing concurrent records
     /// without a second repository traversal. A changed watermark invalidates
     /// immediately; unstable reads are returned but never cached.
-    #[hotpath::measure(label = "sessions.provenance.snapshot")]
+    #[tracing::instrument(name = "sessions.provenance.snapshot", level = "trace", skip_all)]
     pub fn capture_snapshot(&self, captured_at: UtcMicros) -> CapturedRepositoryProvenanceV1 {
         let Some(before) = repository_provenance_watermark(&self.project_root) else {
             return self.capture_snapshot_uncached(captured_at);
@@ -308,7 +308,6 @@ pub struct PreparedRepositoryProvenanceV1 {
 }
 
 impl PreparedRepositoryProvenanceV1 {
-    #[hotpath::skip]
     pub const fn unavailable() -> Self {
         Self {
             availability: EvidenceAvailabilityV1::Unavailable,
@@ -369,7 +368,7 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
 pub struct NativeRepositoryProvenanceProbe;
 
 impl NativeRepositoryProvenanceProbe {
-    #[hotpath::measure(label = "sessions.provenance.capture")]
+    #[tracing::instrument(name = "sessions.provenance.capture", level = "trace", skip_all)]
     pub fn capture(
         &self,
         request: &RepositoryProvenanceProbeRequest<'_>,
@@ -466,7 +465,7 @@ pub fn capture_repository_provenance(
     NativeRepositoryProvenanceProbe.capture(request)
 }
 
-#[hotpath::measure(label = "sessions.provenance.bind")]
+#[tracing::instrument(name = "sessions.provenance.bind", level = "trace", skip_all)]
 fn prepare_generation_binding(
     captured: EvidenceAvailabilityV1<RepositoryProvenanceV1>,
     observation: &DurableObservationV1,

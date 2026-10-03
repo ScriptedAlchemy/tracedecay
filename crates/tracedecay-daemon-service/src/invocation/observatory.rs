@@ -26,7 +26,7 @@ async fn read_registered_observatory(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.observatory.read", future = true)]
+#[tracing::instrument(name = "daemon.service.observatory.read", level = "trace", skip_all)]
 pub(super) async fn execute_observatory_read(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,

@@ -61,7 +61,11 @@ pub struct WorktreeStatSweepV1 {
 /// A cheap stat-level sweep over every ordinary or explicitly admitted source
 /// candidate. Ignored admissions are part of the sweep even though gix
 /// deliberately omits them from its ordinary candidate set.
-#[hotpath::measure(label = "daemon.code_index.freshness.stat_signature")]
+#[tracing::instrument(
+    name = "daemon.code_index.freshness.stat_signature",
+    level = "trace",
+    skip_all
+)]
 pub fn worktree_stat_sweep(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
@@ -69,10 +73,8 @@ pub fn worktree_stat_sweep(
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
-    // One sweep span plus an entries gauge: the stat walk is O(candidates) and
-    // must never publish one profiler event per file.
-    hotpath::gauge!("daemon.code_index.freshness.stat_signature.candidates")
-        .set(candidate_roster.len() as u64);
+    // One sweep span covers the O(candidates) stat walk. Never emit one
+    // trace event per file.
     let mut buf = Vec::new();
     for candidate in candidate_roster {
         let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {
@@ -533,7 +535,11 @@ impl SourceSweepCacheV1 {
     /// every candidate's canonical digest equals its manifest entry (or the
     /// privacy boundary withholds it and the manifest agrees). Digests no
     /// settled key vouches for are re-derived across the indexing pool.
-    #[hotpath::measure(label = "daemon.code_index.freshness.source_sweep")]
+    #[tracing::instrument(
+        name = "daemon.code_index.freshness.source_sweep",
+        level = "trace",
+        skip_all
+    )]
     pub fn witness_matches(
         &mut self,
         project_root: &Path,
@@ -628,8 +634,6 @@ impl SourceSweepCacheV1 {
         .flatten()
         .collect::<Vec<_>>();
         stats.candidates = present.len();
-        hotpath::gauge!("daemon.code_index.freshness.source_sweep.candidates")
-            .set(present.len() as u64);
         let present_paths = present
             .iter()
             .map(|(candidate, _)| candidate.logical_path.as_str())
@@ -655,8 +659,6 @@ impl SourceSweepCacheV1 {
             }
         }
         stats.hashed = unvouched.len();
-        hotpath::gauge!("daemon.code_index.freshness.source_sweep.hashed")
-            .set(unvouched.len() as u64);
         let derive = |candidate: &StatCandidateV1| {
             if shutting_down.load(Ordering::Acquire) {
                 CandidateContentV1::Unreadable

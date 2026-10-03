@@ -102,7 +102,7 @@ impl Drop for ActiveHttpRequest {
     }
 }
 
-#[hotpath::measure(label = "application_surface.http_context")]
+#[tracing::instrument(name = "application_surface.http_context", level = "trace", skip_all)]
 pub(super) async fn application_http_context(
     State(cancellations): State<HttpCancellationRegistry>,
     mut request: Request<Body>,
@@ -170,9 +170,9 @@ pub(super) async fn application_http_context(
         deadline,
         cancellation: cancellation.clone(),
     });
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         next.run(request),
-        label = "application_surface.http.dispatch"
+        tracing::trace_span!("application_surface.http.dispatch"),
     )
     .await;
     active.finish();

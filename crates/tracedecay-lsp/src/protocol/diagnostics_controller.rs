@@ -242,7 +242,7 @@ where
             self.diagnostics.native_upstream.remove(&uri);
         }
     }
-    #[hotpath::measure(label = "lsp.diagnostics.pull", impl_type = "DaemonLspProtocolSession")]
+    #[tracing::instrument(name = "lsp.diagnostics.pull", level = "trace", skip_all)]
     pub(crate) fn pull_diagnostics(
         &mut self,
         uri: &str,
@@ -376,17 +376,12 @@ where
         Ok(value)
     }
 
-    #[hotpath::measure(
-        label = "lsp.diagnostics.flush_cycle",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp.diagnostics.flush_cycle", level = "trace", skip_all)]
     pub(super) fn flush_debounced_diagnostics(&mut self, now_ms: u64) {
         if self.lifecycle.control.lifecycle() != SessionLifecycle::Ready {
             return;
         }
         self.poll_diagnostic_refreshes();
-        hotpath::gauge!("lsp.diagnostics.refreshes.active")
-            .set(self.diagnostics.active_refreshes.len());
         while self.has_outbound_capacity(MAX_PUBLICATION_BYTES) {
             let Some(scheduled) = self.diagnostics.debounce.take_next_due(now_ms) else {
                 break;
@@ -497,10 +492,7 @@ where
         }
     }
 
-    #[hotpath::measure(
-        label = "lsp.diagnostics.refresh_poll",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp.diagnostics.refresh_poll", level = "trace", skip_all)]
     pub(super) fn poll_diagnostic_refresh(&mut self, uri: &str) {
         let Some(pending) = self.diagnostics.active_refreshes.get(uri).cloned() else {
             return;
@@ -627,10 +619,7 @@ where
         true
     }
 
-    #[hotpath::measure(
-        label = "lsp_diagnostics_merge_document",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_diagnostics_merge_document", level = "trace", skip_all)]
     pub(super) fn merge_document_diagnostics(
         &self,
         uri: &str,
@@ -665,10 +654,7 @@ where
             .collect()
     }
 
-    #[hotpath::measure(
-        label = "lsp_diagnostics_publish",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_diagnostics_publish", level = "trace", skip_all)]
     pub(super) fn publish_diagnostics(
         &mut self,
         uri: &str,

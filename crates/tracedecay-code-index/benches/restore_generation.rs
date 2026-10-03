@@ -5,12 +5,11 @@
 //! bytes that store actually holds. This target takes a directory holding a
 //! revision-7 generation manifest plus its file and evidence segments, decodes
 //! it once through the production entry point, and reports the wall time, the
-//! process CPU the decode consumed, and the byte rate per segment. The Hotpath
-//! timing report decomposes the phases inside one segment decode.
+//! process CPU the decode consumed, and the byte rate per segment; tracing
+//! spans decompose the phases inside one segment decode.
 //!
 //! ```text
-//! cargo bench -p tracedecay-code-index --features hotpath \
-//!   --bench restore_generation -- <dir> [restores]
+//! cargo bench -p tracedecay-code-index --bench restore_generation -- <dir> [restores]
 //! ```
 //!
 //! `<dir>/manifest.json` is the generation file copied from
@@ -37,12 +36,6 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1,
 };
-
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
-const DEFAULT_HOTPATH_PATH: &str = "/tmp/tracedecay-restore-generation.json";
 
 #[derive(Serialize)]
 struct Measurement {
@@ -89,20 +82,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             .max(1),
         None => 1,
     };
-    configure_hotpath();
     let manifest = std::fs::read(root.join("manifest.json"))?;
     let segments = root.join("segments");
 
-    let guard = hotpath::HotpathGuardBuilder::new("restore-generation-bench")
-        .format(hotpath::Format::Json)
-        .output_path(hotpath_output_path())
-        .build();
     let cpu_before = process_cpu_ns()?;
     let started = Instant::now();
     let completions = restore_concurrently(concurrent_restores, &manifest, &segments, started)?;
     let decode_wall_ns = u64::try_from(started.elapsed().as_nanos())?;
     let decode_cpu_ns = process_cpu_ns()?.saturating_sub(cpu_before);
-    drop(guard);
 
     let restored_files = completions.restored_files;
     let (file_segment_bytes, evidence_bytes) = directory_bytes(&segments)?;
@@ -268,24 +255,4 @@ fn process_cpu_ns() -> Result<u64, Box<dyn Error>> {
         );
     }
     Ok(total)
-}
-
-fn configure_hotpath() {
-    unsafe {
-        std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        if std::env::var_os("HOTPATH_REPORT").is_none() {
-            std::env::set_var("HOTPATH_REPORT", "functions-timing");
-        }
-        // The default report keeps only the costliest handful of spans, which
-        // hides the cheap phases a decode decomposition has to account for.
-        if std::env::var_os("HOTPATH_FUNCTIONS_LIMIT").is_none() {
-            std::env::set_var("HOTPATH_FUNCTIONS_LIMIT", "64");
-        }
-    }
-}
-
-fn hotpath_output_path() -> PathBuf {
-    std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_HOTPATH_PATH))
 }

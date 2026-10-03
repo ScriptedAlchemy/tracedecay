@@ -117,7 +117,7 @@ struct ReleaseDownload {
 
 /// Resolves both the platform archive and its checksum manifest from one
 /// GitHub release. An archive without `SHA256SUMS` is not installable.
-#[hotpath::measure(label = "cli.upgrade.fetch_release")]
+#[tracing::instrument(name = "cli.upgrade.fetch_release", level = "trace", skip_all)]
 fn fetch_release_download(
     api_base: &str,
     authorization: Option<&str>,
@@ -321,7 +321,7 @@ fn verify_sha256(actual: &str, expected: &str, asset_name: &str) -> Result<()> {
 
 /// Downloads and verifies the archive, then stages every required release
 /// member in an attempt-owned scratch directory. Nothing is published here.
-#[hotpath::measure(label = "cli.upgrade.download_and_stage")]
+#[tracing::instrument(name = "cli.upgrade.download_and_stage", level = "trace", skip_all)]
 fn download_and_stage(
     download: &ReleaseDownload,
     members: &[ReleaseMember],
@@ -527,7 +527,7 @@ fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMemb
 /// resolves relative link targets from the CWD and fails with `ENOENT`), and
 /// `$ORIGIN` is that target's directory. The path is captured before the
 /// swap because on Linux `/proc/self/exe` reads `… (deleted)` afterwards.
-#[hotpath::measure(label = "cli.upgrade.publish_release")]
+#[tracing::instrument(name = "cli.upgrade.publish_release", level = "trace", skip_all)]
 fn publish_release(staged: &StagedRelease) -> Result<(Option<PathBuf>, bool)> {
     #[cfg(unix)]
     {
@@ -1180,7 +1180,7 @@ pub fn show_channel() {
 /// Switch to a different channel by downloading the latest release from it.
 /// Package-manager installs are refused before anything is fetched: the
 /// manager owns those files, and no manager command switches channels.
-#[hotpath::measure(label = "cli.channel.switch")]
+#[tracing::instrument(name = "cli.channel.switch", level = "trace", skip_all)]
 pub fn switch_channel(profile: &ProfileRoot, target_channel: &str) -> Result<String> {
     switch_channel_for(profile, &cloud::detect_install_method(), target_channel)
 }

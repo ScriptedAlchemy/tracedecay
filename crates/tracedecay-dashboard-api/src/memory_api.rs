@@ -344,7 +344,7 @@ pub async fn overview(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let read_control = fact_read_control(&control);
             let limit = coerce_limit(params.limit, 25, memory_service::MEMORY_FACT_LIMIT_MAXIMUM);
@@ -609,17 +609,20 @@ pub async fn overview(
                 }
                 coverage
             };
-            let freshness = hotpath::measure_block!("dashboard_api.freshness.projection", {
-                if !request_timed_out
-                    && !request_cancelled
-                    && overview_ready
-                    && ready_read_count == 3
+            let freshness = {
+                let _span = tracing::trace_span!("dashboard_api.freshness.projection").entered();
                 {
-                    DashboardFreshnessV1::fresh_now()
-                } else {
-                    DashboardFreshnessV1::unknown()
+                    if !request_timed_out
+                        && !request_cancelled
+                        && overview_ready
+                        && ready_read_count == 3
+                    {
+                        DashboardFreshnessV1::fresh_now()
+                    } else {
+                        DashboardFreshnessV1::unknown()
+                    }
                 }
-            });
+            };
             crate::observe::record_freshness_state(freshness.state);
             let providers = match serde_json::from_value(memory_service::providers_payload()) {
                 Ok(providers) => providers,
@@ -645,7 +648,7 @@ pub async fn overview(
                 Some(payload),
             ))
         },
-        label = "dashboard_api.memory.overview"
+        tracing::trace_span!("dashboard_api.memory.overview"),
     )
     .await
 }
@@ -655,7 +658,7 @@ pub async fn status(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let result = memory_status_payload(&state, &fact_read_control(&control)).await;
             if let Some(state_label) = request_terminal_state(&control) {
@@ -680,7 +683,7 @@ pub async fn status(
                 )),
             }
         },
-        label = "dashboard_api.memory.status"
+        tracing::trace_span!("dashboard_api.memory.status"),
     )
     .await
 }
@@ -695,7 +698,7 @@ pub async fn fact_detail(
     RequestControl(control): RequestControl,
     JsonPath(fact_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let fact_id = match owned_fact_id(&state, fact_id) {
                 Ok(fact_id) => fact_id,
@@ -746,7 +749,7 @@ pub async fn fact_detail(
                 )),
             }
         },
-        label = "dashboard_api.memory.fact_detail"
+        tracing::trace_span!("dashboard_api.memory.fact_detail"),
     )
     .await
 }
@@ -758,7 +761,7 @@ pub async fn fact_trust_history(
     RequestControl(control): RequestControl,
     JsonPath(fact_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let fact_id = match owned_fact_id(&state, fact_id) {
                 Ok(fact_id) => fact_id,
@@ -792,7 +795,7 @@ pub async fn fact_trust_history(
                     .into_response(),
             }
         },
-        label = "dashboard_api.memory.trust_history"
+        tracing::trace_span!("dashboard_api.memory.trust_history"),
     )
     .await
 }
@@ -804,7 +807,7 @@ pub async fn projection(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<memory_service::MemoryProjectionPayloadV1> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
             let payload = memory_service::projection_payload(
@@ -824,7 +827,7 @@ pub async fn projection(
             }
             Json(payload)
         },
-        label = "dashboard_api.memory.projection"
+        tracing::trace_span!("dashboard_api.memory.projection"),
     )
     .await
 }
@@ -836,7 +839,7 @@ pub async fn similarity(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<memory_service::MemorySimilarityPayloadV1> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let min_similarity = memory_service::coerce_similarity_score(
                 params.min_similarity,
@@ -864,7 +867,7 @@ pub async fn similarity(
             }
             Json(payload)
         },
-        label = "dashboard_api.memory.similarity"
+        tracing::trace_span!("dashboard_api.memory.similarity"),
     )
     .await
 }
@@ -876,7 +879,7 @@ pub async fn oplog(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<memory_service::MemoryOplogPayloadV1> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = coerce_limit(params.limit, 50, 300);
             let payload =
@@ -891,7 +894,7 @@ pub async fn oplog(
             }
             Json(payload)
         },
-        label = "dashboard_api.memory.oplog"
+        tracing::trace_span!("dashboard_api.memory.oplog"),
     )
     .await
 }

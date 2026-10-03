@@ -77,7 +77,11 @@ async fn current_disposition(
         .transpose()?)
 }
 
-#[hotpath::measure(label = "runtime_core.db.anchor_derivatives_resolve")]
+#[tracing::instrument(
+    name = "runtime_core.db.anchor_derivatives_resolve",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn resolve_anchor_derivatives<O>(
     connection: &(impl QueryExecutor + Sync),
     owner: &O,
@@ -338,7 +342,11 @@ pub async fn append_retrieval_anchor_disposition_on(
 }
 
 impl super::Database {
-    #[hotpath::measure(label = "runtime_core.db.anchor_disposition_append")]
+    #[tracing::instrument(
+        name = "runtime_core.db.anchor_disposition_append",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn append_retrieval_anchor_disposition(
         &self,
         record: &RetrievalAnchorDispositionRecordV1,
@@ -350,7 +358,6 @@ impl super::Database {
         Ok(outcome)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn publish_retrieval_anchor_derivative(
         &self,
         derivative: &RetrievalAnchorDerivativeV1,
@@ -414,7 +421,6 @@ impl super::Database {
         Ok(outcome)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn resolve_retrieval_anchor_derivatives<O>(
         &self,
         owner: &O,
@@ -428,7 +434,6 @@ impl super::Database {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn resolve_retrieval_anchor_derivative(
         &self,
         owner: &FactOwnerV1,
@@ -439,7 +444,6 @@ impl super::Database {
         resolve_anchor_derivative(&connection, owner, kind, derivative_id).await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn retrieval_anchor_disposition_history(
         &self,
         owner: &impl serde::Serialize,

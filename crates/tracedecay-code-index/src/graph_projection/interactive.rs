@@ -355,7 +355,6 @@ impl CodeGraphProjectionStore {
 }
 
 impl CodeGraphInteractiveReader {
-    #[hotpath::skip]
     pub(super) fn assemble(
         generation: CodeGenerationId,
         projection: GraphProjectionIdentity,
@@ -375,7 +374,6 @@ impl CodeGraphInteractiveReader {
         }
     }
 
-    #[hotpath::skip]
     pub fn generation(&self) -> &CodeGenerationId {
         &self.generation
     }
@@ -1488,7 +1486,6 @@ impl CodeGraphInteractiveReader {
         })
     }
 
-    #[hotpath::skip]
     fn read_cancellation(
         &self,
         request: Arc<dyn GraphCancellation>,
@@ -1503,7 +1500,6 @@ impl CodeGraphInteractiveReader {
         Ok(cancellation)
     }
 
-    #[hotpath::skip]
     fn catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1633,8 +1629,8 @@ impl CodeGraphInteractiveReader {
         cancellation: &Arc<dyn GraphCancellation>,
     ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
         if let Some(parent) = parent {
-            match hotpath::measure_block!(
-                "code_graph.catalog.carry",
+            let carried = {
+                let _span = tracing::trace_span!("code_graph.catalog.carry").entered();
                 carry::carry_interactive_catalog(
                     &parent,
                     &self.snapshot,
@@ -1642,18 +1638,14 @@ impl CodeGraphInteractiveReader {
                     self.projection_node_count,
                     Arc::clone(cancellation),
                 )
-            ) {
-                Ok(Ok(catalog)) => {
-                    hotpath::gauge!("code_graph.catalog.carried_builds").inc(1_u64);
-                    return Ok(catalog);
-                }
+            };
+            match carried {
+                Ok(Ok(catalog)) => return Ok(catalog),
                 Ok(Err(decline)) => {
-                    hotpath::gauge!("code_graph.catalog.carry_declined").inc(1_u64);
-                    hotpath::val!("code_graph.catalog.carry_decline").set(&decline.as_str());
+                    tracing::trace!(name: "code_graph.catalog.carry_decline", value = ?decline.as_str());
                 }
                 Err(CodeGraphProjectionError::Corrupt(message)) => {
-                    hotpath::gauge!("code_graph.catalog.carry_failed").inc(1_u64);
-                    hotpath::val!("code_graph.catalog.carry_failure").set(&message.as_str());
+                    tracing::trace!(name: "code_graph.catalog.carry_failure", value = ?message.as_str());
                 }
                 Err(error) => return Err(error),
             }
@@ -1710,9 +1702,10 @@ impl CodeGraphInteractiveReader {
         };
         // Built in a heap of its own, the catalog's pages hold nothing else,
         // are charged as the catalog's, and return whole when it is dropped.
-        let (built, heap) = hotpath::measure_block!("code_graph.catalog.build", {
+        let (built, heap) = {
+            let _span = tracing::trace_span!("code_graph.catalog.build").entered();
             OwnerHeapV1::build(|| self.build_catalog(parent, &cancellation))
-        });
+        };
         let result = built.and_then(|mut catalog| {
             if cancellation.is_cancelled() {
                 Err(CodeGraphProjectionError::Cancelled)

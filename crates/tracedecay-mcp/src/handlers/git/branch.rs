@@ -127,7 +127,7 @@ fn branch_read_unavailable(error: &BranchRouteReadErrorV1) -> BranchReadUnavaila
 }
 
 /// Lists exact local branch refs. A branch name never selects a branch DB.
-#[hotpath::measure(future = true, label = "mcp.git.branch_list.total")]
+#[tracing::instrument(name = "mcp.git.branch_list.total", level = "trace", skip_all)]
 pub async fn compute_branch_list(
     ctx: &McpToolContext<'_>,
     args: Value,
@@ -158,7 +158,7 @@ pub async fn compute_branch_list(
         .map(|cursor| decode_bound_cursor::<String>(&cursor_binding, &cursor))
         .transpose()
         .map_err(|mismatch| crate::tool_errors::cursor_refusal(&mismatch))?;
-    let result = match hotpath::future!(
+    let result = match tracing::Instrument::instrument(
         run_branch_ref_read(
             ctx.project_root().to_path_buf(),
             limit,
@@ -167,7 +167,7 @@ pub async fn compute_branch_list(
             cancellation,
             tracedecay_query::native_git::local_branch_snapshots_controlled,
         ),
-        label = "mcp.git.branch_list.ref_read"
+        tracing::trace_span!("mcp.git.branch_list.ref_read"),
     )
     .await
     {
@@ -273,7 +273,7 @@ fn exact_branch_source(
 }
 
 /// Searches the generation sealed for the selected local ref's exact commit.
-#[hotpath::measure(future = true, label = "mcp.git.branch_search.total")]
+#[tracing::instrument(name = "mcp.git.branch_search.total", level = "trace", skip_all)]
 pub async fn compute_branch_search(
     ctx: &McpToolContext<'_>,
     args: Value,
@@ -310,7 +310,7 @@ pub async fn compute_branch_search(
         request.cursor.as_deref(),
     )?;
     let revision_branch = branch.clone();
-    let revision = match hotpath::future!(
+    let revision = match tracing::Instrument::instrument(
         run_branch_ref_read(
             ctx.project_root().to_path_buf(),
             1,
@@ -325,7 +325,7 @@ pub async fn compute_branch_search(
                 )
             },
         ),
-        label = "mcp.git.branch_search.ref_read"
+        tracing::trace_span!("mcp.git.branch_search.ref_read"),
     )
     .await
     {
@@ -357,7 +357,7 @@ pub async fn compute_branch_search(
         ));
     };
     let (source_root, source_reference) = exact_branch_source(ctx, &branch, &revision.commit)?;
-    let result = match hotpath::future!(
+    let result = match tracing::Instrument::instrument(
         executor(tracedecay_query::code_search::CodeIndexSearchRequestV1 {
             project_root: source_root,
             query,
@@ -371,7 +371,7 @@ pub async fn compute_branch_search(
             deadline,
             cancellation,
         }),
-        label = "mcp.git.branch_search.search"
+        tracing::trace_span!("mcp.git.branch_search.search"),
     )
     .await
     {
@@ -382,27 +382,31 @@ pub async fn compute_branch_search(
             )?;
             let has_more = next_cursor.is_some();
             let source_reference = format!("refs/heads/{branch}");
-            let results = hotpath::measure_block!("mcp.git.branch_search.assemble", {
-                complete
-                    .ordered_candidates
-                    .iter()
-                    .map(|ranked| {
-                        let display = complete.display_by_anchor.get(&ranked.candidate.anchor_id);
-                        BranchSearchHitV1 {
-                            candidate: ranked.clone(),
-                            name: display.map(|value| value.name.clone()),
-                            qualified_name: display.map(|value| value.qualified_name.clone()),
-                            kind: display.map(|value| value.kind.clone()),
-                            path: display.map(|value| value.path.clone()),
-                            branch: branch.clone(),
-                            source_reference: source_reference.clone(),
-                            source_revision: revision.commit.as_str().to_owned(),
-                            source_tree: revision.tree.as_str().to_owned(),
-                            code_generation: complete.code_generation.clone(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let results = {
+                let _span = tracing::trace_span!("mcp.git.branch_search.assemble").entered();
+                {
+                    complete
+                        .ordered_candidates
+                        .iter()
+                        .map(|ranked| {
+                            let display =
+                                complete.display_by_anchor.get(&ranked.candidate.anchor_id);
+                            BranchSearchHitV1 {
+                                candidate: ranked.clone(),
+                                name: display.map(|value| value.name.clone()),
+                                qualified_name: display.map(|value| value.qualified_name.clone()),
+                                kind: display.map(|value| value.kind.clone()),
+                                path: display.map(|value| value.path.clone()),
+                                branch: branch.clone(),
+                                source_reference: source_reference.clone(),
+                                source_revision: revision.commit.as_str().to_owned(),
+                                source_tree: revision.tree.as_str().to_owned(),
+                                code_generation: complete.code_generation.clone(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }
+            };
             BranchSearchResultV1::Page(BranchSearchPageV1 {
                 status: if has_more {
                     GitPageStatusV1::Partial
@@ -514,7 +518,7 @@ fn branch_change_summary(
 }
 
 /// Compares generations sealed for the two selected local refs' exact commits.
-#[hotpath::measure(future = true, label = "mcp.git.branch_diff.total")]
+#[tracing::instrument(name = "mcp.git.branch_diff.total", level = "trace", skip_all)]
 pub async fn compute_branch_diff(
     ctx: &McpToolContext<'_>,
     args: Value,
@@ -559,7 +563,7 @@ pub async fn compute_branch_diff(
     }
     let resolution_base = base_name.clone();
     let resolution_head = head_name.clone();
-    let (base_revision, head_revision) = match hotpath::future!(
+    let (base_revision, head_revision) = match tracing::Instrument::instrument(
         run_branch_ref_read(
             ctx.project_root().to_path_buf(),
             1,
@@ -580,7 +584,7 @@ pub async fn compute_branch_diff(
                 Ok((base, head))
             },
         ),
-        label = "mcp.git.branch_diff.ref_read"
+        tracing::trace_span!("mcp.git.branch_diff.ref_read"),
     )
     .await
     {
@@ -625,7 +629,7 @@ pub async fn compute_branch_diff(
             Vec::new(),
         ));
     };
-    let outcome = hotpath::future!(
+    let outcome = tracing::Instrument::instrument(
         executor(
             tracedecay_query::code_search::CodeIndexBranchDiffRequestV1 {
                 project_root: ctx.project_root().to_path_buf(),
@@ -648,16 +652,16 @@ pub async fn compute_branch_diff(
                 authority: authority.cloned(),
                 deadline,
                 cancellation,
-            }
+            },
         ),
-        label = "mcp.git.branch_diff.diff"
+        tracing::trace_span!("mcp.git.branch_diff.diff"),
     )
     .await;
     let (result, touched) = match outcome {
         tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Complete(completed) => {
             let touched = unique_file_paths(completed.changes.iter().flat_map(branch_change_files));
-            let result = hotpath::measure_block!(
-                "mcp.git.branch_diff.assemble",
+            let result = {
+                let _span = tracing::trace_span!("mcp.git.branch_diff.assemble").entered();
                 BranchDiffResultV1::Complete(BranchDiffCompleteV1 {
                     status: GitReadCompleteV1::Complete,
                     base: base_name,
@@ -672,13 +676,13 @@ pub async fn compute_branch_diff(
                     summary: branch_change_summary(&completed.changes),
                     changes: completed.changes.iter().map(branch_change).collect(),
                 })
-            );
+            };
             (result, touched)
         }
         tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Partial(partial) => {
             let touched = unique_file_paths(partial.changes.iter().flat_map(branch_change_files));
-            let result = hotpath::measure_block!(
-                "mcp.git.branch_diff.assemble",
+            let result = {
+                let _span = tracing::trace_span!("mcp.git.branch_diff.assemble").entered();
                 BranchDiffResultV1::Partial(BranchDiffPartialV1 {
                     status: GitReadPartialV1::Partial,
                     reason: match partial.reason {
@@ -699,7 +703,7 @@ pub async fn compute_branch_diff(
                     summary: branch_change_summary(&partial.changes),
                     changes: partial.changes.iter().map(branch_change).collect(),
                 })
-            );
+            };
             (result, touched)
         }
         tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(mismatch) => {

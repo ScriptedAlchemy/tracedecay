@@ -619,7 +619,6 @@ impl FinalizationSectionV1 {
         })
     }
 
-    #[hotpath::skip]
     const fn name(self) -> &'static str {
         match self {
             Self::SourcePages => "source_pages",
@@ -639,7 +638,6 @@ impl FinalizationSectionV1 {
 
     /// Native digest query of every section the digest phase walks. Base
     /// sections carry none: their digests are adopted from page receipts.
-    #[hotpath::skip]
     const fn full_query(self) -> Option<&'static str> {
         match self {
             Self::SourcePages => Some(
@@ -672,7 +670,6 @@ impl FinalizationSectionV1 {
     }
 
     /// Bounded resumes seek a native table key, never a computed cursor.
-    #[hotpath::skip]
     const fn seek_query(self, after: bool) -> Option<&'static str> {
         match (self, after) {
             (Self::SourcePages, false) => Some(
@@ -844,165 +841,10 @@ enum PersistedFinalizationPhaseV1 {
 }
 
 impl PersistedFinalizationPhaseV1 {
-    #[hotpath::skip]
     const fn public(self) -> CodeLexicalArtifactFinalizationPhaseV1 {
         match self {
             Self::Statistics | Self::Indexes => CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
             Self::Digest => CodeLexicalArtifactFinalizationPhaseV1::Verification,
-        }
-    }
-}
-
-struct FinalizationWakeMetricsV1 {
-    #[cfg(feature = "hotpath")]
-    rows: u64,
-}
-
-struct FinalizationTransactionMetricsV1 {
-    #[cfg(feature = "hotpath")]
-    committed: bool,
-}
-
-impl FinalizationTransactionMetricsV1 {
-    #[inline(always)]
-    #[hotpath::skip]
-    const fn new() -> Self {
-        Self {
-            #[cfg(feature = "hotpath")]
-            committed: false,
-        }
-    }
-
-    #[inline(always)]
-    fn mark_committed(&mut self) {
-        #[cfg(feature = "hotpath")]
-        {
-            self.committed = true;
-        }
-    }
-}
-
-impl Drop for FinalizationTransactionMetricsV1 {
-    fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
-        if !self.committed {
-            // Dropping an uncommitted rusqlite transaction rolls it back.
-            hotpath::gauge!("query.artifact.finalization.rollback_total").inc(1u64);
-        }
-    }
-}
-
-impl FinalizationWakeMetricsV1 {
-    #[inline(always)]
-    fn new() -> Self {
-        Self {
-            #[cfg(feature = "hotpath")]
-            rows: 0,
-        }
-    }
-
-    #[inline(always)]
-    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
-        #[cfg(feature = "hotpath")]
-        match pass {
-            PersistedFinalizationPhaseV1::Statistics => {
-                hotpath::gauge!("query.artifact.finalization.statistics_wakes_total").inc(1u64);
-            }
-            PersistedFinalizationPhaseV1::Indexes => {
-                hotpath::gauge!("query.artifact.finalization.index_wakes_total").inc(1u64);
-            }
-            PersistedFinalizationPhaseV1::Digest => {
-                hotpath::gauge!("query.artifact.finalization.digest_pass.authenticated_total")
-                    .inc(1u64);
-            }
-        };
-        #[cfg(not(feature = "hotpath"))]
-        let _ = pass;
-    }
-
-    #[inline(always)]
-    fn phase(&self, phase: FinalizationSectionV1) {
-        #[cfg(feature = "hotpath")]
-        match phase {
-            FinalizationSectionV1::SourcePages => {
-                hotpath::gauge!("query.artifact.finalization.phase.source_pages_total").inc(1u64);
-            }
-            FinalizationSectionV1::DocumentIntegrity => {
-                hotpath::gauge!("query.artifact.finalization.phase.document_integrity_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::Rows => {
-                hotpath::gauge!("query.artifact.finalization.phase.rows_total").inc(1u64);
-            }
-            FinalizationSectionV1::TermPostings => {
-                hotpath::gauge!("query.artifact.finalization.phase.term_postings_total").inc(1u64);
-            }
-            FinalizationSectionV1::ExactPostings => {
-                hotpath::gauge!("query.artifact.finalization.phase.exact_postings_total").inc(1u64);
-            }
-            FinalizationSectionV1::NgramPostings => {
-                hotpath::gauge!("query.artifact.finalization.phase.ngram_postings_total").inc(1u64);
-            }
-            FinalizationSectionV1::CloneOccurrences => {
-                hotpath::gauge!("query.artifact.finalization.phase.clone_occurrences_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::CloneExactPostings => {
-                hotpath::gauge!("query.artifact.finalization.phase.clone_exact_postings_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::CloneBodyPayloads => {
-                hotpath::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::CloneFingerprintPostings => {
-                hotpath::gauge!(
-                    "query.artifact.finalization.phase.clone_fingerprint_postings_total"
-                )
-                .inc(1u64);
-            }
-            FinalizationSectionV1::FieldStatistics => {
-                hotpath::gauge!("query.artifact.finalization.phase.field_stats_total").inc(1u64);
-            }
-            FinalizationSectionV1::Vocabulary => {
-                hotpath::gauge!("query.artifact.finalization.phase.vocabulary_total").inc(1u64);
-            }
-        };
-        #[cfg(not(feature = "hotpath"))]
-        let _ = phase;
-    }
-
-    #[inline(always)]
-    fn probe(&self) {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.finalization.section_probes_total").inc(1u64);
-    }
-
-    #[inline(always)]
-    fn add_rows(&mut self, rows: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
-        #[cfg(feature = "hotpath")]
-        {
-            self.rows = self
-                .rows
-                .checked_add(u64::try_from(rows).map_err(contract_number)?)
-                .ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact finalization wake row metric overflowed".to_owned(),
-                    )
-                })?;
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = rows;
-        Ok(())
-    }
-}
-
-impl Drop for FinalizationWakeMetricsV1 {
-    fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("query.artifact.finalization.wakes_total").inc(1u64);
-            hotpath::gauge!("query.artifact.finalization.rows_total").inc(self.rows);
         }
     }
 }
@@ -1066,7 +908,7 @@ impl CodeLexicalArtifactBuilderV1 {
         )
     }
 
-    #[hotpath::measure(label = "query.artifact.create")]
+    #[tracing::instrument(name = "query.artifact.create", level = "trace", skip_all)]
     pub fn create_with_memory_budget(
         path: impl AsRef<Path>,
         metadata: CodeLexicalProjectionMetadataV1,
@@ -1089,7 +931,7 @@ impl CodeLexicalArtifactBuilderV1 {
             open_private_builder_connection(path, memory_budget_bytes)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         verify_builder_mutation_gate_schema(&connection)?;
-        crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
+        crate::observe::Residency::Cold.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             private_file,
@@ -1106,7 +948,7 @@ impl CodeLexicalArtifactBuilderV1 {
     /// Reopen only the staged artifact authority while applying the caller's
     /// scheduler epoch/deadline control to integrity, metadata, receipt, and
     /// contiguous-cursor verification.
-    #[hotpath::measure(label = "query.artifact.open_or_resume")]
+    #[tracing::instrument(name = "query.artifact.open_or_resume", level = "trace", skip_all)]
     pub fn open_or_resume_with_memory_budget_and_control(
         path: impl AsRef<Path>,
         expected_metadata: CodeLexicalProjectionMetadataV1,
@@ -1120,34 +962,40 @@ impl CodeLexicalArtifactBuilderV1 {
         let fixed_ledger_charge_bytes =
             validated_fixed_ledger_charge(&expected_metadata, memory_budget_bytes)?;
         let path = path.as_ref();
-        let (connection, private_file, file_identity) = hotpath::measure_block!(
-            "query.artifact.open.sqlite_connect",
+        let (connection, private_file, file_identity) = {
+            let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
             open_private_builder_connection(path, memory_budget_bytes)
-        )?;
+        }?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         require_staged_revision(&connection)?;
-        hotpath::measure_block!("query.artifact.open.schema_verify", {
-            require_integrity(&connection, control)?;
-            verify_artifact_table_layout(&connection)?;
-            verify_builder_mutation_gate_schema(&connection)
-        })?;
-        let expected_digest = hotpath::measure_block!("query.artifact.open.metadata_restore", {
-            let expected_digest = metadata_digest(&expected_metadata)?;
-            verify_artifact_state_metadata(
-                &connection,
-                &expected_metadata,
-                &expected_digest,
-                control,
-            )?;
-            Ok::<_, CodeLexicalArtifactErrorV1>(expected_digest)
-        })?;
-        let (receipt, finalization) = hotpath::measure_block!(
-            "query.artifact.open.receipt_restore",
+        {
+            let _span = tracing::trace_span!("query.artifact.open.schema_verify").entered();
+            {
+                require_integrity(&connection, control)?;
+                verify_artifact_table_layout(&connection)?;
+                verify_builder_mutation_gate_schema(&connection)
+            }
+        }?;
+        let expected_digest = {
+            let _span = tracing::trace_span!("query.artifact.open.metadata_restore").entered();
+            {
+                let expected_digest = metadata_digest(&expected_metadata)?;
+                verify_artifact_state_metadata(
+                    &connection,
+                    &expected_metadata,
+                    &expected_digest,
+                    control,
+                )?;
+                Ok::<_, CodeLexicalArtifactErrorV1>(expected_digest)
+            }
+        }?;
+        let (receipt, finalization) = {
+            let _span = tracing::trace_span!("query.artifact.open.receipt_restore").entered();
             Ok::<_, CodeLexicalArtifactErrorV1>((
                 read_receipt_with_control(&connection, control)?,
                 load_finalization_state(&connection)?,
             ))
-        )?;
+        }?;
         // A staging file still accepting pages must carry the per-batch field
         // totals; one staged without them (an older builder) cannot seal
         // correct statistics and is not resumed.
@@ -1173,7 +1021,7 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
-        crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
+        crate::observe::Residency::Rebuilding.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             private_file,
@@ -1200,7 +1048,7 @@ impl CodeLexicalArtifactBuilderV1 {
         clippy::too_many_arguments,
         reason = "each argument is a separate authority the carry binds once"
     )]
-    #[hotpath::measure(label = "query.artifact.carry")]
+    #[tracing::instrument(name = "query.artifact.carry", level = "trace", skip_all)]
     pub fn carry_parent_with_memory_budget(
         path: impl AsRef<Path>,
         parent: File,
@@ -1227,9 +1075,10 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let metadata_digest = metadata_digest(&metadata)?;
-        hotpath::measure_block!("query.artifact.carry.copy", {
+        {
+            let _span = tracing::trace_span!("query.artifact.carry.copy").entered();
             copy_sealed_parent(parent, parent_digest, parent_size_bytes, path, control)
-        })?;
+        }?;
         let (mut connection, private_file, file_identity) =
             open_private_builder_connection(path, memory_budget_bytes)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
@@ -1285,14 +1134,13 @@ impl CodeLexicalArtifactBuilderV1 {
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
         set_triggers_enabled(&connection, true)?;
-        hotpath::gauge!("query.artifact.carry.pages_carried").inc(carried.carried_pages);
         tracing::debug!(
             pages = carried.pages,
             re_encoded_pages = carried.re_encoded_pages,
             carried_pages = carried.carried_pages,
             "carried lexical artifact staged over its sealed parent"
         );
-        crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
+        crate::observe::Residency::Rebuilding.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             private_file,
@@ -1306,7 +1154,6 @@ impl CodeLexicalArtifactBuilderV1 {
         })
     }
 
-    #[hotpath::skip]
     pub fn progress(
         &self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1318,7 +1165,6 @@ impl CodeLexicalArtifactBuilderV1 {
     /// The receipt of a staging file that finished finalization and awaits
     /// publication. A sealed file keeps no source cursor, so a resumed
     /// publisher publishes it rather than rescanning its source.
-    #[hotpath::skip]
     pub fn sealed_receipt(
         &self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1329,7 +1175,6 @@ impl CodeLexicalArtifactBuilderV1 {
 
     /// The ledger bytes charged regardless of page content: the SQLite
     /// page-cache authority plus the builder-retained projection metadata.
-    #[hotpath::skip]
     pub fn fixed_ledger_charge_bytes(&self) -> usize {
         self.fixed_ledger_charge_bytes
     }
@@ -1447,25 +1292,21 @@ impl CodeLexicalArtifactBuilderV1 {
     /// Atomically append an ordered, contiguous batch of verified source
     /// pages. Replayed prefix pages are verified idempotently; every fresh
     /// page and its derived rows commit in one SQLite transaction.
-    #[hotpath::measure(label = "query.artifact.append_pages")]
+    #[tracing::instrument(name = "query.artifact.append_pages", level = "trace", skip_all)]
     pub fn append_pages(
         &mut self,
         pages: &[VerifiedSealedLexicalPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = (|| {
-            let prepared = self.prepare_pages(pages, control)?;
-            self.append_prepared_pages_inner(&prepared, control)
-        })();
-        record_batch_outcome(&result);
-        result
+        let prepared = self.prepare_pages(pages, control)?;
+        self.append_prepared_pages(&prepared, control)
     }
 
     /// Prepare the fresh suffix of one ordered source batch outside SQLite.
     /// Work runs on the canonical bounded indexing pool, preserves input
     /// order, holds one background CPU permit per active unit, and drains all
     /// workers before returning any failure.
-    #[hotpath::measure(label = "query.artifact.prepare_pages")]
+    #[tracing::instrument(name = "query.artifact.prepare_pages", level = "trace", skip_all)]
     pub fn prepare_pages(
         &self,
         pages: &[VerifiedSealedLexicalPageV1],
@@ -1477,7 +1318,6 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             &prepared,
         )?;
-        record_prepared_batch_metrics(&prepared);
         Ok(prepared)
     }
 
@@ -1497,7 +1337,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let memory_prefix = self.largest_admissible_page_prefix(pages)?;
         if memory_prefix == 0 {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
             admit_page_batch_within_memory_budget(
                 &self.metadata,
                 self.fixed_ledger_charge_bytes,
@@ -1523,7 +1362,6 @@ impl CodeLexicalArtifactBuilderV1 {
                         .to_owned(),
                 )
             })?;
-            record_batch_prefix_limit(exceeded.limit);
             return Err(batch_limit(
                 exceeded.limit,
                 exceeded.required,
@@ -1539,12 +1377,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact admissible source prefix was empty".to_owned(),
             )
         })?;
-        if let Some(exceeded) = exact_limit {
-            record_batch_prefix_limit(exceeded.limit);
-        } else if memory_prefix < pages.len() {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
-        }
-        record_prepared_batch_metrics(&prepared);
         Ok(PreparedCodeLexicalArtifactBatchV1 {
             accepted_prefix,
             prepared_pages: prepared,
@@ -1574,17 +1406,19 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
 
-        hotpath::gauge!("query.artifact.batch.admission_total").inc(1u64);
-        let (current, fresh_start) = hotpath::measure_block!("query.artifact.batch.admission", {
-            prepare_page_batch_admission(
-                &self.connection,
-                &self.metadata,
-                self.fixed_ledger_charge_bytes,
-                self.memory_budget_bytes,
-                pages,
-                control,
-            )
-        })?;
+        let (current, fresh_start) = {
+            let _span = tracing::trace_span!("query.artifact.batch.admission").entered();
+            {
+                prepare_page_batch_admission(
+                    &self.connection,
+                    &self.metadata,
+                    self.fixed_ledger_charge_bytes,
+                    self.memory_budget_bytes,
+                    pages,
+                    control,
+                )
+            }
+        }?;
         let fresh_pages = &pages[fresh_start..];
         if fresh_pages.is_empty() {
             return Ok((fresh_start, Vec::new()));
@@ -1605,7 +1439,9 @@ impl CodeLexicalArtifactBuilderV1 {
             .map(|page| page_transient_peak_bytes(&self.metadata, page, usize::MAX))
             .collect::<Result<Vec<_>, _>>()?;
         let metadata = &self.metadata;
-        let prepared = hotpath::measure_block!("query.artifact.batch.parallel_prepare", {
+        let prepared = {
+                           let _span = tracing::trace_span!("query.artifact.batch.parallel_prepare").entered();
+                           {
             tracedecay_code_index::parallelism::install(|| {
                 fresh_pages
                     .par_iter()
@@ -1636,7 +1472,8 @@ impl CodeLexicalArtifactBuilderV1 {
                     })
                     .collect::<Vec<_>>()
             })
-        })
+            }
+                       }
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
@@ -1646,16 +1483,6 @@ impl CodeLexicalArtifactBuilderV1 {
     /// Atomically admit an ordered prepared batch. The values carry no
     /// durable authority until this method commits their rows and receipts.
     pub fn append_prepared_pages(
-        &mut self,
-        pages: &[PreparedCodeLexicalArtifactPageV1],
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = self.append_prepared_pages_inner(pages, control);
-        record_batch_outcome(&result);
-        result
-    }
-
-    fn append_prepared_pages_inner(
         &mut self,
         pages: &[PreparedCodeLexicalArtifactPageV1],
         control: &dyn CodeIndexExecutionControlV1,
@@ -1674,7 +1501,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let current = progress(&self.connection, control)?;
         if pages.is_empty() {
-            record_artifact_progress(&current);
             return Ok(current);
         }
         validate_prepared_page_batch(&current, pages)?;
@@ -1683,46 +1509,49 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             pages,
         )?;
-        let term_insert_plan = hotpath::measure_block!(
-            "query.artifact.batch.term_order",
+        let term_insert_plan = {
+            let _span = tracing::trace_span!("query.artifact.batch.term_order").entered();
             prepare_term_insert_plan(
                 self.fixed_ledger_charge_bytes,
                 self.memory_budget_bytes,
                 pages,
                 control,
             )
-        )?;
-        let exact_insert_plan = hotpath::measure_block!(
-            "query.artifact.batch.exact_order",
+        }?;
+        let exact_insert_plan = {
+            let _span = tracing::trace_span!("query.artifact.batch.exact_order").entered();
             prepare_exact_insert_plan(
                 self.fixed_ledger_charge_bytes,
                 self.memory_budget_bytes,
                 pages,
                 control,
             )
-        )?;
+        }?;
         enter_resumable_journal(&self.connection)?;
         let mutation_gate = &self.mutation_gate;
         super::with_memory_statement_journals(&mut self.connection, |connection| {
-            hotpath::measure_block!("query.artifact.batch.sqlite", {
+            let _span = tracing::trace_span!("query.artifact.batch.sqlite").entered();
+            {
                 let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
                 let transaction = connection.transaction().map_err(sqlite_error)?;
                 let mutation = (|| {
-                    hotpath::measure_block!(
-                        "query.artifact.batch.clone_bodies",
+                    {
+                        let _span =
+                            tracing::trace_span!("query.artifact.batch.clone_bodies").entered();
                         append_prepared_clone_bodies(&transaction, pages, control)
-                    )?;
-                    hotpath::measure_block!(
-                        "query.artifact.batch.rows.stage_dictionary",
+                    }?;
+                    {
+                        let _span =
+                            tracing::trace_span!("query.artifact.batch.rows.stage_dictionary")
+                                .entered();
                         stage_row_dictionary(&transaction, pages, control)
-                    )?;
-                    hotpath::measure_block!(
-                        "query.artifact.batch.rows",
+                    }?;
+                    {
+                        let _span = tracing::trace_span!("query.artifact.batch.rows").entered();
                         append_prepared_rows(&transaction, pages, control)
-                    )?;
-                    record_batch_row_metrics(pages);
-                    hotpath::measure_block!(
-                        "query.artifact.batch.postings",
+                    }?;
+                    {
+                        let _span = tracing::trace_span!("query.artifact.batch.postings").entered();
                         append_prepared_postings(
                             &transaction,
                             pages,
@@ -1730,56 +1559,37 @@ impl CodeLexicalArtifactBuilderV1 {
                             &exact_insert_plan,
                             control,
                         )
-                    )?;
-                    record_batch_posting_metrics(pages);
-                    hotpath::measure_block!("query.artifact.batch.receipts", {
-                        for page in pages {
-                            insert_prepared_source_page(&transaction, page)?;
+                    }?;
+                    {
+                        let _span = tracing::trace_span!("query.artifact.batch.receipts").entered();
+                        {
+                            for page in pages {
+                                insert_prepared_source_page(&transaction, page)?;
+                            }
+                            Ok::<(), CodeLexicalArtifactErrorV1>(())
                         }
-                        Ok::<(), CodeLexicalArtifactErrorV1>(())
-                    })?;
-                    record_batch_receipt_metrics(pages);
+                    }?;
                     checkpoint(control)
                 })();
                 if let Err(error) = mutation {
-                    hotpath::gauge!("query.artifact.batch.rollbacks_total").inc(1u64);
-                    hotpath::measure_block!(
-                        "query.artifact.batch.rollback",
+                    {
+                        let _span = tracing::trace_span!("query.artifact.batch.rollback").entered();
                         transaction.rollback().map_err(sqlite_error)
-                    )?;
+                    }?;
                     return Err(error);
                 }
-                hotpath::gauge!("query.artifact.batch.commit_attempts_total").inc(1u64);
-                let commit = hotpath::measure_block!(
-                    "query.artifact.batch.commit",
+
+                {
+                    let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
-                );
-                if commit.is_ok() {
-                    hotpath::gauge!("query.artifact.batch.commit_succeeded_total").inc(1u64);
                 }
-                commit
-            })
+            }
         })?;
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its
         // cursor once the whole batch has committed.
         let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("query.artifact.batch.committed_pages_total")
-                .inc(u64::try_from(pages.len()).map_err(contract_number)?);
-            hotpath::gauge!("query.artifact.batch.committed_chunks_total").inc(
-                pages
-                    .iter()
-                    .try_fold(0u64, |total, page| total.checked_add(page.chunk_count))
-                    .ok_or_else(|| {
-                        CodeLexicalArtifactErrorV1::Contract(
-                            "lexical artifact committed chunk count overflowed".to_owned(),
-                        )
-                    })?,
-            );
-        }
-        record_artifact_progress(&progress);
+
         Ok(progress)
     }
 
@@ -1789,7 +1599,11 @@ impl CodeLexicalArtifactBuilderV1 {
     /// observes cancellation during that statement. During digest
     /// verification, `maximum_work` bounds the number of staged rows (or empty
     /// section completions) this call may consume.
-    #[hotpath::measure(label = "query.artifact.finalization.advance_wake")]
+    #[tracing::instrument(
+        name = "query.artifact.finalization.advance_wake",
+        level = "trace",
+        skip_all
+    )]
     pub fn advance_finalization(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -1833,7 +1647,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization work budget must be non-zero".to_owned(),
             ));
         }
-        let mut wake_metrics = FinalizationWakeMetricsV1::new();
         checkpoint(control)?;
         self.verify_path_binding()?;
         verify_artifact_state_metadata(
@@ -1878,22 +1691,18 @@ impl CodeLexicalArtifactBuilderV1 {
                 ));
             };
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             // The sorted pass and the count aggregation are the heaviest
             // sorter statements in finalization; run them under the same
             // sorter CPU admission as the pre-digest index wakes.
             super::with_builder_sorter_cpu_admission(&transaction, || {
-                hotpath::measure_block!(
-                    "query.artifact.finalization.derive_clone_fingerprint_postings",
-                    with_cancellable_sqlite_statement(&transaction, control, || {
-                        derive_clone_fingerprint_postings(
-                            &transaction,
-                            &self.mutation_gate,
-                            control,
-                        )
-                    })
+                let _span = tracing::trace_span!(
+                    "query.artifact.finalization.derive_clone_fingerprint_postings"
                 )
+                .entered();
+                with_cancellable_sqlite_statement(&transaction, control, || {
+                    derive_clone_fingerprint_postings(&transaction, &self.mutation_gate, control)
+                })
             })??;
             let content_epoch = authenticated_authority_epoch(&transaction, source, control)?;
             install_base_freeze(&transaction)?;
@@ -1907,7 +1716,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 )?,
             )?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
                 completed_sections: 0,
@@ -1918,14 +1727,12 @@ impl CodeLexicalArtifactBuilderV1 {
         }
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let mut state = load_finalization_state(&transaction)?.ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact finalization marker disappeared".to_owned(),
             )
         })?;
         validate_finalization_state(&state)?;
-        wake_metrics.digest_pass(state.phase);
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if source.is_some_and(|source| &state.source_state_digest != source.source_state_digest()) {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1948,7 +1755,7 @@ impl CodeLexicalArtifactBuilderV1 {
             })??;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: 0,
@@ -1966,11 +1773,8 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
-            wake_metrics.phase(section);
-            wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
-            wake_metrics.add_rows(rows)?;
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
@@ -2020,7 +1824,7 @@ impl CodeLexicalArtifactBuilderV1 {
         if state.section_ordinal < section_count {
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: u64::try_from(state.completed_sections.len())
@@ -2043,14 +1847,14 @@ impl CodeLexicalArtifactBuilderV1 {
         // of the content alone, which is what lets worktrees share one file.
         // A crash before the seal commits repeats this rewrite on resume.
         store_finalization_state(&transaction, &state)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
-        hotpath::measure_block!(
-            "query.artifact.finalization.canonical_layout",
+        commit_finalization_transaction(transaction)?;
+        {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.canonical_layout").entered();
             self.rewrite_canonical_layout(control)
-        )?;
+        }?;
         checkpoint(control)?;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let sections = state.completed_sections;
         let summary = CodeLexicalSourceSummaryV1::of_staged_pages(
             &transaction,
@@ -2063,14 +1867,14 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         verify_final_sections_against_source(&sections, &summary)?;
-        let clone_index_census = hotpath::measure_block!(
-            "query.artifact.finalization.clone_census",
+        let clone_index_census = {
+            let _span = tracing::trace_span!("query.artifact.finalization.clone_census").entered();
             read_clone_index_census(
                 &transaction,
                 CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-                control
+                control,
             )
-        )?;
+        }?;
         // The resume state binds the building worktree's source; the sealed
         // file keeps none of it, not even the space its row occupied.
         transaction
@@ -2092,7 +1896,7 @@ impl CodeLexicalArtifactBuilderV1 {
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        commit_finalization_transaction(transaction)?;
         self.canonicalize_sealed_header()?;
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
@@ -2187,7 +1991,7 @@ impl CodeLexicalArtifactBuilderV1 {
         file.sync_all().map_err(private_staging_error)
     }
 
-    #[hotpath::measure(label = "query.artifact.finalize")]
+    #[tracing::instrument(name = "query.artifact.finalize", level = "trace", skip_all)]
     pub fn finalize(
         &mut self,
         source: &VerifiedSealedLexicalSourceReceiptV1,
@@ -2204,9 +2008,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 &receipt,
                 control,
             )?;
-            crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
-            hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
-            hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
+            crate::observe::Residency::Warm.record("query.artifact.residency");
             return Ok(receipt);
         }
         Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -4103,10 +3905,10 @@ fn append_prepared_postings(
                 "lexical artifact posting batch has no pages".to_owned(),
             )
         })?;
-    hotpath::measure_block!(
-        "query.artifact.batch.postings.intern_exact",
+    {
+        let _span = tracing::trace_span!("query.artifact.batch.postings.intern_exact").entered();
         intern_exact_terms(transaction, &exact_insert_plan.interned_terms, control)
-    )?;
+    }?;
     let mut term_insert = MultiRowInsertV1::new(
         transaction,
         "term_posting_runs(page_ordinal, term, field, postings)",
@@ -4126,46 +3928,71 @@ fn append_prepared_postings(
         sqlite_error,
     )?;
     let mut field_totals = BTreeMap::new();
-    hotpath::measure_block!("query.artifact.batch.postings.term_rows", {
-        let mut run: Option<((&str, i64), PostingListEncoderV1)> = None;
-        for (index, entry) in term_insert_plan.entries.iter().enumerate() {
-            if index.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
-                checkpoint(control)?;
+    {
+        let _span = tracing::trace_span!("query.artifact.batch.postings.term_rows").entered();
+        {
+            let mut run: Option<((&str, i64), PostingListEncoderV1)> = None;
+            for (index, entry) in term_insert_plan.entries.iter().enumerate() {
+                if index.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+                    checkpoint(control)?;
+                }
+                let (term, field, document_id) = entry.key();
+                if let Some(((term, field), encoder)) =
+                    run.take_if(|(key, _)| *key != (term, field))
+                {
+                    push_posting_run(&mut term_insert, batch_page, sql_text(term), field, encoder)?;
+                }
+                run.get_or_insert_with(|| ((term, field), PostingListEncoderV1::new(true)))
+                    .1
+                    .push(
+                        u32::try_from(document_id).map_err(contract_number)?,
+                        u32::try_from(entry.posting.frequency).map_err(contract_number)?,
+                    )?;
+                let total: &mut i64 = field_totals.entry(field).or_default();
+                *total = total.checked_add(entry.posting.frequency).ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact field total overflowed".to_owned(),
+                    )
+                })?;
             }
-            let (term, field, document_id) = entry.key();
-            if let Some(((term, field), encoder)) = run.take_if(|(key, _)| *key != (term, field)) {
+            if let Some(((term, field), encoder)) = run {
                 push_posting_run(&mut term_insert, batch_page, sql_text(term), field, encoder)?;
             }
-            run.get_or_insert_with(|| ((term, field), PostingListEncoderV1::new(true)))
-                .1
-                .push(
-                    u32::try_from(document_id).map_err(contract_number)?,
-                    u32::try_from(entry.posting.frequency).map_err(contract_number)?,
-                )?;
-            let total: &mut i64 = field_totals.entry(field).or_default();
-            *total = total.checked_add(entry.posting.frequency).ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "lexical artifact field total overflowed".to_owned(),
-                )
-            })?;
+            term_insert.finish()
         }
-        if let Some(((term, field), encoder)) = run {
-            push_posting_run(&mut term_insert, batch_page, sql_text(term), field, encoder)?;
-        }
-        term_insert.finish()
-    })?;
-    hotpath::measure_block!(
-        "query.artifact.batch.postings.field_totals",
+    }?;
+    {
+        let _span = tracing::trace_span!("query.artifact.batch.postings.field_totals").entered();
         stage_field_totals(transaction, &field_totals)
-    )?;
-    hotpath::measure_block!("query.artifact.batch.postings.exact_rows", {
-        let mut run: Option<((i64, i64), PostingListEncoderV1)> = None;
-        for (index, entry) in exact_insert_plan.entries.iter().enumerate() {
-            if index.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
-                checkpoint(control)?;
+    }?;
+    {
+        let _span = tracing::trace_span!("query.artifact.batch.postings.exact_rows").entered();
+        {
+            let mut run: Option<((i64, i64), PostingListEncoderV1)> = None;
+            for (index, entry) in exact_insert_plan.entries.iter().enumerate() {
+                if index.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
+                    checkpoint(control)?;
+                }
+                let key = (entry.term_id, entry.field_code);
+                if let Some(((term_id, field), encoder)) =
+                    run.take_if(|(run_key, _)| *run_key != key)
+                {
+                    push_posting_run(
+                        &mut exact_insert,
+                        batch_page,
+                        sql_integer(term_id),
+                        field,
+                        encoder,
+                    )?;
+                }
+                run.get_or_insert_with(|| (key, PostingListEncoderV1::new(false)))
+                    .1
+                    .push(
+                        u32::try_from(entry.document_id).map_err(contract_number)?,
+                        1,
+                    )?;
             }
-            let key = (entry.term_id, entry.field_code);
-            if let Some(((term_id, field), encoder)) = run.take_if(|(run_key, _)| *run_key != key) {
+            if let Some(((term_id, field), encoder)) = run {
                 push_posting_run(
                     &mut exact_insert,
                     batch_page,
@@ -4174,24 +4001,9 @@ fn append_prepared_postings(
                     encoder,
                 )?;
             }
-            run.get_or_insert_with(|| (key, PostingListEncoderV1::new(false)))
-                .1
-                .push(
-                    u32::try_from(entry.document_id).map_err(contract_number)?,
-                    1,
-                )?;
+            exact_insert.finish()
         }
-        if let Some(((term_id, field), encoder)) = run {
-            push_posting_run(
-                &mut exact_insert,
-                batch_page,
-                sql_integer(term_id),
-                field,
-                encoder,
-            )?;
-        }
-        exact_insert.finish()
-    })?;
+    }?;
     Ok(())
 }
 
@@ -4910,7 +4722,6 @@ fn merge_wake_fits_memory_temp_store(
         .query_row(staged_runs, [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-    hotpath::gauge!("query.artifact.finalization.merge.staged_run_bytes").set(staged_bytes);
     Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 
@@ -5109,7 +4920,9 @@ fn derive_statistics_step(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     match ordinal {
-        0 => hotpath::measure_block!("query.artifact.finalization.derive_field_stats", {
+        0 => {
+                 let _span = tracing::trace_span!("query.artifact.finalization.derive_field_stats").entered();
+                 {
             // Every committed batch already folded its posting lengths into
             // the staging totals (`stage_field_totals`): sealing copies at
             // most nine rows and drops the staging table with its gates.
@@ -5120,10 +4933,11 @@ fn derive_statistics_step(
                  CREATE TRIGGER frozen_field_stats_update BEFORE UPDATE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
                  CREATE TRIGGER frozen_field_stats_delete BEFORE DELETE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;",
             )
-        }),
+            }
+             },
         // Every staging table is gone; return its pages to the filesystem
         // before the digest and the sealed size.
-        1 => hotpath::measure_block!("query.artifact.finalization.release_staging_pages", {
+        1 => { let _span = tracing::trace_span!("query.artifact.finalization.release_staging_pages").entered(); {
             // The staged per-page cursors bind the building worktree's
             // source state; the finalization state keeps the terminal one
             // until the seal.
@@ -5132,7 +4946,7 @@ fn derive_statistics_step(
                 .map_err(sqlite_error)?;
             release_free_pages(transaction, control)?;
             Ok(())
-        }),
+        } },
         _ => {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact selected an unknown statistics step".to_owned(),
@@ -5180,30 +4994,37 @@ fn build_serving_index_step(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mutation_gate = authority.mutation_gate;
     match ordinal {
-        0 => hotpath::measure_block!("query.artifact.finalization.index.row_chunks", {
-            derive_row_dictionary(transaction)?;
-            let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
-            transaction
+        0 => {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.index.row_chunks").entered();
+            {
+                derive_row_dictionary(transaction)?;
+                let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
+                transaction
                 .execute_batch(
                     "INSERT INTO row_chunks(chunk_id, document_id) SELECT chunk_id, document_id FROM row_chunk_pages ORDER BY chunk_id;
                      DROP TABLE row_chunk_pages;
                      CREATE TRIGGER frozen_row_chunks_insert BEFORE INSERT ON row_chunks BEGIN SELECT RAISE(ABORT, 'frozen lexical row chunks'); END;",
                 )
                 .map_err(sqlite_error)
-        }),
-        1 => hotpath::measure_block!(
-            "query.artifact.finalization.merge.term_postings",
+            }
+        }
+        1 => {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.merge.term_postings").entered();
             derive_term_postings(transaction, mutation_gate, control)
-        ),
-        2 => hotpath::measure_block!(
-            "query.artifact.finalization.merge.exact_postings",
+        }
+        2 => {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.merge.exact_postings").entered();
             derive_exact_postings(transaction, mutation_gate, control)
-        ),
+        }
         // Last, so its lists reuse the pages the dropped runs freed.
-        3 => hotpath::measure_block!(
-            "query.artifact.finalization.derive.ngram_postings",
+        3 => {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.derive.ngram_postings").entered();
             derive_ngram_postings(transaction, authority, control)
-        ),
+        }
         _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact selected an unknown serving-index step".to_owned(),
         )),
@@ -6857,180 +6678,28 @@ fn verify_source_receipt(
 }
 
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
-    #[cfg(feature = "hotpath")]
-    {
-        match step {
-            CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
-                hotpath::gauge!("query.artifact.finalization.outcome.pending_total").inc(1u64);
-                crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
-                hotpath::gauge!("query.artifact.rows").set(*completed_rows);
-            }
-            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
-                hotpath::gauge!("query.artifact.finalization.outcome.ready_total").inc(1u64);
-                crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
-                hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
-                hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
-            }
+    match step {
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {
+            crate::observe::Residency::Rebuilding.record("query.artifact.residency");
+        }
+        CodeLexicalArtifactFinalizationStepV1::Ready(_) => {
+            crate::observe::Residency::Warm.record("query.artifact.residency");
         }
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = step;
-}
-
-fn record_batch_outcome(
-    result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
-) {
-    #[cfg(feature = "hotpath")]
-    {
-        match result {
-            Ok(_) => {
-                hotpath::gauge!("query.artifact.batch.outcome.committed_total").inc(1u64);
-            }
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {
-                hotpath::gauge!("query.artifact.batch.outcome.interrupted_total").inc(1u64);
-            }
-            Err(_) => {
-                hotpath::gauge!("query.artifact.batch.outcome.failed_total").inc(1u64);
-            }
-        }
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = result;
-}
-
-fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    #[cfg(feature = "hotpath")]
-    {
-        let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        let source_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::source_retained_bytes)
-            .sum::<usize>();
-        let prepared_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes)
-            .sum::<usize>();
-        let effective_workers =
-            tracedecay_code_index::parallelism::indexing_workers().min(pages.len());
-        let mut scratch = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::preparation_scratch_bytes)
-            .collect::<Vec<_>>();
-        scratch.sort_unstable_by(|left, right| right.cmp(left));
-        let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
-        hotpath::gauge!("query.artifact.batch.prepared_pages_total").inc(pages.len() as u64);
-        hotpath::gauge!("query.artifact.batch.prepared_documents_total").inc(documents as u64);
-        hotpath::gauge!("query.artifact.batch.source_bytes_total").inc(source_bytes as u64);
-        hotpath::gauge!("query.artifact.batch.prepared_bytes_total").inc(prepared_bytes as u64);
-        hotpath::gauge!("query.artifact.batch.active_scratch_bytes_total")
-            .inc(active_scratch as u64);
-        hotpath::gauge!("query.artifact.batch.effective_workers").set(effective_workers as u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = pages;
-}
-
-fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    #[cfg(feature = "hotpath")]
-    {
-        let relational_postings = pages
-            .iter()
-            .flat_map(|page| &page.documents)
-            .map(|document| document.term_postings.len() + document.exact_postings.len())
-            .sum::<usize>();
-        let ngram_shards = pages
-            .iter()
-            .map(|page| page.ngram_shards.len())
-            .sum::<usize>();
-        let ngram_documents = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.cardinality)
-            .sum::<u64>();
-        let ngram_bytes = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.documents.len())
-            .sum::<usize>();
-        hotpath::gauge!("query.artifact.batch.posting_rows_total").inc(relational_postings as u64);
-        hotpath::gauge!("query.artifact.batch.ngram_shard_rows_total").inc(ngram_shards as u64);
-        hotpath::gauge!("query.artifact.batch.ngram_documents_total").inc(ngram_documents);
-        hotpath::gauge!("query.artifact.batch.ngram_bytes_total").inc(ngram_bytes as u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = pages;
-}
-
-fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    #[cfg(feature = "hotpath")]
-    {
-        let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        hotpath::gauge!("query.artifact.batch.document_rows_total").inc(rows as u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = pages;
-}
-
-fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("query.artifact.batch.receipt_rows_total").inc(pages.len() as u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = pages;
-}
-
-fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
-    #[cfg(feature = "hotpath")]
-    {
-        match limit {
-            CodeLexicalArtifactBatchLimitV1::Memory => {
-                hotpath::gauge!("query.artifact.batch.prefix_limited.memory_total").inc(1u64);
-            }
-            CodeLexicalArtifactBatchLimitV1::PreparedRows => {
-                hotpath::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total")
-                    .inc(1u64);
-            }
-            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
-                hotpath::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
-                    .inc(1u64);
-            }
-        }
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = limit;
-}
-
-fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
-        hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
-        hotpath::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = progress;
 }
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,
-    metrics: &mut FinalizationTransactionMetricsV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("query.artifact.finalization.commit_attempts_total").inc(1u64);
-    let result = hotpath::measure_block!(
-        "query.artifact.finalization.commit",
-        transaction.commit().map_err(sqlite_error)
-    );
-    if result.is_ok() {
-        metrics.mark_committed();
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.finalization.commit_succeeded_total").inc(1u64);
-    }
-    result
+    let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
+    transaction.commit().map_err(sqlite_error)
 }
 
-#[hotpath::measure(label = "query.artifact.finalization.sealed_verify")]
+#[tracing::instrument(
+    name = "query.artifact.finalization.sealed_verify",
+    level = "trace",
+    skip_all
+)]
 fn verify_finalized_artifact(
     connection: &Connection,
     path: &Path,

@@ -117,7 +117,7 @@ pub(super) fn project_route_for_handshake(
     Ok((canonical_project_path, route))
 }
 
-#[hotpath::measure(label = "daemon.project.bind.identity", future = true)]
+#[tracing::instrument(name = "daemon.project.bind.identity", level = "trace", skip_all)]
 pub(super) async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
@@ -272,7 +272,7 @@ pub(super) async fn ensure_checkout_topology_before_admission(project_path: &Pat
     }
 }
 
-#[hotpath::measure(label = "daemon.project.route.resolve", future = true)]
+#[tracing::instrument(name = "daemon.project.route.resolve", level = "trace", skip_all)]
 pub(super) async fn resolved_project_server_key(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,

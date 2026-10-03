@@ -166,7 +166,6 @@ impl Default for DaemonHttpApplicationRegistry {
 }
 
 impl DaemonHttpApplicationRegistry {
-    #[hotpath::skip]
     pub(super) async fn mount(&self, project_id: &str, router: Router) -> Result<()> {
         let project_id =
             ProjectId::new(project_id.to_owned()).map_err(|error| TraceDecayError::Config {
@@ -183,7 +182,6 @@ impl DaemonHttpApplicationRegistry {
     /// shut down. Axum routers own cloned server state, so retaining this
     /// cache past server detachment would also retain the project's graph
     /// leases. Remote application state is intentionally unaffected.
-    #[hotpath::skip]
     pub(super) async fn drain_project_routes_for_shutdown(&self) {
         self.routers.lock().await.clear();
     }
@@ -257,7 +255,6 @@ impl DaemonHttpApplicationRegistry {
             })
     }
 
-    #[hotpath::skip]
     pub(super) async fn forget_remote_deleted_routes(
         &self,
         target: super::remote_deletion::RemoteDeletionReceiptTarget,
@@ -274,7 +271,6 @@ impl DaemonHttpApplicationRegistry {
         }
     }
 
-    #[hotpath::skip]
     async fn resolve(
         &self,
         project_id: &str,
@@ -300,12 +296,12 @@ impl DaemonHttpApplicationRegistry {
             .map_err(|_| ProjectRouterResolutionError::Saturated)?;
         // A cold project route resolution can park on daemon project-open
         // work; bound it so an HTTP caller never waits unboundedly.
-        let resolved = hotpath::future!(
+        let resolved = tracing::Instrument::instrument(
             tokio::time::timeout(
                 HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
                 resolver(project_id.clone()),
             ),
-            label = "daemon.http.application.router_resolve"
+            tracing::trace_span!("daemon.http.application.router_resolve"),
         )
         .await
         .map_err(|_| ProjectRouterResolutionError::TimedOut)?
@@ -320,7 +316,11 @@ impl DaemonHttpApplicationRegistry {
         Ok(Some(router))
     }
 
-    #[hotpath::measure(label = "daemon.http.application.build_registry_router")]
+    #[tracing::instrument(
+        name = "daemon.http.application.build_registry_router",
+        level = "trace",
+        skip_all
+    )]
     fn router(
         self,
         admission: LocalHttpAdmission,
@@ -362,15 +362,10 @@ impl DaemonHttpApplicationRegistry {
             .clone();
         match remote {
             Some(remote) => Ok((
-                tracedecay_daemon_service::application_surface::with_hotpath_server_layer(
-                    local.merge(Router::new().nest("/remote", remote.router)),
-                ),
+                local.merge(Router::new().nest("/remote", remote.router)),
                 Some(remote.credentials),
             )),
-            None => Ok((
-                tracedecay_daemon_service::application_surface::with_hotpath_server_layer(local),
-                None,
-            )),
+            None => Ok((local, None)),
         }
     }
 
@@ -414,9 +409,9 @@ async fn provision_remote_node(
     let Some(runtime) = registry.remote_runtime() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         runtime.provision_remote_node(request.grant, request.admission),
-        label = "daemon.http.application.remote_node_provision"
+        tracing::trace_span!("daemon.http.application.remote_node_provision"),
     )
     .await
     {
@@ -435,13 +430,13 @@ async fn publish_remote_writer_authority(
     let Some(runtime) = registry.remote_runtime() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         runtime.publish_remote_writer_authority(
             &request.node_id,
             request.writer,
             request.replay_policy,
         ),
-        label = "daemon.http.application.remote_writer_authority_publish"
+        tracing::trace_span!("daemon.http.application.remote_writer_authority_publish"),
     )
     .await
     {
@@ -462,7 +457,11 @@ async fn publish_remote_writer_authority(
     }
 }
 
-#[hotpath::measure(label = "daemon.http.application.remote_status_read", future = true)]
+#[tracing::instrument(
+    name = "daemon.http.application.remote_status_read",
+    level = "trace",
+    skip_all
+)]
 async fn remote_operational_status(
     State(registry): State<DaemonHttpApplicationRegistry>,
 ) -> Response {
@@ -499,14 +498,12 @@ pub fn live_remote_operational_status(
     let auth_token = connection.auth_token();
     let origin = format!("http://{endpoint}");
     let url = format!("http://{endpoint}/remote-status");
-    let agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT));
-    #[cfg(feature = "hotpath")]
-    let agent = agent.middleware(hotpath::UreqHttpMiddleware::with_label(
-        "daemon.http.application.remote_status",
-    ));
-    let agent = http_agent(agent.build());
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
+            .build(),
+    );
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))
@@ -521,16 +518,19 @@ pub fn live_remote_operational_status(
             ),
         });
     }
-    hotpath::measure_block!("daemon.http.application.remote_status_decode", {
-        response
-            .body_mut()
-            .read_json()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "TraceDecay daemon remote status was not a typed operational read: {error}"
-                ),
-            })
-    })
+    {
+        let _span = tracing::trace_span!("daemon.http.application.remote_status_decode").entered();
+        {
+            response
+                .body_mut()
+                .read_json()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "TraceDecay daemon remote status was not a typed operational read: {error}"
+                    ),
+                })
+        }
+    }
 }
 
 fn remote_status_daemon_unavailable(
@@ -578,9 +578,9 @@ async fn dispatch_project_application(
     };
     *request.uri_mut() = uri;
     request.extensions_mut().clear();
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         router.oneshot(request),
-        label = "daemon.http.application.router_oneshot"
+        tracing::trace_span!("daemon.http.application.router_oneshot"),
     )
     .await
     {
@@ -699,7 +699,11 @@ impl LocalHttpAdmission {
     }
 }
 
-#[hotpath::measure(label = "daemon.http.application.local_admission", future = true)]
+#[tracing::instrument(
+    name = "daemon.http.application.local_admission",
+    level = "trace",
+    skip_all
+)]
 async fn require_local_http_admission(
     State(admission): State<LocalHttpAdmission>,
     request: Request<Body>,
@@ -785,7 +789,6 @@ async fn bind_remote_brain_tls_server(
 
 impl DaemonHttpApplicationService {
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn bind(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,
@@ -793,7 +796,6 @@ impl DaemonHttpApplicationService {
         Self::bind_with_remote_tls(registry, auth_token, None).await
     }
 
-    #[hotpath::skip]
     pub(super) async fn bind_with_remote_tls(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,
@@ -826,7 +828,7 @@ impl DaemonHttpApplicationService {
         active.store(true, Ordering::Release);
         let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 let result = axum::serve(listener, app)
                     .with_graceful_shutdown(async {
@@ -839,7 +841,7 @@ impl DaemonHttpApplicationService {
                 task_active.store(false, Ordering::Release);
                 result
             },
-            label = "daemon.http.application.listener"
+            tracing::trace_span!("daemon.http.application.listener"),
         ));
         let mut remote_tls_endpoint = None;
         let mut remote_tls_shutdown = None;
@@ -858,7 +860,7 @@ impl DaemonHttpApplicationService {
                 remote_tls_egress = Some(server.egress);
             }
             let listener_state = server.credentials;
-            remote_tls_task = Some(tokio::spawn(hotpath::future!(
+            remote_tls_task = Some(tokio::spawn(tracing::Instrument::instrument(
                 async move {
                     let result = server
                         .listener
@@ -870,7 +872,7 @@ impl DaemonHttpApplicationService {
                     }
                     result
                 },
-                label = "daemon.http.application.remote_tls_listener"
+                tracing::trace_span!("daemon.http.application.remote_tls_listener"),
             )));
         }
         Ok(Self {
@@ -930,7 +932,6 @@ impl DaemonHttpApplicationService {
         &self.origin
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(mut self) -> Result<()> {
         self.active.store(false, Ordering::Release);
         if let Some(credentials) = self.remote_credentials.take() {

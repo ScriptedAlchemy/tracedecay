@@ -406,7 +406,6 @@ struct DaemonInvocationClientActivityGuard {
 impl DaemonInvocationClientActivity {
     fn queued(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.queued.fetch_add(1, Ordering::AcqRel);
-        hotpath::gauge!("daemon.invocation.client.queued").inc(1.0);
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::Queued,
@@ -415,7 +414,6 @@ impl DaemonInvocationClientActivity {
 
     fn in_flight(self: &Arc<Self>) -> DaemonInvocationClientActivityGuard {
         self.in_flight.fetch_add(1, Ordering::AcqRel);
-        hotpath::gauge!("daemon.invocation.client.in_flight").inc(1.0);
         DaemonInvocationClientActivityGuard {
             activity: Arc::clone(self),
             phase: DaemonInvocationClientPhase::InFlight,
@@ -436,11 +434,9 @@ impl Drop for DaemonInvocationClientActivityGuard {
         match self.phase {
             DaemonInvocationClientPhase::Queued => {
                 self.activity.queued.fetch_sub(1, Ordering::AcqRel);
-                hotpath::gauge!("daemon.invocation.client.queued").inc(-1.0);
             }
             DaemonInvocationClientPhase::InFlight => {
                 self.activity.in_flight.fetch_sub(1, Ordering::AcqRel);
-                hotpath::gauge!("daemon.invocation.client.in_flight").inc(-1.0);
             }
         }
     }
@@ -533,7 +529,6 @@ impl Drop for InvocationConnectionLease {
             }
             LeaseDisposition::DiscardOne => {
                 // The leased stream drops with the lease; idle siblings stay.
-                hotpath::gauge!("daemon.invocation.client.pool.discarded_total").inc(1u64);
             }
             LeaseDisposition::InvalidatePool => {
                 self.pool
@@ -541,7 +536,6 @@ impl Drop for InvocationConnectionLease {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clear();
-                hotpath::gauge!("daemon.invocation.client.pool.invalidated_total").inc(1u64);
             }
         }
         drop(self.permit.take());
@@ -632,9 +626,9 @@ impl DaemonInvocationClient {
         DaemonInvocationClientActivityGuard,
     )> {
         let queued = self.activity.queued();
-        let permit = hotpath::future!(
+        let permit = tracing::Instrument::instrument(
             Arc::clone(&self.pool.permits).acquire_owned(),
-            label = "daemon.invocation.client.queue_wait"
+            tracing::trace_span!("daemon.invocation.client.queue_wait"),
         )
         .await
         .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
@@ -650,19 +644,19 @@ impl DaemonInvocationClient {
         let connection = match idle {
             Some(connection) => connection,
             None => {
-                let stream = hotpath::future!(
+                let stream = tracing::Instrument::instrument(
                     crate::connection::connect_to_daemon_connection(&self.connection),
-                    label = "daemon.invocation.client.connect"
+                    tracing::trace_span!("daemon.invocation.client.connect"),
                 )
                 .await?;
                 let (reader, mut writer) = stream.into_split();
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     crate::connection::write_daemon_preamble(
                         &mut writer,
                         &self.connection,
-                        &self.handshake
+                        &self.handshake,
                     ),
-                    label = "daemon.invocation.client.preamble"
+                    tracing::trace_span!("daemon.invocation.client.preamble"),
                 )
                 .await?;
                 DaemonInvocationConnection {
@@ -708,29 +702,28 @@ impl DaemonInvocationClient {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
         let connection = lease.connection_mut()?;
-        let request_json = hotpath::measure_block!(
-            "daemon.invocation.client.request.encode",
+        let request_json = {
+            let _span = tracing::trace_span!("daemon.invocation.client.request.encode").entered();
             serde_json::to_string(&request)
-        )?;
-        hotpath::gauge!("daemon.invocation.client.request.bytes").set(request_json.len() as f64);
-        hotpath::future!(
+        }?;
+        tracing::Instrument::instrument(
             async {
                 connection.writer.write_all(request_json.as_bytes()).await?;
                 connection.writer.write_all(b"\n").await?;
                 connection.writer.flush().await
             },
-            label = "daemon.invocation.client.request.write"
+            tracing::trace_span!("daemon.invocation.client.request.write"),
         )
         .await?;
 
-        let Some(line) = hotpath::future!(
+        let Some(line) = tracing::Instrument::instrument(
             crate::connection::next_daemon_response_line(
                 &mut connection.reader,
                 &self.connection,
                 request_label,
                 crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
             ),
-            label = "daemon.invocation.client.response.wait"
+            tracing::trace_span!("daemon.invocation.client.response.wait"),
         )
         .await?
         else {
@@ -740,11 +733,11 @@ impl DaemonInvocationClient {
                 ),
             });
         };
-        hotpath::gauge!("daemon.invocation.client.response.bytes").set(line.len() as f64);
-        let response: crate::contract::DaemonInvocationResponse = match hotpath::measure_block!(
-            "daemon.invocation.client.response.decode",
+        let match_result = {
+            let _span = tracing::trace_span!("daemon.invocation.client.response.decode").entered();
             serde_json::from_str(&line)
-        ) {
+        };
+        let response: crate::contract::DaemonInvocationResponse = match match_result {
             Ok(response) => response,
             Err(_) => {
                 if let Some(refusal) = crate::handshake::DaemonHandshakeRefusal::from_line(&line) {
@@ -770,7 +763,6 @@ impl DaemonInvocationClient {
     ///
     /// FIFO ordering is preserved on each checked-out connection. Concurrent
     /// requests on different leases have no cross-connection ordering.
-    #[hotpath::skip]
     pub async fn invoke(
         &self,
         request: crate::contract::DaemonInvocationRequest,
@@ -780,7 +772,7 @@ impl DaemonInvocationClient {
             .map(DaemonInvocationResult::into_response)
     }
 
-    #[hotpath::measure(label = "daemon.invocation.client", future = true)]
+    #[tracing::instrument(name = "daemon.invocation.client", level = "trace", skip_all)]
     pub async fn invoke_with_delivery(
         &self,
         request: crate::contract::DaemonInvocationRequest,
@@ -813,7 +805,6 @@ impl DaemonInvocationClient {
         }
     }
 
-    #[hotpath::skip]
     async fn acknowledge_work_delivery_on_connection(
         connection: &mut DaemonInvocationConnection,
         daemon_connection: &crate::connection::DaemonConnection,
@@ -885,7 +876,6 @@ impl DaemonInvocationClient {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
@@ -918,7 +908,6 @@ impl DaemonInvocationClient {
         }
     }
 
-    #[hotpath::skip]
     async fn cancel_invocation(
         &self,
         target_request_id: &str,
@@ -938,7 +927,6 @@ impl DaemonInvocationClient {
 }
 
 impl DaemonInvocationDelivery {
-    #[hotpath::skip]
     pub async fn acknowledge(
         mut self,
         outcome: tracedecay_domain::DeliverySettlementOutcomeV1,

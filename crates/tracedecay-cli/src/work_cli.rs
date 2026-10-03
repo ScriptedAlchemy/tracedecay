@@ -75,7 +75,6 @@ impl WorkCliDelivery {
     }
 
     /// Acknowledge only after the caller's output write and flush succeeded.
-    #[hotpath::skip]
     pub async fn acknowledge_delivered(self) -> Result<()> {
         self.delivery
             .acknowledge(
@@ -87,7 +86,6 @@ impl WorkCliDelivery {
 
     /// Record a terminal disconnected/drop outcome when the caller's output
     /// boundary fails. This must never be converted into Delivered.
-    #[hotpath::skip]
     pub async fn acknowledge_dropped(
         self,
         reason: tracedecay_domain::DeliveryDropReasonV1,
@@ -346,7 +344,7 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
 
 /// Invokes Work while retaining the daemon connection until the presentation
 /// layer explicitly acknowledges the terminal output boundary.
-#[hotpath::measure(label = "work_cli.invoke", future = true)]
+#[tracing::instrument(name = "work_cli.invoke", level = "trace", skip_all)]
 pub async fn invoke_work_cli_with_delivery(
     profile: &ProfileRoot,
     project_root: PathBuf,

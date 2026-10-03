@@ -139,7 +139,7 @@ pub(crate) fn tool_command_deadline() -> Result<Duration> {
 }
 
 /// Entry point for `tracedecay tool ...`.
-#[hotpath::measure(label = "cli.tool.dispatch", future = true)]
+#[tracing::instrument(name = "cli.tool.dispatch", level = "trace", skip_all)]
 pub(crate) async fn run(
     profile: &ProfileRoot,
     project: Option<String>,
@@ -194,10 +194,10 @@ fn run_inner(
     let profile = profile.clone();
     Box::pin(async move {
         let profile = &profile;
-        #[cfg(feature = "hotpath")]
+
         {
             let requested_name = name.as_deref().map(canonical_tool_name);
-            hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
+            tracing::trace!(name: "cli.tool.name", value = ?requested_name.as_deref().unwrap_or("list"));
         }
         let requested_operation = name
             .as_deref()
@@ -445,7 +445,7 @@ fn run_inner(
 /// This is the same normalized-argument, deadline, and warm-up-retry path the
 /// `tracedecay tool` fallback uses, so first-class commands cannot drift from
 /// the typed surface's transport behavior.
-#[hotpath::measure(label = "cli.tool.catalog", future = true)]
+#[tracing::instrument(name = "cli.tool.catalog", level = "trace", skip_all)]
 pub(crate) async fn dispatch_catalogued_cli_operation(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
@@ -498,7 +498,7 @@ fn cli_surface_invocation(
 /// without a project reaches the profile-scoped projectless route, where those
 /// operations can only answer `application.surface.unavailable` /
 /// `not_found_or_not_authorized`.
-#[hotpath::measure(label = "cli.tool.application", future = true)]
+#[tracing::instrument(name = "cli.tool.application", level = "trace", skip_all)]
 async fn dispatch_cli_application_surface(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
@@ -534,8 +534,8 @@ fn dispatch_cli_application_surface_inner(
     let profile = profile.clone();
     Box::pin(async move {
         let profile = &profile;
-        #[cfg(feature = "hotpath")]
-        hotpath::val!("cli.application.operation").set(&operation.as_str());
+
+        tracing::trace!(name: "cli.application.operation", value = ?operation.as_str());
         let request_id = mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| {
             TraceDecayError::Config {
                 message: "could not allocate an application surface request id".to_owned(),
@@ -647,7 +647,7 @@ fn cli_request_controls(
 
 /// Run one retained memory, session, or workflow tool through the application
 /// surface and print the same tool result its MCP call returns.
-#[hotpath::measure(label = "cli.tool.retained", future = true)]
+#[tracing::instrument(name = "cli.tool.retained", level = "trace", skip_all)]
 async fn dispatch_cli_retained(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
@@ -704,7 +704,7 @@ async fn dispatch_cli_retained(
 
 /// Run one source-edit tool through the application surface and print the
 /// same tool result its MCP call returns.
-#[hotpath::measure(label = "cli.tool.source_edit", future = true)]
+#[tracing::instrument(name = "cli.tool.source_edit", level = "trace", skip_all)]
 async fn dispatch_cli_source_edit(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
@@ -771,7 +771,7 @@ async fn dispatch_cli_source_edit(
 
 /// Run one graph or port read through its project owner and print the same
 /// tool result its MCP call returns.
-#[hotpath::measure(label = "cli.tool.graph_tool", future = true)]
+#[tracing::instrument(name = "cli.tool.graph_tool", level = "trace", skip_all)]
 async fn dispatch_cli_graph_tool(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
@@ -917,7 +917,7 @@ pub(crate) async fn owner_operation_result(
 /// Run one profile registry read through the daemon's profile owner and print
 /// the same tool result its MCP call returns. The handshake's project, when
 /// the dispatch names one, only marks that project active.
-#[hotpath::measure(label = "cli.tool.profile_registry", future = true)]
+#[tracing::instrument(name = "cli.tool.profile_registry", level = "trace", skip_all)]
 async fn dispatch_cli_profile_registry(
     profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,

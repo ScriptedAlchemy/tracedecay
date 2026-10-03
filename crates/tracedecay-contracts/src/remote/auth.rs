@@ -457,12 +457,11 @@ impl<A> RemoteEnrollmentServiceV1<A>
 where
     A: RemoteEnrollmentAuthorityPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(authority: A) -> Self {
         Self { authority }
     }
 
-    #[hotpath::measure(label = "application.remote.enroll")]
+    #[tracing::instrument(name = "application.remote.enroll", level = "trace", skip_all)]
     pub fn enroll(
         &self,
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
@@ -696,7 +695,11 @@ pub struct EnrollmentIssueRequestV1 {
     pub scope: RemoteRepositoryScopeV1,
 }
 
-#[hotpath::measure(label = "application.remote.issue_enrollment")]
+#[tracing::instrument(
+    name = "application.remote.issue_enrollment",
+    level = "trace",
+    skip_all
+)]
 pub fn issue_enrollment(
     grant: &EnrollmentGrantV1,
     presented_grant: &OpaqueRemoteCredential,
@@ -762,7 +765,11 @@ pub trait RemoteAuthorityAuthenticationPort {
 
 /// Authenticate both sides of a remote request and reauthorize exact scope.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "application.remote.authenticate_request")]
+#[tracing::instrument(
+    name = "application.remote.authenticate_request",
+    level = "trace",
+    skip_all
+)]
 pub fn authenticate_remote_request(
     authority_port: &dyn RemoteAuthorityAuthenticationPort,
     expected_authority: &CurrentRemoteAuthorityV1,
@@ -847,7 +854,11 @@ fn validate_authority_credential(
     Ok(())
 }
 
-#[hotpath::measure(label = "application.remote.rotate_credential")]
+#[tracing::instrument(
+    name = "application.remote.rotate_credential",
+    level = "trace",
+    skip_all
+)]
 pub fn rotate_credential(
     current: &EnrollmentCredentialRecordV1,
     expected_revision: u64,
@@ -899,7 +910,11 @@ pub fn rotate_credential(
 /// Revoke a credential after the surrounding authority command has been
 /// authenticated and authorized. Revocation is monotone and idempotent at an
 /// already-revoked timestamp.
-#[hotpath::measure(label = "application.remote.revoke_credential")]
+#[tracing::instrument(
+    name = "application.remote.revoke_credential",
+    level = "trace",
+    skip_all
+)]
 pub fn revoke_credential(
     current: &EnrollmentCredentialRecordV1,
     expected_revision: u64,

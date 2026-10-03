@@ -70,16 +70,13 @@ pub fn build_empty_execution_topology_daily_rollup(
 /// Refuses non-exact, stale, partial, oversized, or duplicate daily evidence.
 /// A capped page becomes a durable typed Capped artifact with zero cells, so a
 /// storage adapter never publishes values from its observed prefix.
-#[hotpath::measure(label = "application.topology.rollup.build")]
+#[tracing::instrument(name = "application.topology.rollup.build", level = "trace", skip_all)]
 pub fn build_execution_topology_daily_rollup(
     authorized_scope_ref: &str,
     exact_day_horizon: &ObservabilityHorizonV1,
     observed_at_micros: i64,
     page: ObservabilityPageV1,
 ) -> Result<ExecutionTopologyRollupBuildV1, ExecutionTopologyRollupBuildErrorV1> {
-    // Items processed by this daily sweep; the surrounding measure is the
-    // sweep's one wall-time authority and this sizes what it reduced.
-    hotpath::gauge!("application.topology.rollup.build.events").set(page.events.len() as u64);
     let fragment = build_execution_topology_rollup_fragment(
         authorized_scope_ref,
         exact_day_horizon,

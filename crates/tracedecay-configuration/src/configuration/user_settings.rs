@@ -157,7 +157,11 @@ fn user_settings_snapshot(
     })
 }
 
-#[hotpath::measure(label = "usecases.configuration.plan_user_settings")]
+#[tracing::instrument(
+    name = "usecases.configuration.plan_user_settings",
+    level = "trace",
+    skip_all
+)]
 pub fn plan_user_settings_mutation(
     _current: &UserSettingsSnapshotV1,
     profile_id: UserProfileId,

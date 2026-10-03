@@ -362,7 +362,6 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         self.inner.cancellation.cancel();
     }
 
-    #[hotpath::skip]
     pub(crate) async fn shutdown(&self) {
         self.cancel();
         let task = self

@@ -205,7 +205,6 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
     /// Builds the request through the input authority selected with this
     /// runtime's admitted providers. That authority resolves the requested
     /// document against the current sealed generation on every invocation.
-    #[hotpath::skip]
     async fn run_cycle(
         &self,
         request: FeedbackCycleRequest,
@@ -218,7 +217,6 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             .await
     }
 
-    #[hotpath::skip]
     async fn run_cycle_with_lsp_input(
         &self,
         pin: ProjectOpenFeedbackCyclePinV1,
@@ -1266,7 +1264,7 @@ fn hash16(value: &[u8]) -> [u8; 16] {
     value
 }
 
-#[hotpath::measure(label = "daemon.project.owners.advisory", future = true)]
+#[tracing::instrument(name = "daemon.project.owners.advisory", level = "trace", skip_all)]
 pub(super) async fn register_production_feedback_and_advisory(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1318,13 +1316,10 @@ async fn refresh_project_open_feedback_configuration(
 }
 
 /// Registers owners whose exact authority depends on a mounted code index.
-#[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Dependent-owner registration is one follow-on bind after production owners exist."
-    )
+#[tracing::instrument(name = "daemon.project.owners.dependent", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dependent-owner registration is one follow-on bind after production owners exist."
 )]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,

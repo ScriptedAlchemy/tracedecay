@@ -17,7 +17,6 @@ pub(super) enum GitHistoryFailureReason {
 }
 
 impl GitHistoryFailureReason {
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::UnsupportedSourceFraming => "unsupported_source_framing",
@@ -129,7 +128,6 @@ impl GitHistoryFailureRow {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn frontier(&self) -> GitHistoryIndexFrontier {
         GitHistoryIndexFrontier {
             change_sequence: self.change_sequence,

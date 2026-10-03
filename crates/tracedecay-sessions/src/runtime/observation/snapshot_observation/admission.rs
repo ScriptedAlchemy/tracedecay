@@ -173,7 +173,11 @@ pub fn snapshot_cursor_after(
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "sessions.observation.capture_snapshot", future = true)]
+#[tracing::instrument(
+    name = "sessions.observation.capture_snapshot",
+    level = "trace",
+    skip_all
+)]
 pub async fn capture_snapshot_observations<R, D, B, L>(
     facade: &dyn HostAdmission,
     provider: &'static str,
@@ -191,10 +195,11 @@ where
     L: Fn(&Path) -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = hotpath::measure_block!(
-        "sessions.observation.snapshot_discover_blocking",
+    let discovery = {
+        let _span =
+            tracing::trace_span!("sessions.observation.snapshot_discover_blocking").entered();
         run_blocking_transcript_section(discover)
-    );
+    };
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
@@ -202,10 +207,11 @@ where
     }
     for path in discovery.paths {
         ensure_snapshot_admission_active(provider, cancellation)?;
-        let input_bytes = hotpath::measure_block!(
-            "sessions.observation.snapshot_bytes_blocking",
+        let input_bytes = {
+            let _span =
+                tracing::trace_span!("sessions.observation.snapshot_bytes_blocking").entered();
             run_blocking_transcript_section(|| input_bytes_fn(&path))
-        )?;
+        }?;
         ensure_snapshot_admission_active(provider, cancellation)?;
         runner
             .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
@@ -238,7 +244,6 @@ impl SnapshotAdmissionRunner {
         self.budget.defer();
     }
 
-    #[hotpath::skip]
     pub async fn admit_batch<R, F>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -256,10 +261,11 @@ impl SnapshotAdmissionRunner {
             return Ok(());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = hotpath::measure_block!(
-            "sessions.observation.snapshot_parse_blocking",
+        let loaded = {
+            let _span =
+                tracing::trace_span!("sessions.observation.snapshot_parse_blocking").entered();
             run_blocking_transcript_section(load)
-        )?;
+        }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some(batches) = loaded else {
             return Ok(());

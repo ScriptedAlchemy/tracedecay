@@ -136,7 +136,11 @@ impl DaemonNativeIntegrationStore {
         Self::open_actor(ActorDatabase::Registered(database))
     }
 
-    #[hotpath::measure(label = "daemon.native_integration.store_open")]
+    #[tracing::instrument(
+        name = "daemon.native_integration.store_open",
+        level = "trace",
+        skip_all
+    )]
     fn open_actor(database: ActorDatabase) -> NativeIntegrationStoreResult<Self> {
         let (commands, receiver) = sync_channel(NATIVE_INTEGRATION_STORE_ACTOR_CAPACITY);
         let (ready, started) = sync_channel::<NativeIntegrationStoreResult<()>>(1);
@@ -204,7 +208,11 @@ impl DaemonNativeIntegrationStore {
     }
 
     /// Persists one issued approval commitment (approval issuance operation).
-    #[hotpath::measure(label = "agent_hosts.native_store.save_approval")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.save_approval",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
@@ -215,7 +223,11 @@ impl DaemonNativeIntegrationStore {
     }
 
     /// Reads one issued approval commitment for apply resolution.
-    #[hotpath::measure(label = "agent_hosts.native_store.read_approval")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_approval",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -225,7 +237,11 @@ impl DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_preview_by_digest")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_preview_by_digest",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn read_preview_by_digest(
         &self,
         preview_digest: &ManifestDigest,
@@ -238,7 +254,11 @@ impl DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_receipt_by_digest")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_receipt_by_digest",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn read_receipt_by_digest(
         &self,
         receipt_digest: &ManifestDigest,
@@ -278,7 +298,11 @@ impl Drop for DaemonNativeIntegrationStore {
 }
 
 impl NativeIntegrationStore for DaemonNativeIntegrationStore {
-    #[hotpath::measure(label = "agent_hosts.native_store.save_preview")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.save_preview",
+        level = "trace",
+        skip_all
+    )]
     fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
@@ -288,7 +312,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_preview")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_preview",
+        level = "trace",
+        skip_all
+    )]
     fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
@@ -298,7 +326,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.begin_or_replay")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.begin_or_replay",
+        level = "trace",
+        skip_all
+    )]
     fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
@@ -308,7 +340,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_status")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_status",
+        level = "trace",
+        skip_all
+    )]
     fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -318,7 +354,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_record")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_record",
+        level = "trace",
+        skip_all
+    )]
     fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -328,7 +368,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_receipt")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_receipt",
+        level = "trace",
+        skip_all
+    )]
     fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -338,7 +382,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.compare_and_swap_status")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.compare_and_swap_status",
+        level = "trace",
+        skip_all
+    )]
     fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -355,7 +403,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.write_terminal")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.write_terminal",
+        level = "trace",
+        skip_all
+    )]
     fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -372,7 +424,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.pending_transactions")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.pending_transactions",
+        level = "trace",
+        skip_all
+    )]
     fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
@@ -399,7 +455,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.approval_consumed")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.approval_consumed",
+        level = "trace",
+        skip_all
+    )]
     fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -409,7 +469,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.quarantine_repository")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.quarantine_repository",
+        level = "trace",
+        skip_all
+    )]
     fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
@@ -424,7 +488,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.begin_worktree_cleanup")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.begin_worktree_cleanup",
+        level = "trace",
+        skip_all
+    )]
     fn begin_worktree_cleanup(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
@@ -437,7 +505,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.read_worktree_cleanup")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.read_worktree_cleanup",
+        level = "trace",
+        skip_all
+    )]
     fn read_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -450,7 +522,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.pending_worktree_cleanups")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.pending_worktree_cleanups",
+        level = "trace",
+        skip_all
+    )]
     fn pending_worktree_cleanups(
         &self,
         repository_id: &RepositoryId,
@@ -465,7 +541,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.compare_and_swap_worktree_cleanup")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.compare_and_swap_worktree_cleanup",
+        level = "trace",
+        skip_all
+    )]
     fn compare_and_swap_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
@@ -482,7 +562,11 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
-    #[hotpath::measure(label = "agent_hosts.native_store.write_worktree_cleanup_terminal")]
+    #[tracing::instrument(
+        name = "agent_hosts.native_store.write_worktree_cleanup_terminal",
+        level = "trace",
+        skip_all
+    )]
     fn write_worktree_cleanup_terminal(
         &self,
         confirmation_digest: &ManifestDigest,

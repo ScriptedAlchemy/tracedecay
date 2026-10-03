@@ -101,24 +101,6 @@ impl Drop for ProjectOpenTaskCompletionFinalizer {
     }
 }
 
-/// RAII observation of one tracked open task. Held inside the spawned future,
-/// so cooperative cancellation, shutdown aborts, and panics all release the
-/// in-flight gauge with the future itself.
-struct ProjectOpenActiveObservationV1;
-
-impl ProjectOpenActiveObservationV1 {
-    fn enter() -> Self {
-        hotpath::gauge!("daemon.project.open.active").inc(1.0);
-        Self
-    }
-}
-
-impl Drop for ProjectOpenActiveObservationV1 {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.project.open.active").inc(-1.0);
-    }
-}
-
 #[derive(Clone)]
 pub(super) enum ProjectOpenTaskState {
     Opening,
@@ -577,7 +559,6 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) fn start<OpenFuture>(
         &self,
         route: ProjectRouteKey,
@@ -589,7 +570,6 @@ impl ProjectOpenTasks {
         self.start_cancellable(route, |_| open)
     }
 
-    #[hotpath::skip]
     pub(super) fn start_cancellable<OpenOperation, OpenFuture>(
         &self,
         route: ProjectRouteKey,
@@ -603,13 +583,11 @@ impl ProjectOpenTasks {
         let mut registry = self.lock_registry();
         registry.prune(now);
         if registry.closed_profiles.contains(&route.profile_root) {
-            hotpath::gauge!("daemon.project.open.refused.profile_closed").inc(1.0);
             return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
                 "project open denied: authenticated profile was remotely deleted".to_owned(),
             ));
         }
         if let Some(entry) = registry.retiring.get(&route) {
-            hotpath::gauge!("daemon.project.open.joined.retiring").inc(1.0);
             return ProjectOpenTaskClaim::InFlight(entry.state.clone());
         }
         if let Some(entry) = registry.routes.get(&route) {
@@ -623,54 +601,37 @@ impl ProjectOpenTasks {
                 ProjectOpenTaskState::Failed(failure)
                     if finished && failure.is_stale_for(&route) =>
                 {
-                    hotpath::gauge!("daemon.project.open.refusal_stale_dropped").inc(1.0);
                     registry.routes.remove(&route);
                 }
                 ProjectOpenTaskState::Failed(failure) => {
-                    hotpath::gauge!("daemon.project.open.refused.cached_failure").inc(1.0);
                     return ProjectOpenTaskClaim::Failed(failure);
                 }
                 ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
-                    hotpath::gauge!("daemon.project.open.joined.inflight").inc(1.0);
                     return ProjectOpenTaskClaim::InFlight(receiver);
                 }
             }
         }
         if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
-            hotpath::gauge!("daemon.project.open.refused.saturated").inc(1.0);
             return ProjectOpenTaskClaim::Saturated;
         }
 
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let outcome_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let _active = ProjectOpenActiveObservationV1::enter();
                 let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
                 let state = match open(task_cancellation).await {
-                    Ok(()) => {
-                        hotpath::gauge!("daemon.project.open.outcome.ready").inc(1.0);
-                        ProjectOpenTaskState::Ready
-                    }
-                    Err(error) => {
-                        if outcome_cancellation.is_cancelled() {
-                            hotpath::gauge!("daemon.project.open.outcome.cancelled").inc(1.0);
-                        } else {
-                            hotpath::gauge!("daemon.project.open.outcome.failed").inc(1.0);
-                        }
-                        ProjectOpenTaskState::Failed(ProjectOpenFailure::recorded_for_route(
-                            &error,
-                            &failure_route,
-                        ))
-                    }
+                    Ok(()) => ProjectOpenTaskState::Ready,
+                    Err(error) => ProjectOpenTaskState::Failed(
+                        ProjectOpenFailure::recorded_for_route(&error, &failure_route),
+                    ),
                 };
                 updates.send_replace(state);
             },
-            label = "daemon.project.admit.task"
+            tracing::trace_span!("daemon.project.admit.task"),
         ));
         registry.routes.insert(
             route,
@@ -684,7 +645,6 @@ impl ProjectOpenTasks {
         ProjectOpenTaskClaim::InFlight(state)
     }
 
-    #[hotpath::skip]
     pub(super) fn cached_failure(&self, route: &ProjectRouteKey) -> Option<ProjectOpenFailure> {
         let now = Instant::now();
         let mut registry = self.lock_registry();
@@ -709,7 +669,6 @@ impl ProjectOpenTasks {
         }
     }
 
-    #[hotpath::skip]
     pub(super) fn status(&self, route: &ProjectRouteKey) -> Option<ProjectOpenStatusV1> {
         let now = Instant::now();
         let mut registry = self.lock_registry();
@@ -790,7 +749,7 @@ impl ProjectOpenTasks {
     /// full owner set. This is deliberately a route-local operation: callers
     /// must re-read the canonical route after it returns rather than carrying
     /// a core publication's stale project identity into LSP admission.
-    #[hotpath::measure(label = "daemon.project.admit.lsp_upgrade", future = true)]
+    #[tracing::instrument(name = "daemon.project.admit.lsp_upgrade", level = "trace", skip_all)]
     pub(super) async fn wait_for_lsp_upgrade(
         &self,
         route: &ProjectRouteKey,
@@ -847,7 +806,6 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn wait_for_completion(
         mut state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
     ) -> Result<()> {
@@ -873,13 +831,11 @@ impl ProjectOpenTasks {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> bool {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown_project_identity(
         &self,
         profile_root: &Path,
@@ -895,7 +851,11 @@ impl ProjectOpenTasks {
         .await
     }
 
-    #[hotpath::measure(label = "daemon.project.admit.shutdown_identity", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.admit.shutdown_identity",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown_project_identity_with_deadline(
         &self,
         profile_root: &Path,
@@ -917,7 +877,11 @@ impl ProjectOpenTasks {
         self.drain_retiring_routes(routes, timeout).await
     }
 
-    #[hotpath::measure(label = "daemon.project.admit.shutdown_profile", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.admit.shutdown_profile",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown_profile_with_deadline(
         &self,
         profile_root: &Path,
@@ -948,7 +912,7 @@ impl ProjectOpenTasks {
         self.drain_retiring_routes(routes, timeout).await
     }
 
-    #[hotpath::measure(label = "daemon.project.admit.shutdown", future = true)]
+    #[tracing::instrument(name = "daemon.project.admit.shutdown", level = "trace", skip_all)]
     pub(super) async fn shutdown_with_deadline(
         &self,
         cooperative_deadline: Duration,
@@ -989,7 +953,6 @@ impl ProjectOpenTasks {
             .await
     }
 
-    #[hotpath::skip]
     async fn drain_retiring_routes(&self, routes: Vec<ProjectRouteKey>, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         let completions = {
@@ -1019,7 +982,6 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) fn tracked_task_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());
@@ -1037,7 +999,6 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) fn tracked_route_count(&self) -> usize {
         let mut registry = self.lock_registry();
         registry.prune(Instant::now());

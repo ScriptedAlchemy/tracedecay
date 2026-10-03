@@ -74,7 +74,11 @@ pub enum WorkExecutionHistoryV1 {
     },
 }
 
-#[hotpath::measure(label = "application.work.execution_history.project")]
+#[tracing::instrument(
+    name = "application.work.execution_history.project",
+    level = "trace",
+    skip_all
+)]
 pub fn project_work_execution_history<S>(
     storage: &S,
     context: &RequestContext,

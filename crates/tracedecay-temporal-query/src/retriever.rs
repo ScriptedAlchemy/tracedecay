@@ -304,7 +304,7 @@ fn participant_freshness(
 
 /// Hydrate only the globally selected temporal anchors, in the supplied
 /// selected order, through the canonical temporal content authority.
-#[hotpath::measure(future = true, label = "temporal.hydrate.selection")]
+#[tracing::instrument(name = "temporal.hydrate.selection", level = "trace", skip_all)]
 pub async fn hydrate_temporal_candidate_selection(
     request: &TemporalKernelRequest,
     mut export: TemporalCandidateExport,
@@ -346,7 +346,7 @@ pub async fn hydrate_temporal_candidate_selection(
 }
 
 /// Hydrate the entire temporal page without changing its lane-local selection.
-#[hotpath::measure(future = true, label = "temporal.hydrate.export")]
+#[tracing::instrument(name = "temporal.hydrate.export", level = "trace", skip_all)]
 pub async fn hydrate_temporal_candidate_export(
     request: &TemporalKernelRequest,
     export: TemporalCandidateExport,
@@ -424,8 +424,6 @@ pub async fn hydrate_temporal_candidate_export(
     check_control(&snapshot)?;
     let summary_omissions = public_summary_omissions(&summary_eligibility);
     let hydrated = TemporalHydratedResult::from_batch(hydration, &ranked);
-    hotpath::gauge!("temporal_query.candidates.hydrated").set(hydrated.len());
-    hotpath::gauge!("temporal_query.context.assembled").set(context.bundle.records.len());
     Ok(TemporalKernelResult {
         coverage: context.bundle.coverage,
         conflicts: context.bundle.conflicts.clone(),

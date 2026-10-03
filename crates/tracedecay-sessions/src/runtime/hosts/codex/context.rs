@@ -34,7 +34,7 @@ impl CodexContextState {
     /// offset of the same JSONL `generation` also stops it at that offset:
     /// one generation is one byte stream, so the bytes before that offset are
     /// the ones the cached context was read from.
-    #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
+    #[tracing::instrument(name = "sessions.hosts.codex.scan_prior", level = "trace", skip_all)]
     pub(super) fn scan_prior(
         path: &Path,
         generation: u64,
@@ -58,7 +58,6 @@ impl CodexContextState {
                 Err(read) => return (Self::from_meta(meta), read),
             };
         store_prior_context(path, generation, before_offset, state.clone());
-        crate::runtime::pipeline_metrics::add("sessions.hosts.codex.prior_context_bytes", read);
         (state, read)
     }
 

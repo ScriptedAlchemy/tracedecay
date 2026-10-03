@@ -341,7 +341,11 @@ pub struct RetrievalEmissionSummaryV1 {
 /// accounted, never awaited. An envelope this lane cannot even build (a
 /// payload the domain validator rejects) is counted as `invalid` and skipped
 /// rather than substituted with a permissive one.
-#[hotpath::measure(label = "usecases.observability.emit_pipeline")]
+#[tracing::instrument(
+    name = "usecases.observability.emit_pipeline",
+    level = "trace",
+    skip_all
+)]
 pub fn emit_retrieval_pipeline(
     producer: &BoundedObservabilityProducerV1,
     identity: &ObservabilityProducerIdentityV1,

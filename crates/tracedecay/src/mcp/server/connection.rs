@@ -140,7 +140,6 @@ impl McpServer {
     /// route over a real socket. Requests carry the per-request context the
     /// stdio proxy stamps, so a client that skips `initialize` is served the
     /// way a proxied request is.
-    #[hotpath::skip]
     pub async fn run_connection(
         &self,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -150,7 +149,6 @@ impl McpServer {
     }
 
     /// As [`Self::run_connection`], then shuts the server down.
-    #[hotpath::skip]
     pub async fn run(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -161,7 +159,6 @@ impl McpServer {
     }
 
     /// As [`Self::run_connection`], draining when `lifecycle` drains.
-    #[hotpath::skip]
     pub(crate) async fn run_connection_until(
         &self,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
@@ -247,7 +244,6 @@ impl McpServer {
     /// Idempotent, safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
-    #[hotpath::skip]
     pub async fn shutdown(self: &Arc<Self>) {
         let deadline =
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
@@ -257,7 +253,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.shutdown", future = true)]
+    #[tracing::instrument(name = "mcp.server.shutdown", level = "trace", skip_all)]
     pub(crate) async fn shutdown_until(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
@@ -267,7 +263,6 @@ impl McpServer {
             .await
     }
 
-    #[hotpath::skip]
     async fn run_shutdown(self: Arc<Self>, deadline: tokio::time::Instant) -> ShutdownStatus {
         let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
@@ -348,7 +343,6 @@ impl McpServer {
     }
 
     #[cfg(any(test, feature = "test-transport"))]
-    #[hotpath::skip]
     pub(crate) async fn shutdown_background_tasks(&self) {
         let failures = self
             .shutdown_background_tasks_until(
@@ -363,7 +357,6 @@ impl McpServer {
         }
     }
 
-    #[hotpath::skip]
     async fn shutdown_background_tasks_until(
         &self,
         _deadline: tokio::time::Instant,
@@ -383,7 +376,6 @@ impl McpServer {
         failures
     }
 
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "Host-admission replay is one identity-bind and session-catch-up for the connection."
@@ -535,7 +527,6 @@ impl McpServer {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn wait_project_host_admission_replay_idle(&self) {
         let worker = self
             .project_host_admission_replay
@@ -549,7 +540,6 @@ impl McpServer {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn project_host_admission_replay_pass_count(&self) -> usize {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(
@@ -559,7 +549,6 @@ impl McpServer {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn project_host_admission_replay_backoff_count(&self) -> usize {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(

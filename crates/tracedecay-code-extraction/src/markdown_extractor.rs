@@ -149,7 +149,7 @@ impl MarkdownExtractor {
         Self::add_file_node(&mut state, file_path, end_line);
 
         if let Ok(tree) = tree {
-            crate::hotpath_observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
+            crate::observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
         }
 
         Self::build_result(state, start)
@@ -268,7 +268,7 @@ impl MarkdownExtractor {
     }
 
     fn build_result(mut state: ExtractionState, start: Instant) -> ExtractionResult {
-        crate::hotpath_observe::measure_emit(|| {
+        crate::observe::measure_emit(|| {
             Self::resolve_reference_links(&mut state);
             Self::finalize_heading_spans(&mut state);
             ExtractionResult {
@@ -660,12 +660,9 @@ impl crate::LanguageExtractor for MarkdownExtractor {
     /// extractor-owned parse performs, so the own-parser path stays distinct
     /// from the supplied-tree path.
     fn extract_artifact(&self, file_path: &str, source: &str) -> crate::ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || crate::ExtractionArtifactV1::from_result(Self::extract_markdown(file_path, source)),
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
+        crate::observe::measure_extract_file(|| {
+            crate::ExtractionArtifactV1::from_result(Self::extract_markdown(file_path, source))
+        })
     }
 
     fn extract_parsed_artifact_prepared(

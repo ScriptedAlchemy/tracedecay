@@ -18,7 +18,11 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.branch_admin.session_runtime_shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.session_runtime_shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(in crate::daemon) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.cancel();
         let mut failures = Vec::new();
@@ -40,7 +44,6 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
 
 impl StoreAdministration {
     #[cfg(test)]
-    #[hotpath::skip]
     pub(in crate::daemon) async fn install_long_lived_session_runtime_registry_for_test(
         &self,
     ) -> Result<()> {
@@ -71,7 +74,6 @@ impl StoreAdministration {
         })
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn session_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
@@ -121,7 +123,6 @@ impl StoreAdministration {
         Ok(registry)
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn registered_runtime_registry(
         &self,
     ) -> Result<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
@@ -134,7 +135,11 @@ impl StoreAdministration {
     /// [`SessionRuntimeMemoryGraphReconciliationShutdownV1::shutdown`] has
     /// joined terminal hook, schema-convergence, and reconciliation workers;
     /// the drain drops the runtimes those workers publish through.
-    #[hotpath::measure(label = "daemon.branch_admin.close_graph_runtimes", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.close_graph_runtimes",
+        level = "trace",
+        skip_all
+    )]
     pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let registries = self
             .session_runtime_registries
@@ -163,7 +168,11 @@ impl StoreAdministration {
     /// store handles, and only then drain the retained owners and close every
     /// store no lease still holds, so each writer truncates its WAL. Closing
     /// before the join leaves the standing owner attachments leased.
-    #[hotpath::measure(label = "daemon.branch_admin.close_stores_for_shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.branch_admin.close_stores_for_shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(in crate::daemon) async fn close_stores_for_shutdown(
         &self,
     ) -> std::result::Result<(), String> {
@@ -191,7 +200,6 @@ impl StoreAdministration {
         }
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn prepare_memory_graph_reconciliation_shutdown(
         &self,
     ) -> Result<SessionRuntimeMemoryGraphReconciliationShutdownV1> {

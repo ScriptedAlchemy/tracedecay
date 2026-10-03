@@ -63,7 +63,6 @@ impl DaemonInvocationService {
     /// Registers this project's graph-tool owner. A later server for the same
     /// authorized scope (the full server replacing the core, a reopen)
     /// replaces the port; a foreign scope is refused.
-    #[hotpath::skip]
     pub async fn register_graph_tool_owner(
         &self,
         project_root: PathBuf,
@@ -86,7 +85,7 @@ impl DaemonInvocationService {
     }
 }
 
-#[hotpath::measure(label = "daemon.service.graph_tool.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.graph_tool.execute", level = "trace", skip_all)]
 pub(super) async fn execute_graph_tool(
     request_id: String,
     owner: RegisteredGraphToolOwnerV1,

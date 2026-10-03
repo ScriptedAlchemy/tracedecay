@@ -225,7 +225,11 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         Ok(disposition)
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.workflow.transition")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.workflow.transition",
+        level = "trace",
+        skip_all
+    )]
     fn transition(
         &self,
         command: &WorkflowDefinitionLifecycleCommand,
@@ -482,7 +486,11 @@ fn execute_tx_changed(
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
-    #[hotpath::measure(label = "rusqlite_runtime.workflow.handoff_issue")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.workflow.handoff_issue",
+        level = "trace",
+        skip_all
+    )]
     fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let frontier_payload =
@@ -525,7 +533,11 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             .map_err(handoff_unavailable)
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.workflow.handoff_consume")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.workflow.handoff_consume",
+        level = "trace",
+        skip_all
+    )]
     fn consume(
         &self,
         token_digest: &ManifestDigest,
@@ -590,7 +602,11 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         effect_holder::has_pending_effects(self.handle(), worktree_id)
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.workflow.reserve_effect")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.workflow.reserve_effect",
+        level = "trace",
+        skip_all
+    )]
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,

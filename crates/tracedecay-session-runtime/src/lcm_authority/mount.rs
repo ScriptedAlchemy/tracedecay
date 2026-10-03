@@ -73,7 +73,6 @@ fn lcm_operation_and_grant_expiries(observed_at: UtcMicros) -> Option<(UtcMicros
     Some((operation_expires_at, grant_expires_at))
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl MountedLcmAuthority {
     fn invocation(&self, request: LcmAuthorityRequest) -> Option<LcmAuthorityInvocation> {
         let operation = request.operation();
@@ -214,15 +213,14 @@ fn lcm_binding_digest(
     digest.finalize().into()
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl MountedLcmAuthorityPort for MountedLcmAuthority {
     fn execute(&self, request: LcmAuthorityRequest) -> MountedLcmFuture<'_> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let invocation = self.invocation(request)?;
                 Some(self.authority.execute(invocation).await)
             },
-            label = "daemon.lcm.mount.execute"
+            tracing::trace_span!("daemon.lcm.mount.execute"),
         ))
     }
 

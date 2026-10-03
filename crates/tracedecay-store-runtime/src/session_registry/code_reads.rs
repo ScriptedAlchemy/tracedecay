@@ -10,7 +10,6 @@ use super::{
 use tracedecay_domain::errors::TraceDecayError;
 
 impl DaemonSessionRuntimeRegistryV1 {
-    #[hotpath::skip]
     async fn project_graph_database(
         &self,
         project_id: ProjectId,
@@ -56,15 +55,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                                 ),
                             ));
                         }
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.store.project_graph.mount_reuse_total").inc(1_u64);
+
                         return Ok(database);
                     }
                     true
                 }
                 Some(super::ProjectRuntimeOwnerStateV1::Opening) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -77,16 +73,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | super::ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(state.unavailable_route_error());
                 }
                 None => false,
             }
         };
         if !writable {
-            #[cfg(feature = "hotpath")]
-            let _mount_observation = super::StoreMountObservationV1::enter();
             let shard_id = StoreShardIdV1::project(
                 self.identity.brain_id().clone(),
                 self.identity.profile_id().clone(),
@@ -95,14 +87,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             let pin = self
                 .profile_authority_pin("mount project graph store read-only")
                 .await?;
-            let runtime = match hotpath::future!(
+            let runtime = match tracing::Instrument::instrument(
                 self.registry
                     .open(super::StoreRuntimeOpenRequest::new_read_only(
                         shard_id,
                         self.incarnation,
                         Some(pin),
                     )),
-                label = "daemon.store.project_graph.open_read_only"
+                tracing::trace_span!("daemon.store.project_graph.open_read_only"),
             )
             .await
             {
@@ -134,8 +126,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     )
                 });
         }
-        #[cfg(feature = "hotpath")]
-        let _mount_observation = super::StoreMountObservationV1::enter();
+
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
@@ -161,7 +152,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 let pin = self
                     .profile_authority_pin("mount project graph store")
                     .await?;
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     open_runtime(
                         &self.registry,
                         self.resolver.as_ref(),
@@ -174,7 +165,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                             "mount project graph store",
                         ),
                     ),
-                    label = "daemon.store.project_graph.open"
+                    tracing::trace_span!("daemon.store.project_graph.open"),
                 )
                 .await?
             }
@@ -200,9 +191,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database.as_ref().clone())
     }
 
-    #[hotpath::measure(
-        label = "daemon.session_registry.destructive_maintenance",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.session_registry.destructive_maintenance",
+        level = "trace",
+        skip_all
     )]
     pub async fn begin_destructive_code_maintenance(
         &self,
@@ -242,7 +234,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Drops the daemon's retained project facades before a destructive store
     /// reservation closes the underlying physical runtimes. The reservation
     /// then proves that no stale handle can recreate the deleted shard.
-    #[hotpath::skip]
     pub async fn drop_project_runtime_caches(&self, project_id: &ProjectId) {
         let mut owners = self
             .project_owners
@@ -257,7 +248,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn restore_replaced_project_session_ready(
         &self,
         project_id: &ProjectId,
@@ -274,7 +264,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         replacement.restore_old_ready()
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.retire_relation_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.retire_relation_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn retire_project_session_relation_graph(
         &self,
         project_id: &ProjectId,
@@ -447,7 +441,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         vacancy.commit_without_sessions()
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.retire_memory_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.retire_memory_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
         let Some(mut retirement) = self.reserve_project_runtime_retirement(project_id)? else {
             return Ok(());
@@ -788,7 +786,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts the project-wide mutable graph. The checkout path is exact route
     /// provenance; the canonical database locator is supplied by `StoreLayout`.
-    #[hotpath::skip]
     pub async fn project_graph(
         &self,
         _project_root: &Path,
@@ -801,7 +798,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn project_graph_registered(
         &self,
         project_id: ProjectId,

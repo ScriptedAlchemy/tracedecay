@@ -11,7 +11,7 @@ use crate::test_support::hold_after_project_sessions_for_test;
 /// Each store it mounts is one transactionally safe unit that cannot observe
 /// `cancellation` from inside; the token is checked between them so a
 /// draining daemon waits for at most the unit in flight, not the whole open.
-#[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
+#[tracing::instrument(name = "daemon.project.handshake.open", level = "trace", skip_all)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,

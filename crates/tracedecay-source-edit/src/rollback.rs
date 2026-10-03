@@ -133,7 +133,7 @@ fn persist_pre_effect(
     Ok(record.into_live_application_result(outcome, None))
 }
 
-#[hotpath::measure(label = "usecases.edit.rollback", future = true)]
+#[tracing::instrument(name = "usecases.edit.rollback", level = "trace", skip_all)]
 pub(super) async fn execute_source_edit_rollback_inner<A>(
     graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
@@ -324,10 +324,10 @@ where
     // the graph is resynchronized wholesale by the daemon-owned scheduler
     // rather than reindexed file by file: a rollback may delete a file the edit
     // created, and a deleted path has no bytes left to reindex.
-    let apply_result = hotpath::measure_block!(
-        "usecases.edit.rollback.apply",
+    let apply_result = {
+        let _span = tracing::trace_span!("usecases.edit.rollback.apply").entered();
         rollback_planned_source_edit_files(graph.project_root(), &retained.recovery_files)
-    );
+    };
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if apply_result.is_err() || committed_state != retained.expected_state {
         if committed_state != journal.expected_state {

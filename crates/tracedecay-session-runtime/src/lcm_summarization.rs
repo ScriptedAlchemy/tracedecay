@@ -61,7 +61,7 @@ pub(super) async fn resolve_authoritative_summary(
     generate_provider_summary(database, provider, request, timeout).await
 }
 
-#[hotpath::measure(label = "daemon.lcm.summarize", future = true)]
+#[tracing::instrument(name = "daemon.lcm.summarize", level = "trace", skip_all)]
 async fn generate_provider_summary(
     database: &RegisteredGlobalDb,
     provider: &str,
@@ -136,7 +136,7 @@ pub(super) fn summarizer_binding_identity(
 /// The scan is provider-neutral: it decodes each row once and offers it to the
 /// recognizers registered for this provider, which own every provider-specific
 /// recognition rule, corroboration query, and route label.
-#[hotpath::measure(label = "daemon.lcm.evidence", future = true)]
+#[tracing::instrument(name = "daemon.lcm.evidence", level = "trace", skip_all)]
 pub(super) async fn native_summary_evidence(
     database: &RegisteredGlobalDb,
     provider: &str,

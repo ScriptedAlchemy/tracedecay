@@ -46,7 +46,11 @@ pub fn verify_store_path_absent(path: &Path) -> tracedecay_domain::errors::Resul
 /// ritual shared by `wipe` and `projects forget`: symlink components are
 /// refused, the parent directory is durably synced, and the absence of the
 /// namespace entry is verified. Returns `false` when nothing existed.
-#[hotpath::measure(label = "registry_maintenance.remove_store_directory")]
+#[tracing::instrument(
+    name = "registry_maintenance.remove_store_directory",
+    level = "trace",
+    skip_all
+)]
 pub fn remove_store_directory(path: &Path) -> tracedecay_domain::errors::Result<bool> {
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
@@ -132,7 +136,11 @@ impl ProfileRegistryMaintenanceRuntime {
         Self { profile_database }
     }
 
-    #[hotpath::measure(label = "daemon.profile_registry.classify_storage", future = true)]
+    #[tracing::instrument(
+        name = "daemon.profile_registry.classify_storage",
+        level = "trace",
+        skip_all
+    )]
     pub async fn classify_project_storage(
         &self,
         project_root: &Path,
@@ -156,7 +164,11 @@ impl ProfileRegistryMaintenanceRuntime {
             .unwrap_or(location))
     }
 
-    #[hotpath::measure(label = "daemon.profile_registry.retire_paths", future = true)]
+    #[tracing::instrument(
+        name = "daemon.profile_registry.retire_paths",
+        level = "trace",
+        skip_all
+    )]
     pub async fn delete_project_paths(
         &self,
         project_paths: &[PathBuf],
@@ -186,7 +198,11 @@ impl ProfileRegistryMaintenanceRuntime {
     /// transaction. Every store relpath is validated before anything is
     /// deleted, and a directory that fails to delete aborts before the row
     /// retirement so the registry keeps naming the store for a retry.
-    #[hotpath::measure(label = "registry_maintenance.forget_project", future = true)]
+    #[tracing::instrument(
+        name = "registry_maintenance.forget_project",
+        level = "trace",
+        skip_all
+    )]
     pub async fn forget_project(
         &self,
         profile_root: &Path,
@@ -241,7 +257,7 @@ impl ProfileRegistryMaintenanceRuntime {
         })
     }
 
-    #[hotpath::measure(label = "daemon.profile_registry.gc", future = true)]
+    #[tracing::instrument(name = "daemon.profile_registry.gc", level = "trace", skip_all)]
     pub async fn registry_gc(
         &self,
         profile_root: &Path,

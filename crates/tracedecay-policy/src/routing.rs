@@ -252,7 +252,6 @@ impl CapabilityRoutingEvaluatorV1 {
         selected_capability_id: Option<CapabilityId>,
         ordered_reason_codes: Vec<CapabilityRoutingReasonV1>,
     ) -> CapabilityRoutingDecisionV1 {
-        crate::hotpath_observe::routing_outcome(disposition, request.candidates.len());
         CapabilityRoutingDecisionV1 {
             evaluator_id: self.evaluator_id.clone(),
             evaluator_revision: Self::EVALUATOR_REVISION,
@@ -274,7 +273,7 @@ impl CapabilityRoutingEvaluatorV1 {
 }
 
 impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
-    #[hotpath::measure(label = "policy.routing.evaluate")]
+    #[tracing::instrument(name = "policy.routing.evaluate", level = "trace", skip_all)]
     fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1 {
         let mut declared = BTreeSet::new();
         if !request.requested_use_case_id.is_valid()

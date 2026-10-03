@@ -28,7 +28,7 @@ impl DashboardGitCorrelationReadAdapter {
     }
 }
 
-#[hotpath::measure(label = "mcp.dashboard.git_correlation.read", future = true)]
+#[tracing::instrument(name = "mcp.dashboard.git_correlation.read", level = "trace", skip_all)]
 async fn read_sessions(
     store: &GlobalDbGitCorrelationStore<RegisteredGlobalDbLeaseV1>,
     session_ids: &BTreeSet<String>,

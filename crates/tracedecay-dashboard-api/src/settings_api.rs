@@ -311,14 +311,18 @@ pub type PrAutoTrackManagedSummaryReader = Arc<
         + 'static,
 >;
 
-#[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
+#[tracing::instrument(name = "dashboard_api.settings.get", level = "trace", skip_all)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
     Ok(Json(
         settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?).await?,
     ))
 }
 
-#[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.settings.patch_project",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
@@ -407,7 +411,7 @@ pub async fn patch_project_settings(
     }))
 }
 
-#[hotpath::measure(label = "dashboard_api.settings.patch_user", future = true)]
+#[tracing::instrument(name = "dashboard_api.settings.patch_user", level = "trace", skip_all)]
 pub async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
@@ -483,7 +487,11 @@ pub async fn patch_user_settings(
 /// Saves only the ProfileSessions-backed code-index worker selection. This is
 /// deliberately not a branch of `patch_user_settings`: its independent CAS
 /// revision makes a mixed project/profile mutation unrepresentable.
-#[hotpath::measure(label = "dashboard_api.settings.patch_workers", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.settings.patch_workers",
+    level = "trace",
+    skip_all
+)]
 pub async fn patch_code_index_worker_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,

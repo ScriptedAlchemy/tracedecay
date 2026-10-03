@@ -115,7 +115,6 @@ impl VerifiedPayloadStream {
         &self.content_hash
     }
 
-    #[hotpath::skip]
     pub const fn byte_count(&self) -> u64 {
         self.byte_count
     }

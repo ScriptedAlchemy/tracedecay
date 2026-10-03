@@ -103,7 +103,7 @@ pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration:
 /// that worktree's Git directory, not at the shared common directory.
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
-#[hotpath::measure(label = "runtime_core.git.branch.current")]
+#[tracing::instrument(name = "runtime_core.git.branch.current", level = "trace", skip_all)]
 pub fn current_branch(project_root: &Path) -> Option<String> {
     #[cfg(any(test, feature = "test-helpers"))]
     {
@@ -132,7 +132,11 @@ pub enum CheckoutHead {
 ///
 /// Returns `None` when the path is not a repository or HEAD cannot be read.
 /// That is uncertainty, not detachment.
-#[hotpath::measure(label = "runtime_core.git.branch.checkout_head")]
+#[tracing::instrument(
+    name = "runtime_core.git.branch.checkout_head",
+    level = "trace",
+    skip_all
+)]
 #[must_use]
 pub fn checkout_head(project_root: &Path) -> Option<CheckoutHead> {
     let head = crate::git_repository::GitRepositoryAuthority::discover(project_root)

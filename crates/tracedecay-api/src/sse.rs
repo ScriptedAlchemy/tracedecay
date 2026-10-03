@@ -69,10 +69,10 @@ where
     if let Some(sequence) = sequence {
         encoded = encoded.id(sequence.to_string());
     }
-    let data = hotpath::measure_block!("api.http.serialize", {
+    let data = {
+        let _span = tracing::trace_span!("api.http.serialize").entered();
         serde_json::to_string(&event).map_err(|_| HttpAdapterError::EventEncoding)
-    })?;
-    crate::observe::record_response_bytes(data.len());
+    }?;
     Ok(encoded.data(data))
 }
 

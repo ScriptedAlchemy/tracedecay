@@ -187,7 +187,11 @@ pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<Res
 }
 
 #[track_caller]
-#[hotpath::measure(label = "mcp.server.response.handle_retrieve")]
+#[tracing::instrument(
+    name = "mcp.server.response.handle_retrieve",
+    level = "trace",
+    skip_all
+)]
 pub fn retrieve_response_handle(
     root: &Path,
     handle: &str,
@@ -247,7 +251,7 @@ pub fn retrieve_response_handle(
 }
 
 #[track_caller]
-#[hotpath::measure(label = "mcp.server.response.handle_cleanup")]
+#[tracing::instrument(name = "mcp.server.response.handle_cleanup", level = "trace", skip_all)]
 pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<usize> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();

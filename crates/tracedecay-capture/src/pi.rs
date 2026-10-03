@@ -72,15 +72,10 @@ pub fn normalize_observation(
     session_id: &str,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    hotpath::gauge!("capture.pi.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_pi_entry(native, session_id, range);
-    if envelope.is_err() {
-        hotpath::gauge!("capture.pi.normalize_failures").inc(1u64);
-    }
-    envelope
+    normalize_pi_entry(native, session_id, range)
 }
 
-#[hotpath::measure(label = "capture.pi.normalize")]
+#[tracing::instrument(name = "capture.pi.normalize", level = "trace", skip_all)]
 fn normalize_pi_entry(
     native: &Value,
     session_id: &str,

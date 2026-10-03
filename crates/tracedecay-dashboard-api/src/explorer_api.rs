@@ -411,7 +411,7 @@ pub async fn create_query(
     RequestControl(control): RequestControl,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             if let Err(message) = validate_query(&mut request) {
                 return bad_request(message);
@@ -449,7 +449,7 @@ pub async fn create_query(
             ));
             (StatusCode::ACCEPTED, Json(response)).into_response()
         },
-        label = "dashboard_api.query.create"
+        tracing::trace_span!("dashboard_api.query.create"),
     )
     .await
 }
@@ -458,7 +458,7 @@ pub async fn query_status(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let Some(stored) = find_run(&state, &run_id) else {
                 return not_found(&run_id);
@@ -470,12 +470,12 @@ pub async fn query_status(
                 .saturating_sub(run.submitted_at_micros);
             Json(envelope_for_run(&state, run)).into_response()
         },
-        label = "dashboard_api.query.status"
+        tracing::trace_span!("dashboard_api.query.status"),
     )
     .await
 }
 
-#[hotpath::measure(label = "dashboard_api.query.cancel", future = true)]
+#[tracing::instrument(name = "dashboard_api.query.cancel", level = "trace", skip_all)]
 pub async fn cancel_query(
     State(state): State<DashboardState>,
     Path(run_id): Path<String>,
@@ -496,7 +496,7 @@ pub async fn cancel_query(
     Json(envelope_for_run(&state, run.clone())).into_response()
 }
 
-#[hotpath::measure(label = "dashboard_api.query.execute", future = true)]
+#[tracing::instrument(name = "dashboard_api.query.execute", level = "trace", skip_all)]
 async fn execute_query(
     state: DashboardState,
     request: ExplorerQueryRequestV1,
@@ -957,7 +957,7 @@ pub async fn session_size(
     RequestControl(control): RequestControl,
     Path(session_id): Path<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let outcome = read_session_page(&state, control, &session_id, 500, None).await;
             match outcome {
@@ -999,7 +999,7 @@ pub async fn session_size(
                 }
             }
         },
-        label = "dashboard_api.query.session_size"
+        tracing::trace_span!("dashboard_api.query.session_size"),
     )
     .await
 }
@@ -1010,7 +1010,7 @@ pub async fn read_context(
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = params.limit.unwrap_or(100).clamp(1, 500);
             let offset = params.offset.unwrap_or(0).max(0);
@@ -1113,7 +1113,7 @@ pub async fn read_context(
                 .into_response()
             }
         },
-        label = "dashboard_api.query.read_context"
+        tracing::trace_span!("dashboard_api.query.read_context"),
     )
     .await
 }

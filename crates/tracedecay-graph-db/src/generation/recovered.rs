@@ -45,7 +45,7 @@ const PROOF_MAX_WORKERS: usize = 8;
 /// publication release the staged bulk rows before this proof runs.
 ///
 /// Returns the digest and the number of canonical bytes it hashed. The byte
-/// count is what the verify gauge reports and what a verified-generation
+/// count is what the verify outcome event reports and what a verified-generation
 /// marker records, so a later marker hit can report the same magnitude of work
 /// it avoided.
 ///
@@ -66,7 +66,7 @@ const PROOF_MAX_WORKERS: usize = 8;
 /// incident relation. The digest comparison in `verify_recovered_generation`
 /// is the content authority for this proof; per-row unique-key index
 /// round-trips contributed no bytes to it and are deliberately absent.
-#[hotpath::measure(label = "graph_db.generation.recover.digest")]
+#[tracing::instrument(name = "graph_db.generation.recover.digest", level = "trace", skip_all)]
 pub(crate) fn recovered_generation_digest_from_database(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
@@ -146,7 +146,11 @@ pub(crate) fn recovered_generation_digest_chunked(
 
 /// The single-pass stream for generations at or below one chunk: one decoded
 /// row resident at a time, every frame hashed as it is encoded.
-#[hotpath::measure(label = "graph_db.generation.recover.digest_serial")]
+#[tracing::instrument(
+    name = "graph_db.generation.recover.digest_serial",
+    level = "trace",
+    skip_all
+)]
 fn digest_rows_serial(
     store: &dyn GraphStore,
     entities: &[(ArcStr, NodeId)],
@@ -234,7 +238,11 @@ impl EncodedProofChunk {
 /// only on the calling thread (it is not required to be `Sync`); workers
 /// poll the shared abort flag between rows and inside long row encodes, so
 /// an observed failure stops in-flight encoding promptly.
-#[hotpath::measure(label = "graph_db.generation.recover.digest_parallel")]
+#[tracing::instrument(
+    name = "graph_db.generation.recover.digest_parallel",
+    level = "trace",
+    skip_all
+)]
 fn digest_rows_parallel(
     store: Arc<dyn GraphStore>,
     entities: &[(ArcStr, NodeId)],

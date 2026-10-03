@@ -143,13 +143,11 @@ pub struct HostAdmissionTestRuntimeV1 {
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn profile(profile_root: impl AsRef<Path>) -> Result<Self> {
         Self::open(profile_root.as_ref().to_path_buf(), None).await
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn project(
         profile_root: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
@@ -164,7 +162,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// [`Self::project`] returning proof that project authorities are mounted.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn project_scoped(
         profile_root: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
@@ -182,7 +179,6 @@ impl HostAdmissionTestRuntimeV1 {
     /// cannot exist, the profile session-relation graph has exactly one
     /// writer.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn sibling_project(
         &self,
         project_root: impl AsRef<Path>,
@@ -246,7 +242,6 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
-    #[hotpath::skip]
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
         // Fixture compositions run in-process daemon code that reads the
         // registered product runtime (handshakes, initialize payloads);
@@ -408,7 +403,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn checkpoint_session_database_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -454,7 +448,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn replay_observations(
         &self,
         scope: HostAdmissionScope,
@@ -493,7 +486,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn session_temporal_fixture_count_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -545,7 +537,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert_session_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -559,7 +550,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Seeds one raw LCM message into its already-registered session.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert_session_message_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -581,7 +571,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn session_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -598,7 +587,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn session_message_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -613,7 +601,6 @@ impl HostAdmissionTestRuntimeV1 {
     /// Seeds one session row and its raw LCM messages, returning each
     /// message's raw store id in input order.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn seed_session_messages_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -655,7 +642,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn transcript_store_counts_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -710,7 +696,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn project_session_message_count_for_test(&self) -> Result<i64> {
         self.session_database_for_test(HostAdmissionScope::Project)?
             .session_message_count()
@@ -722,7 +707,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn project_lcm_raw_message_exists_for_test(
         &self,
         provider: &str,
@@ -740,7 +724,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn git_sessions_for_for_test(
         &self,
         query: &tracedecay_sessions::runtime::git_correlation::SessionsForQuery,
@@ -763,7 +746,6 @@ impl HostAdmissionTestRuntimeV1 {
     /// Fails the calling test loudly: a fixture whose accounting write is
     /// dropped would assert against totals that were never stored.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         self.profile_database
             .try_upsert_project_tokens(project_path, tokens_saved)
@@ -777,7 +759,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert_code_project(
         &self,
         project_id: &str,
@@ -798,7 +779,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert_project_alias(
         &self,
         alias_path: &Path,
@@ -810,7 +790,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn upsert_store_instance(
         &self,
         upsert: tracedecay_global_db::StoreInstanceUpsert,
@@ -819,7 +798,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn append_profile_analytics_event_for_test(
         &self,
         event: &tracedecay_global_db::AnalyticsEventInsert,
@@ -834,7 +812,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn query_profile_analytics_events_for_test(
         &self,
         query: &tracedecay_global_db::AnalyticsEventQuery,
@@ -868,7 +845,6 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(Arc::new(HostAdmissionBroker::new(runtime)))
     }
 
-    #[hotpath::skip]
     pub async fn ensure_runtime_configuration_for_test(
         &self,
         project_root: &Path,
@@ -882,7 +858,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn resolve_runtime_configuration_for_test(
         &self,
         project_root: &Path,
@@ -896,7 +871,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn load_runtime_configuration_read_only_for_test(
         &self,
         project_root: &Path,
@@ -963,7 +937,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Initializes a project graph through this retained registered runtime.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn initialize_project_graph_for_test(
         &self,
         project_root: &Path,
@@ -1007,7 +980,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reopens an existing project graph through this retained runtime.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn open_project_graph_for_test(
         &self,
         project_root: &Path,
@@ -1029,7 +1001,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Opens one tracked branch through this retained registered runtime.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn open_project_branch_for_test(
         &self,
         project_root: &Path,
@@ -1074,7 +1045,6 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Reopens an existing graph read-only without inferring authority.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn open_project_graph_read_only_for_test(
         &self,
         project_root: &Path,
@@ -1094,7 +1064,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    #[hotpath::skip]
     async fn registered_project_open_inputs(
         &self,
         project_root: &Path,

@@ -445,7 +445,7 @@ where
         let admission_provider = admission_provider.clone();
         let scope_resolver = scope_resolver.clone();
         let execution_admission = Arc::clone(&execution_admission);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let scope = match scope_resolver
                     .resolved_scope_for_project(&request.project_root, &project_id)
@@ -532,19 +532,21 @@ where
                     .generation_id
                     .as_str()
                     .to_owned();
-                let completed =
-                    match hotpath::measure_block!("daemon.code_index.branch_diff.diff", {
-                        bounded_diff(
-                            generations.base.generation(),
-                            generations.head.generation(),
-                            request.file_filter.as_deref(),
-                            request.kind_filter.as_deref(),
-                            &control,
-                        )
-                    }) {
-                        Ok(completed) => completed,
-                        Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
-                    };
+                let match_result = {
+                    let _span =
+                        tracing::trace_span!("daemon.code_index.branch_diff.diff").entered();
+                    bounded_diff(
+                        generations.base.generation(),
+                        generations.head.generation(),
+                        request.file_filter.as_deref(),
+                        request.kind_filter.as_deref(),
+                        &control,
+                    )
+                };
+                let completed = match match_result {
+                    Ok(completed) => completed,
+                    Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
+                };
                 let query_authority = match schedulers.query_authority_for_scope(&scope).await {
                     Some(authority) => authority,
                     None => {
@@ -754,7 +756,7 @@ where
                 }
                 outcome
             },
-            label = "daemon.code_index.branch_diff"
+            tracing::trace_span!("daemon.code_index.branch_diff"),
         ))
     })
 }

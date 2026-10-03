@@ -282,7 +282,7 @@ async fn current_unixepoch(conn: &impl QueryExecutor) -> Result<i64, LcmError> {
 
 // Preflight loads the whole raw session to decide whether to compress, so a
 // "compression feels slow" profile must see it separately from `compress`.
-#[hotpath::measure(label = "sessions.lcm.preflight", future = true)]
+#[tracing::instrument(name = "sessions.lcm.preflight", level = "trace", skip_all)]
 pub async fn preflight(
     conn: &impl QueryExecutor,
     request: LcmPreflightRequest,
@@ -367,7 +367,7 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
 /// summary runs a planning pass and a commit pass over the same message
 /// corpus, changing only `summarizer` in between, so the corpus is owned
 /// once by the caller rather than cloned per pass.
-#[hotpath::measure(label = "sessions.lcm.compress", future = true)]
+#[tracing::instrument(name = "sessions.lcm.compress", level = "trace", skip_all)]
 pub async fn compress(
     conn: &impl Executor,
     scope: &ObservationScopeV1,
@@ -376,7 +376,7 @@ pub async fn compress(
     request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    let response = compress_inner(
+    compress_inner(
         conn,
         scope,
         publisher,
@@ -386,13 +386,7 @@ pub async fn compress(
         None,
     )
     .await
-    .map(|bounded| bounded.response);
-    // A failed compression discarded its ingest writes, assembled backlog,
-    // and summary drafts; success-only gauges would hide exactly that waste.
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
-    response
+    .map(|bounded| bounded.response)
 }
 
 /// Runs canonical compression over one bounded retained-session raw page.
@@ -409,7 +403,7 @@ pub async fn compress_retained_page(
     payload_rollback: &mut payload::PayloadFileRollback,
     guard: RetainedCompressionGuard,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-    let response = compress_inner(
+    compress_inner(
         conn,
         scope,
         publisher,
@@ -418,11 +412,7 @@ pub async fn compress_retained_page(
         payload_rollback,
         Some(guard),
     )
-    .await;
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
-    response
+    .await
 }
 
 async fn compress_inner(
@@ -452,7 +442,7 @@ async fn compress_inner(
         )
         .await?;
         return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response: record_compression_gauges(compression_response(
+            response: compression_response(
                 "ok",
                 reason,
                 Vec::new(),
@@ -460,7 +450,7 @@ async fn compress_inner(
                 frontier,
                 None,
                 assembly_token_cap,
-            )),
+            ),
             rows_scanned: 0,
             bytes_scanned: 0,
             has_more: false,
@@ -499,7 +489,7 @@ async fn compress_inner(
             assembly_token_cap,
         );
         return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response: record_compression_gauges(response),
+            response,
             rows_scanned: 0,
             bytes_scanned: 0,
             has_more: false,
@@ -516,20 +506,11 @@ async fn compress_inner(
     )
     .await?;
     Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-        response: record_compression_gauges(response),
+        response,
         rows_scanned,
         bytes_scanned,
         has_more,
     })
-}
-
-fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
-    crate::metrics::record_lcm_compression(
-        response.summary_nodes_created,
-        response.compression_attempts,
-        response.replay_token_estimate,
-    );
-    response
 }
 
 async fn compress_in_transaction(
@@ -588,7 +569,7 @@ async fn compress_in_transaction(
 // The read phase: whole-session raw load plus window/plan derivation.
 // Together with `ingest_active`, `persist`, and `assemble_replay` this splits
 // the inclusive `compress` span into its sequential phases.
-#[hotpath::measure(label = "sessions.lcm.compress.prepare", future = true)]
+#[tracing::instrument(name = "sessions.lcm.compress.prepare", level = "trace", skip_all)]
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
@@ -973,7 +954,7 @@ async fn persist_and_replay_backlog_compression(
 
 // The summary-publication transaction: chunk selection, immutable summary
 // publication, and the lifecycle/debt writes that commit the new frontier.
-#[hotpath::measure(label = "sessions.lcm.compress.persist", future = true)]
+#[tracing::instrument(name = "sessions.lcm.compress.persist", level = "trace", skip_all)]
 async fn persist_compression_transaction_writes<'a>(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
@@ -1280,7 +1261,11 @@ struct ReplayWindowParts<'a> {
 /// is trimmed under the effective assembly cap.
 // Replay assembly; its DAG-build share is the nested
 // `sessions.lcm.dag.load_uncondensed` span.
-#[hotpath::measure(label = "sessions.lcm.compress.assemble_replay", future = true)]
+#[tracing::instrument(
+    name = "sessions.lcm.compress.assemble_replay",
+    level = "trace",
+    skip_all
+)]
 async fn assemble_replay_context(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1289,29 +1274,33 @@ async fn assemble_replay_context(
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
-    let summaries = hotpath::future!(
+    let summaries = tracing::Instrument::instrument(
         dag::load_uncondensed_summary_nodes(conn, provider, session_id),
-        label = "sessions.lcm.replay.fetch"
+        tracing::trace_span!("sessions.lcm.replay.fetch"),
     )
     .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    Ok(hotpath::measure_block!("sessions.lcm.replay.compile", {
-        assemble_replay_messages(
-            &anchors,
-            &summaries,
-            &raws,
-            anchor_source,
-            max_assembly_tokens,
-        )
-    }))
+    Ok({
+        let _span = tracing::trace_span!("sessions.lcm.replay.compile").entered();
+        {
+            assemble_replay_messages(
+                &anchors,
+                &summaries,
+                &raws,
+                anchor_source,
+                max_assembly_tokens,
+            )
+        }
+    })
 }
 
 /// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
-#[hotpath::measure(
-    label = "sessions.lcm.compress.assemble_overflow_replay",
-    future = true
+#[tracing::instrument(
+    name = "sessions.lcm.compress.assemble_overflow_replay",
+    level = "trace",
+    skip_all
 )]
 async fn assemble_overflow_recovery_replay(
     conn: &impl QueryExecutor,
@@ -1321,21 +1310,24 @@ async fn assemble_overflow_recovery_replay(
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
-    let summaries = hotpath::future!(
+    let summaries = tracing::Instrument::instrument(
         dag::load_uncondensed_summary_nodes(conn, provider, session_id),
-        label = "sessions.lcm.replay.fetch"
+        tracing::trace_span!("sessions.lcm.replay.fetch"),
     )
     .await?;
     let (anchors, raws) = split_leading_anchors(&parts);
-    let candidate = hotpath::measure_block!("sessions.lcm.replay.compile", {
-        assemble_replay_messages(
-            &anchors,
-            &summaries,
-            &raws,
-            anchor_source,
-            max_assembly_tokens,
-        )
-    });
+    let candidate = {
+        let _span = tracing::trace_span!("sessions.lcm.replay.compile").entered();
+        {
+            assemble_replay_messages(
+                &anchors,
+                &summaries,
+                &raws,
+                anchor_source,
+                max_assembly_tokens,
+            )
+        }
+    };
     if candidate.len() == anchors.len()
         && let Some(last_unit) = replay_transactions::replay_units(&raws).last()
     {
@@ -1979,7 +1971,11 @@ async fn load_condensation_candidates(
 // Active-context ingest: sanitization, payload externalization, and raw
 // upserts. This is compression's write-side file I/O + CPU phase, distinct
 // from the summary-publication transaction in `persist`.
-#[hotpath::measure(label = "sessions.lcm.compress.ingest_active", future = true)]
+#[tracing::instrument(
+    name = "sessions.lcm.compress.ingest_active",
+    level = "trace",
+    skip_all
+)]
 async fn ingest_active_messages(
     conn: &impl Executor,
     storage_root: &Path,
@@ -1989,36 +1985,37 @@ async fn ingest_active_messages(
     ignore_message_patterns: &[String],
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<IngestedActiveMessages, LcmError> {
-    let (mut next_available_ordinal, prepared, prefetched_states) = hotpath::future!(
-        async {
-            let next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
-            let compiled_ignore_patterns =
-                security::compile_message_patterns(ignore_message_patterns);
-            let prepared = prepare_active_messages(
-                conn,
-                provider,
-                session_id,
-                messages,
-                &compiled_ignore_patterns,
-            )
-            .await?;
-            let prefetched_message_ids = prepared
-                .iter()
-                .filter_map(|prepared| match prepared {
-                    PreparedActiveMessage::ReplayVerbatim { .. } => None,
-                    PreparedActiveMessage::Ingest { message_id, .. } => message_id.clone(),
-                })
-                .collect::<Vec<_>>();
-            let prefetched_states =
-                existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
-            Ok::<_, LcmError>((next_available_ordinal, prepared, prefetched_states))
-        },
-        label = "sessions.lcm.compress.ingest.fetch"
-    )
-    .await?;
+    let (mut next_available_ordinal, prepared, prefetched_states) =
+        tracing::Instrument::instrument(
+            async {
+                let next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
+                let compiled_ignore_patterns =
+                    security::compile_message_patterns(ignore_message_patterns);
+                let prepared = prepare_active_messages(
+                    conn,
+                    provider,
+                    session_id,
+                    messages,
+                    &compiled_ignore_patterns,
+                )
+                .await?;
+                let prefetched_message_ids = prepared
+                    .iter()
+                    .filter_map(|prepared| match prepared {
+                        PreparedActiveMessage::ReplayVerbatim { .. } => None,
+                        PreparedActiveMessage::Ingest { message_id, .. } => message_id.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let prefetched_states =
+                    existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
+                Ok::<_, LcmError>((next_available_ordinal, prepared, prefetched_states))
+            },
+            tracing::trace_span!("sessions.lcm.compress.ingest.fetch"),
+        )
+        .await?;
     // Message ids written by an earlier iteration are re-read from the
     // database so a repeated id still sees the row this loop just wrote.
-    let replay_messages = hotpath::future!(
+    let replay_messages = tracing::Instrument::instrument(
         async {
             let mut replay_messages = Vec::with_capacity(messages.len());
             let mut rewritten_message_ids = HashSet::new();
@@ -2146,7 +2143,7 @@ async fn ingest_active_messages(
             }
             Ok::<_, LcmError>(replay_messages)
         },
-        label = "sessions.lcm.compress.ingest.persist"
+        tracing::trace_span!("sessions.lcm.compress.ingest.persist"),
     )
     .await?;
 
@@ -2514,7 +2511,7 @@ async fn load_raw_messages_for_session(
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessage>, LcmError> {
-    let fetched = hotpath::future!(
+    let fetched = tracing::Instrument::instrument(
         async {
             let mut rows = conn
                 .query(
@@ -2533,15 +2530,18 @@ async fn load_raw_messages_for_session(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
-    hotpath::measure_block!("sessions.lcm.hydrate.redact", {
-        fetched
-            .iter()
-            .map(raw::verified_raw_message_from_row)
-            .collect::<Result<Vec<_>, _>>()
-    })
+    {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
+        {
+            fetched
+                .iter()
+                .map(raw::verified_raw_message_from_row)
+                .collect::<Result<Vec<_>, _>>()
+        }
+    }
 }
 
 struct RetainedRawMessagePage {

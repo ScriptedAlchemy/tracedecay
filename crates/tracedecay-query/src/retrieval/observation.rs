@@ -154,7 +154,7 @@ fn unique_contributions(output: &CompositionOutputV1) -> BTreeMap<RetrieverKind,
 /// `context_tokens` is `None` whenever the caller has not hydrated the page
 /// yet; the synthesis observation then reports partial coverage rather than a
 /// zero token count.
-#[hotpath::measure(label = "query.observation.compose")]
+#[tracing::instrument(name = "query.observation.compose", level = "trace", skip_all)]
 pub fn observe_composition(
     lanes: &[CompositionLaneInput],
     output: &CompositionOutputV1,
@@ -289,8 +289,6 @@ pub fn observe_composition(
         },
     };
 
-    hotpath::gauge!("query.observation.lanes").set(lanes.len());
-    hotpath::gauge!("query.observation.results").set(output.ranked_candidates.len());
     RetrievalPipelineObservationV1 {
         planner,
         retrievers,
@@ -310,7 +308,6 @@ pub enum ContextUseOutcomeV1 {
 }
 
 impl ContextUseOutcomeV1 {
-    #[hotpath::skip]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Supplied => "context_supplied",

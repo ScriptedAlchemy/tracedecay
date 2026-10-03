@@ -73,12 +73,11 @@ impl<'a> GraphQueryManager<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub fn generation(&self) -> &CodeGenerationId {
         self.reader.generation()
     }
 
-    #[hotpath::measure(label = "usecases.graph.query.page")]
+    #[tracing::instrument(name = "usecases.graph.query.page", level = "trace", skip_all)]
     pub fn page_all_symbols(
         &self,
         page_size: usize,
@@ -169,7 +168,7 @@ impl<'a> GraphQueryManager<'a> {
     /// the prefix still keeps a symbol inside it alive. Filtering the census
     /// before the relation scan would drop those incoming edges and report
     /// live symbols as dead.
-    #[hotpath::measure(label = "usecases.graph.dead_code", future = true)]
+    #[tracing::instrument(name = "usecases.graph.dead_code", level = "trace", skip_all)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
@@ -177,12 +176,15 @@ impl<'a> GraphQueryManager<'a> {
         path_prefix: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        let symbols = hotpath::measure_block!("usecases.graph.dead_code.symbols", {
-            self.page_all_symbols(
-                MAX_ANALYTICAL_SYMBOLS,
-                "verified dead-code census exceeded its analytical budget",
-            )
-        })?;
+        let symbols = {
+            let _span = tracing::trace_span!("usecases.graph.dead_code.symbols").entered();
+            {
+                self.page_all_symbols(
+                    MAX_ANALYTICAL_SYMBOLS,
+                    "verified dead-code census exceeded its analytical budget",
+                )
+            }
+        }?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -199,18 +201,21 @@ impl<'a> GraphQueryManager<'a> {
                 "verified dead-code evidence is incomplete for one or more symbols",
             ));
         }
-        let edges = hotpath::measure_block!("usecases.graph.dead_code.edges", {
-            self.reader
-                .edges_among(
-                    &occurrences,
-                    &HEALTH_EDGE_KINDS,
-                    MAX_ANALYTICAL_RELATIONS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
+        let edges = {
+            let _span = tracing::trace_span!("usecases.graph.dead_code.edges").entered();
+            {
+                self.reader
+                    .edges_among(
+                        &occurrences,
+                        &HEALTH_EDGE_KINDS,
+                        MAX_ANALYTICAL_RELATIONS,
+                        Arc::clone(&self.cancellation),
+                    )
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })
+            }
+        }?;
         let test_markers = symbols
             .iter()
             .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
@@ -269,19 +274,22 @@ impl<'a> GraphQueryManager<'a> {
         Ok(dead)
     }
 
-    #[hotpath::measure(label = "usecases.graph.file_dependents", future = true)]
+    #[tracing::instrument(name = "usecases.graph.file_dependents", level = "trace", skip_all)]
     pub async fn get_file_dependents(&self, file_path: &str) -> Result<FileDependentsV1> {
-        let symbols = hotpath::measure_block!("usecases.graph.file_neighbors.symbols", {
-            self.reader
-                .symbols_in_logical_file(
-                    file_path,
-                    MAX_ANALYTICAL_SYMBOLS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
+        let symbols = {
+            let _span = tracing::trace_span!("usecases.graph.file_neighbors.symbols").entered();
+            {
+                self.reader
+                    .symbols_in_logical_file(
+                        file_path,
+                        MAX_ANALYTICAL_SYMBOLS,
+                        Arc::clone(&self.cancellation),
+                    )
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })
+            }
+        }?;
         let seeds = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
@@ -304,18 +312,21 @@ impl<'a> GraphQueryManager<'a> {
             .map_err(|error| {
                 super::map_code_graph_read_runtime_error(map_projection_error(error))
             })?;
-        let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
-            self.reader
-                .callers(
-                    &seeds,
-                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                    MAX_ANALYTICAL_RELATIONS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
+        let edges = {
+            let _span = tracing::trace_span!("usecases.graph.file_neighbors.edges").entered();
+            {
+                self.reader
+                    .callers(
+                        &seeds,
+                        &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                        MAX_ANALYTICAL_RELATIONS,
+                        Arc::clone(&self.cancellation),
+                    )
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })
+            }
+        }?;
         let mut paths = edges
             .into_iter()
             .flatten()
@@ -331,22 +342,31 @@ impl<'a> GraphQueryManager<'a> {
         })
     }
 
-    #[hotpath::measure(label = "usecases.graph.circular_dependencies", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.circular_dependencies",
+        level = "trace",
+        skip_all
+    )]
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
-        let adjacency = hotpath::future!(
+        let adjacency = tracing::Instrument::instrument(
             self.build_file_adjacency(None),
-            label = "usecases.graph.circular.adjacency"
+            tracing::trace_span!("usecases.graph.circular.adjacency"),
         )
         .await?;
-        let mut cycles = hotpath::measure_block!("usecases.graph.circular.scc", {
-            super::scc::tarjan_scc_cancellable(&adjacency, self.cancellation.as_ref())
-                .map_err(|super::scc::SccCancelled| {
-                    super::map_code_graph_read_runtime_error(super::CodeGraphReadError::Cancelled)
-                })?
-                .into_iter()
-                .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
-                .collect::<Vec<_>>()
-        });
+        let mut cycles = {
+            let _span = tracing::trace_span!("usecases.graph.circular.scc").entered();
+            {
+                super::scc::tarjan_scc_cancellable(&adjacency, self.cancellation.as_ref())
+                    .map_err(|super::scc::SccCancelled| {
+                        super::map_code_graph_read_runtime_error(
+                            super::CodeGraphReadError::Cancelled,
+                        )
+                    })?
+                    .into_iter()
+                    .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
+                    .collect::<Vec<_>>()
+            }
+        };
         for cycle in &mut cycles {
             cycle.sort_unstable();
         }
@@ -355,7 +375,7 @@ impl<'a> GraphQueryManager<'a> {
 
     /// File-level `calls`/`uses` adjacency, restricted to files under
     /// `path_prefix` when one is given.
-    #[hotpath::measure(label = "usecases.graph.file_adjacency", future = true)]
+    #[tracing::instrument(name = "usecases.graph.file_adjacency", level = "trace", skip_all)]
     pub async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
@@ -378,15 +398,18 @@ impl<'a> GraphQueryManager<'a> {
     /// Folds every health input from one immutable graph generation. Symbol
     /// metrics are parser-attested metadata; liveness and test annotations are
     /// derived from the same generation's canonical relation set.
-    #[hotpath::measure(label = "usecases.graph.health_inputs", future = true)]
+    #[tracing::instrument(name = "usecases.graph.health_inputs", level = "trace", skip_all)]
     pub async fn health_inputs(&self, path_prefix: Option<&str>) -> Result<VerifiedHealthInputsV1> {
-        let files = hotpath::measure_block!("usecases.graph.health.files", {
-            self.reader
-                .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
+        let files = {
+            let _span = tracing::trace_span!("usecases.graph.health.files").entered();
+            {
+                self.reader
+                    .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })
+            }
+        }?;
         let logical_paths = path_prefix.map(|prefix| {
             files
                 .iter()
@@ -451,28 +474,32 @@ impl<'a> GraphQueryManager<'a> {
         Vec<CanonicalRelationEdgeV1>,
         HashSet<SymbolOccurrenceId>,
     )> {
-        let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
-            match logical_paths {
-                Some(paths) => self
-                    .symbols_in_logical_files_page(
-                        paths,
-                        None,
+        let symbols = {
+            let _span = tracing::trace_span!("usecases.graph.health.symbols").entered();
+            {
+                match logical_paths {
+                    Some(paths) => self
+                        .symbols_in_logical_files_page(
+                            paths,
+                            None,
+                            MAX_ANALYTICAL_SYMBOLS,
+                            MAX_ANALYTICAL_SYMBOLS,
+                        )
+                        .map(|page| page.symbols),
+                    None => self.page_all_symbols(
                         MAX_ANALYTICAL_SYMBOLS,
-                        MAX_ANALYTICAL_SYMBOLS,
-                    )
-                    .map(|page| page.symbols),
-                None => self.page_all_symbols(
-                    MAX_ANALYTICAL_SYMBOLS,
-                    "verified health symbol census exceeded its analytical budget",
-                ),
+                        "verified health symbol census exceeded its analytical budget",
+                    ),
+                }
             }
-        })?;
+        }?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let (edges, external_test_markers) =
-            hotpath::measure_block!("usecases.graph.health.edges", {
+        let (edges, external_test_markers) = {
+            let _span = tracing::trace_span!("usecases.graph.health.edges").entered();
+            {
                 if logical_paths.is_some() {
                     self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
                         .map(|edges| {
@@ -494,7 +521,8 @@ impl<'a> GraphQueryManager<'a> {
                     self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
                         .map(|edges| (edges, HashSet::new()))
                 }
-            })?;
+            }
+        }?;
         Ok((symbols, edges, external_test_markers))
     }
 

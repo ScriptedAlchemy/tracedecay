@@ -36,7 +36,7 @@ pub fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
         .max(limit)
 }
 
-#[hotpath::measure(label = "sessions.retrieval.dedupe")]
+#[tracing::instrument(name = "sessions.retrieval.dedupe", level = "trace", skip_all)]
 pub fn dedupe_related_message_copies<T>(
     rows: Vec<T>,
     identity: impl for<'a> Fn(&'a T) -> RelatedMessageCopyIdentity<'a>,

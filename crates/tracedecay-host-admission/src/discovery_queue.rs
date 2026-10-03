@@ -6,7 +6,11 @@ use tracedecay_sessions::admission::{HostAdmissionOutcome, HostDiscoveryQueueEnt
 use super::{HostAdmissionFacade, host_scope};
 
 impl HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.has_session_message", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.has_session_message",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn has_session_message(
         &self,
         scope: &ObservationScopeV1,
@@ -23,9 +27,10 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::measure(
-        label = "usecases.admission.existing_session_message_ids",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.admission.existing_session_message_ids",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn existing_session_message_ids(
         &self,
@@ -40,7 +45,6 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("read message identity batch", error))
     }
 
-    #[hotpath::skip]
     pub(super) async fn read_session_backfill_state(
         &self,
         scope: &ObservationScopeV1,
@@ -56,7 +60,6 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::skip]
     pub(super) async fn list_session_backfill_state_page(
         &self,
         scope: &ObservationScopeV1,
@@ -71,7 +74,6 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("list backfill-state page", error.to_string()))
     }
 
-    #[hotpath::skip]
     pub(super) async fn session_backfill_state_high_water(
         &self,
         scope: &ObservationScopeV1,
@@ -84,7 +86,6 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("read backfill-state high water", error.to_string()))
     }
 
-    #[hotpath::skip]
     pub(super) async fn compare_and_swap_session_backfill_state(
         &self,
         scope: &ObservationScopeV1,
@@ -107,7 +108,6 @@ impl HostAdmissionFacade<'_> {
         })
     }
 
-    #[hotpath::skip]
     pub(super) async fn compare_and_delete_session_backfill_state(
         &self,
         scope: &ObservationScopeV1,
@@ -124,7 +124,11 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::measure(label = "usecases.admission.get_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.get_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn get_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -141,7 +145,11 @@ impl HostAdmissionFacade<'_> {
         })
     }
 
-    #[hotpath::measure(label = "usecases.admission.advance_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.advance_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn advance_parse_offset(
         &self,
         scope: &ObservationScopeV1,
@@ -228,7 +236,11 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
-    #[hotpath::measure(label = "usecases.admission.enqueue_discovery", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.enqueue_discovery",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn enqueue_discovery_paths(
         &self,
         scope: &ObservationScopeV1,
@@ -243,7 +255,11 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("enqueue", error))
     }
 
-    #[hotpath::measure(label = "usecases.admission.discovery_paths_after", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.discovery_paths_after",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn discovery_paths_after(
         &self,
         scope: &ObservationScopeV1,
@@ -259,7 +275,7 @@ impl HostAdmissionFacade<'_> {
             .map_err(|error| unavailable("read", error))
     }
 
-    #[hotpath::measure(label = "usecases.admission.discovery_path", future = true)]
+    #[tracing::instrument(name = "usecases.admission.discovery_path", level = "trace", skip_all)]
     pub(super) async fn discovery_path(
         &self,
         scope: &ObservationScopeV1,

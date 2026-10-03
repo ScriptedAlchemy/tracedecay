@@ -43,7 +43,7 @@ struct IdempotencyRecord {
     durability: DurabilityClassV1,
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.idempotency_lookup")]
+#[tracing::instrument(name = "rusqlite.ledger.idempotency_lookup", level = "trace", skip_all)]
 pub(super) fn disposition(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -83,7 +83,7 @@ pub(crate) fn lookup_receipt(
     Ok(load(transaction, binding, &idempotency.key)?.map(|record| record.receipt))
 }
 
-#[hotpath::measure(label = "rusqlite.ledger.idempotency_insert")]
+#[tracing::instrument(name = "rusqlite.ledger.idempotency_insert", level = "trace", skip_all)]
 pub(super) fn insert(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,

@@ -379,13 +379,13 @@ async fn observatory_and_costs_sections(
     since: i64,
     report: &mut AnalyticsResultV1,
 ) {
-    let observatory = hotpath::future!(
+    let observatory = tracing::Instrument::instrument(
         tracedecay_application::observability::observatory_read_model(
             gdb,
             scope.filter.as_deref(),
             since,
         ),
-        label = "mcp.analytics.report.observatory"
+        tracing::trace_span!("mcp.analytics.report.observatory"),
     )
     .await;
     let provider_scope = if all_projects {
@@ -405,7 +405,7 @@ async fn observatory_and_costs_sections(
         })
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = hotpath::future!(
+    let costs = tracing::Instrument::instrument(
         tracedecay_application::observability::costs_read_model(
             gdb,
             provider_usage_db,
@@ -413,7 +413,7 @@ async fn observatory_and_costs_sections(
             scope.filter.as_deref(),
             since,
         ),
-        label = "mcp.analytics.report.costs"
+        tracing::trace_span!("mcp.analytics.report.costs"),
     )
     .await;
     report.observatory = Some(observatory);
@@ -429,7 +429,7 @@ pub struct AnalyticsAuthority<'a> {
     pub cancellation: CancellationSignal,
 }
 
-#[hotpath::measure(label = "mcp.analytics.report.total")]
+#[tracing::instrument(name = "mcp.analytics.report.total", level = "trace", skip_all)]
 pub async fn compute_analytics(
     cg: &TraceDecay,
     args: &Value,
@@ -464,9 +464,9 @@ pub async fn compute_analytics(
     let scope = resolve_scope(cg, all_projects)?;
 
     let since = current_timestamp().saturating_sub(i64::from(window_days).saturating_mul(86_400));
-    let event_count = hotpath::future!(
+    let event_count = tracing::Instrument::instrument(
         gdb.count_analytics_events(scope.filter.as_deref(), since),
-        label = "mcp.analytics.report.events"
+        tracing::trace_span!("mcp.analytics.report.events"),
     )
     .await
     .map_err(config_error)?;
@@ -501,18 +501,18 @@ pub async fn compute_analytics(
     }
 
     if wants_section(section, AnalyticsSectionV1::Tools) {
-        let counts = hotpath::future!(
+        let counts = tracing::Instrument::instrument(
             gdb.query_analytics_tool_counts(scope.filter.as_deref(), since),
-            label = "mcp.analytics.report.tools"
+            tracing::trace_span!("mcp.analytics.report.tools"),
         )
         .await
         .map_err(config_error)?;
         report.tools = Some(tools_section(&counts)?);
     }
     if wants_section(section, AnalyticsSectionV1::Hints) {
-        let counts = hotpath::future!(
+        let counts = tracing::Instrument::instrument(
             gdb.query_analytics_hint_counts(scope.filter.as_deref(), since),
-            label = "mcp.analytics.report.hints"
+            tracing::trace_span!("mcp.analytics.report.hints"),
         )
         .await
         .map_err(config_error)?;
@@ -521,18 +521,18 @@ pub async fn compute_analytics(
     }
     if wants_section(section, AnalyticsSectionV1::Facts) {
         report.facts = Some(
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 facts_section(cg, &scope, &read_control),
-                label = "mcp.analytics.report.facts"
+                tracing::trace_span!("mcp.analytics.report.facts"),
             )
             .await,
         );
     }
     if wants_section(section, AnalyticsSectionV1::Automation) {
         report.automation = Some(
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 automation_section(profile_root, &scope.root, since),
-                label = "mcp.analytics.report.automation"
+                tracing::trace_span!("mcp.analytics.report.automation"),
             )
             .await,
         );

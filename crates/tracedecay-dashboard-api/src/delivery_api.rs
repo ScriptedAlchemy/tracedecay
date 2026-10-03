@@ -870,7 +870,7 @@ pub trait DashboardDeliveryReadPortV1: Send + Sync {
 pub type DashboardProximityAttentionReadFutureV1<'a> =
     Pin<Box<dyn Future<Output = ProjectDeliveryProximityAttentionSourceV1> + Send + 'a>>;
 
-#[hotpath::measure(label = "dashboard_api.delivery.overview", future = true)]
+#[tracing::instrument(name = "dashboard_api.delivery.overview", level = "trace", skip_all)]
 pub async fn overview(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -883,10 +883,10 @@ pub async fn overview(
         },
         None => None,
     };
-    let generation_freshness = hotpath::measure_block!(
-        "dashboard_api.freshness.projection",
+    let generation_freshness = {
+        let _span = tracing::trace_span!("dashboard_api.freshness.projection").entered();
         generation_projection(&changes, indexed_commit)
-    );
+    };
     let live_head = live_head_commit(&changes).and_then(|head| CommitId::new(head).ok());
 
     let delivery = match (
@@ -973,7 +973,7 @@ pub async fn overview(
     Json(envelope)
 }
 
-#[hotpath::measure(label = "dashboard_api.delivery.inbox", future = true)]
+#[tracing::instrument(name = "dashboard_api.delivery.inbox", level = "trace", skip_all)]
 pub async fn inbox(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,

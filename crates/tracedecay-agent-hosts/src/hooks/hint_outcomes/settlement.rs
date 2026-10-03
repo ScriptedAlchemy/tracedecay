@@ -152,7 +152,11 @@ impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
     }
 }
 
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.correlate", future = true)]
+#[tracing::instrument(
+    name = "hosts.hooks.hint_outcomes.correlate",
+    level = "trace",
+    skip_all
+)]
 pub async fn correlate_registered_hint_outcomes(
     analytics: &RegisteredGlobalDb,
     sessions: &RegisteredGlobalDb,
@@ -231,7 +235,7 @@ impl HintOutcomeSettlement {
 /// operator state on its own. Best-effort by contract, failures come back
 /// as typed [`HintOutcomeSettlement`] states and are logged here so every
 /// caller inherits the same observability.
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.settle", future = true)]
+#[tracing::instrument(name = "hosts.hooks.hint_outcomes.settle", level = "trace", skip_all)]
 pub async fn settle_project_hint_outcomes(
     analytics: Option<&RegisteredGlobalDb>,
     sessions: Option<&RegisteredGlobalDb>,
@@ -283,9 +287,9 @@ pub async fn settle_project_hint_outcomes(
                     "hint-outcome settlement pass completed"
                 );
             }
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 record_settled_adoption_outcomes(sessions, stats),
-                label = "hosts.hooks.hint_outcomes.record_adoption"
+                tracing::trace_span!("hosts.hooks.hint_outcomes.record_adoption"),
             )
             .await;
             HintOutcomeSettlement::Settled {
@@ -381,7 +385,11 @@ fn activity_from_row(
     }))
 }
 
-#[hotpath::measure(label = "hosts.hooks.hint_outcomes.activity_parse")]
+#[tracing::instrument(
+    name = "hosts.hooks.hint_outcomes.activity_parse",
+    level = "trace",
+    skip_all
+)]
 fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {

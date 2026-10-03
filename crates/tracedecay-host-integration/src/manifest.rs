@@ -55,7 +55,7 @@ pub struct HostBundleManifestV1 {
 }
 
 impl HostBundleManifestV1 {
-    #[hotpath::measure(label = "host_integration.manifest.validate")]
+    #[tracing::instrument(name = "host_integration.manifest.validate", level = "trace", skip_all)]
     pub fn validate_structure(&self) -> Result<(), HostBundleError> {
         if self.schema_version != HOST_BUNDLE_SCHEMA_VERSION {
             return Err(HostBundleError::UnsupportedManifestVersion);
@@ -88,7 +88,11 @@ impl HostBundleManifestV1 {
     }
 
     /// Canonical first-party catalog bytes used for content identity.
-    #[hotpath::measure(label = "host_integration.manifest.canonicalize")]
+    #[tracing::instrument(
+        name = "host_integration.manifest.canonicalize",
+        level = "trace",
+        skip_all
+    )]
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, HostBundleError> {
         canonical_json_bytes(&HostBundleCatalogPayloadV1 {
             schema_version: self.schema_version,
@@ -106,7 +110,7 @@ impl HostBundleManifestV1 {
         .map_err(|_| HostBundleError::CanonicalizationFailed)
     }
 
-    #[hotpath::measure(label = "host_integration.manifest.digest")]
+    #[tracing::instrument(name = "host_integration.manifest.digest", level = "trace", skip_all)]
     pub fn canonical_digest(&self) -> Result<[u8; 32], HostBundleError> {
         Ok(Sha256::digest(self.canonical_bytes()?).into())
     }

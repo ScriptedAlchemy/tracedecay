@@ -21,7 +21,11 @@ impl RegisteredScopeResolver {
     /// or worktree identifiers. Composition roots use it before invoking their
     /// canonical identity authority, so path aliases cannot create a parallel
     /// identity namespace or affect a route cache before normalization.
-    #[hotpath::measure(label = "usecases.context.registered_scope.authorize")]
+    #[tracing::instrument(
+        name = "usecases.context.registered_scope.authorize",
+        level = "trace",
+        skip_all
+    )]
     pub fn canonical_scope_root(
         registered_root: &Path,
         requested_root: &Path,
@@ -31,7 +35,7 @@ impl RegisteredScopeResolver {
             .map(|resolved| resolved.scope_root)
     }
 
-    #[hotpath::measure(label = "usecases.context.registered_scope")]
+    #[tracing::instrument(name = "usecases.context.registered_scope", level = "trace", skip_all)]
     pub fn resolve(
         registered_root: &Path,
         requested_root: &Path,

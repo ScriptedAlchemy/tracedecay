@@ -261,7 +261,7 @@ impl RowDictionaryV1 for RecordingRowDictionaryV1<'_> {
 
 /// Replace the changed files' pages of the sealed parent copy `transaction`
 /// holds with the successor's, in place, and shift everything after them.
-#[hotpath::measure(label = "query.artifact.carry.patch")]
+#[tracing::instrument(name = "query.artifact.carry.patch", level = "trace", skip_all)]
 pub(super) fn carry_parent_rows(
     transaction: &Transaction<'_>,
     metadata: &CodeLexicalProjectionMetadataV1,
@@ -295,51 +295,44 @@ pub(super) fn carry_parent_rows(
     }))?;
     let new_pages: Vec<&PreparedCodeLexicalArtifactPageV1> =
         changed.iter().flat_map(|file| &file.pages).collect();
-    hotpath::gauge!("query.artifact.carry.document_growth").set(
-        documents
-            .growth
-            .last()
-            .map_or(0, |growth| growth.unsigned_abs()),
-    );
-    hotpath::measure_block!(
-        "query.artifact.carry.row_dictionary",
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.row_dictionary").entered();
         carry_row_dictionary(transaction, metadata, &parent_pages, &changed, control)
-    )?;
-    hotpath::measure_block!("query.artifact.carry.rows", {
+    }?;
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.rows").entered();
         carry_row_blocks(transaction, &documents, &new_pages, control)?;
         carry_row_chunks(transaction, &documents, &new_pages, control)
-    })?;
+    }?;
     let mut field_totals = BTreeMap::<i64, i64>::new();
-    hotpath::measure_block!(
-        "query.artifact.carry.term_postings",
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.term_postings").entered();
         carry_term_postings(
             transaction,
             &documents,
             &new_pages,
             &mut field_totals,
-            control
+            control,
         )
-    )?;
+    }?;
     apply_field_totals(transaction, &field_totals)?;
-    hotpath::measure_block!(
-        "query.artifact.carry.exact_postings",
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.exact_postings").entered();
         carry_exact_postings(transaction, &documents, &new_pages, control)
-    )?;
-    hotpath::measure_block!(
-        "query.artifact.carry.ngram_postings",
+    }?;
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.ngram_postings").entered();
         carry_ngram_postings(transaction, &documents, &new_pages, control)
-    )?;
-    hotpath::measure_block!(
-        "query.artifact.carry.clones",
+    }?;
+    {
+        let _span = tracing::trace_span!("query.artifact.carry.clones").entered();
         carry_clone_rows(transaction, &clones, &changed, control)
-    )?;
+    }?;
     let page_count = write_page_rows(transaction, &parent_pages, &changed)?;
     let documents: i64 = transaction
         .query_row("SELECT COUNT(*) FROM row_chunks", [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let re_encoded_pages = new_pages.len() as u64;
-    hotpath::gauge!("query.artifact.carry.pages_encoded").inc(re_encoded_pages);
-    hotpath::gauge!("query.artifact.carry.files_re_encoded").inc(changed.len() as u64);
     Ok(CarriedRowsV1 {
         pages: page_count,
         documents: u64::try_from(documents).map_err(contract_number)?,

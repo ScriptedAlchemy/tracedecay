@@ -238,7 +238,7 @@ pub(super) struct SkillWriterStoreRuntime<'a> {
 // The single funnel every skill-writer entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
-#[hotpath::measure(future = true, label = "automation.run.skill_writer")]
+#[tracing::instrument(name = "automation.run.skill_writer", level = "trace", skip_all)]
 async fn run_skill_writer_for_store_with_publication(
     runtime: SkillWriterStoreRuntime<'_>,
     retrieval: &dyn AutomationSessionRetrieval,

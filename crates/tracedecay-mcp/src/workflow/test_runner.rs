@@ -255,7 +255,7 @@ impl TestRunControl {
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.run")]
+#[tracing::instrument(name = "mcp.workflow.affected_tests.run", level = "trace", skip_all)]
 pub async fn run_cargo_tests(
     project_root: PathBuf,
     profile: TestProfile,
@@ -298,7 +298,11 @@ fn cargo_test_command(project_root: &Path, profile: TestProfile, test_identity: 
     command
 }
 
-#[hotpath::measure(label = "mcp.workflow.affected_tests.selected")]
+#[tracing::instrument(
+    name = "mcp.workflow.affected_tests.selected",
+    level = "trace",
+    skip_all
+)]
 fn run_selected_cargo_tests(
     project_root: &Path,
     profile: TestProfile,

@@ -32,7 +32,7 @@ files. Load a tracedecay skill only when its specific workflow matches the task;
 tracedecay_message_search or tracedecay_lcm_expand_query when prior conversation context matters.";
 
 /// Codex `SessionStart` hook handler.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
+#[tracing::instrument(name = "hosts.hooks.codex.session_start", level = "trace", skip_all)]
 pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!(
@@ -82,7 +82,11 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
 /// Codex `UserPromptSubmit` hook handler.
 ///
 /// Resets the local counter and injects steering context for the new turn.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
+#[tracing::instrument(
+    name = "hosts.hooks.codex.user_prompt_submit",
+    level = "trace",
+    skip_all
+)]
 pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!(
         runtime,
@@ -205,7 +209,7 @@ async fn codex_user_prompt_submit_context_with_root(
 /// The native event enters the canonical V2 admission/replay journey. Only
 /// daemon-approved ready guidance is rendered in Codex's documented
 /// `additionalContext` shape; unavailable or guidance-free admission is silent.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
+#[tracing::instrument(name = "hosts.hooks.codex.post_tool_use", level = "trace", skip_all)]
 pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!(
@@ -256,7 +260,7 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 /// The daemon lands the session's rollout through the canonical transcript
 /// ingest route and then runs the daemon-owned compression journey; the hook
 /// itself only forwards the boundary and fails open.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
+#[tracing::instrument(name = "hosts.hooks.codex.post_compact", level = "trace", skip_all)]
 pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!(
         runtime,
@@ -343,7 +347,11 @@ pub fn evaluate_codex_subagent_start(profile: &ProfileRoot, event_json: &str) ->
 }
 
 /// Records a Codex `SubagentStart` and returns the session-local count.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.record_subagent_start")]
+#[tracing::instrument(
+    name = "hosts.hooks.codex.record_subagent_start",
+    level = "trace",
+    skip_all
+)]
 pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = event_project_root_with_identity(runtime, &parsed).await?;
@@ -545,7 +553,7 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
     rels
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.compact_daemon")]
+#[tracing::instrument(name = "hosts.hooks.codex.compact_daemon", level = "trace", skip_all)]
 async fn codex_post_compact(
     runtime: &HookRuntimeV1,
     event_json: &str,

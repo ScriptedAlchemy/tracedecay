@@ -101,7 +101,11 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 ///
 /// The returned span writes `hook_completed` when dropped; the caller notes
 /// the capture outcome on it first.
-#[hotpath::measure(label = "agent_hosts.hooks.record_native_capture")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.record_native_capture",
+    level = "trace",
+    skip_all
+)]
 pub fn record_native_capture_invoked(
     runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
@@ -221,7 +225,11 @@ use tool_hints::ToolHint;
 use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_kimi_event")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_kimi_event",
+    level = "trace",
+    skip_all
+)]
 async fn dispatch_kimi_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
@@ -248,7 +256,11 @@ const PI_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
 /// Pi lifecycle events record under the Pi host with Pi's own event name, and
 /// each session boundary lands that session's transcript through the
 /// canonical Pi source so recall reflects the session the event names.
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_pi_event")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_pi_event",
+    level = "trace",
+    skip_all
+)]
 async fn dispatch_pi_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
@@ -286,7 +298,11 @@ async fn dispatch_pi_event(
     guidance
 }
 
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_droid_event")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_droid_event",
+    level = "trace",
+    skip_all
+)]
 async fn dispatch_droid_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
@@ -307,7 +323,11 @@ async fn dispatch_droid_event(
     .flatten()
 }
 
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_opencode_event",
+    level = "trace",
+    skip_all
+)]
 async fn dispatch_opencode_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
@@ -328,9 +348,10 @@ async fn dispatch_opencode_event(
     .flatten()
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "agent_hosts.hooks.dispatch_opencode_tool_after"
+#[tracing::instrument(
+    name = "agent_hosts.hooks.dispatch_opencode_tool_after",
+    level = "trace",
+    skip_all
 )]
 async fn dispatch_opencode_tool_after(
     runtime: &HookRuntimeV1,
@@ -358,7 +379,7 @@ async fn dispatch_opencode_tool_after(
 /// spool and wait on each other only for a rename; a publish lock held past
 /// the synchronous budget, measured from that wait, leaves the synced receipt
 /// staged for the daemon's drain to adopt.
-#[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
+#[tracing::instrument(name = "hosts.hooks.write_output", level = "trace", skip_all)]
 pub(crate) async fn write_hook_output(
     profile: &ProfileRoot,
     project_root: Option<&Path>,
@@ -544,7 +565,7 @@ async fn hook_native_event(
     0
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
+#[tracing::instrument(name = "hosts.hooks.kimi_event", level = "trace", skip_all)]
 pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
@@ -555,12 +576,12 @@ pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
     .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.pi_event")]
+#[tracing::instrument(name = "hosts.hooks.pi_event", level = "trace", skip_all)]
 pub async fn hook_pi_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(runtime, NativeHostIdentityV1::Pi, None, dispatch_pi_event).await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.droid_event")]
+#[tracing::instrument(name = "hosts.hooks.droid_event", level = "trace", skip_all)]
 pub async fn hook_droid_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
@@ -571,7 +592,7 @@ pub async fn hook_droid_event(runtime: &HookRuntimeV1) -> i32 {
     .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]
+#[tracing::instrument(name = "hosts.hooks.opencode_event", level = "trace", skip_all)]
 pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
@@ -586,7 +607,7 @@ pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
 /// hook it answers (`ctx.tool.hook("execute.after")`) is the name.
 pub const OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME: &str = "tool.execute.after";
 
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
+#[tracing::instrument(name = "hosts.hooks.opencode_tool_after", level = "trace", skip_all)]
 pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
         runtime,
@@ -597,7 +618,7 @@ pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     .await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.native_resolve_root")]
+#[tracing::instrument(name = "hosts.hooks.native_resolve_root", level = "trace", skip_all)]
 async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Option<PathBuf> {
     let parsed = serde_json::from_str::<Value>(event).ok();
     let start = parsed
@@ -609,7 +630,7 @@ async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Opti
     (runtime.project_root_resolver)(&runtime.profile, &start).await
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
+#[tracing::instrument(name = "hosts.hooks.daemon_action", level = "trace", skip_all)]
 pub(crate) async fn daemon_hook_action(
     runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
@@ -645,7 +666,7 @@ pub(crate) async fn daemon_hook_action(
     result
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.ingest_user_session")]
+#[tracing::instrument(name = "hosts.hooks.ingest_user_session", level = "trace", skip_all)]
 pub(crate) async fn ingest_user_session(
     runtime: &HookRuntimeV1,
     provider: &str,
@@ -759,7 +780,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     }
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.ingest_transcript")]
+#[tracing::instrument(name = "hosts.hooks.ingest_transcript", level = "trace", skip_all)]
 pub(crate) async fn ingest_transcript_for_event(
     runtime: &HookRuntimeV1,
     provider: &str,
@@ -831,7 +852,7 @@ pub fn additional_context_json(event_name: &str, additional_context: &str) -> St
     .to_string()
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
+#[tracing::instrument(name = "hosts.hooks.notify_event", level = "trace", skip_all)]
 pub(crate) async fn notify_hook_event_with_telemetry(
     runtime: &HookRuntimeV1,
     project_root: &Path,
@@ -843,7 +864,11 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
+#[tracing::instrument(
+    name = "hosts.hooks.hermes_terminal_receipt",
+    level = "trace",
+    skip_all
+)]
 pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event_json = read_hook_event!(
@@ -1303,7 +1328,7 @@ fn event_project_root_or_process_cwd(profile: &ProfileRoot, parsed: &Value) -> O
 /// Identity-aware [`event_project_root`]: consults the registry so a
 /// global-store-only checkout still resolves. Shared by every host whose session
 /// events carry `cwd`.
-#[hotpath::measure(future = true, label = "hosts.hooks.resolve_root")]
+#[tracing::instrument(name = "hosts.hooks.resolve_root", level = "trace", skip_all)]
 async fn event_project_root_with_identity(
     runtime: &HookRuntimeV1,
     parsed: &Value,

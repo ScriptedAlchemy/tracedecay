@@ -132,7 +132,7 @@ pub fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> PathBuf {
     store::skill_usage_record_path(profile_root, skill_id)
 }
 
-#[hotpath::measure(label = "automation.skill_usage.load", future = true)]
+#[tracing::instrument(name = "automation.skill_usage.load", level = "trace", skip_all)]
 pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLedger> {
     store::load_ledger(profile_root).await
 }

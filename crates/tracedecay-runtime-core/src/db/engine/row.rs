@@ -59,7 +59,6 @@ impl Rows {
             .map(String::as_str)
     }
 
-    #[hotpath::skip]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         Ok(self.rows.pop_front())
     }

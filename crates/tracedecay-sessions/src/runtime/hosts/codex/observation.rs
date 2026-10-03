@@ -166,7 +166,6 @@ fn lookup_codex_meta(key: &CodexMetaCacheKey) -> TranscriptIngestResult<CodexMet
             .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
         let meta = Arc::clone(&entry.meta);
         cache.entries.push_back(entry);
-        hotpath::gauge!("codex_shared_meta_hits").inc(1.0);
         return Ok(CodexMetaLookup::Hit(meta));
     }
     if let Some(settled) = cache.in_flight.get(key) {
@@ -180,7 +179,6 @@ fn lookup_codex_meta(key: &CodexMetaCacheKey) -> TranscriptIngestResult<CodexMet
     }
     let settled = Arc::new(Notify::new());
     cache.in_flight.insert(key.clone(), Arc::clone(&settled));
-    hotpath::gauge!("codex_shared_meta_misses").inc(1.0);
     Ok(CodexMetaLookup::Claimed(CodexMetaFillClaim {
         key: key.clone(),
         settled,

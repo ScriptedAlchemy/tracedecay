@@ -840,7 +840,7 @@ impl GitHubReadOnlyClientV1 {
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
+        let agent = http_agent(builder.build());
         Some(Self {
             agent,
             target,
@@ -1252,18 +1252,21 @@ impl GitHubReadOnlyClientV1 {
         // UreqHttpMiddleware times header completion; this span is body/decode
         // (and 304 etag-cache validation) after that send.
         let response = request.call();
-        hotpath::measure_block!("usecases.github_network.rest_get", {
-            decode_ureq_response(
-                response,
-                MAX_GITHUB_READ_RESPONSE_BYTES_V1,
-                link_page.map(|current_page| GitHubLinkPageScopeV1 {
-                    rest_base_uri: &self.config.rest_base_uri,
-                    endpoint: url,
-                    current_page,
-                    page_size: GITHUB_REVIEW_REST_PAGE_SIZE_V1,
-                }),
-            )
-        })
+        {
+            let _span = tracing::trace_span!("usecases.github_network.rest_get").entered();
+            {
+                decode_ureq_response(
+                    response,
+                    MAX_GITHUB_READ_RESPONSE_BYTES_V1,
+                    link_page.map(|current_page| GitHubLinkPageScopeV1 {
+                        rest_base_uri: &self.config.rest_base_uri,
+                        endpoint: url,
+                        current_page,
+                        page_size: GITHUB_REVIEW_REST_PAGE_SIZE_V1,
+                    }),
+                )
+            }
+        }
     }
 
     fn post_static_graphql(&self, payload: &serde_json::Value) -> HttpResponseV1 {
@@ -1285,9 +1288,10 @@ impl GitHubReadOnlyClientV1 {
         let response = request.send_json(payload);
         // GraphQL pagination is cursor-based inside the response body; a Link
         // header on this route is never a continuation and is not consulted.
-        hotpath::measure_block!("usecases.github_network.graphql_post", {
+        {
+            let _span = tracing::trace_span!("usecases.github_network.graphql_post").entered();
             decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1, None)
-        })
+        }
     }
 }
 
@@ -1359,7 +1363,7 @@ impl GitHubCiReadOnlyClientV1 {
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
+        let agent = http_agent(builder.build());
         Some(Self {
             agent,
             target,
@@ -1399,9 +1403,10 @@ impl GitHubCiReadOnlyClientV1 {
         let response = request.call();
         // CI paging is driven by the caller's explicit page parameter and
         // bounded page counts; the provider Link header is not consulted.
-        hotpath::measure_block!("usecases.github_network.ci_get", {
+        {
+            let _span = tracing::trace_span!("usecases.github_network.ci_get").entered();
             decode_ureq_response(response, MAX_GITHUB_READ_RESPONSE_BYTES_V1, None)
-        })
+        }
     }
 
     pub(crate) fn read_workflow_run<'a>(
@@ -1838,7 +1843,8 @@ fn decode_ureq_response(
                 },
                 None => None,
             };
-            let Ok(body) = hotpath::measure_block!("usecases.github_network.body_decode", {
+            let Ok(body) = ({
+                let _span = tracing::trace_span!("usecases.github_network.body_decode").entered();
                 response
                     .body_mut()
                     .with_config()

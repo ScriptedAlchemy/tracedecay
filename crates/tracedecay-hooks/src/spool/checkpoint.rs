@@ -238,7 +238,7 @@ impl RecordsPrefixDigestV1 {
 
     /// Whether the records file's current `[0, len)` still hashes to this
     /// digest.
-    #[hotpath::measure(label = "hooks.spool.verify_records_prefix")]
+    #[tracing::instrument(name = "hooks.spool.verify_records_prefix", level = "trace", skip_all)]
     pub(super) fn matches_file(&self, root: &Path) -> Result<bool, HookSpoolError> {
         let mut current = Self::empty();
         Ok(current.read_through(root, self.len)? && current.checksum() == self.checksum())

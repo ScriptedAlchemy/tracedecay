@@ -20,18 +20,11 @@ pub fn normalize_observation(
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // OpenCode messages order by snapshot position, not file bytes, so there
-    // is no truthful record-bytes gauge here; entries are the normalize span's
-    // call count. Failures are counted, never hidden.
-    let envelope = normalize_opencode_record(native, session_id, stable_record_id, range);
-    if envelope.is_err() {
-        hotpath::gauge!("capture.opencode.normalize_failures").inc(1u64);
-    }
-    envelope
+    normalize_opencode_record(native, session_id, stable_record_id, range)
 }
 
 /// One source-message canonicalization, not a per-part walk.
-#[hotpath::measure(label = "capture.opencode.normalize")]
+#[tracing::instrument(name = "capture.opencode.normalize", level = "trace", skip_all)]
 fn normalize_opencode_record(
     native: &Value,
     session_id: &str,

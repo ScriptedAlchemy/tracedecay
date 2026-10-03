@@ -32,6 +32,7 @@
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
 // Uniform fallible surfaces that currently always return Ok.
 #![allow(clippy::unnecessary_wraps)]
 

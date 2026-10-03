@@ -187,7 +187,6 @@ impl LaneAdmission {
         }
     }
 
-    #[hotpath::skip]
     const fn interactive(lane: ReaderLane) -> Self {
         Self {
             lane,
@@ -261,7 +260,6 @@ impl PoolState {
         self.workers(lane).saturating_sub(self.limbo(lane))
     }
 
-    #[hotpath::skip]
     pub(super) const fn limbo(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.limbo_general,
@@ -269,7 +267,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn limbo_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.limbo_general,
@@ -277,7 +274,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     const fn waiting(&self, lane: ReaderLane) -> u16 {
         match lane {
             ReaderLane::General => self.waiting_general,
@@ -285,7 +281,6 @@ impl PoolState {
         }
     }
 
-    #[hotpath::skip]
     const fn waiting_mut(&mut self, lane: ReaderLane) -> &mut u16 {
         match lane {
             ReaderLane::General => &mut self.waiting_general,
@@ -335,7 +330,6 @@ struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
 }
 
 impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
-    #[hotpath::skip]
     const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
         Self {
             inner,
@@ -344,7 +338,6 @@ impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
         }
     }
 
-    #[hotpath::skip]
     const fn was_counted(&self) -> bool {
         self.counted
     }
@@ -863,7 +856,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.acquire(request, probe, ACQUISITION_POLL_QUANTUM)
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.reader.acquire_lane")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.reader.acquire_lane",
+        level = "trace",
+        skip_all
+    )]
     fn acquire_lane<F>(
         &self,
         admission: LaneAdmission,

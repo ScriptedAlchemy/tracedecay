@@ -372,7 +372,7 @@ pub(super) struct SparseResolutionV1 {
 /// file set, `edited` each edited file's index there with its parent and
 /// successor artifacts, and `occurrence_of_path` the successor file each
 /// logical path names.
-#[hotpath::measure(label = "code_index.sparse.resolve")]
+#[tracing::instrument(name = "code_index.sparse.resolve", level = "trace", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edit(
     parent: &SealedParentGenerationV1,
@@ -431,7 +431,7 @@ pub(super) fn resolve_edit(
             .difference(&referencing)
             .copied()
             .collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             let parent_key = parent_key_of_path
                 .get(files[file_index].logical_path())
                 .ok_or_else(|| contract("a carried file has no parent segment"))?;
@@ -446,7 +446,6 @@ pub(super) fn resolve_edit(
     .into_iter()
     .flatten()
     .collect::<BTreeSet<_>>();
-    hotpath::gauge!("code_index.sparse.dependents_repointed").set(dependents.len() as u64);
     let candidates = edited_indices
         .iter()
         .chain(&referencing)
@@ -460,7 +459,7 @@ pub(super) fn resolve_edit(
             .chain(&dependents)
             .copied()
             .collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             files[file_index].artifacts();
             Ok::<_, CodeIndexProductionErrorV1>(())
         },
@@ -493,12 +492,6 @@ pub(super) fn resolve_edit(
         )
         .collect::<HashSet<_>>();
     let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
-    hotpath::gauge!("code_index.sparse.references_resolved").set(
-        selection
-            .iter()
-            .map(|(_, picks)| picks.len())
-            .sum::<usize>() as u64,
-    );
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.

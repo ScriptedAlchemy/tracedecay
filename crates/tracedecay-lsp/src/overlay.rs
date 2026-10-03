@@ -162,7 +162,7 @@ impl OverlayStore {
         })
     }
 
-    #[hotpath::measure(label = "lsp_overlay_open", impl_type = "OverlayStore")]
+    #[tracing::instrument(name = "lsp_overlay_open", level = "trace", skip_all)]
     pub fn open(
         &mut self,
         root: &AdmittedRoot,
@@ -222,7 +222,7 @@ impl OverlayStore {
 
     /// Applies an ordered `didChange` batch. A version must strictly advance;
     /// LSP does not require consecutive integer versions, only causal order.
-    #[hotpath::measure(label = "lsp_overlay_change", impl_type = "OverlayStore")]
+    #[tracing::instrument(name = "lsp_overlay_change", level = "trace", skip_all)]
     pub fn change(
         &mut self,
         uri: &str,
@@ -419,10 +419,7 @@ impl DiagnosticSnapshotAdapter {
 }
 
 impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
-    #[hotpath::measure(
-        label = "lsp_overlay_document_diagnostics",
-        impl_type = "DiagnosticSnapshotAdapter"
-    )]
+    #[tracing::instrument(name = "lsp_overlay_document_diagnostics", level = "trace", skip_all)]
     fn document_diagnostics(
         &self,
         root: &AdmittedRoot,
@@ -449,10 +446,7 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
         }
     }
 
-    #[hotpath::measure(
-        label = "lsp_overlay_request_refresh",
-        impl_type = "DiagnosticSnapshotAdapter"
-    )]
+    #[tracing::instrument(name = "lsp_overlay_request_refresh", level = "trace", skip_all)]
     fn request_document_refresh(
         &self,
         root: &AdmittedRoot,

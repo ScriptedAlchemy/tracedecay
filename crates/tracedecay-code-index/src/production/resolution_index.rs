@@ -192,7 +192,7 @@ fn publish_pages<T: Serialize + Sync>(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<Vec<PartitionedIndexSegmentDescriptorV1>, CodeIndexProductionErrorV1> {
-    let encoded = collect_bounded_ordered(pages, |page, _worker| encode_segment(page))?;
+    let encoded = collect_bounded_ordered(pages, |page| encode_segment(page))?;
     let mut descriptors = Vec::with_capacity(encoded.len());
     for (descriptor, bytes) in encoded {
         publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
@@ -209,7 +209,11 @@ type BorrowedDefinitionPageV1<'a> =
 type BorrowedReferencePageV1<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
 
 /// Seal the resolution index of a generation whose files are `files`.
-#[hotpath::measure(label = "code_index.sealed_encode.resolution_index")]
+#[tracing::instrument(
+    name = "code_index.sealed_encode.resolution_index",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn seal_resolution_index(
     files: &[Arc<FileGenerationArtifactsV1>],
     mut publish: impl FnMut(
@@ -301,7 +305,6 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             descriptor.segment_size_bytes,
         )?;
         let canonical = inflate_index_segment(&bytes, descriptor.decoded_size_bytes)?;
-        hotpath::gauge!("code_index.sparse.index_bytes_decoded").inc(canonical.len());
         serde_json::from_slice(&canonical)
             .map_err(|error| contract(format!("sealed resolution index decoding failed: {error}")))
     }
@@ -340,7 +343,11 @@ impl<'r> ResolutionIndexReaderV1<'r> {
 /// replaced file's names or segments land on are read and rewritten; every
 /// other page keeps its parent descriptor. Import aliases must not change:
 /// a successor whose imports move is resolved whole, never resealed here.
-#[hotpath::measure(label = "code_index.sparse.reseal_resolution_index")]
+#[tracing::instrument(
+    name = "code_index.sparse.reseal_resolution_index",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn reseal_resolution_index(
     parent: &ResolutionIndexReaderV1<'_>,
     before: &[&FileGenerationArtifactsV1],

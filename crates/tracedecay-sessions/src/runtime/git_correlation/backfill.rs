@@ -285,7 +285,6 @@ impl BackfillStats {
         }
     }
 
-    #[hotpath::skip]
     pub const fn skipped_total(&self) -> usize {
         self.skipped_no_window
             + self.skipped_not_worktree
@@ -452,7 +451,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-#[hotpath::measure(label = "sessions.git_correlation.backfill", future = true)]
+#[tracing::instrument(name = "sessions.git_correlation.backfill", level = "trace", skip_all)]
 pub async fn run_backfill<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
@@ -491,10 +490,6 @@ where
         stats.spans_written = written.spans_changed;
         stats.commits_attributed = written.commits_changed;
     }
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
     Ok(stats)
 }
 
@@ -518,7 +513,11 @@ pub struct CollectedBackfill {
 /// at the first transient Git failure so the frontier never passes an
 /// unresolved session; permanent exclusions (no activity window, not a
 /// worktree, verified empty history) settle without evidence.
-#[hotpath::measure(label = "sessions.git_correlation.backfill.collect", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.backfill.collect",
+    level = "trace",
+    skip_all
+)]
 pub async fn collect_incremental_backfill<S, G>(
     session_store: &S,
     git: &G,

@@ -23,7 +23,7 @@ use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 /// named. A code-generation continuation runs only the bounded
 /// code-generation unit, draining a superseded backlog without re-running
 /// scope reconciliation or compaction.
-#[hotpath::measure(label = "daemon.maintenance.generation", future = true)]
+#[tracing::instrument(name = "daemon.maintenance.generation", level = "trace", skip_all)]
 pub async fn run_project_generation_maintenance(
     lease: &ProjectStoreMaintenanceLeaseV1,
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -38,16 +38,19 @@ pub async fn run_project_generation_maintenance(
     let code_generation = if cancellation.is_cancelled() {
         CodeGenerationRetentionOutcomeV1::Failed
     } else {
-        hotpath::measure_block!(
-            "daemon.maintenance.code_generation_retention",
+        {
+            use tracing::Instrument as _;
             run_code_generation_retention(
                 lease,
                 code_index_schedulers,
                 maintenance_observations,
                 cancellation,
             )
+            .instrument(tracing::trace_span!(
+                "daemon.maintenance.code_generation_retention"
+            ))
             .await
-        )
+        }
     };
     let mut outcome = match code_generation {
         CodeGenerationRetentionOutcomeV1::Complete => MaintenanceTickOutcome::Complete,
@@ -60,15 +63,20 @@ pub async fn run_project_generation_maintenance(
         return finalize_generation_outcome(outcome, cancellation);
     }
     if !cancellation.is_cancelled() {
-        outcome = outcome.combine(hotpath::measure_block!(
-            "daemon.maintenance.scope_reconciliation",
-            run_code_index_scope_reconciliation(lease, code_index_schedulers).await
-        ));
+        outcome = outcome.combine({
+            use tracing::Instrument as _;
+            run_code_index_scope_reconciliation(lease, code_index_schedulers)
+                .instrument(tracing::trace_span!(
+                    "daemon.maintenance.scope_reconciliation"
+                ))
+                .await
+        });
     }
     if !cancellation.is_cancelled()
         && let Some(compaction) = compaction
     {
-        hotpath::measure_block!("daemon.maintenance.compaction", {
+        use tracing::Instrument as _;
+        async {
             let project_compacted = record_live_compaction_outcome(
                 tracedecay_runtime_core::config::DB_FILENAME,
                 crate::retention::live_compaction::compact_project_store(
@@ -80,7 +88,9 @@ pub async fn run_project_generation_maintenance(
             if !project_compacted {
                 outcome = MaintenanceTickOutcome::Retry;
             }
-        });
+        }
+        .instrument(tracing::trace_span!("daemon.maintenance.compaction"))
+        .await;
     }
     finalize_generation_outcome(outcome, cancellation)
 }
@@ -89,7 +99,11 @@ pub async fn run_project_generation_maintenance(
 /// that no mounted graph owns. It is the whole unit on a full tick and on a
 /// code-generation continuation alike: an unmounted store has no compaction
 /// pass of its own here.
-#[hotpath::measure(label = "daemon.maintenance.registered_generation", future = true)]
+#[tracing::instrument(
+    name = "daemon.maintenance.registered_generation",
+    level = "trace",
+    skip_all
+)]
 pub async fn run_registered_project_generation_maintenance(
     store: &RegisteredProjectStoreV1,
     mounted_store_roots: &BTreeSet<PathBuf>,
@@ -124,12 +138,8 @@ fn finalize_generation_outcome(
     cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
-        hotpath::gauge!("daemon.maintenance.generation.cancelled_total").inc(1_u64);
         MaintenanceTickOutcome::Retry
     } else {
-        if matches!(outcome, MaintenanceTickOutcome::Retry) {
-            hotpath::gauge!("daemon.maintenance.generation.retry_total").inc(1_u64);
-        }
         outcome
     }
 }

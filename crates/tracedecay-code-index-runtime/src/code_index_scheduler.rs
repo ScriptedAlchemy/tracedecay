@@ -22,13 +22,6 @@ use crate::code_index::{
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_contracts::now_micros;
 
-/// Std mutex wrapped for Hotpath lock-contention accounting. Condvar-paired
-/// mutexes (the generation-decode barrier and the text-projection slot)
-/// cannot use this wrapper because `Condvar::wait` requires the exact std
-/// guard type; those measure lock-wait and parked wait with explicit spans
-/// instead.
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
 /// out-of-agent saves): a query admitted after this bound since the last
 /// reconciliation re-checks gix truth before serving. Git-mediated changes are

@@ -24,7 +24,6 @@ pub enum GraphBudgetKind {
 
 impl GraphBudgetKind {
     #[must_use]
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -242,7 +241,6 @@ impl GraphDbError {
 
     /// A conflict verdict from `site` with no compared evidence.
     #[must_use]
-    #[hotpath::skip]
     pub const fn conflict(site: &'static str) -> Self {
         Self::Conflict {
             context: GraphConflictContextV1 {
@@ -277,7 +275,6 @@ impl GraphDbError {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn budget_exhausted(kind: GraphBudgetKind, limit: u64) -> Self {
         Self::BudgetExhausted { kind, limit }
     }

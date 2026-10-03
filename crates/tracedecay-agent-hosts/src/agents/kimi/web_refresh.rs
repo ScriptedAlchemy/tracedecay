@@ -68,7 +68,7 @@ pub(crate) struct KimiPluginRefreshV1 {
 
 /// Re-run Kimi's installer for the staged TraceDecay plugin when, and only
 /// when, Kimi already has it installed from that exact source.
-#[hotpath::measure(label = "hosts.agent.kimi.web_refresh")]
+#[tracing::instrument(name = "hosts.agent.kimi.web_refresh", level = "trace", skip_all)]
 pub(crate) fn refresh_installed_plugin(
     home: &Path,
 ) -> Result<KimiPluginRefreshV1, KimiWebRefreshError> {
