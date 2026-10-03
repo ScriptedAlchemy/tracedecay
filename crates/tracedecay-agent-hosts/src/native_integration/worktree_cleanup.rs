@@ -28,18 +28,8 @@ enum CleanupNativeStateV1 {
 }
 
 impl DaemonNativeWorktreeAuthority {
-    pub(super) fn remove_cleanup(
-        &self,
-        request: &WorktreeCleanupRemoveRequestV1,
-        scope_set: &AuthorizedScopeSet,
-        cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
-        let removal = self.remove_cleanup_checked(request, scope_set, cancellation);
-        removal
-    }
-
     #[tracing::instrument(name = "daemon.git.worktree.remove", level = "trace", skip_all)]
-    fn remove_cleanup_checked(
+    pub(super) fn remove_cleanup(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
@@ -165,18 +155,8 @@ impl DaemonNativeWorktreeAuthority {
         self.execute_remove(transaction, scope_set, admission)
     }
 
-    pub(super) fn reconcile_cleanup(
-        &self,
-        request: &WorktreeCleanupReconcileRequestV1,
-        scope_set: &AuthorizedScopeSet,
-        cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
-        let reconciliation = self.reconcile_cleanup_checked(request, scope_set, cancellation);
-        reconciliation
-    }
-
     #[tracing::instrument(name = "daemon.git.worktree.reconcile", level = "trace", skip_all)]
-    fn reconcile_cleanup_checked(
+    pub(super) fn reconcile_cleanup(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,

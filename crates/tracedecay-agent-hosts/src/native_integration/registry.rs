@@ -263,7 +263,6 @@ impl DaemonNativeIntegrationOwner {
         })
         .await
         .map_err(|_| NativeIntegrationPortError::Unavailable)?
-        .inspect(|reconciled| {})
     }
 
     pub fn authorized_scope_set(
@@ -385,10 +384,8 @@ impl DaemonNativeIntegrationServiceRegistry {
         observed_at: UtcMicros,
         analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
-        let owner = self
-            .ensure_registered(database, target, observed_at, analysis)
-            .await;
-        owner
+        self.ensure_registered(database, target, observed_at, analysis)
+            .await
     }
 
     async fn ensure_registered(
