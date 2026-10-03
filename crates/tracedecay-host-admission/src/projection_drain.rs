@@ -234,13 +234,8 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let project_root = self
-                .authorities
-                .repository_provenance
-                .as_ref()
-                .map(|provenance| provenance.admitted_project_root());
             let convergence = database
-                .converge_session_git_evidence(&SystemGit, project_root)
+                .converge_session_git_evidence(&SystemGit, self.authorities.project_root.as_deref())
                 .await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
