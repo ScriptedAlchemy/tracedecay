@@ -166,6 +166,23 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
                     "page_digest": format!("sha256:{orphan_digest}"),
                     "page_size_bytes": orphan_bytes.len()
                 }]
+            },
+            "resolution_index": {
+                "definitions": [{
+                    "segment_digest": format!("sha256:{orphan_digest}"),
+                    "segment_size_bytes": orphan_bytes.len(),
+                    "decoded_size_bytes": orphan_bytes.len()
+                }],
+                "references": [{
+                    "segment_digest": format!("sha256:{orphan_digest}"),
+                    "segment_size_bytes": orphan_bytes.len(),
+                    "decoded_size_bytes": orphan_bytes.len()
+                }],
+                "import_aliases": {
+                    "segment_digest": format!("sha256:{orphan_digest}"),
+                    "segment_size_bytes": orphan_bytes.len(),
+                    "decoded_size_bytes": orphan_bytes.len()
+                }
             }
         }
     }))
