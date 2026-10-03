@@ -797,9 +797,11 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
         Some(Vec::new()),
         "the edit must change the catalog"
     );
+    // Read before the grandchild publishes and retention retires the child.
+    let child_reads = catalog_reads(&scanned_child, &child_generation);
     assert_eq!(
         catalog_reads(&carried_child, &child_generation),
-        catalog_reads(&scanned_child, &child_generation)
+        child_reads
     );
 
     std::fs::remove_file(project_root.join("src/m030.rs")).expect("delete m030");
@@ -877,7 +879,7 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
     );
     assert_eq!(
         catalog_reads(&cold_child_store, &child_generation),
-        catalog_reads(&scanned_child, &child_generation)
+        child_reads
     );
     drop((
         base_runtime,
