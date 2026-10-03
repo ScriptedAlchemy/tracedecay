@@ -290,16 +290,28 @@ fn code_read_outcome(home: &Path, project: &Path, tool: &str, args: &Value) -> V
 }
 
 fn probe_symbol_id(home: &Path, project: &Path) -> String {
-    let found = super::typed_envelope(&super::tool_call(
-        home,
-        project,
-        "tracedecay_find_exact_symbol",
-        &json!({ "name": "probe", "format": "json" }),
-    ));
-    found["matches"][0]["id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("find_exact_symbol did not resolve `probe`: {found}"))
-        .to_owned()
+    let started = Instant::now();
+    loop {
+        let found = super::typed_envelope(&super::tool_call(
+            home,
+            project,
+            "tracedecay_find_exact_symbol",
+            &json!({ "name": "probe", "format": "json" }),
+        ));
+        if let Some(id) = found["matches"][0]["id"].as_str() {
+            return id.to_owned();
+        }
+        let retryable = found["problem"]["retryable"].as_bool() == Some(true);
+        assert!(
+            retryable,
+            "find_exact_symbol did not resolve `probe`: {found}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "the code graph never verified `probe`: {found}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn session_status(home: &Path, project: &Path, storage_scope: &str) -> Value {

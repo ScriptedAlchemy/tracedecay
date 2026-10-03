@@ -133,9 +133,13 @@ pub(super) fn watch_project(project: &SpooledProject, consumer: Option<Arc<Notif
 /// The drain's own acknowledgements, cursors, and compaction touch other
 /// files, remove receipts, or publish records by rename, so they never wake
 /// it again; only its adoption of a readied receipt does, once.
+///
+/// Windows' `ReadDirectoryChangesW` reports every in-place modification as
+/// `ModifyKind::Any`; accepting it alongside `Data` keeps the filename check
+/// the only gate, so an append wakes the drain on either platform.
 fn wake_for_append(targets: &StdMutex<WatchTargets>, event: &notify::Event) {
     let wakes: fn(&Path) -> bool = match event.kind {
-        EventKind::Modify(notify::event::ModifyKind::Data(_)) => {
+        EventKind::Modify(notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Any) => {
             |path| path.file_name() == Some(OsStr::new(HOOK_SPOOL_RECORDS_FILE))
         }
         EventKind::Create(_)
@@ -199,7 +203,6 @@ pub(super) fn detach_consumer(data_root: &Path) {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn install_opener(opener: mpsc::UnboundedSender<SpooledProject>) {
     with_watch(|watch| {
         if let Ok(mut targets) = watch.targets.lock() {
@@ -208,7 +211,6 @@ pub(super) fn install_opener(opener: mpsc::UnboundedSender<SpooledProject>) {
     });
 }
 
-#[cfg(unix)]
 pub(super) fn consumer_attached(data_root: &Path) -> bool {
     spool_watch().lock().is_ok_and(|watch| {
         watch.as_ref().is_some_and(|watch| {

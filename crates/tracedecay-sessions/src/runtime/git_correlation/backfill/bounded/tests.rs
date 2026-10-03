@@ -437,6 +437,7 @@ async fn scalar(store: &TestStore, sql: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+#[cfg(unix)]
 async fn text_scalar(store: &TestStore, sql: &str) -> String {
     let mut rows = store.connection.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -199,7 +201,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert_eq!(alias_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
         alias_payload["project"]["display_root"],
-        seeded_project_root.to_string_lossy().as_ref()
+        canonical_root_identity(&seeded_project_root)
+            .to_string_lossy()
+            .as_ref()
     );
 
     let unknown_alias = handle_real_server_tool_call(

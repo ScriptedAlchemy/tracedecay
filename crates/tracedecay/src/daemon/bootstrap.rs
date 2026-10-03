@@ -180,6 +180,16 @@ async fn run_foreground_loopback(
         },
     )
     .await;
+    let spooled_hook_opener = hook_v2_replay_consumer::spawn_spooled_hook_opener(
+        hook_v2_replay_consumer::PortableSpoolOpenerOwners {
+            lifecycle: lifecycle.clone(),
+            store_administration: store_administration.clone(),
+            project_open_gates: Arc::clone(&project_open_gates),
+            invocation: invocation.clone(),
+            http_application_registry: http_application_registry.clone(),
+        },
+        profile.clone(),
+    );
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
@@ -246,6 +256,7 @@ async fn run_foreground_loopback(
     lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
     drop(listener);
+    spooled_hook_opener.abort();
     cancel_retained_session_history(&store_administration).await;
     let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
         - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;

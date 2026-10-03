@@ -433,8 +433,15 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
 /// The one `/proc/self/status` parser in the workspace: the daemon's
 /// dedicated resident-memory sampler and every admission re-measure read it
 /// through [`ResidentMemoryPressureV1::sample_and_publish`]. Returns `None`
-/// where the kernel surface is unavailable (non-Linux hosts), which callers
-/// must treat as unobserved, never as zero.
+/// where the kernel surface is unavailable (hosts without a process-memory
+/// counter), which callers must treat as unobserved, never as zero.
+///
+/// Windows reads the same contract through `GetProcessMemoryInfo`:
+/// `WorkingSetSize` is every resident page (`resident_bytes`), and
+/// `PrivateUsage` is the private commit charge — resident and paged-out
+/// private pages together, which is the kernel figure a memory kill line
+/// would count. It fills `unreclaimable_bytes` so `admission_bytes` compares
+/// the same quantity `/proc` reports as `RssAnon + RssShmem + VmSwap`.
 #[must_use]
 pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     #[cfg(target_os = "linux")]
@@ -446,10 +453,50 @@ pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
             cgroup_committed_bytes_v1(Path::new(PROC_SELF_CGROUP_V1), Path::new(CGROUP_V2_ROOT_V1));
         Some(sample)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        process_resident_sample_from_counters_v1()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         None
     }
+}
+
+/// The Windows kernel's per-process memory counters, mapped onto the
+/// `/proc/self/status` shape. `PagefileUsage` is left out: it reports the
+/// pagefile-backed commit the working set is charged, which `PrivateUsage`
+/// already covers.
+#[cfg(target_os = "windows")]
+fn process_resident_sample_from_counters_v1() -> Option<ProcessResidentSampleV1> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    // SAFETY: `counters` is a live `PROCESS_MEMORY_COUNTERS_EX` of the size
+    // declared in `cb`, and `GetCurrentProcess` is a pseudohandle that never
+    // needs closing.
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            std::ptr::from_mut(&mut counters).cast(),
+            counters.cb,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(ProcessResidentSampleV1 {
+        resident_bytes: counters.WorkingSetSize as u64,
+        unreclaimable_bytes: counters.PrivateUsage as u64,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    })
 }
 
 /// Unreclaimable bytes, for growth measurement. Admission publishes

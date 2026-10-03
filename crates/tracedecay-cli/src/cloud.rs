@@ -699,24 +699,48 @@ mod tests {
 
     #[test]
     fn a_refused_connection_is_network_unreachable() {
-        // Bound but never listening, and held for the whole test: the port
-        // refuses connections and cannot be reused, whereas a dropped listener
-        // stays connectable while a sibling test's forked child still holds
-        // the inherited descriptor.
-        let refusing =
-            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
-        refusing
-            .bind(
-                &"127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .unwrap()
-                    .into(),
+        // A connection that dies at the transport level before any HTTP
+        // answer is NetworkUnreachable. Unix refuses a SYN to a port that is
+        // bound but never listening instantly (the socket is held so the
+        // port cannot be reused, whereas a dropped listener stays
+        // connectable while a sibling test's forked child still holds the
+        // inherited descriptor). The Windows kernel retries a refused SYN
+        // for about two seconds — longer than the lookup budget — so there
+        // the same failure class is reached by accepting the connection and
+        // resetting it with a zero-linger close.
+        #[cfg(unix)]
+        let (base, _hold) = {
+            let refusing =
+                socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+            refusing
+                .bind(
+                    &"127.0.0.1:0"
+                        .parse::<std::net::SocketAddr>()
+                        .unwrap()
+                        .into(),
+                )
+                .unwrap();
+            (
+                format!(
+                    "http://{}",
+                    refusing.local_addr().unwrap().as_socket().unwrap()
+                ),
+                refusing,
             )
-            .unwrap();
-        let base = format!(
-            "http://{}",
-            refusing.local_addr().unwrap().as_socket().unwrap()
-        );
+        };
+        #[cfg(windows)]
+        let (base, _hold) = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let hold = std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
+                    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+                    drop(stream);
+                }
+            });
+            (base, hold)
+        };
 
         let error = latest_release_version(&base, true, None).unwrap_err();
 

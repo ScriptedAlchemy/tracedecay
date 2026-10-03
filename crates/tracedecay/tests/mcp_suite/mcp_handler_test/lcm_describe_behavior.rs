@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use tracedecay::mcp::McpServer;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{
@@ -37,7 +38,7 @@ const PAYLOAD_RECEIPT: &str = "{\"ingest_protection\":{\"sanitization_receipt\":
 #[tokio::test]
 async fn tracedecay_lcm_describe_reports_shape_without_bodies() {
     let (cg, _env, dir) = setup_empty_project().await;
-    let project = dir.path().to_path_buf();
+    let project = canonical_root_identity(dir.path());
     let external_body = format!("{SECRET} {}", "payload ".repeat(40_000));
     let content_hash = sha256_hex(external_body.as_bytes());
     let payload_ref = format!(

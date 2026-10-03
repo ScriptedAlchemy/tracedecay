@@ -1757,8 +1757,12 @@ impl StoreAdministration {
             outcomes.push(
                 tracedecay_contracts::retrieval::AutomationSchedulerOwnerReconcileOutcome {
                     project_id: key.owner.project_id,
-                    store_root: key.owner.store_root,
-                    graph_db_path: key.owner.graph_db_path,
+                    store_root: tracedecay_runtime_core::path_safety::plain_host_path(
+                        &key.owner.store_root,
+                    ),
+                    graph_db_path: tracedecay_runtime_core::path_safety::plain_host_path(
+                        &key.owner.graph_db_path,
+                    ),
                     scope_prefix: key.scope_prefix,
                     outcome: server.reconcile_automation_scheduler().await,
                 },

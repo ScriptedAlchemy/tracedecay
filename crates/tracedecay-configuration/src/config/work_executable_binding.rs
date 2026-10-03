@@ -14,6 +14,7 @@ use tracedecay_domain::{
     ManifestDigest, ManifestDigestHasher, WorkExecutableReference, WorkProviderBackendV1,
     WorkProviderProtocol,
 };
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 use super::PinnedRuntimeConfiguration;
 
@@ -145,7 +146,9 @@ impl WorkExecutableBindingResolver for PinnedWorkExecutableBindingResolver {
                 executable_id: executable_id.clone(),
             }
         })?;
-        if canonical_path != binding.canonical_path() {
+        // `canonicalize` spells verbatim `\\?\C:\` on Windows while bindings
+        // record the plain canonical form; compare identities, not spelling.
+        if !same_canonical_path(&canonical_path, binding.canonical_path()) {
             return Err(WorkExecutableBindingError::Stale { executable_id });
         }
         let (actual_digest, verified_byte_length) =
