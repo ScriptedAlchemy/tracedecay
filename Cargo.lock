@@ -3472,16 +3472,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrics"
-version = "0.24.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
-dependencies = [
- "portable-atomic",
- "rapidhash",
-]
-
-[[package]]
 name = "micromap"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4067,15 +4057,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rapidhash"
-version = "4.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]
@@ -5419,7 +5400,6 @@ dependencies = [
  "jsonschema",
  "keyring",
  "libc",
- "metrics",
  "notify",
  "regex",
  "rmcp",
@@ -5501,7 +5481,6 @@ dependencies = [
  "hex",
  "jsonc-parser",
  "libc",
- "metrics",
  "same-file",
  "serde",
  "serde_json",
@@ -5547,7 +5526,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "metrics",
  "schemars",
  "serde",
  "serde_json",
@@ -5569,7 +5547,6 @@ dependencies = [
  "gix",
  "glob",
  "hex",
- "metrics",
  "same-file",
  "schemars",
  "serde",
@@ -5632,7 +5609,6 @@ dependencies = [
  "cap-std",
  "getrandom 0.2.17",
  "hex",
- "metrics",
  "rustls",
  "schemars",
  "serde",
@@ -5668,7 +5644,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
- "metrics",
  "serde_json",
  "sha2",
  "thiserror",
@@ -5690,7 +5665,6 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
- "metrics",
  "mimalloc",
  "rayon",
  "reqwest",
@@ -5758,7 +5732,6 @@ name = "tracedecay-code-extraction"
 version = "0.1.0"
 dependencies = [
  "cc",
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -5785,7 +5758,6 @@ dependencies = [
  "flate2",
  "hex",
  "ignore",
- "metrics",
  "rayon",
  "regex",
  "rusqlite",
@@ -5815,7 +5787,6 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "libc",
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -5835,7 +5806,6 @@ dependencies = [
  "filetime",
  "futures-util",
  "gix",
- "metrics",
  "notify",
  "rayon",
  "rusqlite",
@@ -5896,7 +5866,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
- "metrics",
  "schemars",
  "serde",
  "serde_json",
@@ -5949,7 +5918,6 @@ name = "tracedecay-daemon-protocol"
 version = "0.1.0"
 dependencies = [
  "hex",
- "metrics",
  "semver",
  "serde",
  "serde_json",
@@ -5975,7 +5943,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
- "metrics",
  "rustls",
  "serde",
  "serde_json",
@@ -6036,7 +6003,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "httpdate",
- "metrics",
  "schemars",
  "semver",
  "serde",
@@ -6100,7 +6066,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
- "metrics",
  "rusqlite",
  "schemars",
  "serde",
@@ -6137,7 +6102,6 @@ dependencies = [
  "grafeo-engine",
  "grafeo-storage",
  "hex",
- "metrics",
  "parking_lot",
  "rayon",
  "rusqlite",
@@ -6157,7 +6121,6 @@ dependencies = [
 name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -6178,7 +6141,6 @@ dependencies = [
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6194,7 +6156,6 @@ dependencies = [
 name = "tracedecay-host-admission"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6227,7 +6188,6 @@ dependencies = [
 name = "tracedecay-lcm"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "regex",
  "rusqlite",
  "serde",
@@ -6253,7 +6213,6 @@ dependencies = [
  "globset",
  "jsonc-parser",
  "lsp-types",
- "metrics",
  "serde",
  "serde_json",
  "tempfile",
@@ -6278,7 +6237,6 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "filetime",
- "metrics",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6310,7 +6268,6 @@ dependencies = [
  "glob",
  "hex",
  "libc",
- "metrics",
  "rmcp",
  "serde",
  "serde_json",
@@ -6383,7 +6340,6 @@ dependencies = [
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "schemars",
  "serde",
  "serde_json",
@@ -6398,7 +6354,6 @@ dependencies = [
  "aho-corasick",
  "hex",
  "jsonc-parser",
- "metrics",
  "percent-encoding",
  "regex-automata",
  "serde",
@@ -6427,7 +6382,6 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "libc",
- "metrics",
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",
@@ -6484,7 +6438,6 @@ dependencies = [
  "gix",
  "hex",
  "hmac",
- "metrics",
  "rayon",
  "roaring",
  "rusqlite",
@@ -6515,7 +6468,6 @@ dependencies = [
  "gix",
  "hex",
  "libc",
- "metrics",
  "reflink-copy",
  "rusqlite",
  "serde",
@@ -6542,7 +6494,6 @@ name = "tracedecay-rusqlite-runtime"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "metrics",
  "proptest",
  "ring",
  "rusqlite",
@@ -6607,7 +6558,6 @@ dependencies = [
  "amari-holographic",
  "hex",
  "memmap2",
- "metrics",
  "regex",
  "schemars",
  "serde",
@@ -6641,7 +6591,6 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "hex",
- "metrics",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6681,7 +6630,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6713,7 +6661,6 @@ dependencies = [
  "getrandom 0.2.17",
  "gix",
  "hex",
- "metrics",
  "rayon",
  "rusqlite",
  "serde",
@@ -6742,7 +6689,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "metrics",
  "same-file",
  "serde",
  "serde_json",
@@ -6767,7 +6713,6 @@ dependencies = [
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "schemars",
  "serde",
  "serde_json",
@@ -6784,7 +6729,6 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6819,7 +6763,6 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
- "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6833,7 +6776,6 @@ dependencies = [
 name = "tracedecay-tool-catalog"
 version = "0.1.0"
 dependencies = [
- "metrics",
  "schemars",
  "serde",
  "serde_json",
