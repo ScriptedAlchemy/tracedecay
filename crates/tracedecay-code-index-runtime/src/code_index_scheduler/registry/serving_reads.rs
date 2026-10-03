@@ -865,23 +865,34 @@ impl CodeIndexSchedulerRegistryV1 {
         let root = &root;
         let Ok(waited) = self
             .wait_for_seat(root, deadline, |_| async move {
+                // The seat is read before the servability check and the text
+                // owner after it. Either one landing between the reads then
+                // keeps the wait open; its signal re-runs this probe.
+                let seated = {
+                    let mounted = self.mounted.lock().await;
+                    let Some(worktree) = mounted.get(root) else {
+                        return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                    };
+                    worktree
+                        .serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
+                };
                 if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
                     return Ok(Some(CodeIndexSeatWaitV1::Seated(latest)));
                 }
-                let mounted = self.mounted.lock().await;
-                let Some(worktree) = mounted.get(root) else {
-                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                let text_published = {
+                    let mounted = self.mounted.lock().await;
+                    let Some(worktree) = mounted.get(root) else {
+                        return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                    };
+                    worktree
+                        .text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
                 };
-                let seated = worktree
-                    .serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_some();
-                let text_published = worktree
-                    .text_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_some();
                 Ok::<_, Infallible>(if seated {
                     Some(CodeIndexSeatWaitV1::Parked(
                         CodeIndexSeatParkV1::SeatNotServable,
