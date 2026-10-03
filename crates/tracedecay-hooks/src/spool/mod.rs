@@ -128,10 +128,17 @@ pub struct HookSpoolV1 {
     /// Frames this handle wrote or deduplicated against, not yet committed.
     uncommitted: Option<UncommittedExtentV1>,
     /// Held for its `Drop` only: closes the writer-lease hold observation.
-    _lease_hold: SpoolLeaseHoldObservationV1,
+    _lease_hold: Option<SpoolLeaseHoldObservationV1>,
 }
 
 static SPOOL_LEASES_HELD: AtomicU64 = AtomicU64::new(0);
+
+/// No metrics recorder is installed outside profiling sessions, so spool
+/// gauges that cost an atomic, a clock read, or a walk run only under TRACE.
+#[inline(always)]
+fn observing() -> bool {
+    tracing::level_enabled!(tracing::Level::TRACE)
+}
 
 /// Writer-lease hold observation. Acquisition wait is the
 /// `hooks.spool.acquire_lease` span; this records how long the sole writer
@@ -143,14 +150,17 @@ struct SpoolLeaseHoldObservationV1 {
 }
 
 impl SpoolLeaseHoldObservationV1 {
-    fn enter() -> Self {
+    fn enter() -> Option<Self> {
+        if !observing() {
+            return None;
+        }
         let held = SPOOL_LEASES_HELD
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         metrics::gauge!("hooks.spool.lease.held").set((held) as f64);
-        Self {
+        Some(Self {
             acquired: std::time::Instant::now(),
-        }
+        })
     }
 }
 
@@ -621,7 +631,7 @@ impl HookSpoolV1 {
             }
         }
 
-        {
+        if observing() {
             metrics::gauge!("hooks.spool.append.frame_bytes").set((frame_len) as f64);
             metrics::gauge!("hooks.spool.pending.frame_count").set((self.pending.len()) as f64);
             metrics::gauge!("hooks.spool.pending.bytes").set((self.pending_bytes()) as f64);
@@ -715,7 +725,7 @@ impl HookSpoolV1 {
             });
         }
 
-        {
+        if observing() {
             let frame_count = batches
                 .iter()
                 .map(|batch| batch.records.len())
@@ -851,16 +861,18 @@ impl HookSpoolV1 {
         }
         normalize_acknowledgements(&mut next_meta)?;
 
-        let settled = acknowledged_indices
-            .iter()
-            .map(|(index, disposition)| {
-                let record = &self.pending[*index];
-                (record.framed_len, record.queued_at, *disposition)
-            })
-            .collect::<Vec<_>>();
+        let settled = observing().then(|| {
+            acknowledged_indices
+                .iter()
+                .map(|(index, disposition)| {
+                    let record = &self.pending[*index];
+                    (record.framed_len, record.queued_at, *disposition)
+                })
+                .collect::<Vec<_>>()
+        });
         self.publish_meta(&next_meta, now)?;
 
-        {
+        if let Some(settled) = settled {
             for (framed_len, queued_at, disposition) in settled {
                 // A tombstone is a delivery that expired or was refused, not a
                 // success; the disposition mix keeps those failures visible.
