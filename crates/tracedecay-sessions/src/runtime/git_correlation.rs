@@ -699,8 +699,10 @@ impl AdmittedWorktrees {
             .common_dir
             .as_deref()
             .and_then(|common_dir| {
-                let topology =
-                    tracedecay_runtime_core::git_repository::repository_topology(location).ok()?;
+                let topology = tracedecay_runtime_core::git_repository::repository_topology(
+                    crate::runtime::shared::nearest_existing_ancestor(location),
+                )
+                .ok()?;
                 if topology.common_dir != common_dir {
                     return None;
                 }
