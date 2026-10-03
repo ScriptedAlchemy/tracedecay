@@ -544,8 +544,16 @@ fn raw_strict_resume_validates_the_prefix_once_per_scan() {
     // below is not vacuously zero.
     assert_eq!(second.frames.len(), 1, "the appended frame must be scanned");
     assert_eq!(second.start_offset, prefix_bytes);
+    // A platform without a rewrite witness cannot trust the token, so the
+    // commit step re-proves the consumed prefix at `read_through` bytes.
+    let commit_proof = if tracedecay_private_fs::RewriteWitness::NATIVE.proves_unchanged_bytes() {
+        0
+    } else {
+        second.read_through
+    };
     assert_eq!(
-        second.io.prefix_validation_bytes, prefix_bytes,
+        second.io.prefix_validation_bytes,
+        prefix_bytes + commit_proof,
         "the resumed prefix must be hashed once, not once per consumer"
     );
 }

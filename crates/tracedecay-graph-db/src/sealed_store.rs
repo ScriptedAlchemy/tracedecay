@@ -2694,10 +2694,12 @@ mod build_tests {
 
     use super::{
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        build_sealed_container, sealed_generation_directory, sealed_store_root,
+        build_sealed_container, sealed_artifact_database_options, sealed_generation_directory,
+        sealed_store_root,
     };
+    use crate::location::PersistentGraphStoreState;
     use crate::{
-        GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
+        GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
         GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace,
         GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
@@ -2808,6 +2810,86 @@ mod build_tests {
         assert_eq!(
             left,
             vec![std::ffi::OsString::from(SEALED_STORE_DATABASE_FILE)]
+        );
+    }
+
+    /// A reopened sealed generation serves its rows in place: opening it
+    /// leaves a small fraction of the container resident, a point read
+    /// answers exactly, and a page that fails verification refuses the read
+    /// that touched it as corrupt instead of answering without the page.
+    /// Opening one used to decode every dictionary string and rebuild every
+    /// id map and property index, leaving more than the container resident.
+    #[test]
+    fn a_reopened_sealed_generation_serves_its_rows_in_place() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let manifest = manifest(30_000, 45_000);
+        let identity = manifest.identity();
+        let namespace = identity.physical_namespace().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        build_sealed_container(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            staging.path(),
+            check,
+        )
+        .unwrap();
+        let path = staging.path().join(SEALED_STORE_DATABASE_FILE);
+        let container = std::fs::metadata(&path).unwrap().len();
+        let open = || {
+            GraphDb::open_lazy_with_store_state(
+                sealed_artifact_database_options(path.clone()),
+                PersistentGraphStoreState::Existing,
+            )
+            .unwrap()
+        };
+        let name = GraphPropertyName::new("name").unwrap();
+
+        let database = open();
+        let entity = database
+            .entity(
+                &namespace,
+                &entity_identity(12_345),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap()
+            .expect("the sealed entity reads back");
+        assert_eq!(
+            entity.properties.get(&name),
+            Some(&GraphProperty::String("fn_12345".to_owned()))
+        );
+        let resident = database.resident_engine_bytes().unwrap().unwrap();
+        assert!(
+            resident * 4 < container,
+            "opening a {container}-byte sealed container left {resident} bytes resident"
+        );
+        database.close().unwrap();
+        drop(database);
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at: Vec<usize> = bytes
+            .windows(8)
+            .enumerate()
+            .filter(|(_, window)| *window == b"fn_12345")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(at.len(), 1, "the name is stored once, in its dictionary");
+        bytes[at[0] + 3] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let database = open();
+        let refused = database.entity(
+            &namespace,
+            &entity_identity(12_345),
+            Arc::new(NeverCancelled),
+        );
+        assert!(
+            matches!(&refused, Err(GraphDbError::Corrupt { message }) if message.contains("CRC mismatch")),
+            "a read over a corrupt sealed page must be refused as corrupt: {refused:?}"
+        );
+        let later = database.entity(&namespace, &entity_identity(7), Arc::new(NeverCancelled));
+        assert!(
+            matches!(later, Err(GraphDbError::Corrupt { .. })),
+            "once a page fails, the open serves no further reads: {later:?}"
         );
     }
 

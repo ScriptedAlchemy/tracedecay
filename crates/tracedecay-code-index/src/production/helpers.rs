@@ -1030,13 +1030,14 @@ fn rust_crate_name<T>(
 where
     T: ResolutionFileV1,
 {
-    let manifest = Path::new(source_root)
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("Cargo.toml");
-    let manifest = manifest.to_str()?;
+    // `logical_path` is always `/`-normalized, so build the manifest path
+    // with `/` instead of `Path::join`, which produces `\\` on Windows.
+    let manifest = match source_root.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/Cargo.toml"),
+        None => "Cargo.toml".to_owned(),
+    };
     by_path
-        .get(manifest)
+        .get(manifest.as_str())
         .map(|index| &files[*index])
         .and_then(|file| {
             file.as_ref().artifacts.symbols.iter().find(|symbol| {
@@ -1044,7 +1045,9 @@ where
             })
         })
         .and_then(|symbol| symbol.signature.as_deref())
-        .and_then(|signature| toml::from_str::<toml::Value>(signature).ok())
+        // A CRLF checkout leaves the pair's trailing `\r` in its signature,
+        // and bare CR is invalid TOML, so parse the trimmed fragment.
+        .and_then(|signature| toml::from_str::<toml::Value>(signature.trim_end()).ok())
         .and_then(|pair| {
             pair.get("name")
                 .and_then(toml::Value::as_str)

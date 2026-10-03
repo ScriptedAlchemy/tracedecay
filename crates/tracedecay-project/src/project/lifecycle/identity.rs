@@ -317,7 +317,14 @@ mod tests {
         )
         .await
         .expect("a throwaway profile still admits throwaway roots");
-        assert!(layout.data_root.starts_with(hermetic.path()));
+        assert!(
+            layout.data_root.starts_with(
+                hermetic
+                    .path()
+                    .canonicalize()
+                    .expect("canonical hermetic profile")
+            )
+        );
     }
 
     #[tokio::test]

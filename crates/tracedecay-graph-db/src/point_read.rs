@@ -17,9 +17,9 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let entity = load_entity(database, namespace, identity)?;
+        let entity = self.read_intact(cancellation.as_ref(), |database| {
+            load_entity(database, namespace, identity)
+        })?;
         if let Some(stored) = &entity {
             self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
         }
@@ -41,9 +41,9 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let relation = load_relation(database, namespace, identity)?;
+        let relation = self.read_intact(cancellation.as_ref(), |database| {
+            load_relation(database, namespace, identity)
+        })?;
         if let Some(stored) = &relation {
             self.ensure_projection_readable(namespace, &stored.projection)?;
         }

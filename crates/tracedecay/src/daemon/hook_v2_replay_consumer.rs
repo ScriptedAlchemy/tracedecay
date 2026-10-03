@@ -45,7 +45,25 @@ const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 fn spool_root_absent(root: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(root) {
         Ok(_) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Windows collapses ENOTDIR into ERROR_PATH_NOT_FOUND, so a path
+            // through a regular file also reports NotFound; absence is only
+            // honest once no existing ancestor is a non-directory.
+            let mut ancestor = root.parent();
+            while let Some(path) = ancestor {
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) if !meta.is_dir() => {
+                        return Err(format!(
+                            "hook spool root could not be inspected: {} is not a directory",
+                            path.display()
+                        ));
+                    }
+                    Ok(_) => return Ok(true),
+                    Err(_) => ancestor = path.parent(),
+                }
+            }
+            Ok(true)
+        }
         Err(error) => Err(format!("hook spool root could not be inspected: {error}")),
     }
 }

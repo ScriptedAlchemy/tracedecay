@@ -248,13 +248,17 @@ tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokens
 # merged with upstream v0.5.43 (ScriptedAlchemy/grafeo#9), which adds
 # checked size fields that fail an oversize write instead of corrupting it,
 # keeps edges of modified nodes after `compact()`, and drops deleted nodes
-# from property and vector indexes. Its
+# from property and vector indexes. Since ScriptedAlchemy/grafeo#8 a
+# sealed section is served in place: indexed columns store their rows in
+# value order, id maps and dictionary entries are read from the mapping,
+# and pages are checksummed and verified on first touch, so reopening a
+# sealed generation reads only what its queries touch. Its
 # workspace resolves sibling crates by path, so every grafeo crate must
 # come from the same revision. A mixed
 # registry/git graph would build type-incompatible instances of the patched
 # crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "efac2f98614d672c30f379debfb802f998c9bf32" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "efac2f98614d672c30f379debfb802f998c9bf32" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "efac2f98614d672c30f379debfb802f998c9bf32" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "efac2f98614d672c30f379debfb802f998c9bf32" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "efac2f98614d672c30f379debfb802f998c9bf32" }

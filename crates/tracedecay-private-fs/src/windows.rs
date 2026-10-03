@@ -53,6 +53,7 @@ enum PathKind {
 }
 
 impl PathKind {
+    #[hotpath::skip]
     const fn inheritance(self) -> u32 {
         match self {
             Self::Directory => SUB_CONTAINERS_AND_OBJECTS_INHERIT,
@@ -60,6 +61,7 @@ impl PathKind {
         }
     }
 
+    #[hotpath::skip]
     const fn description(self) -> &'static str {
         match self {
             Self::Directory => "directory",
@@ -139,7 +141,7 @@ pub fn current_user_sid_string() -> io::Result<String> {
 }
 
 /// Create one private directory without changing any existing ancestor ACL.
-#[tracing::instrument(name = "private_fs.create_directory", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.create_directory")]
 pub fn create_private_directory(path: &Path) -> io::Result<()> {
     with_private_security_attributes(path, PathKind::Directory, |attributes| {
         let absolute = absolute_security_path(path)?;
@@ -178,7 +180,7 @@ pub fn validate_private_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Open an exact protected, inheritable current-user directory.
-#[tracing::instrument(name = "private_fs.open_directory", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.open_directory")]
 pub fn open_private_directory(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -202,7 +204,7 @@ pub fn validate_private_file(path: &Path) -> io::Result<()> {
 }
 
 /// Open an existing regular file only after validating its exact ACL.
-#[tracing::instrument(name = "private_fs.open_file", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.open_file")]
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_and_validate(
         path,
@@ -214,15 +216,30 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 }
 
 /// Protect an existing regular file through its exact opened handle.
-#[tracing::instrument(name = "private_fs.make_private_file", level = "trace", skip_all)]
+///
+/// The open asks for data-write access so callers can still sync through
+/// the returned handle. A file carrying the read-only attribute gates
+/// `FILE_GENERIC_WRITE` but never the DACL rewrite this performs, so the
+/// denied open retries without it and that handle cannot write or sync.
+#[hotpath::measure(label = "private_fs.make_private_file")]
 pub fn make_private_file(path: &Path) -> io::Result<File> {
-    let file = open_handle_with_share(
+    let file = match open_handle_with_share(
         path,
         OPEN_EXISTING,
         SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER,
         null(),
         SHARE_READ_WRITE_DELETE,
-    )?;
+    ) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(5) => open_handle_with_share(
+            path,
+            OPEN_EXISTING,
+            SECURITY_ACCESS | FILE_GENERIC_READ | WRITE_DAC | WRITE_OWNER,
+            null(),
+            SHARE_READ_WRITE_DELETE,
+        )?,
+        Err(error) => return Err(error),
+    };
     validate_file_kind(&file, path, PathKind::File)?;
     protect_existing(&file, path, PathKind::File)?;
     validate_private_handle(&file, path, PathKind::File)?;
@@ -236,7 +253,7 @@ pub fn make_private_file(path: &Path) -> io::Result<File> {
 /// the caller created through an ordinary path. The
 /// `WRITE_DAC | WRITE_OWNER` open is the authorization proof, a caller that
 /// cannot take ownership of the object is refused by the open itself.
-#[tracing::instrument(name = "private_fs.make_private_directory", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.make_private_directory")]
 pub fn make_private_directory(path: &Path) -> io::Result<()> {
     let file = open_handle_with_share(
         path,
@@ -270,7 +287,7 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
 
 /// Create a new empty regular file while retaining its exact handle if
 /// post-creation ACL validation fails.
-#[tracing::instrument(name = "private_fs.create_file", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.create_file")]
 pub fn create_private_file_retained(
     path: &Path,
 ) -> Result<File, crate::PrivateFileCreationFailure> {
@@ -444,7 +461,7 @@ fn posix_rename_payload(destination: &Path) -> io::Result<(Vec<usize>, u32)> {
 }
 
 /// Returns bytes available to the current user at `path` (quota-aware).
-#[tracing::instrument(name = "private_fs.available_space", level = "trace", skip_all)]
+#[hotpath::measure(label = "private_fs.available_space")]
 pub fn available_space(path: &Path) -> io::Result<u64> {
     let encoded = encode_path(path)?;
     let mut available = 0_u64;

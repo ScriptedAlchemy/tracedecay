@@ -7736,29 +7736,60 @@ fn source_sweep_rereads_only_files_whose_settled_stat_moved() {
             }
         )
     );
-    assert_eq!(
-        fence.source_sweep_for_test(fixture.path(), &shutting_down),
-        (
-            true,
-            SourceSweepStatsV1 {
-                walked: false,
-                candidates: 2,
-                hashed: 0
-            }
-        )
-    );
+    // Where a native rewrite witness exists the settled stat vouches for the
+    // digest and nothing re-reads; without one every sweep re-derives every
+    // digest (see `StatKeyV1::settled`), which still detects the rewrite below.
+    if cfg!(unix) {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                true,
+                SourceSweepStatsV1 {
+                    walked: false,
+                    candidates: 2,
+                    hashed: 0
+                }
+            )
+        );
+    } else {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                true,
+                SourceSweepStatsV1 {
+                    walked: true,
+                    candidates: 2,
+                    hashed: 2
+                }
+            )
+        );
+    }
     rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert_eq!(
-        fence.source_sweep_for_test(fixture.path(), &shutting_down),
-        (
-            false,
-            SourceSweepStatsV1 {
-                walked: false,
-                candidates: 2,
-                hashed: 1
-            }
-        )
-    );
+    if cfg!(unix) {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                false,
+                SourceSweepStatsV1 {
+                    walked: false,
+                    candidates: 2,
+                    hashed: 1
+                }
+            )
+        );
+    } else {
+        assert_eq!(
+            fence.source_sweep_for_test(fixture.path(), &shutting_down),
+            (
+                false,
+                SourceSweepStatsV1 {
+                    walked: true,
+                    candidates: 2,
+                    hashed: 2
+                }
+            )
+        );
+    }
 }
 
 /// A pass can start and settle entirely between two reads of the running

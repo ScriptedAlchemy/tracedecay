@@ -942,9 +942,10 @@ impl LayeredReads<'_> {
         } else {
             (self.layer.proven_base()?, &self.layer.base_namespace)
         };
-        let guard = database.read_database(cancellation)?;
-        let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        load_relation(native, namespace, identity)?
+        database
+            .read_intact(cancellation, |native| {
+                load_relation(native, namespace, identity)
+            })?
             .map(|stored| generation_relation(self.projection, stored.relation))
             .transpose()
     }

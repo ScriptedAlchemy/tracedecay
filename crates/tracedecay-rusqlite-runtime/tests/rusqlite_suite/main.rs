@@ -16,6 +16,7 @@ mod registered_workflow_store;
 mod runtime_test_support;
 mod work_registered_store;
 
+mod diagnostics_publication;
 mod handoff_open_storage;
 mod multi_root_scope_set;
 mod repository_attachment;

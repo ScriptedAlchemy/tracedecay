@@ -6,7 +6,10 @@
 //! and project session store. Stores are then given a shape a released binary
 //! left behind: observation rows written before the unified identity, an LCM
 //! schema version, a git correlation schema version, or a workflow schema
-//! identity other than the one this binary writes. Over that profile the
+//! identity other than the one this binary writes. A released binary marked
+//! the profile authority (`global.db`) with the same versions, so the
+//! version cases age it too; it holds no session rows and keeps serving its
+//! registry. Over that profile the
 //! project must still open, the MCP host must initialize and list tools, code
 //! search and callers must answer, session reads against a refused store must
 //! return the typed `reset_required` refusal naming
@@ -24,6 +27,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::stale_profile_authority_reset::registered_project_ids;
 use crate::common::{
     TestChildProcess, canonical_existing_path, spawn_tracedecay_daemon_with,
     tracedecay_command_with_home,
@@ -323,6 +327,9 @@ struct SessionStoreRefusal {
     age: fn(&Path),
     /// Also ages the profile session store, not only the project's.
     ages_profile_store: bool,
+    /// Also ages the profile authority (`global.db`), which a released binary
+    /// marked with the same session-feature schema versions.
+    ages_profile_authority: bool,
     authority: &'static str,
     found_version: Value,
     required_version: Value,
@@ -371,6 +378,9 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
     (refusal.age)(&profile_root.join(&project_store).join("sessions.db"));
     if refusal.ages_profile_store {
         (refusal.age)(&profile_root.join("user-sessions.db"));
+    }
+    if refusal.ages_profile_authority {
+        (refusal.age)(&profile_root.join("global.db"));
     }
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
@@ -433,6 +443,11 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
         })
         .collect();
     wait_for_reset_required_stores(&home_path, &project_path, &expected_census);
+    assert_eq!(
+        registered_project_ids(&home_path, &project_path),
+        vec![project_id.clone()],
+        "the profile authority keeps serving its registry over refused session stores"
+    );
     let project_open = find_key(&status(&home_path, &project_path), "project_open");
     assert!(
         project_open
@@ -625,6 +640,7 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
     refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
         age: seed_pre_unified_observation_rows,
         ages_profile_store: true,
+        ages_profile_authority: false,
         authority: "observations",
         found_version: Value::Null,
         required_version: Value::Null,
@@ -644,6 +660,7 @@ fn session_stores_at_shipped_lcm_schema_13_refuse_sessions_only_until_their_scop
             );
         },
         ages_profile_store: true,
+        ages_profile_authority: true,
         authority: "LCM",
         found_version: json!(13),
         required_version: json!(14),
@@ -663,6 +680,7 @@ fn project_session_store_at_another_git_correlation_version_refuses_sessions_onl
             );
         },
         ages_profile_store: false,
+        ages_profile_authority: true,
         authority: "git correlation",
         found_version: json!(5),
         required_version: json!(6),
@@ -685,6 +703,7 @@ fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_
             );
         },
         ages_profile_store: false,
+        ages_profile_authority: true,
         authority: "workflow",
         found_version: Value::Null,
         required_version: Value::Null,

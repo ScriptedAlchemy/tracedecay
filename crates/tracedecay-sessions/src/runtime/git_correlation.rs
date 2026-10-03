@@ -414,16 +414,30 @@ fn commit_hits<'a>(
 fn span_identities<'a>(
     spans: impl IntoIterator<Item = &'a SessionGitSpan>,
 ) -> BTreeMap<String, String> {
-    spans.into_iter().fold(BTreeMap::new(), |mut ids, span| {
-        ids.entry(span.session_id.clone())
-            .and_modify(|provider| {
-                if provider.is_empty() {
-                    provider.clone_from(&span.provider);
-                }
-            })
-            .or_insert_with(|| span.provider.clone());
-        ids
-    })
+    session_provider_identities(
+        spans
+            .into_iter()
+            .map(|span| (span.session_id.as_str(), span.provider.as_str())),
+    )
+}
+
+/// The `span_identities` fold over dedicated `(session_id, provider)` pairs,
+/// for callers that never materialized a full span record.
+fn session_provider_identities<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<String, String> {
+    pairs
+        .into_iter()
+        .fold(BTreeMap::new(), |mut ids, (session_id, provider)| {
+            ids.entry(session_id.to_owned())
+                .and_modify(|existing| {
+                    if existing.is_empty() {
+                        provider.clone_into(existing);
+                    }
+                })
+                .or_insert_with(|| provider.to_owned());
+            ids
+        })
 }
 
 /// Session identities named by already prefix-matching commit records. When

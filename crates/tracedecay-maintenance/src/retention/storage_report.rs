@@ -1925,7 +1925,7 @@ mod tests {
         let profile_root = tmp.path().join("profile");
         let checkout = tmp.path().join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
-        let checkout = checkout.canonicalize().unwrap();
+        let checkout = tracedecay_runtime_core::path_safety::canonical_root_identity(&checkout);
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
             &profile_root,
         )
