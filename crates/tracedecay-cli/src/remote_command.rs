@@ -267,10 +267,8 @@ fn emit_query_response(
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
-        // The response is already on stdout, so the refusal is the marker
-        // that keeps `--json` from printing a second document.
         Err(problem) => Err(TraceDecayError::tool_refused(
-            format!("Remote Brain request {}", response.request_id),
+            format!("remote request {}", response.request_id),
             Some(problem.problem.code.clone()),
             Some(problem.problem.message.clone()),
         )),
@@ -610,21 +608,21 @@ mod tests {
     }
 
     #[test]
-    fn emit_protocol_response_marks_a_typed_problem_as_already_rendered() {
+    fn emit_protocol_response_returns_a_tool_refusal_for_typed_problem() {
         let response = protocol_problem_response();
-        let problem = &response.result.as_ref().unwrap_err().problem;
         let error = emit_protocol_response(&response, true)
             .expect_err("typed Remote Brain problem must be non-zero");
+        let expected = response.result.as_ref().unwrap_err();
         match error {
             TraceDecayError::ToolRefused(refusal) => {
-                assert!(refusal.tool.contains("request.cli.remote.7"));
-                assert_eq!(refusal.code.as_deref(), Some(problem.code.as_str()));
-                assert_eq!(refusal.reason.as_deref(), Some(problem.message.as_str()));
+                assert_eq!(refusal.tool, "remote request request.cli.remote.7");
+                assert_eq!(refusal.code.as_deref(), Some(expected.problem.code.as_str()));
+                assert_eq!(
+                    refusal.reason.as_deref(),
+                    Some(expected.problem.message.as_str())
+                );
             }
-            other => panic!(
-                "the response is already printed, so any error but ToolRefused makes the \
-                 process boundary print a second --json document: {other:?}"
-            ),
+            other => panic!("expected tool refusal, got {other:?}"),
         }
     }
 
