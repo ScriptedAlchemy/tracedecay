@@ -266,8 +266,7 @@ impl McpDispatchCatalogV1 {
     }
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
-        let contract = self.contracts.get(tool_name);
-        contract
+        self.contracts.get(tool_name)
     }
 
     pub fn contracts(&self) -> impl ExactSizeIterator<Item = &McpDispatchContractV1> {

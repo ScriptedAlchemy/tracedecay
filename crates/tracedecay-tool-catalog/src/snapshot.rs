@@ -391,14 +391,13 @@ impl CatalogSnapshotV1 {
         protocol_revision: u32,
         negotiated_features: &BTreeSet<FeatureId>,
     ) -> Option<&CapabilityManifestV1> {
-        let resolved = self.resolve_binding_capability(
+        self.resolve_binding_capability(
             profile_id,
             surface,
             operation,
             protocol_revision,
             negotiated_features,
-        );
-        resolved
+        )
     }
 
     fn resolve_binding_capability(
