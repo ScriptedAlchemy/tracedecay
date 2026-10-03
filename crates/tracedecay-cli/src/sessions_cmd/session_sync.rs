@@ -1,6 +1,8 @@
 use std::path::Path;
 use tracedecay_contracts::retrieval::{AdminCliSessionSyncV1, AdminCliSurfaceRequestV1};
-use tracedecay_contracts::session_sync::{SessionSyncCoverageV1, SessionSyncSourceCoverageV1};
+use tracedecay_contracts::session_sync::{
+    SessionSyncCoverageV1, SessionSyncSourceCoverageV1, SessionSyncSourceV1,
+};
 use tracedecay_contracts::{IdempotencyKey, OperationTermination, RequestId};
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -106,8 +108,7 @@ pub(super) enum SessionSyncPollState {
     },
 }
 
-/// CLI surface observing a session sync operation. The receipt does not name
-/// the command that started it, so the surface owns the deferral policy.
+/// CLI surface observing a session sync operation.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SessionSyncSurface {
     Import,
@@ -122,12 +123,6 @@ impl SessionSyncSurface {
             Self::GitSync => "session git sync",
             Self::Status => "session sync",
         }
-    }
-
-    /// Git sync is a bounded foreground pass, so unfinished coverage there is
-    /// a failure rather than background catch-up.
-    fn accepts_deferred_catch_up(self) -> bool {
-        !matches!(self, Self::GitSync)
     }
 }
 
@@ -159,6 +154,7 @@ pub(super) fn session_sync_poll_state(
         AdminCliSessionSyncV1::Complete {
             operation_id,
             idempotency_key,
+            source,
             termination,
             coverage,
             failure_codes,
@@ -171,7 +167,7 @@ pub(super) fn session_sync_poll_state(
                     ),
                 }
             })?;
-            if surface.accepts_deferred_catch_up()
+            if source == SessionSyncSourceV1::ImportTranscripts
                 && deferred_catch_up(termination, &coverage, &failure_codes, remaining_work)
             {
                 return Ok(SessionSyncPollState::Deferred {
@@ -379,8 +375,8 @@ mod tests {
     use tracedecay_contracts::session_sync::{
         SessionGitSyncV1, SessionSyncCommandV1, SessionSyncCompletionReceiptV1,
         SessionSyncCoverageV1, SessionSyncJournalStatusV1, SessionSyncJournalV1,
-        SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncSourceCoverageV1, SessionSyncStatsV1,
-        SessionTranscriptImportV1,
+        SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncSourceCoverageV1, SessionSyncSourceV1,
+        SessionSyncStatsV1, SessionTranscriptImportV1,
     };
     use tracedecay_contracts::{
         CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
@@ -400,6 +396,7 @@ mod tests {
         AdminCliSessionSyncV1::Complete {
             operation_id: RequestId::new("operation.fixture").unwrap(),
             idempotency_key: IdempotencyKey::new("session-sync.fixture").unwrap(),
+            source: SessionSyncSourceV1::ImportTranscripts,
             coalesced_primary: None,
             termination,
             stats: SessionSyncStatsV1::default(),
@@ -640,17 +637,19 @@ mod tests {
 
     #[test]
     fn session_git_sync_still_rejects_unfinished_coverage() {
+        let git_sync =
+            SessionSyncCommandV1::SynchronizeGit(SessionGitSyncV1::new(0, 1, false).unwrap());
         let error = session_sync_poll_state(
             SessionSyncSurface::GitSync,
-            complete(
-                OperationTermination::Partial,
-                vec![SessionSyncCoverageV1::Partial { deferred_units: 1 }],
-                &[],
-            ),
+            journaled_partial_receipt(git_sync),
         )
         .expect_err("git sync still requires the bounded pass to finish");
 
-        assert!(error.to_string().contains("remaining work"));
+        assert_eq!(
+            error.to_string(),
+            "config error: session git sync did not complete successfully \
+             (partial; remaining work 1)"
+        );
     }
 
     #[test]
