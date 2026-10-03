@@ -1419,90 +1419,102 @@ impl CodeIndexSchedulerRegistryV1 {
                 let bind_serving_generation = Arc::clone(&worker_serving_generation);
                 let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
                 let bind_source_freshness = worker_source_freshness.clone();
-                let source_result = tokio::task::spawn_blocking(move || {
-                    let mut scheduler =
-                        Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
-                    // One arrival per attempted pass, before the branch: the
-                    // three reconcile entry points below are alternatives, so
-                    // hooking them individually would under- or double-count.
-                    #[cfg(test)]
-                    scheduler.arrive_reconcile_fault_for_test()?;
-                    // A prior pass may have built the successor and lost
-                    // only the durable write. Republish before choosing a
-                    // reconcile branch: graph-off with no text owner goes
-                    // to reconcile_now and would otherwise extract again.
-                    if let Some(outcome) = scheduler.republish_unpublished_retained_generation()? {
-                        return Ok(outcome);
-                    }
-                    // Legacy graph recovery requires a decoded complete
-                    // generation in the serving slot before a dirty-tree
-                    // rebuild. Revision 7 deliberately leaves that slot
-                    // empty: the retained manifest owner validates and
-                    // seats Grafeo below without opening partition bytes.
-                    // Graph-off and deferred passes also fall through to
-                    // retained text reconciliation.
-                    if graph_activation_enabled
-                        && !graph_activation_deferred
-                        && serving_empty
-                        && text_serving_ready
-                        && !retained_text_uses_partitioned_manifest
-                        && let Some(outcome) =
-                            scheduler.seat_retained_generation_on_empty_serving()?
-                    {
-                        return Ok(outcome);
-                    }
-                    if retained_partitioned_graph_recovery_pending
-                        && let Some(metadata) = retained_text_metadata.as_ref()
-                    {
-                        // Reserve this pass for verified-head recovery.
-                        // `Noop` here means no successor was published;
-                        // it never claims source currency. The successor
-                        // pass below captures the source state itself so
-                        // a quiet remount is not fabricated as dirty.
-                        return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
-                            snapshot_content_identity: metadata.snapshot().content_identity.clone(),
-                            overflow_reconciled: false,
-                        }));
-                    }
-                    let outcome = if let Some(metadata) = retained_text_metadata {
-                        match scheduler.reconcile_retained_text_generation_with(
-                            &metadata,
-                            !graph_activation_enabled,
-                        ) {
-                            Ok(Some(outcome)) => Ok(outcome),
-                            Ok(None) if graph_activation_enabled => {
-                                scheduler.activate_or_reconcile()
-                            }
-                            Ok(None) => scheduler.reconcile_now(),
-                            Err(error) => Err(error),
+                let source_result = tracing::Instrument::instrument(
+                    tokio::task::spawn_blocking(move || {
+                        let mut scheduler =
+                            Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
+                        // One arrival per attempted pass, before the branch: the
+                        // three reconcile entry points below are alternatives, so
+                        // hooking them individually would under- or double-count.
+                        #[cfg(test)]
+                        scheduler.arrive_reconcile_fault_for_test()?;
+                        // A prior pass may have built the successor and lost
+                        // only the durable write. Republish before choosing a
+                        // reconcile branch: graph-off with no text owner goes
+                        // to reconcile_now and would otherwise extract again.
+                        if let Some(outcome) =
+                            scheduler.republish_unpublished_retained_generation()?
+                        {
+                            return Ok(outcome);
                         }
-                    } else if graph_activation_enabled {
-                        scheduler.activate_or_reconcile()
-                    } else {
-                        scheduler.reconcile_now()
-                    }?;
-                    // A seat whose publishing pass could not prove its
-                    // source (`code_index_post_projection_source_unverified`)
-                    // installs without a currency witness. The swap arm
-                    // re-proves such a seat as `Offered`, but a retained
-                    // native graph that already serves skips the graph
-                    // prepare and with it the swap, so no later pass ever
-                    // reached that arm. This unchanged pass verified
-                    // exactly the snapshot the seat was sealed from, so
-                    // bind that proof here, while this pass still holds
-                    // the scheduler: a reader that holds the scheduler to
-                    // keep a seat unproven must not see the proof land
-                    // after the pass has already let go.
-                    if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
-                        Self::bind_unproven_seat_to_verified_source(
-                            &bind_serving_generation,
-                            &bind_serving_source_witness,
-                            &bind_source_freshness,
-                            &evidence.snapshot_content_identity,
-                        );
-                    }
-                    Ok(outcome)
-                })
+                        // Legacy graph recovery requires a decoded complete
+                        // generation in the serving slot before a dirty-tree
+                        // rebuild. Revision 7 deliberately leaves that slot
+                        // empty: the retained manifest owner validates and
+                        // seats Grafeo below without opening partition bytes.
+                        // Graph-off and deferred passes also fall through to
+                        // retained text reconciliation.
+                        if graph_activation_enabled
+                            && !graph_activation_deferred
+                            && serving_empty
+                            && text_serving_ready
+                            && !retained_text_uses_partitioned_manifest
+                            && let Some(outcome) =
+                                scheduler.seat_retained_generation_on_empty_serving()?
+                        {
+                            return Ok(outcome);
+                        }
+                        if retained_partitioned_graph_recovery_pending
+                            && let Some(metadata) = retained_text_metadata.as_ref()
+                        {
+                            // Reserve this pass for verified-head recovery.
+                            // `Noop` here means no successor was published;
+                            // it never claims source currency. The successor
+                            // pass below captures the source state itself so
+                            // a quiet remount is not fabricated as dirty.
+                            return Ok(CodeIndexReconcileOutcomeV1::Noop(
+                                CodeIndexNoopEvidenceV1 {
+                                    snapshot_content_identity: metadata
+                                        .snapshot()
+                                        .content_identity
+                                        .clone(),
+                                    overflow_reconciled: false,
+                                },
+                            ));
+                        }
+                        let outcome = if let Some(metadata) = retained_text_metadata {
+                            match scheduler.reconcile_retained_text_generation_with(
+                                &metadata,
+                                !graph_activation_enabled,
+                            ) {
+                                Ok(Some(outcome)) => Ok(outcome),
+                                Ok(None) if graph_activation_enabled => {
+                                    scheduler.activate_or_reconcile()
+                                }
+                                Ok(None) => scheduler.reconcile_now(),
+                                Err(error) => Err(error),
+                            }
+                        } else if graph_activation_enabled {
+                            scheduler.activate_or_reconcile()
+                        } else {
+                            scheduler.reconcile_now()
+                        }?;
+                        // A seat whose publishing pass could not prove its
+                        // source (`code_index_post_projection_source_unverified`)
+                        // installs without a currency witness. The swap arm
+                        // re-proves such a seat as `Offered`, but a retained
+                        // native graph that already serves skips the graph
+                        // prepare and with it the swap, so no later pass ever
+                        // reached that arm. This unchanged pass verified
+                        // exactly the snapshot the seat was sealed from, so
+                        // bind that proof here, while this pass still holds
+                        // the scheduler: a reader that holds the scheduler to
+                        // keep a seat unproven must not see the proof land
+                        // after the pass has already let go.
+                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
+                            Self::bind_unproven_seat_to_verified_source(
+                                &bind_serving_generation,
+                                &bind_serving_source_witness,
+                                &bind_source_freshness,
+                                &evidence.snapshot_content_identity,
+                            );
+                        }
+                        Ok(outcome)
+                    }),
+                    // Sealing runs inside this blocking reconcile pipeline; the
+                    // outer span keeps the end-to-end seal path in one trace row.
+                    tracing::trace_span!("daemon.code_index.reconcile_or_seal"),
+                )
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(

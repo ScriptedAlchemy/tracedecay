@@ -844,7 +844,7 @@ impl PersistedFinalizationPhaseV1 {
 }
 
 struct FinalizationWakeMetricsV1 {
-    rows: u64,
+    rows: usize,
 }
 
 struct FinalizationTransactionMetricsV1 {
@@ -958,28 +958,15 @@ impl FinalizationWakeMetricsV1 {
     }
 
     #[inline(always)]
-    fn add_rows(&mut self, rows: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
-        {
-            self.rows = self
-                .rows
-                .checked_add(u64::try_from(rows).map_err(contract_number)?)
-                .ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact finalization wake row metric overflowed".to_owned(),
-                    )
-                })?;
-        }
-
-        Ok(())
+    fn add_rows(&mut self, rows: usize) {
+        self.rows = self.rows.saturating_add(rows);
     }
 }
 
 impl Drop for FinalizationWakeMetricsV1 {
     fn drop(&mut self) {
-        {
-            metrics::gauge!("query.artifact.finalization.wakes_total").increment(1.0);
-            metrics::gauge!("query.artifact.finalization.rows_total").increment((self.rows) as f64);
-        }
+        metrics::gauge!("query.artifact.finalization.wakes_total").increment(1.0);
+        metrics::gauge!("query.artifact.finalization.rows_total").increment(self.rows as f64);
     }
 }
 
@@ -1638,20 +1625,13 @@ impl CodeLexicalArtifactBuilderV1 {
         // cursor once the whole batch has committed.
         let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
 
-        {
-            metrics::gauge!("query.artifact.batch.committed_pages_total")
-                .increment((u64::try_from(pages.len()).map_err(contract_number)?) as f64);
-            metrics::gauge!("query.artifact.batch.committed_chunks_total").increment(
-                (pages
-                    .iter()
-                    .try_fold(0u64, |total, page| total.checked_add(page.chunk_count))
-                    .ok_or_else(|| {
-                        CodeLexicalArtifactErrorV1::Contract(
-                            "lexical artifact committed chunk count overflowed".to_owned(),
-                        )
-                    })?) as f64,
-            );
-        }
+        metrics::gauge!("query.artifact.batch.committed_pages_total").increment(pages.len() as f64);
+        metrics::gauge!("query.artifact.batch.committed_chunks_total").increment(
+            pages
+                .iter()
+                .fold(0u64, |total, page| total.saturating_add(page.chunk_count))
+                as f64,
+        );
         record_artifact_progress(&progress);
         Ok(progress)
     }
@@ -1794,7 +1774,7 @@ impl CodeLexicalArtifactBuilderV1 {
             wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
-            wake_metrics.add_rows(rows)?;
+            wake_metrics.add_rows(rows);
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(

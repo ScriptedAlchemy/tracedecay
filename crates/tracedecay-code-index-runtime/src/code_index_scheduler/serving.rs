@@ -93,9 +93,7 @@ use crate::{
     },
 };
 
-use super::{
-    CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
-};
+use super::{CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, queries};
 
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
@@ -137,7 +135,7 @@ pub(super) type GenerationServingCachesV1 = (
     Arc<CodeTextProjectionStateV1>,
     Arc<AtomicBool>,
     GenerationTextControlV1,
-    Arc<ProfiledStdMutex<CodeIndexBuildProgressStateV1>>,
+    Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
     u64,
     Arc<RwLock<CodeGraphActivationStateV1>>,
 );
@@ -451,7 +449,7 @@ pub struct LatestCodeTextGenerationV1 {
     pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
     pub(super) text_projection_failed: Arc<AtomicBool>,
     pub(super) text_control: GenerationTextControlV1,
-    pub(super) text_progress_state: Arc<ProfiledStdMutex<CodeIndexBuildProgressStateV1>>,
+    pub(super) text_progress_state: Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
     pub(super) text_progress_slot: CodeIndexBuildProgressSlotV1,
     /// Bounded authentication work for a cold immutable-artifact open. It is
     /// intentionally separate from durable build progress.
@@ -468,7 +466,7 @@ pub struct LatestCodeTextGenerationV1 {
     /// A cold graph-off bind authenticates the sealed source once and hands
     /// that same reader to the artifact build. The full generation is never
     /// decoded merely to discover text metadata or source layout.
-    pub(super) preopened_source: Arc<ProfiledStdMutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
+    pub(super) preopened_source: Arc<std::sync::Mutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
     pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
 }
 
@@ -752,10 +750,7 @@ pub(super) struct CodeTextArtifactBuildV1 {
 /// reopen normally runs with the slot lock released; missing or invalid
 /// rebuildable witness state falls back to corpus-wide verification under the
 /// same claim. Concurrent wakes therefore park with typed cancellation instead
-/// of blocking on the mutex for either path. This stays a plain
-/// `std::sync::Mutex` because `Condvar::wait_timeout` requires the exact
-/// std guard type; lock-wait and
-/// parked wait are measured with explicit spans instead.
+/// of blocking on the mutex for either path.
 pub(super) struct CodeTextProjectionStateV1 {
     slot: Mutex<CodeTextProjectionSlotV1>,
     ready: Condvar,
@@ -3159,10 +3154,8 @@ impl LatestCodeTextGenerationV1 {
             )
             .map_err(map_sealed_page_source_error)?;
 
-            let completed_lexical_units_before = artifact_build
-                .source
-                .completed_lexical_units()
-                .map_err(map_sealed_page_source_error)?;
+            let completed_lexical_units_before =
+                artifact_build.source.completed_lexical_units().ok();
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
             let mut durable_progress = None;
             let mut commit_latency_micros = None;
@@ -3300,18 +3293,16 @@ impl LatestCodeTextGenerationV1 {
                             u64::try_from(clone_scratch_bytes).unwrap_or(u64::MAX),
                         );
 
-                    {
-                        let committed_lexical_units = artifact_build
-                            .source
-                            .completed_lexical_units()
-                            .map_err(map_sealed_page_source_error)?
-                            .saturating_sub(completed_lexical_units_before);
+                    if let (Some(before), Ok(after)) = (
+                        completed_lexical_units_before,
+                        artifact_build.source.completed_lexical_units(),
+                    ) {
                         metrics::gauge!("query.artifact.batch.committed_lexical_units_total")
-                            .increment((committed_lexical_units) as f64);
-                        if let Some(latency_micros) = commit_latency_micros {
-                            metrics::gauge!("query.artifact.progress.latest_commit_latency_micros")
-                                .set((latency_micros) as f64);
-                        }
+                            .increment(after.saturating_sub(before) as f64);
+                    }
+                    if let Some(latency_micros) = commit_latency_micros {
+                        metrics::gauge!("query.artifact.progress.latest_commit_latency_micros")
+                            .set(latency_micros as f64);
                     }
                     remaining = remaining.checked_sub(page_count).ok_or_else(|| {
                         RetrievalPortError::Contract(

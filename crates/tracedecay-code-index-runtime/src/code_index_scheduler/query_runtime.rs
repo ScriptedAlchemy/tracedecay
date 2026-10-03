@@ -672,9 +672,8 @@ where
     // lifetime: admission (sanitize + production owner resolution), one span per
     // retrieval lane, and composition/encode below. The lanes run sequentially,
     // so their spans are disjoint slices of the outer wall time.
-    let (sanitized, owners) = {
-        let _span = tracing::trace_span!("daemon.code_index.query.admission").entered();
-        {
+    let (sanitized, owners) = tracing::Instrument::instrument(
+        async {
             let sanitized = RawRetrievalRequestV1::new(input.query, request)
                 .sanitize(input.sanitizer_revision, input.normalization_revision)?;
             let readiness = text.query_owner_readiness();
@@ -695,9 +694,11 @@ where
             let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
                 return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
             };
-            (sanitized, owners)
-        }
-    };
+            Ok::<_, QuerySearchExecutionErrorV1>((sanitized, owners))
+        },
+        tracing::trace_span!("daemon.code_index.query.admission"),
+    )
+    .await?;
     let request = sanitized.request();
     let query_view = sanitized.query_view();
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
