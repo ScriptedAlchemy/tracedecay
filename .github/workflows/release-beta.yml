@@ -32,6 +32,7 @@ jobs:
       github.repository == 'ScriptedAlchemy/tracedecay' &&
       vars.BETA_CHANNEL_ENABLED == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
       contents: read
       attestations: read
@@ -100,6 +101,8 @@ jobs:
     if: needs.validate.outputs.build_required == 'true'
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # Windows 81 min, macOS 54 min on recent betas. 180 is ~2x the Windows max.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
@@ -325,6 +328,7 @@ jobs:
       needs.validate.result == 'success' &&
       needs.build.result != 'cancelled'
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
       contents: write
       id-token: write

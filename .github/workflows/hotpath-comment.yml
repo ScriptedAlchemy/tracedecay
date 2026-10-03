@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 # One comment per profiled pull request; a newer profile supersedes the
 # comment for the older head.
@@ -20,9 +19,13 @@ concurrency:
 jobs:
   comment:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: profile-metrics
           path: /tmp/metrics/
@@ -51,7 +54,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.comparable.outputs.available == 'true'
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.comparable.outputs.available == 'true'
 
       - name: Install hotpath-utils 0.24.0
