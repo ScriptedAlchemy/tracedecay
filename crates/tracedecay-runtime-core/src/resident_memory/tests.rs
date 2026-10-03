@@ -70,7 +70,6 @@ fn absent_cgroup_memory_files_keep_host_memory_capacity() {
 
 #[test]
 fn cgroup_v1_only_membership_does_not_invent_a_v2_ceiling() {
-    let gib = 1024 * 1024 * 1024;
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
         Some("12:memory:/trace.slice/daemon.scope\n"),
         Some("32212254720\n"),

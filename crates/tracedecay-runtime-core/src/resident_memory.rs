@@ -544,9 +544,8 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 
 /// The measured side of the memory accounting loop.
 ///
-/// One dedicated reader samples the process (`/proc/self/status` on Linux),
-/// publishes the `daemon.process.resident_bytes` gauge, and feeds this cell
-/// the unreclaimable bytes. Admission re-measures through the same sampler;
+/// One dedicated reader samples the process (`/proc/self/status` on Linux)
+/// and feeds this cell the unreclaimable bytes. Admission re-measures through the same sampler;
 /// there is no second parser or publisher.
 ///
 /// Every request refused for memory, by any authority on this cell, waits on
@@ -983,12 +982,12 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
         None => glibc_trim(),
     };
     let after_bytes = sampled_process_resident_bytes_v1();
-    let trim = ProcessAllocatorTrimV1 {
+
+    ProcessAllocatorTrimV1 {
         trimmed,
         before_bytes,
         after_bytes,
-    };
-    trim
+    }
 }
 
 fn glibc_trim() -> bool {

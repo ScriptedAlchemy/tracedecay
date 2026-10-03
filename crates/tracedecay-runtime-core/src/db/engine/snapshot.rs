@@ -35,10 +35,6 @@ impl ReadSnapshot {
     }
 }
 
-impl Drop for ReadSnapshot {
-    fn drop(&mut self) {}
-}
-
 fn join_error(error: tokio::task::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL read snapshot task failed: {error}"))
 }

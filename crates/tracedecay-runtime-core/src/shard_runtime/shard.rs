@@ -655,8 +655,8 @@ impl ShardRuntimeState {
         let before = self.runtime_leases.len();
         self.runtime_leases
             .retain(|_, lease| !lease.is_expired_at(now));
-        let released = before - self.runtime_leases.len();
-        released
+
+        before - self.runtime_leases.len()
     }
 
     fn health_snapshot(
