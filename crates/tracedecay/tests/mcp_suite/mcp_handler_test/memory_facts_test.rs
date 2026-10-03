@@ -726,22 +726,44 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "default exact fact-tool scope should remain the active project",
     );
 
-    let cross_project_write = invoke_exact_tool(
+    invoke_exact_tool(
         &fixture.active_server,
         "tracedecay_fact_store_add",
         json!({
             "project_selector": {"project_id": target_project_id.clone()},
-            "content": "Cross-project writes should be rejected",
-            "category": "project"
+            "content": "Cross-project write lands in the selected project",
+            "category": "decision"
         }),
     )
-    .await;
-    assert!(
-        cross_project_write.is_err(),
-        "the exact add route must reject cross-project writes"
+    .await
+    .expect("a selected-project add must land in the selected project's store");
+    let target_decisions = invoke_exact_tool(
+        &fixture.target_server,
+        "tracedecay_fact_store_list",
+        json!({"category": "decision", "min_trust": 0.0}),
+    )
+    .await
+    .unwrap();
+    assert_fact_list(
+        &target_decisions,
+        "Cross-project write lands",
+        "Active selector fact",
+        "the selected project's own list must show the cross-project add",
+    );
+    let active_decisions = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
+        json!({"category": "decision", "min_trust": 0.0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        active_decisions["facts"],
+        json!([]),
+        "the cross-project add must not land in the active project: {active_decisions}"
     );
 
-    let cross_project_feedback = invoke_exact_tool(
+    invoke_exact_tool(
         &fixture.active_server,
         "tracedecay_fact_feedback",
         json!({
@@ -750,11 +772,8 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
             "project_selector": {"project_id": target_project_id.clone()}
         }),
     )
-    .await;
-    assert!(
-        cross_project_feedback.is_err(),
-        "fact feedback must reject cross-project selectors"
-    );
+    .await
+    .expect("feedback on a selected-project fact must reach the selected project's store");
 
     let typo_selector = invoke_exact_tool(
         &fixture.active_server,

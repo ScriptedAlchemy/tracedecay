@@ -478,17 +478,6 @@ pub fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool {
     )
 }
 
-/// Selector-bound effects accept a project selector but must not open the
-/// selected project's store. The calling session stays admitted; the retained
-/// owner denies a foreign selector as `NotFoundOrNotAuthorized`.
-#[cfg(test)]
-pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
-    matches!(
-        registered_project_access(tool_name),
-        Some(RegisteredProjectAccess::SelectorOnly)
-    ) && direct_effect(tool_name).is_effect()
-}
-
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"
@@ -1121,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_fact_reads_dispatch_to_their_registered_project() {
+    fn exact_fact_tools_dispatch_to_their_registered_project() {
         for tool_name in [
             "tracedecay_fact_store_search",
             "tracedecay_fact_store_probe",
@@ -1132,16 +1121,6 @@ mod tests {
             "tracedecay_fact_store_list",
             "tracedecay_memory_status",
             "tracedecay_message_search",
-        ] {
-            assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(tool_dispatches_registered_project_reader(tool_name));
-            assert!(!tool_is_selector_bound_effect(tool_name));
-        }
-    }
-
-    #[test]
-    fn exact_fact_effects_keep_the_active_project_authority() {
-        for tool_name in [
             "tracedecay_fact_store_add",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
@@ -1149,10 +1128,9 @@ mod tests {
             "tracedecay_fact_feedback",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(!tool_dispatches_registered_project_reader(tool_name));
             assert!(
-                tool_is_selector_bound_effect(tool_name),
-                "{tool_name} must stay selector-bound so writes are not dispatched into the selected store"
+                tool_dispatches_registered_project_reader(tool_name),
+                "{tool_name} must open the selected project's store"
             );
         }
     }
