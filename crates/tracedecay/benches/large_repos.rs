@@ -211,7 +211,7 @@ fn run_query(
 // still-settling cancellation resolves them inside a bounded window, and the
 // problem carries the AfterRevalidate directive. Prime/cleanup steps retry
 // that window; the timed call still fails loudly.
-const TRANSIENT_STEP_CODES: &[&str] = &[
+pub(crate) const TRANSIENT_STEP_CODES: &[&str] = &[
     "fence-conflict",
     "capacity-exhausted",
     "not-cancellable",
@@ -432,7 +432,9 @@ fn bench_all(c: &mut Criterion) {
     // A dirty worktree re-verify or a cold rebuild can outlast the open's
     // internal publish gate; the durable profile state makes each retry pick
     // up where the last attempt left off, so retry bounded instead of dying.
-    let open_deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    // A cold profile seats the whole code index inside open; on a large repo
+    // that takes many publish-gate retries before the composition admits.
+    let open_deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let harness = loop {
         match rt.block_on(ProductionProjectCompositionHarnessV1::open(
             &root,

@@ -418,7 +418,7 @@ pub(crate) async fn seed_all(
         .take(64)
         .map(str::to_owned)
         .collect();
-    let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
+    let call = |tool: &'static str, args: Value| call_transient(harness, project_root, tool, args);
 
     // ── identity ─────────────────────────────────────────────────────────
     if let Some(v) = opt_err(
@@ -800,7 +800,7 @@ async fn seed_configuration(
             .push("configuration_*: no project_id (active_project failed)".to_owned());
         return;
     };
-    let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
+    let call = |tool: &'static str, args: Value| call_transient(harness, project_root, tool, args);
 
     // Attempt receipts persist across runs and bind their authority; keys
     // must be run-unique.
@@ -905,7 +905,7 @@ async fn seed_facts(
     seeds: &mut Seeds,
 ) {
     let (alpha, beta, gamma) = seeded_fact_terms(0);
-    let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
+    let call = |tool: &'static str, args: Value| call_transient(harness, project_root, tool, args);
     let first = call(
         "tracedecay_fact_store_add",
         fact_add_args(
@@ -1569,6 +1569,34 @@ async fn call_lenient(
         .map_err(|error| format!("{tool_name} returned non-JSON output: {error}"))
 }
 
+/// `call_json_tool` with a bounded wall-clock retry on the same transient
+/// codes the prime steps use: seed chains hit identical settlement and lease
+/// fences, and a seed that dies on the first transient leaves its whole tool
+/// family silently unmeasured. The budget is time, not attempts — a slow
+/// call (proposal generation can outlive the transport's own deadline)
+/// converges or is recorded, it cannot grind retries for hours.
+async fn call_transient(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    tool: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        match call_json_tool(harness, project_root, tool, args.clone()).await {
+            Err(error)
+                if tokio::time::Instant::now() < deadline
+                    && crate::TRANSIENT_STEP_CODES
+                        .iter()
+                        .any(|code| error.contains(code)) =>
+            {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// `<field> expected sha256:<hex>` repair hints published by
 /// `workflow_validate_definition` denials — mirrors the suite's
 /// `_WORKFLOW_PIN_MISMATCH` contract.
@@ -1641,12 +1669,13 @@ async fn seed_work_attempt_provider(
     project_id: &str,
     seeds: &mut Seeds,
 ) -> bool {
-    let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
+    let call = |tool: &'static str, args: Value| call_transient(harness, project_root, tool, args);
     // A provider that exits instantly settles every attempt before the
     // lifecycle can be exercised: cancel/pause/resume then have nothing live
-    // to operate on (`not-cancellable`). Thirty seconds stays well under the
-    // route's 60s duration ceiling while the cancel rung ends it promptly.
-    let executable_bytes: &[u8] = b"#!/bin/sh\nsleep 30\n";
+    // to operate on (`not-cancellable`). Eight seconds keeps the attempt
+    // running when cancel lands but frees the topology's single parallel
+    // slot well inside the prime's transient-retry window.
+    let executable_bytes: &[u8] = b"#!/bin/sh\nsleep 8\n";
     // Keep the provider outside the clone: `restore_repo` stashes and drops
     // untracked files between runs, which would leave the persisted
     // binding's canonical_path dangling and fail the next open's route
@@ -1873,7 +1902,7 @@ async fn settle_attempt(
 ) -> (Result<Value, String>, Value, String) {
     let call = |tool: &'static str, mut args: Value| {
         args["format"] = json!("json");
-        call_json_tool(harness, project_root, tool, args)
+        call_transient(harness, project_root, tool, args)
     };
     let status =
         |attempt: &str| json!({"task_id": task_id, "run_id": run_id, "attempt_id": attempt});
@@ -1989,7 +2018,7 @@ async fn seed_work(
     let call = |tool: &'static str, args: Value| {
         let mut args = args;
         args["format"] = json!("json");
-        call_json_tool(harness, project_root, tool, args)
+        call_transient(harness, project_root, tool, args)
     };
     let mut work = WorkSeeds {
         selection: json!({

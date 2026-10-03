@@ -174,6 +174,9 @@ fn step_start_ids(ctx: &QueryContext, run: &'static str, attempt: &'static str) 
 }
 
 fn step_pause_run_id(run: &str) -> PrimeStep {
+    // `auth_v` is captured by the admit-placement step earlier in the same
+    // prime chain; pause_run's result carries no authority_version/graph_version
+    // fields, so a capture here would only discard the working value.
     PrimeStep {
         inject: Vec::new(),
         tool: "tracedecay_work_pause_run",
@@ -183,7 +186,7 @@ fn step_pause_run_id(run: &str) -> PrimeStep {
             "reason": "operator_request",
             "occurred_at": "{{now}}",
         }),
-        capture: &[("digany:authority_version,graph_version", "auth_v")],
+        capture: &[],
     }
 }
 
@@ -335,6 +338,15 @@ fn cleanup_cancel_start(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
         ),
         resume_attempts_step(),
     ]
+}
+
+fn cleanup_cancel_cx(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
+    // The timed call already requested the cancellation; what the next
+    // iteration needs is the topology's single parallel slot back. The
+    // recovery sweep seals the parked cancellation to a terminal state —
+    // a duplicate cancel would only burn the transient window on
+    // `not-cancellable` while the row stays non-terminal.
+    vec![resume_attempts_step()]
 }
 
 fn cleanup_cancel_pz(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
@@ -839,7 +851,7 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     out.push(tg(
         "tracedecay_work_cancel_attempt",
         fiveq(&|_| {
-            eqn(
+            eqc(
                 "tracedecay_work_cancel_attempt",
                 "cancel",
                 json!({
@@ -850,6 +862,10 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "occurred_at": "{{now}}",
                 }),
                 p_start_cx,
+                crate::queries::EffectCleanup {
+                    capture: &[],
+                    steps: cleanup_cancel_cx,
+                },
             )
         }),
     ));
