@@ -293,7 +293,6 @@ impl WriterTelemetry {
     }
 
     pub(crate) fn fault_unsettled(&self) {
-        let mut released = super::WriterQueueSnapshot::default();
         self.update(|state| {
             let unsettled = state
                 .snapshot
@@ -302,7 +301,6 @@ impl WriterTelemetry {
                 .saturating_sub(state.snapshot.operations.completed_operations);
             state.snapshot.operations.completed_operations =
                 state.snapshot.operations.admitted_operations;
-            released = state.snapshot.queue;
             state.snapshot.queue = Default::default();
             state.snapshot.error_events =
                 state.snapshot.error_events.saturating_add(unsettled.max(1));
