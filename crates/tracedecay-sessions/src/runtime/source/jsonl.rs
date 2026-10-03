@@ -311,11 +311,13 @@ struct UnchangedGenerationProof {
 }
 
 impl UnchangedGenerationProof {
+    /// Proofs of the same physical file version. Each scope can resume it
+    /// under its own generation, so the generation does not tell versions
+    /// apart and must not evict another scope's proof.
     fn same_cached_file(&self, other: &Self) -> bool {
         other.key.size == self.key.size
             && other.key.change == self.key.change
-            && other.key.generation == self.key.generation
-            && other.key.stable_file_identity == self.key.stable_file_identity
+            && other.physical_identity == self.physical_identity
     }
 }
 
@@ -443,20 +445,21 @@ fn remember_unchanged_generation_if_settled(
     proofs.retain(|kept| proof.same_cached_file(kept));
     // A cursor that was the only one at `resumed_position` takes that slot
     // with it. A shared checkpoint stays for the cursor that has not moved.
+    // Another generation's proof at the same offset belongs to a scope that
+    // has not moved. On one file version the prefix digest is fixed by the
+    // position, so these fields single out the moving cursor's own proof.
     if resumed_position != proof.key.position {
-        let source_shared = proofs
-            .iter()
-            .find(|kept| kept.key.position == resumed_position)
-            .is_some_and(|kept| kept.shared);
-        if source_shared {
-            if let Some(source) = proofs
-                .iter_mut()
-                .find(|kept| kept.key.position == resumed_position)
-            {
-                source.shared = false;
+        let is_source = |kept: &UnchangedGenerationProof| {
+            kept.key.position == resumed_position
+                && kept.key.generation == proof.key.generation
+                && kept.key.stable_file_identity == proof.key.stable_file_identity
+        };
+        if let Some(index) = proofs.iter().position(is_source) {
+            if proofs[index].shared {
+                proofs[index].shared = false;
+            } else {
+                proofs.remove(index);
             }
-        } else {
-            proofs.retain(|kept| kept.key.position != resumed_position);
         }
     }
     if let Some(index) = proofs.iter().position(|kept| kept.key == proof.key) {
@@ -2405,6 +2408,115 @@ mod tests {
             resumed.io.prefix_validation_bytes,
             expected_prefix_validation(&resumed),
             "the idle cursor rehashed its prefix after the other ran ahead"
+        );
+    }
+
+    /// After an atomic replacement the project scope resumes a minted rewrite
+    /// generation while the profile scope takes the new file's identity. Both
+    /// sit at end-of-file on one settled file, so neither repoll may evict the
+    /// other's proof and re-read the file (#2889).
+    #[test]
+    fn cursors_under_different_generations_both_settle_at_end_of_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("replaced.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(64)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let profile = resume_next_batch(&path, None, 1 << 20);
+        assert_eq!(
+            profile.new_cursor.position,
+            std::fs::metadata(&path).unwrap().len()
+        );
+        let rewrite_generation = profile.new_cursor.file_id ^ 1;
+        let project_cursor = StoredCursor {
+            file_id: rewrite_generation,
+            ..profile.new_cursor
+        };
+        let project_resume = JsonlResumeState {
+            generation: rewrite_generation,
+            file_identity: profile.file_identity,
+            fingerprint: profile.frames.last().unwrap().resume_fingerprint,
+        };
+        let profile_resume = JsonlResumeState {
+            generation: profile.new_cursor.file_id,
+            ..project_resume
+        };
+        let repoll = |cursor, resume| {
+            try_stream_new_jsonl_raw_strict_with_resume(
+                &path,
+                cursor,
+                None,
+                MAX_JSONL_RECORD_BYTES,
+                Some(resume),
+            )
+            .unwrap()
+        };
+        // The first repoll of each scope proves its checkpoint; every later
+        // one must be served from that proof.
+        repoll(profile.new_cursor, profile_resume);
+        repoll(project_cursor, project_resume);
+        for round in 0..3 {
+            for (scope, cursor, resume) in [
+                ("profile", profile.new_cursor, profile_resume),
+                ("project", project_cursor, project_resume),
+            ] {
+                let next = repoll(cursor, resume);
+                assert_eq!(next.new_cursor.file_id, cursor.file_id);
+                assert!(next.frames.is_empty());
+                if cfg!(unix) {
+                    assert_eq!(
+                        (
+                            next.io.prefix_validation_bytes,
+                            next.io.identity_window_bytes
+                        ),
+                        (0, 0),
+                        "round {round}: the {scope} scope re-read the settled file"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The project scope resumes the profile's checkpoint under its own
+    /// generation and advances. That retires only the project's own proof, so
+    /// the profile still resumes the same offset from its digest.
+    #[test]
+    fn a_generation_advancing_from_a_shared_offset_keeps_the_other_generations_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("two-generations.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let profile = resume_next_batch(&path, None, 1_024);
+        let rewrite_generation = profile.new_cursor.file_id ^ 1;
+        let project = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            StoredCursor {
+                file_id: rewrite_generation,
+                ..profile.new_cursor
+            },
+            Some(1_024),
+            MAX_JSONL_RECORD_BYTES,
+            Some(JsonlResumeState {
+                generation: rewrite_generation,
+                file_identity: profile.file_identity,
+                fingerprint: profile.frames.last().unwrap().resume_fingerprint,
+            }),
+        )
+        .unwrap();
+        assert_eq!(project.start_offset, profile.new_cursor.position);
+        assert!(project.new_cursor.position > profile.new_cursor.position);
+
+        let resumed = resume_next_batch(&path, Some(&profile), 1_024);
+        assert_eq!(resumed.start_offset, profile.new_cursor.position);
+        let expected_prefix_validation = if cfg!(unix) {
+            0
+        } else {
+            resumed.start_offset + resumed.read_through
+        };
+        assert_eq!(
+            resumed.io.prefix_validation_bytes, expected_prefix_validation,
+            "the profile rehashed its prefix after the project advanced from the same offset"
         );
     }
 

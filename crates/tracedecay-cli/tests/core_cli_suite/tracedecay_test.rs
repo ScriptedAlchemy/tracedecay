@@ -170,9 +170,25 @@ fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
     assert!(
         import.status.success()
             && stdout.starts_with("session import scheduled (")
-            && stdout.ends_with("); historical catch-up has remaining work 2\n"),
+            && stdout.contains("); historical catch-up has remaining work 2 "),
         "sessions import --project-path . must import into the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&import.stderr)
+    );
+    let sync_status = stdout
+        .split_once("Check status with: ")
+        .map(|(_, command)| shell_words::split(command.trim_end()).unwrap())
+        .unwrap_or_else(|| panic!("the import hint must name its status command: {stdout}"));
+    assert_eq!(
+        sync_status[..4],
+        ["tracedecay", "sessions", "sync-status", "--idempotency-key"],
+        "{stdout}"
+    );
+    assert!(sync_status[4].starts_with("session-sync."), "{stdout}");
+    assert_eq!(sync_status[5], "--project-path", "{stdout}");
+    assert_eq!(
+        Path::new(&sync_status[6]).canonicalize().unwrap(),
+        project_path.canonicalize().unwrap(),
+        "{stdout}"
     );
 
     let status = tracedecay_command_with_home(&home_path)

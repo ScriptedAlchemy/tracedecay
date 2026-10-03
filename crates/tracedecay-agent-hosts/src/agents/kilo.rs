@@ -40,7 +40,7 @@ impl AgentIntegration for KiloIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKilo CLI integration\x1b[0m");
+        dc.section("Kilo CLI integration");
         doctor_check_settings(dc, &ctx.home);
     }
 

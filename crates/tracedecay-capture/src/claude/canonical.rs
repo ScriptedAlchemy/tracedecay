@@ -112,6 +112,14 @@ fn normalize_record(
         );
         append_assistant_attribution_fact(&mut facts, native, record_kind);
         append_tool_use_result_facts(&mut facts, native, record_kind);
+        // The branch rides only on message records so it never renders as a
+        // row of its own.
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        {
+            append_git_branch_fact(&mut facts, native);
+        }
         // Preserve Claude's native compact-summary flags as typed compaction
         // metadata without introducing a cross-provider trust contract.
         if record_kind == "user"
@@ -281,6 +289,20 @@ fn append_session_location_fact(facts: &mut Vec<CanonicalObservationFactV1>, nat
         profile: None,
         location_provenance: Some("transcript_record".to_owned()),
     });
+}
+
+fn append_git_branch_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
+    if let Some(branch) = native
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+            reference: Some(branch.to_owned()),
+            content: None,
+        });
+    }
 }
 
 fn append_assistant_attribution_fact(

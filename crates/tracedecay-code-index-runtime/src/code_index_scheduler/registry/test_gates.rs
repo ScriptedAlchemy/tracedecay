@@ -698,6 +698,22 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Drop only the decoded seat, as a deferred serving decode does once a
+    /// published graph head serves from the text owner.
+    #[cfg(test)]
+    pub async fn release_serving_seat_for_test(&self, project_root: &Path) {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted worktree");
+        Self::release_superseded_serving_seat(
+            &worktree.serving_generation,
+            &worktree.serving_generation_epoch,
+            &worktree.serving_source_witness,
+            &self.serving_seats,
+            &worktree.serving_generation_changed,
+        );
+    }
+
     /// Retires the serving generation only when this operation's metadata
     /// rollback succeeded and its exact installation token is still current.
     #[cfg(test)]
