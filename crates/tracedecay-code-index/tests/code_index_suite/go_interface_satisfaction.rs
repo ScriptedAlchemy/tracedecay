@@ -442,7 +442,7 @@ fn go_generic_type_decides_methods_whose_signature_ignores_its_type_parameters()
         "go-sat-generic-fixed",
         &[(
             "gen/gen.go",
-            "package gen\n\ntype U int\n\ntype Namer interface {\n\tName() string\n}\n\ntype Getter interface {\n\tGet() U\n}\n\ntype Box[T any] struct{ v T }\n\nfunc (b *Box[T]) Name() string { return \"box\" }\n\ntype Cell[T any] struct{}\n\nfunc (c Cell[U]) Get() U {\n\tvar v U\n\treturn v\n}\n",
+            "package gen\n\ntype U int\n\ntype Namer interface {\n\tName() string\n}\n\ntype Getter interface {\n\tGet() U\n}\n\ntype Box[T any] struct{ v T }\n\nfunc (b *Box[T]) Name() string { return \"box\" }\n\ntype Cell[T any] struct{}\n\nfunc (c Cell[U]) Get() U {\n\tvar v U\n\treturn v\n}\n\ntype Labeler interface {\n\tLabel() string\n}\n\nfunc (c Cell[string]) Label() string {\n\tvar v string\n\treturn v\n}\n",
         )],
     );
     for generation in [&child, &cold] {
@@ -462,6 +462,14 @@ fn go_generic_type_decides_methods_whose_signature_ignores_its_type_parameters()
         assert!(
             undecided(generation, "gen/gen.go::Getter"),
             "Cell's Get depends on its renamed type parameter, so Getter stays undecided"
+        );
+        assert!(
+            !edges.contains(&edge("gen/gen.go::Cell", "gen/gen.go::Labeler")),
+            "Cell[string].Label returns the receiver's parameter `string`, not the builtin: {edges:?}"
+        );
+        assert!(
+            undecided(generation, "gen/gen.go::Labeler"),
+            "a type parameter shadowing a predeclared name keeps Labeler undecided"
         );
     }
 }

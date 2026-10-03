@@ -657,6 +657,7 @@ func (l *List[T]) Len() int { return 0 }
 func (l List[U]) First() U { var v U; return v }
 func (l List[U]) Each(f func(U) bool) {}
 func (l List[U]) Base() T { return 0 }
+func (l List[string]) Label() string { var v string; return v }
 "#,
     );
     let generic = rows
@@ -672,6 +673,7 @@ func (l List[U]) Base() T { return 0 }
             ("Base", false),
             ("Each", true),
             ("First", true),
+            ("Label", true),
             ("Len", false)
         ],
         "the receiver's own parameter names decide, not the type declaration's"

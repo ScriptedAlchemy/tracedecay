@@ -513,7 +513,7 @@ impl GoExtractor {
         }
 
         if let Some((type_name, type_params)) = Self::extract_receiver(state, node, &id) {
-            let method = Self::method_signature(state, node);
+            let method = Self::method_signature(state, node, &type_params);
             let generic = method.params.iter().chain(&method.results).flatten().any(
                 |token| matches!(token, GoTypeTokenV1::Local(name) if type_params.contains(name)),
             );
@@ -924,10 +924,10 @@ impl GoExtractor {
         for child in iface_type.named_children(&mut cursor) {
             match child.kind() {
                 "method_elem" => method_sets.push(row(GoMethodSetRowV1::InterfaceMethod {
-                    method: Self::method_signature(state, child),
+                    method: Self::method_signature(state, child, &[]),
                 })),
                 "type_elem" => method_sets.push(row(GoMethodSetRowV1::Embeds {
-                    embedded: Self::type_tokens(state, child),
+                    embedded: Self::type_tokens(state, child, &[]),
                 })),
                 _ => {}
             }
@@ -1427,19 +1427,26 @@ impl GoExtractor {
 
     /// The name, parameter types, and result types of a `method_declaration`
     /// or `method_elem`, with parameter names dropped and grouped
-    /// parameters expanded.
-    fn method_signature(state: &ExtractionState, node: TsNode<'_>) -> GoMethodSignatureV1 {
+    /// parameters expanded. `type_params` are the receiver's type-parameter
+    /// names, which may shadow predeclared types.
+    fn method_signature(
+        state: &ExtractionState,
+        node: TsNode<'_>,
+        type_params: &[String],
+    ) -> GoMethodSignatureV1 {
         let name = node
             .child_by_field_name("name")
             .map(|name| state.node_text(name).to_string())
             .unwrap_or_default();
         let params = node
             .child_by_field_name("parameters")
-            .map(|list| Self::parameter_types(state, list))
+            .map(|list| Self::parameter_types(state, list, type_params))
             .unwrap_or_default();
         let results = match node.child_by_field_name("result") {
-            Some(list) if list.kind() == "parameter_list" => Self::parameter_types(state, list),
-            Some(result) => vec![Self::type_tokens(state, result)],
+            Some(list) if list.kind() == "parameter_list" => {
+                Self::parameter_types(state, list, type_params)
+            }
+            Some(result) => vec![Self::type_tokens(state, result, type_params)],
             None => Vec::new(),
         };
         GoMethodSignatureV1 {
@@ -1451,7 +1458,11 @@ impl GoExtractor {
 
     /// One type per parameter of a `parameter_list`: `a, b int` is two
     /// `int`s, `xs ...T` is `...` followed by `T`.
-    fn parameter_types(state: &ExtractionState, list: TsNode<'_>) -> Vec<GoTypeV1> {
+    fn parameter_types(
+        state: &ExtractionState,
+        list: TsNode<'_>,
+        type_params: &[String],
+    ) -> Vec<GoTypeV1> {
         let mut types = Vec::new();
         let mut cursor = list.walk();
         for param in list.named_children(&mut cursor) {
@@ -1462,7 +1473,7 @@ impl GoExtractor {
             if param.kind() == "variadic_parameter_declaration" {
                 tokens.push(GoTypeTokenV1::Text("...".to_owned()));
             }
-            tokens.extend(Self::type_tokens(state, ty));
+            tokens.extend(Self::type_tokens(state, ty, type_params));
             let mut names = param.walk();
             let count = param
                 .children_by_field_name("name", &mut names)
@@ -1480,22 +1491,31 @@ impl GoExtractor {
             ty = ty.child_by_field_name("type")?;
         }
         matches!(ty.kind(), "type_identifier" | "qualified_type")
-            .then(|| Self::type_tokens(state, ty))
+            .then(|| Self::type_tokens(state, ty, &[]))
     }
 
     /// The tokens of a type node. Identifiers that name types are `Local` or
     /// `Qualified` so the seal can qualify them; every other leaf is `Text`.
-    fn type_tokens(state: &ExtractionState, node: TsNode<'_>) -> GoTypeV1 {
+    /// A predeclared name in `type_params` is a type parameter, so `Local`.
+    fn type_tokens(state: &ExtractionState, node: TsNode<'_>, type_params: &[String]) -> GoTypeV1 {
         let mut tokens = Vec::new();
-        Self::push_type_tokens(state, node, &mut tokens);
+        Self::push_type_tokens(state, node, type_params, &mut tokens);
         tokens
     }
 
-    fn push_type_tokens(state: &ExtractionState, node: TsNode<'_>, tokens: &mut GoTypeV1) {
+    fn push_type_tokens(
+        state: &ExtractionState,
+        node: TsNode<'_>,
+        type_params: &[String],
+        tokens: &mut GoTypeV1,
+    ) {
         let text = |node: TsNode<'_>| state.node_text(node).to_string();
         match node.kind() {
             "comment" | ";" => {}
-            "type_identifier" if is_predeclared_type(state.node_text(node)) => {
+            "type_identifier"
+                if is_predeclared_type(state.node_text(node))
+                    && !type_params.contains(&text(node)) =>
+            {
                 tokens.push(GoTypeTokenV1::Text(text(node)));
             }
             "type_identifier" => tokens.push(GoTypeTokenV1::Local(text(node))),
@@ -1512,12 +1532,13 @@ impl GoExtractor {
             }
             "parenthesized_type" => {
                 if let Some(inner) = node.named_child(0) {
-                    Self::push_type_tokens(state, inner, tokens);
+                    Self::push_type_tokens(state, inner, type_params, tokens);
                 }
             }
             "parameter_list" => {
                 tokens.push(GoTypeTokenV1::Text("(".to_owned()));
-                for (index, param) in Self::parameter_types(state, node).into_iter().enumerate() {
+                let params = Self::parameter_types(state, node, type_params);
+                for (index, param) in params.into_iter().enumerate() {
                     if index > 0 {
                         tokens.push(GoTypeTokenV1::Text(",".to_owned()));
                     }
@@ -1532,10 +1553,10 @@ impl GoExtractor {
                     // `func() T` and `func() (T)` are one type.
                     if Some(child) == result && child.kind() != "parameter_list" {
                         tokens.push(GoTypeTokenV1::Text("(".to_owned()));
-                        Self::push_type_tokens(state, child, tokens);
+                        Self::push_type_tokens(state, child, type_params, tokens);
                         tokens.push(GoTypeTokenV1::Text(")".to_owned()));
                     } else {
-                        Self::push_type_tokens(state, child, tokens);
+                        Self::push_type_tokens(state, child, type_params, tokens);
                     }
                 }
             }
@@ -1543,7 +1564,7 @@ impl GoExtractor {
             _ => {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
-                    Self::push_type_tokens(state, child, tokens);
+                    Self::push_type_tokens(state, child, type_params, tokens);
                 }
             }
         }
