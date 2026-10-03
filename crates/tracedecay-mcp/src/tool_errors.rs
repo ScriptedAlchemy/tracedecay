@@ -17,6 +17,11 @@ use crate::transport::{ErrorCode, JsonRpcResponse};
 /// Reason code for `tracedecay tool` flags or an `--args` payload that do not
 /// form a request for the named tool.
 pub const TOOL_ARGUMENTS_INVALID: &str = "tool_arguments_invalid";
+/// The session-sync owner refused the request before admitting it, because
+/// the caller cancelled or its deadline passed first. An admitted sync that
+/// ends cancelled or timed out reports its own termination instead.
+pub const SESSION_SYNC_CANCELLED_BEFORE_ADMISSION: &str = "session_sync_cancelled_before_admission";
+pub const SESSION_SYNC_DEADLINE_EXCEEDED: &str = "session_sync_deadline_exceeded";
 
 fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
@@ -176,9 +181,11 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | "session_sync_wrong_scope"
         | CURSOR_PARAMETER_CHANGED_CODE
         | CURSOR_INVALID_CODE => Some("invalid_request"),
-        "application_surface_not_found_or_not_authorized" | "project_route_not_found" => {
-            Some("denied")
-        }
+        // `not_found_or_not_authorized` is the code an owner's denial record
+        // carries back from a daemon or remote tool result.
+        "application_surface_not_found_or_not_authorized"
+        | "project_route_not_found"
+        | "not_found_or_not_authorized" => Some("denied"),
         _ => None,
     }
 }

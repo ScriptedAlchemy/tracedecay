@@ -417,6 +417,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn owner_denial_renders_as_denial_not_unavailable() {
+        let envelope = tracedecay_api::adapter_problem(
+            RequestId::new("request.cli.fixture").unwrap(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        )
+        .unwrap();
+        let mut tool_result = tracedecay_mcp::application_output::tool_result::problem_tool_result(
+            &serde_json::to_string(&envelope).unwrap(),
+            &envelope.problem,
+        )
+        .unwrap();
+        tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut tool_result);
+        let from_tool_result =
+            tracedecay_mcp::application_output::tool_result::tool_result_refusal(
+                &tool_result.value,
+            )
+            .expect("an isError tool result carries the owner refusal");
+        let from_envelope = retained_tool_payload::<serde_json::Value>(
+            "tracedecay_message_search",
+            serde_json::to_value(&envelope).unwrap(),
+        )
+        .expect_err("a problem envelope is a refusal");
+
+        for error in [from_tool_result, from_envelope] {
+            let document: serde_json::Value = serde_json::from_str(
+                &tracedecay::mcp::tools::command_refusal_document(&error).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                document["problem"]["kind"], "not_found_or_not_authorized",
+                "{document}"
+            );
+        }
+    }
+
     /// Envelope drift fails with an error naming the tool instead of a bare
     /// serde message.
     #[test]
