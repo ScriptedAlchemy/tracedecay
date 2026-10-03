@@ -30,9 +30,19 @@ impl Residency {
     }
 }
 
+/// No metrics recorder is installed outside profiling sessions, so samplers
+/// and metric-only walks share TRACE as their measurement switch.
+#[inline(always)]
+pub(crate) fn observing() -> bool {
+    tracing::level_enabled!(tracing::Level::TRACE)
+}
+
 /// Sample 1-in-16 of frequent inner scopes (per-row scoring).
 #[inline]
 pub(crate) fn sample_frequent() -> bool {
+    if !observing() {
+        return false;
+    }
     thread_local! {
         static TICK: Cell<u32> = const { Cell::new(0) };
     }

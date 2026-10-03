@@ -1606,6 +1606,9 @@ impl ArtifactQueryMetricsV1 {
         &self,
         statement: &rusqlite::Statement<'_>,
     ) -> Result<(), RetrievalPortError> {
+        if !(cfg!(test) || crate::observe::observing()) {
+            return Ok(());
+        }
         let steps = u64::try_from(statement.get_status(StatementStatus::FullscanStep))
             .map_err(contract_error)?;
         #[cfg(test)]
