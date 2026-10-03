@@ -29,10 +29,6 @@ pub(super) struct QueuedFrame {
     pub(super) payload: LspFrame,
     pub(super) publication: Option<PublicationTag>,
     pub(super) server_request: Option<LspRequestId>,
-    /// Enqueue instant, sampled as `lsp.outbound.queue_wait_us` when the frame
-    /// first goes in flight. The depth gauges alone cannot separate a deep
-    /// queue from a bridge that is slow to poll.
-    pub(super) queued_at: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -169,8 +165,6 @@ where
     /// state is preserved across temporary backpressure.
     pub fn drain_outbound(&mut self) -> Vec<LspFrame> {
         self.outbound.in_flight = false;
-        // Drained frames were never acknowledged by the bridge; an ack-latency
-        // sample here would misattribute drain time as bridge latency.
         let mut frames = Vec::with_capacity(self.outbound.queue.len());
         while let Some(frame) = self.outbound.queue.pop_front() {
             self.outbound.queued_bytes = self
@@ -264,7 +258,6 @@ where
             payload,
             publication: None,
             server_request,
-            queued_at: std::time::Instant::now(),
         });
         true
     }
@@ -338,7 +331,6 @@ where
             payload,
             publication,
             server_request,
-            queued_at: std::time::Instant::now(),
         });
         true
     }

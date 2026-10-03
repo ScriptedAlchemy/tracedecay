@@ -299,14 +299,14 @@ impl LspSessionControl {
     #[tracing::instrument(name = "lsp_session_complete_request", level = "trace", skip_all)]
     pub fn complete_request(&mut self, id: &LspRequestId) -> CompletionDisposition {
         let removed = self.pending.remove(id).map(|request| request.state);
-        let disposition = match removed {
+
+        match removed {
             Some(PendingState::Active) => CompletionDisposition::Publish,
             Some(PendingState::Cancelled) => CompletionDisposition::SuppressCancelled,
             Some(PendingState::ContentModified) => CompletionDisposition::SuppressContentModified,
             Some(PendingState::TimedOut) => CompletionDisposition::SuppressTimedOut,
             None => CompletionDisposition::UnknownRequest,
-        };
-        disposition
+        }
     }
 
     pub fn admit_publication(
@@ -465,12 +465,4 @@ impl LspSessionControl {
         publication.delivery = delivery;
         true
     }
-}
-
-/// RAII backstop for the in-flight gauge: a session actor dropped without an
-/// `exit`/`expire` transition (panic, abort, daemon teardown) still returns
-/// its admitted-but-unsettled requests, so the gauge cannot leak. The gauge is
-/// a compile-time no-op until the binary selects the profiler backend.
-impl Drop for LspSessionControl {
-    fn drop(&mut self) {}
 }
