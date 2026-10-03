@@ -1280,7 +1280,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
     use std::process::Command;
 
