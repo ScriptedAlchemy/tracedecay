@@ -154,8 +154,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 /// caller's page/session row count, so it is not an inner-loop micro-probe.
 #[tracing::instrument(name = "sessions.lcm.raw.verify_row", level = "trace", skip_all)]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
-    let verified = decode_verified_raw_message(row);
-    verified
+    decode_verified_raw_message(row)
 }
 
 fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
