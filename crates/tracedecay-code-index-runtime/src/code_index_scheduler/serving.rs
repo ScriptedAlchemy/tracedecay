@@ -738,6 +738,10 @@ pub(super) struct CodeTextArtifactBuildV1 {
     /// The key the artifact is published under, derived before the build.
     content_key: ManifestDigest,
     source_receipt: Option<VerifiedSealedLexicalSourceReceiptV1>,
+    /// Finalization began before this build opened (a carried parent, or a
+    /// resumed staging file): the source is never walked and finalization
+    /// reads its totals from the staged pages.
+    finalizing: bool,
     pub(super) staging_path: PathBuf,
     /// Holds the builder's advertised memory ceiling reserved in the
     /// process resident-memory authority for the lifetime of the build.
@@ -885,6 +889,19 @@ pub(super) fn map_sealed_page_source_error(
             CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
         ) => RetrievalPortError::Contract(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
+    }
+}
+
+/// A changed file the carry decodes fails the way the sealed source does.
+fn carried_source_error(error: CodeIndexProductionErrorV1) -> CodeLexicalArtifactErrorV1 {
+    match error {
+        CodeIndexProductionErrorV1::Interrupted(interruption) => {
+            CodeLexicalArtifactErrorV1::Interrupted(interruption)
+        }
+        CodeIndexProductionErrorV1::Contract(detail) => {
+            CodeLexicalArtifactErrorV1::Contract(detail)
+        }
+        error => CodeLexicalArtifactErrorV1::Io(error.to_string()),
     }
 }
 
@@ -2410,7 +2427,11 @@ impl LatestCodeTextGenerationV1 {
         observe_committed: bool,
     ) -> Result<(), RetrievalPortError> {
         let source_cursor = build.source.cursor();
+        let finalizing = build.finalizing;
         match build.source_receipt.as_ref() {
+            // A build that opened finalizing never walks its source; its
+            // counters are the staged pages' own totals.
+            _ if finalizing => {}
             // A completed source mints one terminal read that emits no record
             // and only normalizes the exhausted file position, so its live
             // cursor sits one file rollover beyond the last durably accepted
@@ -2437,21 +2458,28 @@ impl LatestCodeTextGenerationV1 {
                 }
             },
         }
-        if progress.next_page_ordinal != source_cursor.next_page_ordinal()
-            || progress.completed_chunks != source_cursor.emitted_chunks()
-            || progress.completed_payload_bytes != source_cursor.emitted_payload_bytes()
-            || progress.completed_imports != source_cursor.emitted_imports()
+        if !finalizing
+            && (progress.next_page_ordinal != source_cursor.next_page_ordinal()
+                || progress.completed_chunks != source_cursor.emitted_chunks()
+                || progress.completed_payload_bytes != source_cursor.emitted_payload_bytes()
+                || progress.completed_imports != source_cursor.emitted_imports())
         {
             return Err(RetrievalPortError::Contract(
                 "text-artifact progress counters do not match the sealed-source cursor".to_owned(),
             ));
         }
-        let completed_files = build.source.completed_files();
-        let completed_lexical_units = build
-            .source
-            .completed_lexical_units()
-            .map_err(map_sealed_page_source_error)?;
         let total_lexical_units = build.source.total_lexical_units();
+        let (completed_files, completed_lexical_units) = if finalizing {
+            (build.source.total_files(), total_lexical_units)
+        } else {
+            (
+                build.source.completed_files(),
+                build
+                    .source
+                    .completed_lexical_units()
+                    .map_err(map_sealed_page_source_error)?,
+            )
+        };
         let observed_at = Instant::now();
         let observed_micros = now_micros().0;
         let last_commit_latency_micros = last_commit_latency_micros.or_else(|| {
@@ -2915,6 +2943,91 @@ impl LatestCodeTextGenerationV1 {
         Ok(Some(TextHeadOpenOutcomeV1::Served))
     }
 
+    /// Stage this generation's artifact over an ancestor's published one when
+    /// both sealed sources cut the same files and at most an eighth of them
+    /// changed: only the changed files are decoded and re-encoded. `None`
+    /// means a cold build: no retained ancestor with a published artifact, a
+    /// different file roster, a larger change, or an ancestor artifact of
+    /// another layout.
+    fn carry_parent_text_artifact(
+        &self,
+        staging_path: &Path,
+        source: &mut VerifiedSealedLexicalPageSourceV1,
+        metadata: &CodeLexicalProjectionMetadataV1,
+        builder_budget: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Option<CodeLexicalArtifactBuilderV1>, RetrievalPortError> {
+        let store = &self.text_artifact_store;
+        // The nearest retained ancestor with a published artifact: an edit
+        // that superseded its parent before the parent's text sealed carries
+        // from the generation before.
+        let mut ancestor = self.metadata.manifest().parent_generation.clone();
+        let (parent_id, descriptor, parent_source) = loop {
+            let Some(ancestor_id) = ancestor.take() else {
+                return Ok(None);
+            };
+            let identity = match store.sealed_identity(&ancestor_id) {
+                Ok(identity) => identity,
+                Err(RetrievalPortError::AuthorityUnavailable(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let ancestor_source = store.open_sealed_source(&identity, control)?;
+            if let Some(descriptor) = store.published_descriptor(&ancestor_id)? {
+                break (ancestor_id, descriptor, ancestor_source);
+            }
+            ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
+        };
+        let changed = source.changed_files_since(&parent_source);
+        drop(parent_source);
+        let Some(changed) = changed else {
+            return Ok(None);
+        };
+        let changed_count = u64::try_from(changed.len()).unwrap_or(u64::MAX);
+        if changed_count.saturating_mul(8) > source.total_files() {
+            return Ok(None);
+        }
+        let parent_path = code_text_artifact_path(store.store_root(), &descriptor)
+            .map_err(text_artifact_unavailable)?;
+        let source_state_digest = source.source_state_digest().clone();
+        let source_format_revision = source.format_revision();
+        let mut stage_file_pages = |file: u64, first_page: u64, first_chunk: u64| {
+            source
+                .stage_file_pages(file, first_page, first_chunk, control)
+                .map_err(carried_source_error)
+        };
+        // Opened under the store lock, so retention cannot collect the file
+        // first; the open handle keeps its bytes readable for the copy.
+        let parent_file = {
+            let _lock = store.acquire_store_write_lock()?;
+            std::fs::File::open(&parent_path).map_err(text_artifact_unavailable)?
+        };
+        let carried = CodeLexicalArtifactBuilderV1::carry_parent_with_memory_budget(
+            staging_path,
+            parent_file,
+            metadata.clone(),
+            builder_budget,
+            source_state_digest,
+            source_format_revision,
+            &changed,
+            &mut stage_file_pages,
+            control,
+        );
+        match carried {
+            Ok(builder) => Ok(Some(builder)),
+            Err(CodeLexicalArtifactErrorV1::Incompatible(reason)) => {
+                tracing::info!(
+                    event = "code_text_artifact_parent_not_carried",
+                    parent_generation = %parent_id,
+                    %reason,
+                    "the parent text artifact cannot be carried; building cold"
+                );
+                store.discard_incompatible_staging(staging_path, control)?;
+                Ok(None)
+            }
+            Err(error) => Err(map_text_artifact_error(error)),
+        }
+    }
+
     /// One claimed head-open pass, run with the slot lock released: reopen
     /// the published durable head when one exists, otherwise authenticate the
     /// sealed source and begin (or resume) the staging build. Fail-closed:
@@ -2973,32 +3086,43 @@ impl LatestCodeTextGenerationV1 {
             text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
         let metadata = self.text_projection_metadata()?;
         let content_key = text_artifact_content_key(&source, &metadata)?;
-        let mut builder = if staging_path.exists() {
+        let resumed = if staging_path.exists() {
             match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                 &staging_path,
                 metadata.clone(),
                 builder_budget,
                 control,
             ) {
-                Ok(builder) => Ok(builder),
+                Ok(builder) => Some(builder),
+                // Includes a carry interrupted before it committed, which
+                // leaves the parent's metadata behind.
                 Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
                     store.discard_incompatible_staging(&staging_path, control)?;
-                    CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-                        &staging_path,
-                        metadata.clone(),
-                        builder_budget,
-                    )
+                    None
                 }
-                Err(error) => Err(error),
+                Err(error) => return Err(map_text_artifact_error(error)),
             }
         } else {
-            CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+            None
+        };
+        let mut builder = match resumed {
+            Some(builder) => builder,
+            None => match self.carry_parent_text_artifact(
                 &staging_path,
-                metadata.clone(),
+                &mut source,
+                &metadata,
                 builder_budget,
-            )
-        }
-        .map_err(map_text_artifact_error)?;
+                control,
+            )? {
+                Some(carried) => carried,
+                None => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    &staging_path,
+                    metadata.clone(),
+                    builder_budget,
+                )
+                .map_err(map_text_artifact_error)?,
+            },
+        };
         // A staging file sealed before its publication was interrupted keeps
         // no source cursor; it is complete and is published as it stands.
         if builder
@@ -3036,19 +3160,27 @@ impl LatestCodeTextGenerationV1 {
                 }
             }
         }
+        let finalizing = builder
+            .finalization_started(control)
+            .map_err(map_text_artifact_error)?;
         let initialized = CodeTextArtifactBuildV1 {
             builder,
             source,
             sealed_identity,
             content_key,
             source_receipt: None,
+            finalizing,
             staging_path,
             _build_reservation: build_reservation,
         };
         self.publish_text_progress_boundary(
             &initialized,
             &progress,
-            CodeIndexBuildPhaseV1::SourceScan,
+            if finalizing {
+                CodeIndexBuildPhaseV1::Verification
+            } else {
+                CodeIndexBuildPhaseV1::SourceScan
+            },
             0,
             0,
             None,
@@ -3127,7 +3259,8 @@ impl LatestCodeTextGenerationV1 {
         let (source_batch_pages, source_batch_bytes, source_work_limit) =
             text_artifact_source_batch_limits(build_memory_budget);
         let mut remaining = maximum_work.min(source_work_limit);
-        while remaining > 0 && artifact_build.source_receipt.is_none() {
+        while remaining > 0 && !artifact_build.finalizing && artifact_build.source_receipt.is_none()
+        {
             let maximum_batch_pages = remaining.clamp(1, source_batch_pages);
             let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(
                 maximum_batch_pages,
@@ -3299,9 +3432,9 @@ impl LatestCodeTextGenerationV1 {
                 }
             }
         }
-        let Some(source_receipt) = artifact_build.source_receipt.as_ref() else {
+        if !artifact_build.finalizing && artifact_build.source_receipt.is_none() {
             return Ok(false);
-        };
+        }
         if remaining == 0 {
             return Ok(false);
         }
@@ -3312,32 +3445,30 @@ impl LatestCodeTextGenerationV1 {
                     "code text artifact finalization work budget overflowed".to_owned(),
                 )
             })?;
+        let advance = |build: &mut CodeTextArtifactBuildV1| match build.source_receipt.as_ref() {
+            Some(source_receipt) => {
+                build
+                    .builder
+                    .advance_finalization(source_receipt, finalization_rows, control)
+            }
+            None => build
+                .builder
+                .advance_started_finalization(finalization_rows, control),
+        };
         #[cfg(feature = "hotpath")]
         let finalized = if matches!(
             self.text_progress_phase(),
             Some(CodeIndexBuildPhaseV1::Verification)
         ) {
-            hotpath::measure_block!("query.artifact.finalization.digest_verify_wake", {
-                artifact_build.builder.advance_finalization(
-                    source_receipt,
-                    finalization_rows,
-                    control,
-                )
-            })
+            hotpath::measure_block!(
+                "query.artifact.finalization.digest_verify_wake",
+                advance(artifact_build)
+            )
         } else {
-            hotpath::measure_block!("query.artifact.index.build", {
-                artifact_build.builder.advance_finalization(
-                    source_receipt,
-                    finalization_rows,
-                    control,
-                )
-            })
+            hotpath::measure_block!("query.artifact.index.build", advance(artifact_build))
         };
         #[cfg(not(feature = "hotpath"))]
-        let finalized =
-            artifact_build
-                .builder
-                .advance_finalization(source_receipt, finalization_rows, control);
+        let finalized = advance(artifact_build);
         // A finalization wake is what status reports as `index_build` and
         // `verification`. Returning its refusal bare left those phases
         // indistinguishable from progress: a build stalled on resident-memory
@@ -3352,6 +3483,10 @@ impl LatestCodeTextGenerationV1 {
                 return Err(map_text_artifact_error(error));
             }
         };
+        // The first finalization step verified the staged pages against the
+        // source receipt; from here the builder's staged totals are the
+        // progress authority.
+        artifact_build.finalizing = true;
         let finalization_phase = match finalized {
             CodeLexicalArtifactFinalizationStepV1::Pending { phase, .. } => {
                 let phase = match phase {
@@ -3404,6 +3539,7 @@ impl LatestCodeTextGenerationV1 {
             sealed_identity,
             content_key,
             source_receipt: _,
+            finalizing: _,
             staging_path,
             _build_reservation: build_reservation,
         } = *finished;
