@@ -83,7 +83,8 @@ use tracedecay_domain::{FactEventId, FactId, ProjectId, TemporalModeV1};
 
 use super::RetainedSurfaceOperation;
 
-/// Exact registered-project selector shared by retained reads.
+/// Exact registered-project selector. Reads and fact effects run against the
+/// selected project.
 ///
 /// Inlined so every request schema advertises the closed selector contract
 /// (`required: ["project_id"]`, no additional properties) directly on its
