@@ -12,12 +12,18 @@ const NAMES: [&str; 5] = ["main", "init", "parse", "run", "handle"];
 
 fn repo_ids(ctx: &QueryContext) -> (Value, Value) {
     (
-        json!(ctx.seeds.project_id.clone().unwrap_or_else(|| "missing".into())),
-        json!(ctx
-            .seeds
-            .repository_id
-            .clone()
-            .unwrap_or_else(|| "missing".into())),
+        json!(
+            ctx.seeds
+                .project_id
+                .clone()
+                .unwrap_or_else(|| "missing".into())
+        ),
+        json!(
+            ctx.seeds
+                .repository_id
+                .clone()
+                .unwrap_or_else(|| "missing".into())
+        ),
     )
 }
 
@@ -79,13 +85,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     ] {
         out.push(ToolGroup {
             tool,
-            queries: five(|i| {
-                rq(
-                    tool,
-                    label,
-                    json!({"path": path_at(ctx, i), "limit": 25}),
-                )
-            }),
+            queries: five(|i| rq(tool, label, json!({"path": path_at(ctx, i), "limit": 25}))),
         });
     }
     out.push(ToolGroup {

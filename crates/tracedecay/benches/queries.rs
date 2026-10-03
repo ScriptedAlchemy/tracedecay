@@ -108,7 +108,12 @@ impl Query {
         }
     }
 
-    pub(crate) fn effect(label: &'static str, tool: &'static str, args: Value, prime: PrimeFn) -> Self {
+    pub(crate) fn effect(
+        label: &'static str,
+        tool: &'static str,
+        args: Value,
+        prime: PrimeFn,
+    ) -> Self {
         Self {
             label,
             tool,
@@ -262,10 +267,8 @@ async fn try_build_context(
                 .get("preview")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let re = regex::Regex::new(
-                r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#,
-            )
-            .map_err(|e| e.to_string())?;
+            let re = regex::Regex::new(r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#)
+                .map_err(|e| e.to_string())?;
             let mut recovered = Vec::new();
             for m in re.find_iter(preview) {
                 if let Ok(file) = serde_json::from_str::<Value>(m.as_str()) {
@@ -273,7 +276,9 @@ async fn try_build_context(
                 }
             }
             if recovered.is_empty() {
-                return Err(format!("tracedecay_files returned no files array: {file_payload}"));
+                return Err(format!(
+                    "tracedecay_files returned no files array: {file_payload}"
+                ));
             }
             recovered
         }
@@ -299,13 +304,7 @@ async fn try_build_context(
     require_samples("qualified function names", &function_qnames)?;
     require_samples("indexed directory prefixes", &dir_prefixes)?;
 
-    let seeds = crate::coverage::seed_all(
-        harness,
-        project_root,
-        &function_qnames,
-        &files,
-    )
-    .await;
+    let seeds = crate::coverage::seed_all(harness, project_root, &function_qnames, &files).await;
 
     Ok(QueryContext {
         function_ids,
@@ -331,7 +330,10 @@ pub(crate) async fn call_json_tool(
     json_tool_payload(tool_name, &response)
 }
 
-pub(crate) fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Value, String> {
+pub(crate) fn json_tool_payload(
+    tool_name: &str,
+    response: &JsonRpcResponse,
+) -> Result<Value, String> {
     if let Some(error) = &response.error {
         return Err(format!("{tool_name} JSON-RPC failed: {error:?}"));
     }

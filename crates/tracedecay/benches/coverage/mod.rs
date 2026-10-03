@@ -47,8 +47,7 @@ pub(crate) fn bench_session_id(repo_name: &str) -> String {
 /// Must run after clones exist and before the harness opens: the profile
 /// home under `isolation_root` is the only home the composition reads.
 pub(crate) fn seed_transcripts(isolation_root: &Path, repos: &[(String, std::path::PathBuf)]) {
-    let Some(home) =
-        ProductionProjectCompositionHarnessV1::transcript_source_home(isolation_root)
+    let Some(home) = ProductionProjectCompositionHarnessV1::transcript_source_home(isolation_root)
     else {
         eprintln!("[bench] no transcript source home; session/lcm groups will skip");
         return;
@@ -152,6 +151,9 @@ pub struct Seeds {
     pub dirty_file: Option<String>,
     /// Skill id minted via profile skill file drop (managed skills surface).
     pub skill_id: Option<String>,
+    /// First worktree entry id seen in the seeded worktree inventory (cleanup
+    /// lane targets `kind:"worktree"` objects).
+    pub worktree_id: Option<String>,
     /// Changed path whose run_affected_tests plan maps to covering tests
     /// (minted a request handle at seed time).
     pub test_results_path: Option<String>,
@@ -229,7 +231,11 @@ pub struct WorkSeeds {
     pub topology_generation: Option<Value>,
 }
 
-fn opt_err(skipped: &mut Vec<String>, what: &'static str, outcome: Result<Value, String>) -> Option<Value> {
+fn opt_err(
+    skipped: &mut Vec<String>,
+    what: &'static str,
+    outcome: Result<Value, String>,
+) -> Option<Value> {
     match outcome {
         Ok(v) => Some(v),
         Err(e) => {
@@ -415,7 +421,11 @@ pub(crate) async fn seed_all(
     let call = |tool: &'static str, args: Value| call_json_tool(harness, project_root, tool, args);
 
     // ── identity ─────────────────────────────────────────────────────────
-    if let Some(v) = opt_err(&mut seeds.skipped, "active_project", call("tracedecay_active_project", json!({"format":"json"})).await) {
+    if let Some(v) = opt_err(
+        &mut seeds.skipped,
+        "active_project",
+        call("tracedecay_active_project", json!({"format":"json"})).await,
+    ) {
         seeds.project_id = dig_str(&v, "project_id").map(str::to_owned);
         seeds.repository_id = dig_str(&v, "repository_id").map(str::to_owned);
         seeds.branch = dig_str(&v, "current_branch").map(str::to_owned);
@@ -502,10 +512,9 @@ pub(crate) async fn seed_all(
         }
     }
     if seeds.rename_node.is_none() {
-        seeds.skipped.push(
-            "rename_apply: no corpus node yielded an unblocked rename dry-run"
-                .to_owned(),
-        );
+        seeds
+            .skipped
+            .push("rename_apply: no corpus node yielded an unblocked rename dry-run".to_owned());
     }
 
     // ── source-edit apply targets: each op needs a symbol whose dry-run is
@@ -594,7 +603,11 @@ pub(crate) async fn seed_all(
         seeds.project_id.clone(),
         project_root.to_str().map(str::to_owned),
     ) {
-        let scope_set_id = format!("scope-set.bench.{project_id}");
+        // Persisted scope sets are actor-sealed (only the persisting actor may
+        // read them back), and the bench profile survives runs — a fixed id
+        // collides with an earlier actor's set and stays invisible forever.
+        // Mint a per-run identity so the set is always ours.
+        let scope_set_id = format!("scope-set.bench.{project_id}.{}", now_micros());
         match call(
             "tracedecay_multi_root_scope_set_compare_and_swap",
             json!({
@@ -636,9 +649,7 @@ pub(crate) async fn seed_all(
                         seeds.scope_set_digest = dig_str(&v, "scope_set_digest")
                             .or_else(|| dig_str(&v, "digest"))
                             .map(str::to_owned);
-                        if seeds.scope_set_revision.is_none()
-                            || seeds.scope_set_digest.is_none()
-                        {
+                        if seeds.scope_set_revision.is_none() || seeds.scope_set_digest.is_none() {
                             seeds.skipped.push(
                                 "multi_root_execute: scope_set read omitted revision/digest"
                                     .to_owned(),
@@ -845,9 +856,7 @@ async fn seed_configuration(
         }
     }
     let Some(seeded_revision) = seeded_revision else {
-        seeds.skipped.push(format!(
-            "configuration_set: {last_err}"
-        ));
+        seeds.skipped.push(format!("configuration_set: {last_err}"));
         return;
     };
     let restored = opt_err(
@@ -867,8 +876,7 @@ async fn seed_configuration(
     );
     if let Some(restored) = restored {
         seeds.config_rollback_target = Some(seeded_revision.clone());
-        seeds.config_revision =
-            dig_str(&restored, "result_revision_id").map(str::to_owned);
+        seeds.config_revision = dig_str(&restored, "result_revision_id").map(str::to_owned);
         seeds.config_key = Some(scalar_key.to_owned());
         seeds.config_scalar = Some(toggled);
     }
@@ -1041,17 +1049,14 @@ async fn seed_refresh(
         Ok(v) => match dig_str(&v, "handle").map(str::to_owned) {
             Some(h) if !h.is_empty() => {
                 seeds.refresh_handle = Some(h);
-                seeds.refresh_operation_id =
-                    dig_str(&v, "operation_id").map(str::to_owned);
+                seeds.refresh_operation_id = dig_str(&v, "operation_id").map(str::to_owned);
                 seeds.refresh_selectors = Some(selectors);
             }
             _ => seeds
                 .skipped
                 .push("session_refresh_*: begin returned no handle".to_owned()),
         },
-        Err(e) => seeds
-            .skipped
-            .push(format!("session_refresh_*: {e}")),
+        Err(e) => seeds.skipped.push(format!("session_refresh_*: {e}")),
     }
 }
 
@@ -1168,11 +1173,8 @@ async fn seed_affected_tests(
         .await
         {
             Ok(v)
-                if extract_token(
-                    &v,
-                    "digany:request_handle,handle,run_handle,result_handle",
-                )
-                .is_some() =>
+                if extract_token(&v, "digany:request_handle,handle,run_handle,result_handle")
+                    .is_some() =>
             {
                 seeds.test_results_path = Some(path);
                 return;
@@ -1180,9 +1182,9 @@ async fn seed_affected_tests(
             _ => {}
         }
     }
-    seeds.skipped.push(
-        "affected_tests/test_results: no changed path maps to covering tests".to_owned(),
-    );
+    seeds
+        .skipped
+        .push("affected_tests/test_results: no changed path maps to covering tests".to_owned());
 }
 
 /// Mint a reversible response handle: `tracedecay_search` over the indexed
@@ -1241,8 +1243,7 @@ async fn seed_git_preview(
         .await
         {
             Ok(v) => {
-                seeds.preview_input_id =
-                    dig_str(&v, "preview_input_id").map(str::to_owned);
+                seeds.preview_input_id = dig_str(&v, "preview_input_id").map(str::to_owned);
                 let mut digests = Vec::new();
                 collect_hunk_digests(&v, &mut digests);
                 seeds.hunk_digests = digests;
@@ -1299,9 +1300,9 @@ async fn seed_native_integration(
         seeds.base_branch.clone(),
     )
     else {
-        seeds.skipped.push(
-            "native_integration_*: scope-set/branch/commit seeds missing".to_owned(),
-        );
+        seeds
+            .skipped
+            .push("native_integration_*: scope-set/branch/commit seeds missing".to_owned());
         return;
     };
     // The identity minted at seed start can go stale while intervening seeds
@@ -1315,10 +1316,12 @@ async fn seed_native_integration(
     .await
     {
         Ok(v) => (
-            dig(&v, "revision")
+            dig(&v, "scope_set_revision")
+                .or_else(|| dig(&v, "revision"))
                 .and_then(Value::as_i64)
                 .unwrap_or(scope_set_revision),
-            dig_str(&v, "digest")
+            dig_str(&v, "scope_set_digest")
+                .or_else(|| dig_str(&v, "digest"))
                 .map(str::to_owned)
                 .unwrap_or(scope_set_digest),
         ),
@@ -1350,17 +1353,18 @@ async fn seed_native_integration(
             return;
         }
     };
-    let Some(inventory_snapshot_id) =
-        dig_str(&inventory, "inventory_snapshot_id").map(str::to_owned)
+    let Some(inventory_snapshot_id) = dig_str(&inventory, "snapshot_id")
+        .or_else(|| dig_str(&inventory, "inventory_snapshot_id"))
+        .map(str::to_owned)
     else {
         seeds.skipped.push(format!(
             "native_integration_*: inventory returned no snapshot id: {inventory}"
         ));
         return;
     };
-    let Some(inventory_epoch) = dig(&inventory, "inventory_epoch")
+    let Some(inventory_epoch) = dig(&inventory, "epoch")
         .and_then(Value::as_i64)
-        .or_else(|| dig(&inventory, "epoch").and_then(Value::as_i64))
+        .or_else(|| dig(&inventory, "inventory_epoch").and_then(Value::as_i64))
     else {
         seeds.skipped.push(format!(
             "native_integration_*: inventory returned no epoch: {inventory}"
@@ -1370,6 +1374,7 @@ async fn seed_native_integration(
     let worktree_id = dig_str(&inventory, "worktree_id")
         .map(str::to_owned)
         .unwrap_or_else(|| "worktree.bench".to_owned());
+    seeds.worktree_id = Some(worktree_id.clone());
     let grant_digest = dig_str(&inventory, "grant_digest")
         .map(str::to_owned)
         .unwrap_or_else(|| format!("sha256:{}", "0".repeat(64)));
@@ -1451,9 +1456,9 @@ async fn seed_native_integration(
         }
     };
     let Some(snapshot) = snapshot else {
-        seeds.skipped.push(
-            "native_integration_*: stack_snapshot returned no sealed snapshot".to_owned(),
-        );
+        seeds
+            .skipped
+            .push("native_integration_*: stack_snapshot returned no sealed snapshot".to_owned());
         return;
     };
     let preflight = match call_json_tool(
@@ -1572,7 +1577,9 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
     let mut all = Vec::new();
     objects(response, &mut all);
     for obj in all {
-        let Some(diagnostic) = obj.get("diagnostic") else { continue };
+        let Some(diagnostic) = obj.get("diagnostic") else {
+            continue;
+        };
         let Some(code) = diagnostic.get("code").and_then(Value::as_str) else {
             continue;
         };
@@ -1584,7 +1591,9 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
         };
         for part in message.split(',') {
             let part = part.trim();
-            let Some(field) = part.strip_suffix(" digest") else { continue };
+            let Some(field) = part.strip_suffix(" digest") else {
+                continue;
+            };
             if !field.starts_with("pinned_") {
                 continue;
             }
@@ -1592,7 +1601,10 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
                 continue;
             };
             let digest = &message[expect_pos + "expected ".len()..];
-            let digest: String = digest.chars().take_while(|c| c.is_ascii_hexdigit() || *c == ':').collect();
+            let digest: String = digest
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == ':')
+                .collect();
             if digest.len() == 71 {
                 pins.insert(field.to_owned(), Value::String(digest));
                 found = true;
@@ -1600,11 +1612,17 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
         }
         // Fallback for the exact suite phrasing: "<field> expected sha256:<hex>, observed"
         if !found && let Some(expect_pos) = message.find(" expected sha256:") {
-            let field = message[..expect_pos].rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next();
+            let field = message[..expect_pos]
+                .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next();
             let digest = &message[expect_pos + " expected ".len()..];
-            let digest: String = digest.chars().take_while(|c| c.is_ascii_hexdigit() || *c == ':').collect();
+            let digest: String = digest
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == ':')
+                .collect();
             if let (Some(field), true) = (field, digest.len() == 71)
-                && field.starts_with("pinned_") && field.ends_with("_digest")
+                && field.starts_with("pinned_")
+                && field.ends_with("_digest")
             {
                 pins.insert(field.to_owned(), Value::String(digest));
                 found = true;
@@ -1838,22 +1856,24 @@ async fn settle_attempt(
         args["format"] = json!("json");
         call_json_tool(harness, project_root, tool, args)
     };
-    let status = |attempt: &str| {
-        json!({"task_id": task_id, "run_id": run_id, "attempt_id": attempt})
-    };
-    let started = call("tracedecay_work_start_attempt", json!({
-        "task_id": task_id,
-        "run_id": run_id,
-        "attempt_id": attempt_id,
-        "operation": "operation.work.start_attempt",
-        "execution_snapshot": execution_snapshot,
-        "worktree_root": project_root,
-        "reference": null,
-        "commit": commit,
-        "instructions": "Bench lifecycle attempt.",
-        "effect_state": "observational",
-        "occurred_at": now_micros(),
-    }))
+    let status =
+        |attempt: &str| json!({"task_id": task_id, "run_id": run_id, "attempt_id": attempt});
+    let started = call(
+        "tracedecay_work_start_attempt",
+        json!({
+            "task_id": task_id,
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "operation": "operation.work.start_attempt",
+            "execution_snapshot": execution_snapshot,
+            "worktree_root": project_root,
+            "reference": null,
+            "commit": commit,
+            "instructions": "Bench lifecycle attempt.",
+            "effect_state": "observational",
+            "occurred_at": now_micros(),
+        }),
+    )
     .await;
     let identity = started
         .as_ref()
@@ -1865,7 +1885,10 @@ async fn settle_attempt(
         if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await {
             state = dig_str(&s, "state").unwrap_or("").to_owned();
             if state == "running"
-                || matches!(state.as_str(), "succeeded" | "failed" | "timed_out" | "cancelled")
+                || matches!(
+                    state.as_str(),
+                    "succeeded" | "failed" | "timed_out" | "cancelled"
+                )
             {
                 break;
             }
@@ -1873,13 +1896,16 @@ async fn settle_attempt(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if state == "running" {
-        let _ = call("tracedecay_work_cancel_attempt", json!({
-            "task_id": task_id,
-            "run_id": run_id,
-            "attempt_id": attempt_id,
-            "request_id": format!("cancel.bench.{attempt_id}"),
-            "occurred_at": now_micros(),
-        }))
+        let _ = call(
+            "tracedecay_work_cancel_attempt",
+            json!({
+                "task_id": task_id,
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "request_id": format!("cancel.bench.{attempt_id}"),
+                "occurred_at": now_micros(),
+            }),
+        )
         .await;
         for _ in 0..60 {
             if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await
@@ -1929,8 +1955,13 @@ async fn seed_work(
         commit: commit.clone(),
         ..WorkSeeds::default()
     };
-    let suffix = format!("{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    let suffix = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
     let occurred_at = now_micros();
     let ids = [
         ("initiative_id", format!("initiative.bench.{suffix}")),
@@ -1942,7 +1973,12 @@ async fn seed_work(
         ("attempt_id", format!("attempt.bench.{suffix}")),
         ("dup_attempt_id", format!("attempt.dup.bench.{suffix}")),
     ];
-    let id = |k: &str| ids.iter().find(|(key, _)| *key == k).map(|(_, v)| v.clone()).unwrap();
+    let id = |k: &str| {
+        ids.iter()
+            .find(|(key, _)| *key == k)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
     work.task_id = id("task_id");
     work.run_id = id("run_id");
     work.attempt_id = id("attempt_id");
@@ -1959,17 +1995,23 @@ async fn seed_work(
     let prepared = match opt_err(
         &mut seeds.skipped,
         "work_prepare_graph_mutation",
-        call("tracedecay_work_prepare_graph_mutation", json!({
-            "selection": work.selection,
-            "change": create,
-            "evidence": [],
-        })).await,
+        call(
+            "tracedecay_work_prepare_graph_mutation",
+            json!({
+                "selection": work.selection,
+                "change": create,
+                "evidence": [],
+            }),
+        )
+        .await,
     ) {
         Some(v) => v,
         None => return,
     };
     let Some(request) = dig(&prepared, "request").cloned() else {
-        seeds.skipped.push("work_create: prepare omitted request".to_owned());
+        seeds
+            .skipped
+            .push("work_create: prepare omitted request".to_owned());
         return;
     };
     if let Some(v) = opt_err(
@@ -1978,7 +2020,9 @@ async fn seed_work(
         call("tracedecay_work_create", request).await,
     ) {
         if v.get("replayed") == Some(&Value::Bool(true)) {
-            seeds.skipped.push("work_create: replayed a fresh request".to_owned());
+            seeds
+                .skipped
+                .push("work_create: replayed a fresh request".to_owned());
             return;
         }
     } else {
@@ -1988,18 +2032,24 @@ async fn seed_work(
     let generated = match opt_err(
         &mut seeds.skipped,
         "work_generate_proposal",
-        call("tracedecay_work_generate_proposal", json!({
-            "selection": work.selection,
-            "task_id": work.task_id,
-            "proposal_id": id("proposal_id"),
-            "occurred_at": now_micros(),
-        })).await,
+        call(
+            "tracedecay_work_generate_proposal",
+            json!({
+                "selection": work.selection,
+                "task_id": work.task_id,
+                "proposal_id": id("proposal_id"),
+                "occurred_at": now_micros(),
+            }),
+        )
+        .await,
     ) {
         Some(v) => v,
         None => return,
     };
     let proposal = dig(&generated, "proposal").cloned().unwrap_or(Value::Null);
-    work.initial_version = dig(&generated, "verified_graph_version").cloned().unwrap_or(Value::Null);
+    work.initial_version = dig(&generated, "verified_graph_version")
+        .cloned()
+        .unwrap_or(Value::Null);
 
     let prepared_accept = match opt_err(
         &mut seeds.skipped,
@@ -2014,7 +2064,9 @@ async fn seed_work(
         None => return,
     };
     let Some(accept_request) = dig(&prepared_accept, "request").cloned() else {
-        seeds.skipped.push("work_accept_proposal: prepare omitted request".to_owned());
+        seeds
+            .skipped
+            .push("work_accept_proposal: prepare omitted request".to_owned());
         return;
     };
     let accepted = match opt_err(
@@ -2025,26 +2077,36 @@ async fn seed_work(
         Some(v) => v,
         None => return,
     };
-    let accepted_version = dig(&accepted, "verified_graph_version").cloned().unwrap_or(Value::Null);
-    work.accepted_gv = dig(&accepted_version, "graph_version").and_then(Value::as_i64).unwrap_or(0);
+    let accepted_version = dig(&accepted, "verified_graph_version")
+        .cloned()
+        .unwrap_or(Value::Null);
+    work.accepted_gv = dig(&accepted_version, "graph_version")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
 
     let prepared_admit = match opt_err(
         &mut seeds.skipped,
         "work_admit_execution.prepare",
-        call("tracedecay_work_prepare_graph_mutation", json!({
-            "selection": work.selection,
-            "change": {
-                "change": "admit_execution",
-                "task_id": work.task_id,
-            },
-            "evidence": [],
-        })).await,
+        call(
+            "tracedecay_work_prepare_graph_mutation",
+            json!({
+                "selection": work.selection,
+                "change": {
+                    "change": "admit_execution",
+                    "task_id": work.task_id,
+                },
+                "evidence": [],
+            }),
+        )
+        .await,
     ) {
         Some(v) => v,
         None => return,
     };
     let Some(admit_request) = dig(&prepared_admit, "request").cloned() else {
-        seeds.skipped.push("work_admit_execution: prepare omitted request".to_owned());
+        seeds
+            .skipped
+            .push("work_admit_execution: prepare omitted request".to_owned());
         return;
     };
     let admitted = match call("tracedecay_work_admit_execution", admit_request.clone()).await {
@@ -2056,7 +2118,9 @@ async fn seed_work(
             return;
         }
     };
-    work.execution_snapshot = dig(&admitted, "execution_snapshot").cloned().unwrap_or(Value::Null);
+    work.execution_snapshot = dig(&admitted, "execution_snapshot")
+        .cloned()
+        .unwrap_or(Value::Null);
 
     let placement = json!({
         "task_id": work.task_id,
@@ -2088,9 +2152,9 @@ async fn seed_work(
     )
     .await;
     if started.is_err() || identity.is_null() {
-        seeds
-            .skipped
-            .push(format!("work_start_attempt: seed attempt never admitted ({state})"));
+        seeds.skipped.push(format!(
+            "work_start_attempt: seed attempt never admitted ({state})"
+        ));
     } else {
         work.attempt_identity = identity;
     }
@@ -2111,12 +2175,17 @@ async fn seed_work(
     }
 
     // ── current graph read for verified versions + generation ids ────────
-    if let Ok(v) = call("tracedecay_work_views", json!({
-        "selection": work.selection,
-        "mode": {"mode": "current"},
-        "continuation": null,
-        "observed_at": now_micros(),
-    })).await {
+    if let Ok(v) = call(
+        "tracedecay_work_views",
+        json!({
+            "selection": work.selection,
+            "mode": {"mode": "current"},
+            "continuation": null,
+            "observed_at": now_micros(),
+        }),
+    )
+    .await
+    {
         work.current_version = dig(&v, "verified_version").cloned().unwrap_or(Value::Null);
         work.work_generation = dig(&v, "work_generation").cloned();
         work.topology_generation = dig(&v, "topology_generation").cloned();
@@ -2124,9 +2193,18 @@ async fn seed_work(
 
     // ── workflow: repair environment pins, register + activate + run ─────
     let mut pins = serde_json::Map::from_iter([
-        ("pinned_policy_digest".to_owned(), json!("sha256:".to_owned() + &"0".repeat(64))),
-        ("pinned_configuration_digest".to_owned(), json!("sha256:".to_owned() + &"0".repeat(64))),
-        ("pinned_catalog_digest".to_owned(), json!("sha256:".to_owned() + &"0".repeat(64))),
+        (
+            "pinned_policy_digest".to_owned(),
+            json!("sha256:".to_owned() + &"0".repeat(64)),
+        ),
+        (
+            "pinned_configuration_digest".to_owned(),
+            json!("sha256:".to_owned() + &"0".repeat(64)),
+        ),
+        (
+            "pinned_catalog_digest".to_owned(),
+            json!("sha256:".to_owned() + &"0".repeat(64)),
+        ),
     ]);
     let definition_id = format!("workflow.bench.{suffix}");
     let mut definition = json!({
@@ -2156,7 +2234,11 @@ async fn seed_work(
         .await;
         let Ok(resp) = resp else { break };
         if repair_definition_pins(&resp, &mut pins) {
-            for k in ["pinned_policy_digest", "pinned_configuration_digest", "pinned_catalog_digest"] {
+            for k in [
+                "pinned_policy_digest",
+                "pinned_configuration_digest",
+                "pinned_catalog_digest",
+            ] {
                 if let Some(v) = pins.get(k) {
                     definition[k] = v.clone();
                 }

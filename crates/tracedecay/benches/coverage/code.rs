@@ -266,9 +266,9 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             tool: "tracedecay_rename_symbol",
             queries: five(|_i| {
                 eqc(
-                "tracedecay_rename_symbol",
-                "rename_plan",
-                json!({
+                    "tracedecay_rename_symbol",
+                    "rename_plan",
+                    json!({
                     "node_id": "{{rp_id}}",
                     "qualified_name": "{{rp_qname}}",
                     "kind": "{{rp_kind}}",
@@ -389,24 +389,22 @@ fn p_rename(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
         .and_then(Value::as_str)
         .unwrap_or("missing")
         .to_owned();
-    vec![
-        PrimeStep {
-            inject: Vec::new(),
-            tool: "tracedecay_rename_preview",
-            args: json!({
-                "node_id": node_id,
-                "new_name": "bench_renamed_{{iter}}",
-                "format": "json",
-            }),
-            capture: &[
-                ("digpath:node:id", "rp_id"),
-                ("digpath:node:qualified_name", "rp_qname"),
-                ("digpath:node:kind", "rp_kind"),
-                ("digpath:node:file", "rp_file"),
-                ("digpath:node:name", "rp_name"),
-            ],
-        },
-    ]
+    vec![PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_rename_preview",
+        args: json!({
+            "node_id": node_id,
+            "new_name": "bench_renamed_{{iter}}",
+            "format": "json",
+        }),
+        capture: &[
+            ("digpath:node:id", "rp_id"),
+            ("digpath:node:qualified_name", "rp_qname"),
+            ("digpath:node:kind", "rp_kind"),
+            ("digpath:node:file", "rp_file"),
+            ("digpath:node:name", "rp_name"),
+        ],
+    }]
 }
 
 fn sym_inject(ctx: &QueryContext, target: &Option<String>) -> Vec<(String, Value)> {

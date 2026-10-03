@@ -36,11 +36,12 @@ fn selectors(ctx: &QueryContext) -> Value {
 /// Selectors + a minted handle (status/cancel inputs).
 fn refresh_args(ctx: &QueryContext) -> Value {
     let mut args = selectors(ctx);
-    args["handle"] = json!(ctx
-        .seeds
-        .refresh_handle
-        .clone()
-        .unwrap_or_else(|| "td-bench-refresh-missing".into()));
+    args["handle"] = json!(
+        ctx.seeds
+            .refresh_handle
+            .clone()
+            .unwrap_or_else(|| "td-bench-refresh-missing".into())
+    );
     args
 }
 
@@ -57,7 +58,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     // whole family stays an honest seed-ledger skip.
     let has_session = ctx.seeds.lcm_session.is_some();
     if has_session {
-    out.push(ToolGroup {
+        out.push(ToolGroup {
         tool: "tracedecay_message_search",
         queries: five(|i| {
             rq(
@@ -72,44 +73,44 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             )
         }),
     });
-    out.push(ToolGroup {
-        tool: "tracedecay_session_lookup",
-        queries: five(|i| {
-            rq(
-                "tracedecay_session_lookup",
-                "session_lookup",
-                json!({
-                    "session_id": session,
-                    "meta": lookup_meta("temporal_descending", 5 + i as u32),
-                }),
-            )
-        }),
-    });
-    out.push(ToolGroup {
-        tool: "tracedecay_workflows",
-        queries: five(|_i| {
-            rq(
-                "tracedecay_workflows",
-                "workflows",
-                json!({"session_id": session, "limit": 10}),
-            )
-        }),
-    });
-    out.push(ToolGroup {
-        tool: "tracedecay_lcm_describe",
-        queries: five(|_i| {
-            rq(
-                "tracedecay_lcm_describe",
-                "lcm_describe",
-                json!({
-                    "provider": "codex",
-                    "session_id": session,
-                    "target": {"kind": "canonical_occurrence", "message_id": msg_id},
-                }),
-            )
-        }),
-    });
-    out.push(ToolGroup {
+        out.push(ToolGroup {
+            tool: "tracedecay_session_lookup",
+            queries: five(|i| {
+                rq(
+                    "tracedecay_session_lookup",
+                    "session_lookup",
+                    json!({
+                        "session_id": session,
+                        "meta": lookup_meta("temporal_descending", 5 + i as u32),
+                    }),
+                )
+            }),
+        });
+        out.push(ToolGroup {
+            tool: "tracedecay_workflows",
+            queries: five(|_i| {
+                rq(
+                    "tracedecay_workflows",
+                    "workflows",
+                    json!({"session_id": session, "limit": 10}),
+                )
+            }),
+        });
+        out.push(ToolGroup {
+            tool: "tracedecay_lcm_describe",
+            queries: five(|_i| {
+                rq(
+                    "tracedecay_lcm_describe",
+                    "lcm_describe",
+                    json!({
+                        "provider": "codex",
+                        "session_id": session,
+                        "target": {"kind": "canonical_occurrence", "message_id": msg_id},
+                    }),
+                )
+            }),
+        });
+        out.push(ToolGroup {
         tool: "tracedecay_lcm_expand_query",
         queries: five(|i| {
             rq(
@@ -124,21 +125,21 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             )
         }),
     });
-    out.push(ToolGroup {
-        tool: "tracedecay_lcm_expand",
-        queries: five(|_i| {
-            rq(
-                "tracedecay_lcm_expand",
-                "lcm_expand",
-                json!({
-                    "provider": "codex",
-                    "session_id": session,
-                    "target": {"kind": "canonical_occurrence", "message_id": msg_id},
-                }),
-            )
-        }),
-    });
-    out.push(ToolGroup {
+        out.push(ToolGroup {
+            tool: "tracedecay_lcm_expand",
+            queries: five(|_i| {
+                rq(
+                    "tracedecay_lcm_expand",
+                    "lcm_expand",
+                    json!({
+                        "provider": "codex",
+                        "session_id": session,
+                        "target": {"kind": "canonical_occurrence", "message_id": msg_id},
+                    }),
+                )
+            }),
+        });
+        out.push(ToolGroup {
         tool: "tracedecay_lcm_grep",
         queries: five(|i| {
             rq(
@@ -153,26 +154,24 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             )
         }),
     });
-    out.push(ToolGroup {
-        tool: "tracedecay_lcm_status",
-        queries: five(|i| {
-            rq(
-                "tracedecay_lcm_status",
-                "lcm_status",
-                json!({
-                    "session_id": session,
-                    "provider": "codex",
-                    "deep": i % 2 == 0,
-                }),
-            )
-        }),
-    });
+        out.push(ToolGroup {
+            tool: "tracedecay_lcm_status",
+            queries: five(|i| {
+                rq(
+                    "tracedecay_lcm_status",
+                    "lcm_status",
+                    json!({
+                        "session_id": session,
+                        "provider": "codex",
+                        "deep": i % 2 == 0,
+                    }),
+                )
+            }),
+        });
     }
     out.push(ToolGroup {
         tool: "tracedecay_lcm_doctor",
-        queries: five(|_i| {
-            rq("tracedecay_lcm_doctor", "lcm_doctor", json!({}))
-        }),
+        queries: five(|_i| rq("tracedecay_lcm_doctor", "lcm_doctor", json!({}))),
     });
     if let Some(branch) = ctx.seeds.branch.clone() {
         out.push(ToolGroup {
@@ -191,40 +190,40 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     // selector envelope plus the minted handle. Skips with the session
     // family when no refreshable session exists.
     if ctx.seeds.refresh_selectors.is_some() {
-    out.push(ToolGroup {
-        tool: "tracedecay_session_refresh_begin",
-        queries: five(|_i| {
-            eq(
-                "tracedecay_session_refresh_begin",
-                "refresh_begin",
-                selectors(ctx),
-                |_ctx, _iter| Vec::new(),
-            )
-        }),
-    });
-    out.push(ToolGroup {
-        tool: "tracedecay_session_refresh_status",
-        queries: five(|_i| {
-            rq(
-                "tracedecay_session_refresh_status",
-                "refresh_status",
-                refresh_args(ctx),
-            )
-        }),
-    });
-    out.push(ToolGroup {
-        tool: "tracedecay_session_refresh_cancel",
-        queries: five(|_i| {
-            let mut args = selectors(ctx);
-            args["handle"] = json!("{{handle}}");
-            eq(
-                "tracedecay_session_refresh_cancel",
-                "refresh_cancel",
-                args,
-                |ctx, _iter| vec![begin_prime(ctx)],
-            )
-        }),
-    });
+        out.push(ToolGroup {
+            tool: "tracedecay_session_refresh_begin",
+            queries: five(|_i| {
+                eq(
+                    "tracedecay_session_refresh_begin",
+                    "refresh_begin",
+                    selectors(ctx),
+                    |_ctx, _iter| Vec::new(),
+                )
+            }),
+        });
+        out.push(ToolGroup {
+            tool: "tracedecay_session_refresh_status",
+            queries: five(|_i| {
+                rq(
+                    "tracedecay_session_refresh_status",
+                    "refresh_status",
+                    refresh_args(ctx),
+                )
+            }),
+        });
+        out.push(ToolGroup {
+            tool: "tracedecay_session_refresh_cancel",
+            queries: five(|_i| {
+                let mut args = selectors(ctx);
+                args["handle"] = json!("{{handle}}");
+                eq(
+                    "tracedecay_session_refresh_cancel",
+                    "refresh_cancel",
+                    args,
+                    |ctx, _iter| vec![begin_prime(ctx)],
+                )
+            }),
+        });
     }
 }
 
@@ -232,7 +231,7 @@ fn begin_prime(ctx: &QueryContext) -> PrimeStep {
     let mut args = selectors(ctx);
     args["format"] = json!("json");
     PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_session_refresh_begin",
         args,
         capture: &[("dig:handle", "handle")],

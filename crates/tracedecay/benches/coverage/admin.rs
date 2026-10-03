@@ -15,19 +15,39 @@ fn path_at(ctx: &QueryContext, i: usize) -> String {
 pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     for (tool, label, extra) in [
         ("tracedecay_status", "status", json!({})),
-        ("tracedecay_storage_status", "storage_status", json!({"include_details": true})),
+        (
+            "tracedecay_storage_status",
+            "storage_status",
+            json!({"include_details": true}),
+        ),
         ("tracedecay_health", "health", json!({})),
         ("tracedecay_health_read", "health_read", json!({})),
         ("tracedecay_runtime", "runtime", json!({})),
         ("tracedecay_configuration_list", "config_list", json!({})),
-        ("tracedecay_configuration_observed_state", "config_observed", json!({})),
-        ("tracedecay_configuration_audit", "config_audit", json!({"limit": 25})),
+        (
+            "tracedecay_configuration_observed_state",
+            "config_observed",
+            json!({}),
+        ),
+        (
+            "tracedecay_configuration_audit",
+            "config_audit",
+            json!({"limit": 25}),
+        ),
         ("tracedecay_active_project", "active_project", json!({})),
         ("tracedecay_remote_status", "remote_status", json!({})),
         ("tracedecay_analytics", "analytics", json!({})),
         ("tracedecay_dashboard", "dashboard", json!({})),
-        ("tracedecay_observatory_read", "observatory_read", json!({"window_days": 7})),
-        ("tracedecay_skill_list", "skill_list", json!({"include_body": false})),
+        (
+            "tracedecay_observatory_read",
+            "observatory_read",
+            json!({"window_days": 7}),
+        ),
+        (
+            "tracedecay_skill_list",
+            "skill_list",
+            json!({"include_body": false}),
+        ),
         ("tracedecay_hermes_skill_bridge", "hermes_bridge", json!({})),
     ] {
         out.push(ToolGroup {
@@ -132,10 +152,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                         "preview_id": "{{ni_preview_id}}",
                         "preview_digest": "{{ni_preview_digest}}",
                     }),
-                    |ctx, _iter| vec![
-                        native_snapshot_step(ctx),
-                        native_preflight_step(),
-                    ],
+                    |ctx, _iter| vec![native_snapshot_step(ctx), native_preflight_step()],
                 )
             }),
         });
@@ -152,11 +169,13 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                         "approval_digest": "{{ni_approval_digest}}",
                         "transaction_id": "{{ni_transaction_id}}",
                     }),
-                    |ctx, _iter| vec![
-                        native_snapshot_step(ctx),
-                        native_preflight_step(),
-                        native_approve_step(),
-                    ],
+                    |ctx, _iter| {
+                        vec![
+                            native_snapshot_step(ctx),
+                            native_preflight_step(),
+                            native_approve_step(),
+                        ]
+                    },
                 )
             }),
         });
@@ -167,18 +186,17 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "tracedecay_cancel_native_integration",
                     "native_cancel",
                     json!({"transaction_id": "{{ni_transaction_id}}"}),
-                    |ctx, _iter| vec![
-                        native_snapshot_step(ctx),
-                        native_preflight_step(),
-                    ],
+                    |ctx, _iter| vec![native_snapshot_step(ctx), native_preflight_step()],
                 )
             }),
         });
     }
     // worktree inventory + cleanup chain all claim the seeded scope_set
-    // identity; cleanup inspect seeds digests for confirm/reconcile/remove.
+    // identity; cleanup tools target the registered worktree (repository
+    // targets are only valid for inventory), and inspect seeds digests for
+    // confirm/reconcile/remove.
     let wt_target = json!({
-        "kind": "repository",
+        "kind": "worktree",
         "project_id": ctx
             .seeds
             .project_id
@@ -189,6 +207,11 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             .repository_id
             .clone()
             .unwrap_or_else(|| "td-bench-missing".into()),
+        "worktree_id": ctx
+            .seeds
+            .worktree_id
+            .clone()
+            .unwrap_or_else(|| "worktree.bench.missing".into()),
     });
     let wt_claim = move |extra: Value| {
         let mut a = json!({
@@ -213,7 +236,25 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     out.push(ToolGroup {
         tool: "tracedecay_worktree_inventory",
         queries: five(|_i| {
-            rqn("tracedecay_worktree_inventory", "wt_inventory", wt_claim(json!({})))
+            rqn(
+                "tracedecay_worktree_inventory",
+                "wt_inventory",
+                wt_claim(json!({
+                    "target": {
+                        "kind": "repository",
+                        "project_id": ctx
+                            .seeds
+                            .project_id
+                            .clone()
+                            .unwrap_or_else(|| "td-bench-missing".into()),
+                        "repository_id": ctx
+                            .seeds
+                            .repository_id
+                            .clone()
+                            .unwrap_or_else(|| "td-bench-missing".into()),
+                    }
+                })),
+            )
         }),
     });
     out.push(ToolGroup {
@@ -229,7 +270,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     });
     for (tool, label) in [
         ("tracedecay_worktree_cleanup_confirm", "wt_cleanup_confirm"),
-        ("tracedecay_worktree_cleanup_reconcile", "wt_cleanup_reconcile"),
+        (
+            "tracedecay_worktree_cleanup_reconcile",
+            "wt_cleanup_reconcile",
+        ),
         ("tracedecay_worktree_cleanup_remove", "wt_cleanup_remove"),
     ] {
         out.push(ToolGroup {
@@ -282,15 +326,18 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "operation": {
                         "kind": "query",
                         "request": {
-                            "operation": "code_signature_search",
+                            "operation": "code_symbol_search",
                             "request": {
-                                "returns": "str",
-                                "params": [],
-                                "is_async": null,
+                                "query": ctx
+                                    .function_qnames
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "fit".into()),
+                                "lazy_index_ignored_dependencies": true,
                                 "scope": {"path_prefix": null},
                                 "meta": {
                                     "projection": "summary",
-                                    "order": "source_position",
+                                    "order": "relevance",
                                     "cursor": null,
                                 },
                             },
@@ -332,7 +379,11 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     });
     for (tool, label, args) in [
         ("tracedecay_project_context", "project_ctx", json!({})),
-        ("tracedecay_project_list", "project_list", json!({"limit": 10})),
+        (
+            "tracedecay_project_list",
+            "project_list",
+            json!({"limit": 10}),
+        ),
         (
             "tracedecay_project_search",
             "project_search",
@@ -366,7 +417,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     });
     for (tool, label) in [
         ("tracedecay_automation_run_view", "automation_view"),
-        ("tracedecay_automation_run_artifact_view", "automation_artifact"),
+        (
+            "tracedecay_automation_run_artifact_view",
+            "automation_artifact",
+        ),
     ] {
         out.push(ToolGroup {
             tool,
@@ -380,8 +434,12 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 });
                 if tool == "tracedecay_automation_run_artifact_view" {
                     args["kind"] = json!("traces");
+                    // The artifact-view request struct declares no `format`
+                    // field and denies unknown keys — rqn keeps the wire clean.
+                    rqn(tool, label, args)
+                } else {
+                    rq(tool, label, args)
                 }
-                rq(tool, label, args)
             }),
         });
     }
@@ -402,18 +460,66 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         })
     };
     for (tool, label, args) in [
-        ("tracedecay_context_scout_status", "scout_status", json!({"address": scout_addr()})),
-        ("tracedecay_context_scout_recent", "scout_recent", json!({"address": scout_addr(), "limit": 5})),
-        ("tracedecay_context_scout_explain", "scout_explain", json!({"address": scout_addr(), "limit": 5})),
-        ("tracedecay_context_scout_capability", "scout_capability", json!({"address": scout_addr()})),
-        ("tracedecay_context_scout_budget", "scout_budget", json!({"address": scout_addr()})),
-        ("tracedecay_context_scout_claim", "scout_claim", json!({"address": scout_addr(), "window": "observation", "idempotency_key": "bench-scout-claim-{{iter}}"})),
-        ("tracedecay_context_scout_pause", "scout_pause", json!({"address": scout_addr(), "expected_revision": 0, "idempotency_key": "bench-scout-pause-{{iter}}"})),
-        ("tracedecay_context_scout_resume", "scout_resume", json!({"address": scout_addr(), "expected_revision": 0, "idempotency_key": "bench-scout-resume-{{iter}}"})),
-        ("tracedecay_context_scout_cancel", "scout_cancel", json!({"address": scout_addr(), "work": "scout.bench.work", "idempotency_key": "bench-scout-cancel-{{iter}}"})),
-        ("tracedecay_context_scout_delivery", "scout_delivery", json!({"address": scout_addr(), "claim": "scout.bench.claim", "delivered_at": "{{now}}", "outcome": "delivered", "idempotency_key": "bench-scout-delivery-{{iter}}"})),
-        ("tracedecay_context_scout_feedback", "scout_feedback", json!({"address": scout_addr(), "receipt": "scout.bench.receipt", "feedback": {"signal": "useful"}, "idempotency_key": "bench-scout-feedback-{{iter}}"})),
-        ("tracedecay_github_stack_signal_expand", "stack_signal_expand", json!({"signal_id": "td-bench-missing", "format": "json"})),
+        (
+            "tracedecay_context_scout_status",
+            "scout_status",
+            json!({"address": scout_addr()}),
+        ),
+        (
+            "tracedecay_context_scout_recent",
+            "scout_recent",
+            json!({"address": scout_addr(), "limit": 5}),
+        ),
+        (
+            "tracedecay_context_scout_explain",
+            "scout_explain",
+            json!({"address": scout_addr(), "limit": 5}),
+        ),
+        (
+            "tracedecay_context_scout_capability",
+            "scout_capability",
+            json!({"address": scout_addr()}),
+        ),
+        (
+            "tracedecay_context_scout_budget",
+            "scout_budget",
+            json!({"address": scout_addr()}),
+        ),
+        (
+            "tracedecay_context_scout_claim",
+            "scout_claim",
+            json!({"address": scout_addr(), "window": "on_request", "idempotency_key": "bench-scout-claim-{{iter}}"}),
+        ),
+        (
+            "tracedecay_context_scout_pause",
+            "scout_pause",
+            json!({"address": scout_addr(), "expected_revision": "revision.bench.0", "idempotency_key": "bench-scout-pause-{{iter}}"}),
+        ),
+        (
+            "tracedecay_context_scout_resume",
+            "scout_resume",
+            json!({"address": scout_addr(), "expected_revision": "revision.bench.0", "idempotency_key": "bench-scout-resume-{{iter}}"}),
+        ),
+        (
+            "tracedecay_context_scout_cancel",
+            "scout_cancel",
+            json!({"address": scout_addr(), "work": {"address": scout_addr(), "generation": 0, "input_watermark": vec![0u8; 32]}, "idempotency_key": "bench-scout-cancel-{{iter}}"}),
+        ),
+        (
+            "tracedecay_context_scout_delivery",
+            "scout_delivery",
+            json!({"address": scout_addr(), "claim": {"envelope_id": vec![0u8; 16], "lease_id": vec![0u8; 16], "lease_expires_at": "{{now}}"}, "delivered_at": "{{now}}", "outcome": "displayed", "idempotency_key": "bench-scout-delivery-{{iter}}"}),
+        ),
+        (
+            "tracedecay_context_scout_feedback",
+            "scout_feedback",
+            json!({"address": scout_addr(), "receipt": {"receipt_id": vec![0u8; 16], "envelope_id": vec![0u8; 16], "delivered_at": "{{now}}", "outcome": "displayed"}, "feedback": {"receipt_id": vec![0u8; 16], "kind": "explicitly_accepted"}, "idempotency_key": "bench-scout-feedback-{{iter}}"}),
+        ),
+        (
+            "tracedecay_github_stack_signal_expand",
+            "stack_signal_expand",
+            json!({"signal_id": "td-bench-missing", "format": "json"}),
+        ),
         (
             "tracedecay_source_edit_reconcile",
             "source_edit_reconcile",
@@ -430,9 +536,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     ] {
         out.push(ToolGroup {
             tool,
-            queries: five(|_i| {
-                eqn(tool, label, args.clone(), |_ctx, _iter| Vec::new())
-            }),
+            queries: five(|_i| eqn(tool, label, args.clone(), |_ctx, _iter| Vec::new())),
         });
     }
     let _ = path_at;

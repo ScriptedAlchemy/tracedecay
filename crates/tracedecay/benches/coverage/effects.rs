@@ -22,7 +22,7 @@ fn project_layer(ctx: &QueryContext) -> serde_json::Value {
 /// must observe the current revision first.
 fn revision_prime(key: &'static str) -> PrimeStep {
     PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_configuration_get",
         args: json!({"key": key, "format": "json"}),
         capture: &[
@@ -36,7 +36,7 @@ fn revision_prime(key: &'static str) -> PrimeStep {
 /// sweep applies (matches `_changed_topology_policy`).
 fn change_topology_primes() -> Vec<PrimeStep> {
     vec![PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_configuration_get",
         args: json!({"key": TOPOLOGY_KEY, "format": "json"}),
         capture: &[("dig:revision_id", "revision")],
@@ -62,7 +62,7 @@ fn set_args(ctx: &QueryContext, iter_note: &str) -> serde_json::Value {
 /// trimmed policy directly.
 fn changed_policy_step() -> PrimeStep {
     PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_configuration_get",
         args: json!({"key": TOPOLOGY_KEY, "format": "json"}),
         capture: &[
@@ -100,7 +100,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     vec![
                         revision_prime(SCALAR_KEY),
                         PrimeStep {
-    inject: Vec::new(),
+                            inject: Vec::new(),
                             tool: "tracedecay_configuration_set",
                             args: json!({
                                 "layer": project_layer(ctx),

@@ -104,7 +104,14 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
         if history_depth(&dir) < CLONE_DEPTH.parse::<u64>().unwrap_or(1) {
             eprintln!("[bench] deepening {} (depth {CLONE_DEPTH})...", repo.name);
             run_git(
-                &["fetch", "--progress", "--deepen", CLONE_DEPTH, "origin", repo.git_ref],
+                &[
+                    "fetch",
+                    "--progress",
+                    "--deepen",
+                    CLONE_DEPTH,
+                    "origin",
+                    repo.git_ref,
+                ],
                 Some(&dir),
             )?;
         }

@@ -112,9 +112,7 @@ async fn call_tool_retried(
 /// the application authority never mounted under this composition — a
 /// composition-level truth, so the lane is named and skipped rather than
 /// measured as an error path or panicked on.
-fn unavailable_problem(
-    response: &tracedecay_mcp::jsonrpc::JsonRpcResponse,
-) -> Option<String> {
+fn unavailable_problem(response: &tracedecay_mcp::jsonrpc::JsonRpcResponse) -> Option<String> {
     let problem = response_problem(response)?;
     let unavailable = problem.get("kind").and_then(Value::as_str) == Some("unavailable")
         && problem.get("retryable").and_then(Value::as_bool) == Some(true);
@@ -150,7 +148,12 @@ fn problem_code(problem: &Value) -> String {
 /// with no structuredContent problem envelope. Normalize that into the same
 /// retryable-unavailable signal the seeded ledger keys on.
 fn content_text_problem(result: &Value) -> Option<Value> {
-    let text = result.get("content")?.as_array()?.first()?.get("text")?.as_str()?;
+    let text = result
+        .get("content")?
+        .as_array()?
+        .first()?
+        .get("text")?
+        .as_str()?;
     let mut parsed: Value = serde_json::from_str(text).ok()?;
     // A nested `problem` envelope is authoritative where present.
     if let Some(problem) = parsed.get("problem") {
@@ -164,9 +167,7 @@ fn content_text_problem(result: &Value) -> Option<Value> {
     }
     let unavailable = parsed.get("status").and_then(Value::as_str) == Some("unavailable")
         || parsed.get("kind").and_then(Value::as_str) == Some("unavailable");
-    if unavailable
-        && let Value::Object(map) = &mut parsed
-    {
+    if unavailable && let Value::Object(map) = &mut parsed {
         map.entry("kind")
             .or_insert_with(|| Value::from("unavailable"));
     }
@@ -182,8 +183,7 @@ fn run_query(
     rt.block_on(async {
         // Preserve the complete wire response so criterion cannot optimize the
         // mounted JSON-RPC dispatch or response rendering away.
-        match call_tool_retried(harness, project_root, q.tool, q.args.clone()).await
-        {
+        match call_tool_retried(harness, project_root, q.tool, q.args.clone()).await {
             Ok(response) => {
                 if response.error.is_some()
                     || response
@@ -239,7 +239,12 @@ fn run_primes(
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, &tokens);
         let payload = rt
-            .block_on(queries::call_json_tool(harness, project_root, step.tool, args))
+            .block_on(queries::call_json_tool(
+                harness,
+                project_root,
+                step.tool,
+                args,
+            ))
             .map_err(|error| format!("{} prime step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, &mut tokens, q)?;
     }
@@ -267,7 +272,7 @@ fn capture_tokens(
                 return Err(format!(
                     "{} step could not capture '{path}' (token '{token}'): {payload}",
                     q.tool
-                ))
+                ));
             }
         }
     }
@@ -289,6 +294,9 @@ fn run_cleanup(
 ) -> Result<(), String> {
     capture_tokens(timed_payload, cleanup.capture, tokens, q)?;
     for step in (cleanup.steps)(ctx, iteration) {
+        // Cleanup calls commit real events after the timed call: `{{now}}`
+        // must postdate it just as it does across prime steps.
+        tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
         for (name, mut value) in step.inject {
             coverage::substitute_tokens(&mut value, &tokens);
             tokens.insert(name, value);
@@ -296,7 +304,12 @@ fn run_cleanup(
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, tokens);
         let payload = rt
-            .block_on(queries::call_json_tool(harness, project_root, step.tool, args))
+            .block_on(queries::call_json_tool(
+                harness,
+                project_root,
+                step.tool,
+                args,
+            ))
             .map_err(|error| format!("{} cleanup step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, tokens, q)?;
     }
@@ -312,7 +325,9 @@ fn run_effect_query(
 ) -> Result<Value, String> {
     rt.block_on(async {
         match call_tool_retried(harness, project_root, q.tool, args).await {
-            Ok(response) => queries::json_tool_payload(q.tool, &response).map_err(|e| e.to_string()),
+            Ok(response) => {
+                queries::json_tool_payload(q.tool, &response).map_err(|e| e.to_string())
+            }
             Err(error) => Err(format!("{} transport failed: {error}", q.tool)),
         }
     })
@@ -412,8 +427,7 @@ fn bench_all(c: &mut Criterion) {
                         "[bench] reopening composition so the seeded work provider binding mounts..."
                     );
                     rt.block_on(harness.shutdown());
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(240);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
                     harness = loop {
                         match rt.block_on(ProductionProjectCompositionHarnessV1::open(
                             &root,
@@ -422,9 +436,7 @@ fn bench_all(c: &mut Criterion) {
                             Ok(harness) => break harness,
                             Err(error) => {
                                 if std::time::Instant::now() >= deadline {
-                                    eprintln!(
-                                        "[bench] composition reopen failed: {error}"
-                                    );
+                                    eprintln!("[bench] composition reopen failed: {error}");
                                     return;
                                 }
                                 eprintln!(
@@ -487,9 +499,8 @@ fn bench_all(c: &mut Criterion) {
                                         let code = response_problem(&resp)
                                             .map(|p| problem_code(&p))
                                             .unwrap_or_else(|| "unknown".to_owned());
-                                        read_warm_error = Some(format!(
-                                            "warm-up error response ({code})"
-                                        ));
+                                        read_warm_error =
+                                            Some(format!("warm-up error response ({code})"));
                                         break;
                                     }
                                     if unavailable.is_none() {
@@ -511,7 +522,13 @@ fn bench_all(c: &mut Criterion) {
                     QueryKind::Effect { prime, cleanup } => {
                         let mut iteration = coverage::now_micros() as u64;
                         let warm = run_primes(
-                            &rt, &harness, &rb.dir, &rb.ctx, first, *prime, &mut iteration,
+                            &rt,
+                            &harness,
+                            &rb.dir,
+                            &rb.ctx,
+                            first,
+                            *prime,
+                            &mut iteration,
                         )
                         .and_then(|(args, mut tokens)| {
                             run_effect_query(&rt, &harness, &rb.dir, first, args).and_then(
@@ -659,19 +676,33 @@ fn bench_all(c: &mut Criterion) {
                             b.iter_batched(
                                 || {
                                     (
-                                        run_primes(&rt, &harness, &rb.dir, &rb.ctx, q, *prime, &mut iteration)
-                                            .unwrap_or_else(|e| panic!("{e}")),
+                                        run_primes(
+                                            &rt,
+                                            &harness,
+                                            &rb.dir,
+                                            &rb.ctx,
+                                            q,
+                                            *prime,
+                                            &mut iteration,
+                                        )
+                                        .unwrap_or_else(|e| panic!("{e}")),
                                         iteration,
                                     )
                                 },
                                 |((args, mut tokens), iter)| {
-                                    let payload =
-                                        run_effect_query(&rt, &harness, &rb.dir, q, args)
-                                            .unwrap_or_else(|e| panic!("{e}"));
+                                    let payload = run_effect_query(&rt, &harness, &rb.dir, q, args)
+                                        .unwrap_or_else(|e| panic!("{e}"));
                                     if let Some(cleanup) = cleanup {
                                         run_cleanup(
-                                            &rt, &harness, &rb.dir, &rb.ctx, q, &payload,
-                                            &mut tokens, cleanup, iter,
+                                            &rt,
+                                            &harness,
+                                            &rb.dir,
+                                            &rb.ctx,
+                                            q,
+                                            &payload,
+                                            &mut tokens,
+                                            cleanup,
+                                            iter,
                                         )
                                         .unwrap_or_else(|e| panic!("{e}"));
                                     }

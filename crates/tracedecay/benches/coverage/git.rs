@@ -58,11 +58,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             )
         }),
     });
-    if !ctx
-        .seeds
-        .unavailable_tools
-        .contains("tracedecay_git_blame")
-    {
+    if !ctx.seeds.unavailable_tools.contains("tracedecay_git_blame") {
         out.push(ToolGroup {
             tool: "tracedecay_git_blame",
             queries: five(|i| {
@@ -116,10 +112,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             )
         }),
     });
-    if let (Some(base), Some(head)) = (
-        ctx.seeds.base_branch.clone(),
-        ctx.seeds.branch.clone(),
-    ) {
+    if let (Some(base), Some(head)) = (ctx.seeds.base_branch.clone(), ctx.seeds.branch.clone()) {
         out.push(ToolGroup {
             tool: "tracedecay_branch_diff",
             queries: five(|_i| {
@@ -140,7 +133,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     // preview input each iteration since previews expire on consumption.
     fn preview_primes(_ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
         vec![PrimeStep {
-    inject: Vec::new(),
+            inject: Vec::new(),
             tool: "tracedecay_git_hunks",
             args: json!({"scope": "working_tree", "format": "json"}),
             capture: &[
@@ -151,8 +144,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     }
     // Preview/apply lanes only run when seeding proved the hunk evidence
     // path serves a real preview input for this composition's dirty file.
-    let preview_ready = ctx.seeds.preview_input_id.is_some()
-        && !ctx.seeds.hunk_digests.is_empty();
+    let preview_ready = ctx.seeds.preview_input_id.is_some() && !ctx.seeds.hunk_digests.is_empty();
     if preview_ready {
         out.push(ToolGroup {
             tool: "tracedecay_git_preview",
@@ -183,7 +175,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     |ctx, iter| {
                         let mut steps = preview_primes(ctx, iter);
                         steps.push(PrimeStep {
-    inject: Vec::new(),
+                            inject: Vec::new(),
                             tool: "tracedecay_git_preview",
                             args: json!({
                                 "operation": "stage_hunks",

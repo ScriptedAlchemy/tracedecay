@@ -18,10 +18,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         .as_ref()
         .map(|p| (p.0.clone(), p.1.clone(), p.2.clone()))
         .unwrap_or_else(|| ("missing".into(), "missing".into(), "missing".into()));
-    let entities = pair
-        .as_ref()
-        .map(|p| p.3.clone())
-        .unwrap_or_default();
+    let entities = pair.as_ref().map(|p| p.3.clone()).unwrap_or_default();
 
     out.push(ToolGroup {
         tool: "tracedecay_fact_store_get",
@@ -67,10 +64,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "add",
                 fact_add_args(
                     "bench added fact",
-                    &[
-                        format!("bench-alpha-{i}"),
-                        format!("bench-beta-{i}"),
-                    ],
+                    &[format!("bench-alpha-{i}"), format!("bench-beta-{i}")],
                     0.9,
                 ),
                 no_primes,
@@ -155,10 +149,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             "tracedecay_fact_store_reason",
             json!({"entities": entities, "limit": 10}),
         ),
-        (
-            "tracedecay_fact_store_contradict",
-            json!({"limit": 10}),
-        ),
+        ("tracedecay_fact_store_contradict", json!({"limit": 10})),
         (
             "tracedecay_fact_store_curate",
             json!({"fact_review_limit": 10, "min_confidence_millionths": 0}),
@@ -206,15 +197,35 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             });
         };
     }
-    feedback_read!("tracedecay_feedback_impact", "impact", "digany:impact_handle");
-    feedback_read!("tracedecay_feedback_list", "flist", "digany:list_handle,request_handle");
+    feedback_read!(
+        "tracedecay_feedback_impact",
+        "impact",
+        "digany:impact_handle"
+    );
+    feedback_read!(
+        "tracedecay_feedback_list",
+        "flist",
+        "digany:list_handle,request_handle"
+    );
     feedback_read!("tracedecay_feedback_get", "get", "digany:get_handle");
-    feedback_read!("tracedecay_feedback_expand", "expand", "digany:expansion_handle");
-    feedback_read!("tracedecay_feedback_diagnostics", "diagnostics", "digany:diagnostics_handle");
+    feedback_read!(
+        "tracedecay_feedback_expand",
+        "expand",
+        "digany:expansion_handle"
+    );
+    feedback_read!(
+        "tracedecay_feedback_diagnostics",
+        "diagnostics",
+        "digany:diagnostics_handle"
+    );
     // affected_tests reads the affected set the advisory cycle retained under
     // its minted handle; test_results reads the managed run a primed
     // run_affected_tests execution retained.
-    feedback_read!("tracedecay_affected_tests", "affected", "digany:request_handle");
+    feedback_read!(
+        "tracedecay_affected_tests",
+        "affected",
+        "digany:request_handle"
+    );
     out.push(ToolGroup {
         tool: "tracedecay_test_results",
         queries: five(|_i| {
@@ -240,7 +251,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
 
 fn affected_results_prime(ctx: &QueryContext, iter: u64) -> Vec<PrimeStep> {
     vec![PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_run_affected_tests",
         args: json!({
             "changed_paths": [ctx
@@ -271,7 +282,7 @@ fn add_step_named(iter: u64, tag: &str, token: &'static str) -> PrimeStep {
         _ => &[("dig:fact_id", "fact_id")],
     };
     PrimeStep {
-    inject: Vec::new(),
+        inject: Vec::new(),
         tool: "tracedecay_fact_store_add",
         args,
         capture,
