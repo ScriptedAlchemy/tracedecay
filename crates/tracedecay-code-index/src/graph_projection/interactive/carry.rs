@@ -215,7 +215,7 @@ enum EntityContent {
     Symbol {
         identity: GraphEntityId,
         occurrence: SymbolOccurrenceId,
-        row: SymbolRow,
+        row: Box<SymbolRow>,
     },
     Import {
         identity: GraphEntityId,
@@ -233,11 +233,11 @@ impl EntityContent {
             Self::Symbol {
                 identity: entity.identity.clone(),
                 occurrence: record.occurrence,
-                row: SymbolRow {
+                row: Box::new(SymbolRow {
                     binding: record.binding,
                     metadata: record.metadata,
                     unresolved_calls: record.unresolved_calls,
-                },
+                }),
             }
         } else if has_label(entity, IMPORT_LABEL) {
             Self::Import {
@@ -264,15 +264,13 @@ impl EntityContent {
                     .cloned()
                     .ok_or_else(|| corrupt("catalog layer names a file the catalog lacks"))?,
             ),
-            DeltaEntityV1::Symbol(occurrence) => {
-                Self::Symbol {
-                    identity: identity.clone(),
-                    occurrence: occurrence.clone(),
-                    row: SymbolRow::of(parent.symbols.get(occurrence).ok_or_else(|| {
-                        corrupt("catalog layer names a symbol the catalog lacks")
-                    })?),
-                }
-            }
+            DeltaEntityV1::Symbol(occurrence) => Self::Symbol {
+                identity: identity.clone(),
+                occurrence: occurrence.clone(),
+                row: Box::new(SymbolRow::of(parent.symbols.get(occurrence).ok_or_else(
+                    || corrupt("catalog layer names a symbol the catalog lacks"),
+                )?)),
+            },
             DeltaEntityV1::Import(import) => Self::Import {
                 identity: identity.clone(),
                 import: import.clone(),
@@ -775,7 +773,7 @@ impl<'a> CatalogCarry<'a> {
                         "code graph catalog carry removes a symbol its predecessor did not hold",
                     )
                 })?;
-                if SymbolRow::of(held) != *row {
+                if SymbolRow::of(held) != **row {
                     return Err(corrupt(
                         "code graph catalog carry removes a symbol record its predecessor did not hold",
                     ));
@@ -839,7 +837,8 @@ impl<'a> CatalogCarry<'a> {
                     self.unresolved_sources_by_entity
                         .insert(identity.clone(), Some(occurrence.clone()));
                 }
-                self.symbols.insert(occurrence.clone(), Some(row.clone()));
+                self.symbols
+                    .insert(occurrence.clone(), Some((**row).clone()));
             }
             EntityContent::Import { identity, import } => {
                 if self
