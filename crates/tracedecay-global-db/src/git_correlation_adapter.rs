@@ -12,18 +12,18 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
-use tracedecay_sessions::runtime::git_correlation::{
-    AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
-    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
-    GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn, GitEvidenceBatch,
-    GitEvidencePassOutcome, GitEvidenceWriter, GitReflogSource, GitScopeFilter,
-    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    converge_git_evidence_pass, open_git_evidence_view, read_meta_value,
-    run_bounded_history_index_page,
-};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
     AnalyticsSessionTimestampSource, BackfillStats, run_backfill,
+};
+use tracedecay_sessions::runtime::git_correlation::{
+    BackfillOptions, BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter,
+    CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
+    GIT_HISTORY_SEQUENCE_FRONTIER_KEY, GitCorrelationError, GitCorrelationSessionStore,
+    GitCorrelationWriteTxn, GitEvidenceBatch, GitEvidencePassOutcome, GitEvidenceWriter,
+    GitReflogSource, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery,
+    SpanObservation, converge_git_evidence_pass, open_git_evidence_view, read_meta_value,
+    run_bounded_history_index_page,
 };
 
 /// Git evidence recorded for a bounded set of sessions, bound to the
@@ -55,8 +55,9 @@ impl RegisteredGlobalDb {
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
+        project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
-        converge_git_evidence_pass(self, git).await
+        converge_git_evidence_pass(self, git, project_root).await
     }
 }
 
@@ -190,8 +191,9 @@ where
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
+        project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
-        converge_git_evidence_pass(self, git).await
+        converge_git_evidence_pass(self, git, project_root).await
     }
 
     #[tracing::instrument(
@@ -213,7 +215,8 @@ where
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
         self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
-        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        let backfill_watermark =
+            read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
         Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => view.health(backfill_watermark),
             // Never recorded: truthfully report the projection as absent
@@ -244,7 +247,8 @@ where
     {
         self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
-        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        let backfill_watermark =
+            read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
         Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => {
                 let results = view.sessions_for(query, relation).await?;
@@ -491,7 +495,7 @@ mod tests {
         let store = GlobalDbGitCorrelationStore::new(harness.registered.clone());
 
         assert!(matches!(
-            store.converge_session_git_evidence(&SystemGit).await,
+            store.converge_session_git_evidence(&SystemGit, None).await,
             Err(GitCorrelationError::Db(message))
                 if message.contains("ProjectSessions")
         ));

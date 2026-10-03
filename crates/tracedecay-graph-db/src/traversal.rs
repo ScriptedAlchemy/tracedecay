@@ -256,6 +256,9 @@ pub(crate) fn visit_outgoing_relation_targets(
                 to: &target.identity,
             },
         )?;
+        // A sealed page is verified when a read first touches it, so each
+        // target waits for its own reads to prove intact before it streams.
+        crate::runtime::ensure_intact(database)?;
         visitor(GraphRelationTarget { relation, target });
         visited = visited
             .checked_add(1)

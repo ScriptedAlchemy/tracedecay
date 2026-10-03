@@ -432,7 +432,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Drop a seat that no longer names the advertised generation. Search
     /// serves the text owner while the seat is empty, and holding the
     /// predecessor's decode would only keep a corpus-sized generation alive.
-    fn release_superseded_serving_seat(
+    pub(super) fn release_superseded_serving_seat(
         serving_generation: &ServingGenerationSlot,
         serving_generation_epoch: &AtomicU64,
         serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
@@ -1616,10 +1616,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     graph_text = match published_text {
                         Ok(Ok(Ok(Some(published_text)))) => {
-                            *worker_text_generation
+                            let mut serving_text = worker_text_generation
                                 .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(published_text.clone());
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            published_text.hold_outgoing_graph(serving_text.as_ref());
+                            *serving_text = Some(published_text.clone());
+                            drop(serving_text);
                             // The publication broadcast went out before the
                             // successor's owner was installed; waiters that
                             // probed in between must wake now.
@@ -2418,6 +2420,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                 match &stop {
                                     GraphPrepareStopV1::ResidentMemory(detail) => {
                                         if !graph_waits_for_text {
+                                            // The outgoing graph held for reads
+                                            // is the headroom this decode needs.
+                                            if let Some(text) = worker_text_generation
+                                                .read()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .as_ref()
+                                            {
+                                                text.release_graph_predecessor();
+                                            }
                                             if !converged {
                                                 park_convergence(
                                                     &worker_convergence_park,

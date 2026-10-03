@@ -3407,6 +3407,279 @@ async fn refused_decode_of_a_graph_serving_publication_seats_on_the_follow_up_pa
     registry.shutdown().await;
 }
 
+/// A publication installs its text owner before that owner's graph activates,
+/// and the activated graph's catalog warms after it serves. Once a deferred
+/// decode has released the seat, the outgoing owner's warm graph is the last
+/// complete one: graph reads serve it stale through both windows instead of
+/// refusing, and serve the successor as soon as its graph is warm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_reads_serve_the_outgoing_warm_graph_until_the_successor_warms() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let root = fixture.path();
+    let canonical_root = canonical_existing_identity(root).expect("canonical fixture");
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first = wait_for_ready_generation(&registry, root)
+        .await
+        .expect("the first generation reaches ready");
+    let first_text = registry
+        .latest_text_serving_for_root(root)
+        .await
+        .expect("the first text owner serves");
+    let first_seat = registry
+        .latest_complete_serving_for_test(root)
+        .await
+        .expect("the first generation is seated");
+    super::install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+    registry.release_serving_seat_for_test(root).await;
+
+    let snapshot = first_text.metadata().snapshot();
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(
+        &operation,
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("a worktree generation"),
+    );
+    let port = crate::project_reads::project_code_graph_projection_read_port(
+        registry.clone(),
+        root.to_path_buf(),
+        context.scope().clone(),
+    );
+    let served = || async {
+        port.open(tracedecay_graph_query::CodeGraphReadRequest::from_context(
+            &context,
+            UtcMicros(1),
+        ))
+        .await
+        .map(|read| (read.generation().as_str().to_owned(), read.freshness()))
+    };
+    assert_eq!(
+        served().await.map(|(generation, _)| generation),
+        Ok(first.clone()),
+        "the text owner serves its warm graph with no seat"
+    );
+
+    let [
+        (before_decode, release_decode),
+        (after_decode, release_after_decode),
+    ] = registry.pause_around_next_graph_decode(canonical_root);
+    fixture.edit("src/lib.rs", "pub fn changed_before_the_seat() {}\n");
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, before_decode)
+        .await
+        .expect("the publication reaches its serving decode")
+        .expect("decode gate stays armed");
+    let first_id = first.as_str();
+    let registry_ref = &registry;
+    let second_text = wait_until_serving_seat(
+        registry_ref,
+        root,
+        SERVING_SEAT_FAILURE_CEILING,
+        || async move {
+            registry_ref
+                .latest_text_serving_for_root(root)
+                .await
+                .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+        },
+    )
+    .await;
+    let second = second_text.metadata().manifest().generation_id.clone();
+    let stale_first = |served: Result<_, _>| {
+        assert!(
+            matches!(
+                &served,
+                Ok((generation, tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale { .. }))
+                    if *generation == first
+            ),
+            "{served:?}"
+        );
+    };
+    stale_first(served().await);
+
+    let binding = registry
+        .code_graph_replay_binding(root, &second)
+        .await
+        .expect("mounted worktree")
+        .expect("sealed replay binding");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let warming = sealed_segment_graph_store(&binding, &second, scratch.path());
+    let reader = warming
+        .evidence_reader_with_cancellation(
+            &second,
+            Some(second_text.metadata().snapshot().repository.clone()),
+            second_text.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph evidence reader");
+    warming
+        .mark_interactive_catalog_warming()
+        .expect("the catalog warms in the background");
+    second_text
+        .install_graph_serving(
+            reader,
+            Some(Arc::clone(&warming)),
+            super::super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("the successor's graph serves from its text owner");
+    stale_first(served().await);
+
+    release_decode.send(()).expect("release the decode");
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, after_decode)
+        .await
+        .expect("the decode returns")
+        .expect("decode gate stays armed");
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+    let scope = context.scope().clone();
+    let scope_ref = &scope;
+    let second_ref = &second;
+    wait_until_serving_seat(
+        registry_ref,
+        root,
+        SERVING_SEAT_FAILURE_CEILING,
+        || async move {
+            registry_ref
+                .latest_complete_ready_decoded_for_root_scope(root, scope_ref)
+                .await
+                .filter(|seated| seated.generation().manifest().generation_id == *second_ref)
+        },
+    )
+    .await;
+    stale_first(served().await);
+
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            root,
+            store.path().to_path_buf(),
+            super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("remount graph-off");
+    assert!(
+        !matches!(served().await, Ok((generation, _)) if generation == first),
+        "a graph turned off by configuration stops serving the outgoing graph"
+    );
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("remount graph-on");
+
+    warming
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("warm the successor's catalog");
+    assert_eq!(
+        served().await.map(|(generation, _)| generation),
+        Ok(second.as_str().to_owned()),
+        "a warm successor graph replaces the outgoing one"
+    );
+    registry.shutdown().await;
+}
+
+/// A graph refused for resident memory needs the headroom the outgoing warm
+/// graph holds, so the refusal releases that graph instead of serving it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_refused_graph_releases_the_outgoing_warm_graph() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let root = fixture.path();
+    let canonical_root = canonical_existing_identity(root).expect("canonical fixture");
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first = wait_for_ready_generation(&registry, root)
+        .await
+        .expect("the first generation reaches ready");
+    let first_text = registry
+        .latest_text_serving_for_root(root)
+        .await
+        .expect("the first text owner serves");
+    let first_seat = registry
+        .latest_complete_serving_for_test(root)
+        .await
+        .expect("the first generation is seated");
+    super::install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+    registry.release_serving_seat_for_test(root).await;
+
+    let [
+        (before_decode, release_decode),
+        (after_decode, release_after_decode),
+    ] = registry.pause_around_next_graph_decode(canonical_root);
+    fixture.edit("src/lib.rs", "pub fn changed_before_the_seat() {}\n");
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, before_decode)
+        .await
+        .expect("the publication reaches its serving decode")
+        .expect("decode gate stays armed");
+    let first_id = first.as_str();
+    let registry_ref = &registry;
+    let second_text = wait_until_serving_seat(
+        registry_ref,
+        root,
+        SERVING_SEAT_FAILURE_CEILING,
+        || async move {
+            registry_ref
+                .latest_text_serving_for_root(root)
+                .await
+                .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+        },
+    )
+    .await;
+    let held = || {
+        second_text
+            .graph_predecessor
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
+    };
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "the successor holds the warm graph"
+    );
+
+    second_text.refuse_graph_activation(
+        super::super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON,
+    );
+    assert_eq!(
+        held(),
+        None,
+        "the memory refusal releases the outgoing graph"
+    );
+
+    release_decode.send(()).expect("release the decode");
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, after_decode)
+        .await
+        .expect("the decode returns")
+        .expect("decode gate stays armed");
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+    registry.shutdown().await;
+}
+
 /// A serving decode that fails for a reason no holder will release parks
 /// typed, so status names the failure instead of an eternal `indexing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
