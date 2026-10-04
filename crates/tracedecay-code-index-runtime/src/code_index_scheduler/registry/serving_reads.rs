@@ -860,10 +860,11 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;
-            unique_mounted_for_scope(&mounted, scope)
-                .unique()?
-                .0
-                .clone()
+            let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            if !worktree.graph_activation.policy().is_enabled() {
+                return None;
+            }
+            root.clone()
         };
         let root = &root;
         let slots = || async move {
