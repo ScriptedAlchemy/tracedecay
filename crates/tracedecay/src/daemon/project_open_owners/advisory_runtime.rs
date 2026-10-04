@@ -38,10 +38,10 @@ use tracedecay_application::delivery::{
 };
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_application::feedback::{
-    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
-    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
-    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
-    resolve_production_feedback_cycle_parts, resolve_project_feedback_scope_v1,
+    FeedbackCycleInvocation, FeedbackCycleRuntime, ProductionFeedbackCycleAuthorizationFuture,
+    ProductionFeedbackCycleAuthorizationPort, ProductionFeedbackCycleOpenV1,
+    ProductionFeedbackRuntimeStateV1, resolve_production_feedback_cycle_parts,
+    resolve_project_feedback_scope_v1,
 };
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::operation_stream::OperationKind;
@@ -213,19 +213,34 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         let pin = self.producer.feedback_cycle.read().await.clone();
         let lsp_input = pin.runtime.lsp_input();
-        self.run_cycle_with_lsp_input(pin, lsp_input, request, deadline, agent_stop_gate)
+        let invocation = lsp_input(request).await?;
+        // Attribution needs the decoded generation, unlike feedback document
+        // identity and ordinary native-graph reads. Admit that demand only for
+        // this cycle and retain its generation while the synchronous join port
+        // reads it. A refused or expired seat remains typed unavailability.
+        let _attribution_generation = self
+            .producer
+            .code_index_schedulers
+            .latest_complete_fresh_for_scope_awaiting_seat(
+                &self.producer.scope,
+                tokio::time::Instant::from_std(deadline.instant()),
+            )
+            .await
+            .filter(|latest| {
+                Some(&latest.generation().manifest().generation_id)
+                    == invocation.request.input.target.generation_id.as_ref()
+            });
+        self.run_cycle_with_invocation(pin, invocation, deadline, agent_stop_gate)
             .await
     }
 
-    async fn run_cycle_with_lsp_input(
+    async fn run_cycle_with_invocation(
         &self,
         pin: ProjectOpenFeedbackCyclePinV1,
-        lsp_input: FeedbackCycleLspInput,
-        request: FeedbackCycleRequest,
+        mut invocation: FeedbackCycleInvocation,
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        let mut invocation = lsp_input(request).await?;
         if agent_stop_gate {
             invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
             invocation = FeedbackCycleInvocation::new(invocation.context, invocation.request)

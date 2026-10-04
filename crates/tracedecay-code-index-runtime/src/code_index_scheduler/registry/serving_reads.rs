@@ -853,7 +853,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// is what starts that decode: it waits for the seat rather than answering
     /// the demanding request unavailable, until `deadline`. A seat that does
     /// not serve this scope, or no published text owner to decode, ends it.
-    pub(crate) async fn latest_complete_fresh_for_scope_awaiting_seat(
+    pub async fn latest_complete_fresh_for_scope_awaiting_seat(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
         deadline: tokio::time::Instant,
