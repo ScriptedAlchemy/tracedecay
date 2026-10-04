@@ -67,7 +67,7 @@ pub(crate) async fn execute_background_refresh_direct(
     // `canonicalize` spells verbatim `\\?\C:\` on Windows while a mounted
     // graph records the plain canonical root; compare identities, not
     // spelling.
-    if !same_canonical_path(&request.graph.project_root(), &canonical_root)
+    if !same_canonical_path(request.graph.project_root(), &canonical_root)
         || request.graph.active_branch() != active_branch.as_deref()
     {
         return Err(TraceDecayError::Config {
