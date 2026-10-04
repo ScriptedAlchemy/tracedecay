@@ -106,9 +106,7 @@ function Kicker({ children, tone }: { children: ReactNode; tone?: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Plan 26 dimension bands (adoption, retrieval, budgets)
-// ---------------------------------------------------------------------------
+// Dimension bands (adoption, retrieval, budgets)
 
 function dimensionRows(
   dimensions: readonly PlanDimension[],
@@ -260,9 +258,7 @@ export function BudgetsBody({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Doctor
-// ---------------------------------------------------------------------------
 
 export function DoctorBody({
   summary,
@@ -392,9 +388,7 @@ function FindingRows({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Code-index pipeline
-// ---------------------------------------------------------------------------
 
 const PHASES: readonly CodeIndexBuildProgressV1['phase'][] = [
   'source_scan',
@@ -520,9 +514,7 @@ function WorktreeRail({ worktree }: { worktree: CodeIndexWorktreeFreshnessV1 }) 
   );
 }
 
-// ---------------------------------------------------------------------------
 // Hook hints / rejected arguments
-// ---------------------------------------------------------------------------
 
 export function HooksBody({
   summary,
@@ -596,9 +588,7 @@ export function HooksBody({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Execution topology
-// ---------------------------------------------------------------------------
 
 export function TopologyBody({
   summary,
@@ -642,9 +632,7 @@ export function TopologyBody({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Analytics controls
-// ---------------------------------------------------------------------------
 
 export function AnalyticsBody({
   summary,
@@ -706,9 +694,7 @@ export function AnalyticsBody({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Storage telemetry
-// ---------------------------------------------------------------------------
 
 export function TelemetryBody({
   summary,
@@ -755,9 +741,7 @@ export function TelemetryBody({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Storage findings
-// ---------------------------------------------------------------------------
 
 export function FindingsBody({
   summary,
