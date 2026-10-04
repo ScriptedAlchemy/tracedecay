@@ -34,7 +34,9 @@ fn quiesced_guard(profile: &ProfileRoot) -> QuiescedDaemonLifecycle {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: QUIESCED_VERSION.to_owned(),
-        runner: ServiceRunner::WindowsTask,
+        runner: ServiceRunner::WindowsTask {
+            profile: profile.clone(),
+        },
         settlement: RestoreSettlement::Complete,
     }
 }
