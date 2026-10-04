@@ -591,6 +591,7 @@ pub struct PrimitiveNotFoundV1 {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // misses carry the freshness verdict inline; the miss path is cold
 pub enum NodeResultV1 {
     Found(Box<NodeDetailsV1>),
     NotFound(PrimitiveNotFoundV1),
