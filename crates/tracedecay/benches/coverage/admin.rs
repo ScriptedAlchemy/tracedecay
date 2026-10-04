@@ -262,7 +262,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     out.push(ToolGroup {
         tool: "tracedecay_worktree_cleanup_inspect",
         queries: five(|_i| {
-            eqn(
+            eq(
                 "tracedecay_worktree_cleanup_inspect",
                 "wt_cleanup_inspect",
                 wt_claim(json!({})),
@@ -281,7 +281,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         out.push(ToolGroup {
             tool,
             queries: five(|_i| {
-                eqn(
+                eq(
                     tool,
                     label,
                     wt_claim(json!({
@@ -579,6 +579,9 @@ fn wt_cleanup_primes(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
                 .unwrap_or_else(|| "worktree.bench.missing".into()),
         },
     });
+    let mut claim = claim;
+    // Application surfaces default to markdown; the prime chain parses JSON.
+    claim["format"] = json!("json");
     let mut confirm_args = claim.clone();
     confirm_args["inspection_digest"] = json!("{{wt_inspection_digest}}");
     vec![

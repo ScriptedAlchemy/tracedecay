@@ -292,7 +292,7 @@ impl WorkAttemptProcessRegistryV1 {
                 tokio::select! {
                     () = &mut future => {}
                     () = task_lifecycle.cancelled() => {
-                        task_cancellation.notify_waiters();
+                        task_cancellation.notify_one();
                         let _ = tokio::time::timeout(CANCELLATION_GRACE, &mut future).await;
                     }
                 }
@@ -403,7 +403,7 @@ impl WorkAttemptProcessRegistryV1 {
             .processes
             .get(&Self::key(worktree_id, identity))
         {
-            notify.cancellation.notify_waiters();
+            notify.cancellation.notify_one();
         }
     }
 
@@ -429,7 +429,7 @@ impl WorkAttemptProcessRegistryV1 {
             std::mem::take(&mut state.processes)
         };
         for process in processes.values() {
-            process.cancellation.notify_waiters();
+            process.cancellation.notify_one();
             process.lifecycle.cancel();
         }
         let deadline =
@@ -469,7 +469,7 @@ impl Drop for WorkAttemptProcessRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accepting = false;
         for process in state.processes.values() {
-            process.cancellation.notify_waiters();
+            process.cancellation.notify_one();
             process.lifecycle.cancel();
             if let Some(handle) = &process.handle {
                 handle.abort();
@@ -801,6 +801,14 @@ fn settle_unstarted<S>(
             ?problem,
             "work attempt could not be fenced for provider unavailability"
         );
+        seal_cancellation_before_running(
+            attempts,
+            context,
+            attempt,
+            None,
+            provider_fallback,
+            observability_producer,
+        );
         return;
     }
     let evidence = WorkAttemptEvidenceRecordV1 {
@@ -823,6 +831,53 @@ fn settle_unstarted<S>(
                 task = identity.task_id().as_str(),
                 ?problem,
                 "work attempt provider denial could not be sealed"
+            );
+        }
+    }
+}
+
+/// A cancellation requested before the provider was durably `Running` wins
+/// the race: the row is `CancellationRequested`, which cannot become
+/// `Running`, and no provider is left to exit. Seal it here as `Cancelled`.
+/// Any other refusal leaves the durable row as the authority.
+fn seal_cancellation_before_running<S>(
+    attempts: &tracedecay_contracts::WorkAttemptService<S>,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    actual_route: Option<WorkProviderRouteV1>,
+    provider_fallback: Option<WorkProviderFallbackRecordV1>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
+) where
+    S: tracedecay_contracts::WorkAttemptStoragePort,
+{
+    let identity = attempt.identity();
+    let observed_at = now_micros();
+    if attempts
+        .acknowledge_cancellation(context, identity, observed_at)
+        .is_err()
+    {
+        return;
+    }
+    let evidence = WorkAttemptEvidenceRecordV1 {
+        identity: identity.clone(),
+        requested_route: attempt.requested_route().clone(),
+        actual_route,
+        outcome: WorkAttemptProviderOutcomeV1::Cancelled,
+        stdout: None,
+        stderr: None,
+        provider_session: None,
+        provider_fallback,
+        observed_at,
+    };
+    match attempts.settle_with_artifacts(context, identity, &evidence, Vec::new()) {
+        Ok(settled) => {
+            let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?problem,
+                "work attempt cancellation could not be sealed before running"
             );
         }
     }
@@ -1006,7 +1061,16 @@ async fn execute_provider_with_environment<S>(
             );
             terminate(&mut child, TerminationSignal::Kill);
             let _ = child.wait().await;
-            settle_effect_dispatch(attempt_effects, context, attempt, true);
+            if settle_effect_dispatch(attempt_effects, context, attempt, true) {
+                seal_cancellation_before_running(
+                    attempts,
+                    context,
+                    attempt,
+                    Some(selection.actual_route.clone()),
+                    selection.fallback.clone(),
+                    observability_producer,
+                );
+            }
             return;
         }
     };
@@ -1188,7 +1252,16 @@ async fn execute_app_server<S>(
                 ?problem,
                 "work attempt could not be marked running; app-server was not started"
             );
-            settle_effect_dispatch(attempt_effects, context, attempt, false);
+            if settle_effect_dispatch(attempt_effects, context, attempt, false) {
+                seal_cancellation_before_running(
+                    attempts,
+                    context,
+                    attempt,
+                    None,
+                    selection.fallback.clone(),
+                    observability_producer,
+                );
+            }
             return;
         }
     };

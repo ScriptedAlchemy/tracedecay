@@ -1234,12 +1234,8 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
                 },
             )
             .unwrap();
-        // `notify_waiters` only wakes waiters already parked on the channel,
-        // so keep signalling until the execution arm observes it.
-        loop {
-            cancel.notify_waiters();
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        cancel.notify_one();
+        std::future::pending::<()>().await;
     };
 
     tokio::select! {
@@ -1256,7 +1252,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
             None,
             AttemptAdmissionTimingV1::for_test(),
         ) => {}
-        _ = driver => unreachable!("the driver loops until execution settles"),
+        () = driver => unreachable!("the driver never settles"),
     }
 
     // The graceful rung really was delivered to the child, and really was
@@ -1278,6 +1274,80 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     assert_eq!(
         fixture.sealed_evidence().outcome,
         WorkAttemptProviderOutcomeV1::Cancelled
+    );
+}
+
+/// A cancellation requested after the provider was launched but before the
+/// row became `Running` must still end `Cancelled`: `CancellationRequested`
+/// cannot become `Running`, and no later provider exit will seal it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_requested_before_mark_running_seals_cancelled() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let executable = fake_executable(root, "claude-code", "#!/bin/sh\nexit 0\n");
+    let fixture = leased_attempt(root, "Cancelled before running.", &SnapshotShape::default());
+    let identity = fixture.identity().clone();
+    fixture
+        .attempts
+        .request_cancellation(
+            &fixture.context,
+            CancelWorkAttemptCommand {
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
+                request_id: id("cancellation.work-attempt-exec.before-running"),
+                occurred_at: now_micros(),
+            },
+        )
+        .unwrap();
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
+
+    execute_provider_with_environment(
+        &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
+        &fixture.context,
+        &fixture.attempt,
+        &preferred(
+            executable,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            route.clone(),
+        ),
+        &admitted_environment,
+        Arc::new(Notify::new()),
+        None,
+        None,
+        AttemptAdmissionTimingV1::for_test(),
+    )
+    .await;
+
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Cancelled);
+    assert_eq!(
+        fixture.rows.observed_states(),
+        vec![
+            WorkAttemptStateV1::Leased,
+            WorkAttemptStateV1::CancellationRequested,
+            WorkAttemptStateV1::CancellationAcknowledged,
+            WorkAttemptStateV1::Cancelled,
+        ]
+    );
+    let evidence = fixture.sealed_evidence();
+    assert_eq!(evidence.outcome, WorkAttemptProviderOutcomeV1::Cancelled);
+    assert_eq!(evidence.requested_route, route);
+    assert_eq!(evidence.actual_route, Some(route));
+    assert_eq!(evidence.stdout, None);
+    assert_eq!(
+        fixture
+            .effects
+            .load(&fixture.context, fixture.identity())
+            .unwrap()
+            .and_then(|holder| holder.resolution()),
+        Some(WorkAttemptEffectResolutionV1::NoEffect)
     );
 }
 
@@ -1933,6 +2003,48 @@ async fn the_process_registry_admits_one_live_owner_per_attempt() {
     assert!(
         registry.register(fixture.identity()).is_some(),
         "release must return the attempt to the unowned pool"
+    );
+}
+
+/// The durable request is persisted before the live owner is signalled, so
+/// the owner may not be waiting yet; the signal must still reach it.
+#[tokio::test]
+async fn a_cancellation_signalled_before_the_owner_waits_still_reaches_it() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Early cancellation signal.",
+        &SnapshotShape::default(),
+    );
+    let worktree_id: WorktreeId = id("worktree.registry.early-signal");
+    let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
+    let signalled = Arc::new(Notify::new());
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_signalled = Arc::clone(&signalled);
+    let task_observed = Arc::clone(&observed);
+
+    assert!(registry.spawn_for_worktree(
+        fixture.identity(),
+        &worktree_id,
+        move |cancellation| async move {
+            task_signalled.notified().await;
+            if tokio::time::timeout(std::time::Duration::from_secs(5), cancellation.notified())
+                .await
+                .is_ok()
+            {
+                task_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    ));
+    registry.signal_cancellation(&worktree_id, fixture.identity());
+    signalled.notify_one();
+    while registry.holds_attempt(&worktree_id, fixture.identity()) {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        observed.load(std::sync::atomic::Ordering::SeqCst),
+        "a cancellation signalled before the owner waited was lost"
     );
 }
 
