@@ -234,6 +234,9 @@ jobs:
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
 
+      - name: Test Windows checkout preserves generated and embedded bytes
+        run: python3 scripts/test-checkout-bytes.py
+
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
 

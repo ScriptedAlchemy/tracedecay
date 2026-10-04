@@ -48,8 +48,8 @@ pub const TOOLCHAIN_NOT_INSTALLED_MESSAGE: &str =
 /// The exact program and environment one analyzer spawn uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalyzerLaunch {
-    /// The configured command, or the real toolchain binary behind a rustup
-    /// proxy.
+    /// The resolved executable spelling, or the real toolchain binary behind
+    /// a rustup proxy.
     pub program: PathBuf,
     /// Environment the spawn sets on top of the daemon's own.
     pub env: Vec<(String, String)>,
@@ -57,9 +57,9 @@ pub struct AnalyzerLaunch {
 
 impl AnalyzerLaunch {
     /// Spawns `command` directly, with the no-install environment applied.
-    pub fn direct(command: &str) -> Self {
+    pub fn direct(command: impl AsRef<Path>) -> Self {
         Self {
-            program: PathBuf::from(command),
+            program: command.as_ref().to_path_buf(),
             env: no_install_env(),
         }
     }
@@ -181,7 +181,7 @@ impl AnalyzerLaunchResolver {
             });
         };
         let Some(rustup) = rustup_proxy_owner(&located) else {
-            return Ok(AnalyzerLaunch::direct(command));
+            return Ok(AnalyzerLaunch::direct(located));
         };
         run_blocking_probe_section(|| {
             self.require_no_install_rustup(&rustup, command)?;
@@ -399,16 +399,14 @@ pub fn command_available(command: &str) -> bool {
 fn locate_command(command: &str) -> Option<PathBuf> {
     let path = Path::new(command);
     if path.components().count() > 1 {
-        return path.is_file().then(|| path.to_path_buf());
+        // Resolution happens before the analyzer switches to its workspace.
+        // Preserve the admitted spelling without dereferencing multicall shims.
+        return path
+            .is_file()
+            .then(|| std::path::absolute(path).ok())
+            .flatten();
     }
-    let paths = std::env::var_os("PATH")?;
-    let candidates = command_candidates(command);
-    std::env::split_paths(&paths).find_map(|directory| {
-        candidates
-            .iter()
-            .map(|candidate| directory.join(candidate))
-            .find(|candidate| candidate.is_file())
-    })
+    tracedecay_runtime_core::git::find_executable_on_path(command)
 }
 
 /// The `rustup` binary owning `located` when it is a rustup proxy.
@@ -447,36 +445,6 @@ fn same_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn same_inode(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
     false
-}
-
-#[cfg(windows)]
-fn command_candidates(command: &str) -> Vec<String> {
-    if Path::new(command).extension().is_some() {
-        return vec![command.to_string()];
-    }
-
-    let pathext = std::env::var_os("PATHEXT").map_or_else(
-        || ".COM;.EXE;.BAT;.CMD".to_string(),
-        |value| value.to_string_lossy().into_owned(),
-    );
-
-    let mut candidates = vec![command.to_string()];
-    candidates.extend(pathext.split(';').filter_map(|extension| {
-        let extension = extension.trim();
-        if extension.is_empty() {
-            None
-        } else if extension.starts_with('.') {
-            Some(format!("{command}{extension}"))
-        } else {
-            Some(format!("{command}.{extension}"))
-        }
-    }));
-    candidates
-}
-
-#[cfg(not(windows))]
-fn command_candidates(command: &str) -> Vec<String> {
-    vec![command.to_string()]
 }
 
 /// A recording stand-in for a rustup installation, shared by the launch and
@@ -600,6 +568,89 @@ mod tests {
                 command: "__tracedecay_missing_lsp_for_test__".to_owned(),
             })
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_cmd_launcher_survives_a_different_workspace_directory() {
+        let current = std::env::current_dir().unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("analyzer launch ")
+            .tempdir_in(&current)
+            .unwrap();
+        let program = fixture.path().join("language server.cmd");
+        std::fs::write(&program, "@echo off\r\n@echo launched %~1\r\n").unwrap();
+        let relative = program.strip_prefix(&current).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        let launch = resolve_analyzer_launch(relative.to_str().unwrap(), workspace.path()).unwrap();
+        assert!(launch.program.is_absolute());
+        let output = Command::new(launch.program)
+            .envs(launch.env)
+            .arg("argument with spaces")
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "launched argument with spaces"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn npm_style_launcher_is_resolved_and_spawned_from_path() {
+        const CHILD: &str = "TRACEDECAY_TEST_NPM_LAUNCH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let launch = resolve_analyzer_launch("language-server", Path::new(".")).unwrap();
+            assert_eq!(launch.program.extension().unwrap(), "CMD");
+            let output = Command::new(launch.program)
+                .envs(launch.env)
+                .arg("argument with spaces")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                "launched argument with spaces"
+            );
+            return;
+        }
+
+        let directory = tempfile::Builder::new()
+            .prefix("npm launch ")
+            .tempdir()
+            .unwrap();
+        std::fs::write(
+            directory.path().join("language-server"),
+            "#!/bin/sh\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("language-server.CMD"),
+            "@echo off\r\n@echo launched %~1\r\n",
+        )
+        .unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "analyzer::launch::tests::npm_style_launcher_is_resolved_and_spawned_from_path",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", directory.path())
+            .env("PATHEXT", ".EXE;.CMD")
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     }
 
     #[test]
