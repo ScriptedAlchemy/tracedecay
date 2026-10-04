@@ -71,7 +71,7 @@ pub fn application_surface_dispatch_input_with_controls(
     })
 }
 
-#[hotpath::measure(label = "application_surface.execute")]
+#[tracing::instrument(name = "application_surface.execute", level = "trace", skip_all)]
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
@@ -90,22 +90,25 @@ pub async fn execute_application_surface(
         terminal_states,
         receipt_contract,
         reconciliation_contract,
-    ) = hotpath::measure_block!("application_surface.execute.catalog", {
-        let catalog = application_surface_binding_catalog_ref()?;
-        let capability = catalog
-            .capabilities()
-            .find(|capability| capability.binding_ids().contains(&binding_id))
-            .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
-        (
-            i64::try_from(capability.deadline().maximum_millis())
-                .map_err(ApplicationSurfaceAdapterError::invalid_request)?
-                .saturating_mul(1_000),
-            capability.cancellation().clone(),
-            capability.terminal_states().clone(),
-            capability.receipt(),
-            capability.reconciliation(),
-        )
-    });
+    ) = {
+        let _span = tracing::trace_span!("application_surface.execute.catalog").entered();
+        {
+            let catalog = application_surface_binding_catalog_ref()?;
+            let capability = catalog
+                .capabilities()
+                .find(|capability| capability.binding_ids().contains(&binding_id))
+                .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+            (
+                i64::try_from(capability.deadline().maximum_millis())
+                    .map_err(ApplicationSurfaceAdapterError::invalid_request)?
+                    .saturating_mul(1_000),
+                capability.cancellation().clone(),
+                capability.terminal_states().clone(),
+                capability.receipt(),
+                capability.reconciliation(),
+            )
+        }
+    };
     let maximum_deadline_at = UtcMicros(observed_at.0.saturating_add(deadline_ceiling_micros));
     let effective_deadline_at = invocation
         .deadline
@@ -145,9 +148,9 @@ pub async fn execute_application_surface(
     )?;
     let request = tracedecay_contracts::ApplicationRequest::surface(binding, payload)?;
     let invocation = tracedecay_contracts::ApplicationInvocation::new(context, request)?;
-    let result = match hotpath::future!(
+    let result = match tracing::Instrument::instrument(
         tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
-        label = "application_surface.execute.invoke"
+        tracing::trace_span!("application_surface.execute.invoke"),
     )
     .await
     {
@@ -202,7 +205,7 @@ pub async fn execute_application_surface(
     })
 }
 
-#[hotpath::measure(label = "application_surface.resolve.http", future = true)]
+#[tracing::instrument(name = "application_surface.resolve.http", level = "trace", skip_all)]
 pub async fn resolve_http_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -236,7 +239,11 @@ pub async fn resolve_http_application_surface(
 /// application handler as CLI, MCP, and HTTP. Dashboard adapters may shape
 /// presentation responses around this result, but they do not own mutation
 /// validation, authorization, CAS, receipts, or rollback semantics.
-#[hotpath::measure(label = "application_surface.resolve.dashboard", future = true)]
+#[tracing::instrument(
+    name = "application_surface.resolve.dashboard",
+    level = "trace",
+    skip_all
+)]
 pub async fn resolve_dashboard_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -292,7 +299,7 @@ pub fn resolve_application_surface_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "application_surface.dispatch")]
+#[tracing::instrument(name = "application_surface.dispatch", level = "trace", skip_all)]
 pub fn resolve_application_surface_dispatch_with_controls(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
@@ -345,7 +352,7 @@ pub(super) fn invoke_catalog_bound_application_request(
     })
 }
 
-#[hotpath::measure(label = "application_surface.adapter.invoke", future = true)]
+#[tracing::instrument(name = "application_surface.adapter.invoke", level = "trace", skip_all)]
 pub(super) async fn invoke_application_adapter_request(
     request: HttpApplicationRequest,
     surface: BindingSurface,

@@ -61,7 +61,11 @@ impl AgentIntegration for OpenCodeIntegration {
         true
     }
 
-    #[hotpath::measure(label = "hosts.agent.opencode.project_install")]
+    #[tracing::instrument(
+        name = "hosts.agent.opencode.project_install",
+        level = "trace",
+        skip_all
+    )]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -586,7 +590,11 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
 /// origin beside this file rather than replace it (see [`plugin_cli`]). The
 /// destination is checked rather than assumed so a future refactor cannot
 /// quietly deploy where the host never scans.
-#[hotpath::measure(label = "hosts.agent.opencode.plugin_install")]
+#[tracing::instrument(
+    name = "hosts.agent.opencode.plugin_install",
+    level = "trace",
+    skip_all
+)]
 fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
     if !plugin_cli::is_host_discovered_plugin_path(path) {
         return Err(TraceDecayError::Config {
@@ -646,7 +654,11 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
 /// declines to drive, so forging its effect is refused on both the install and
 /// uninstall paths, see
 /// [`plugin_cli::ensure_host_owned_plugin_registration_untouched`].
-#[hotpath::measure(label = "hosts.agent.opencode.registration_install")]
+#[tracing::instrument(
+    name = "hosts.agent.opencode.registration_install",
+    level = "trace",
+    skip_all
+)]
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let outcome = update_text_file_transactionally(config_path, |existing: &str| {
         let before = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;

@@ -20,13 +20,10 @@ use tracedecay_project::project::TraceDecay;
 
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
-#[hotpath::measure(label = "daemon.dashboard.automation.curate", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Curation pins the live configuration digest and admits one effect before the curator backend runs; a failed pin never starts a run."
-    )
+#[tracing::instrument(name = "daemon.dashboard.automation.curate", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Curation pins the live configuration digest and admits one effect before the curator backend runs; a failed pin never starts a run."
 )]
 pub async fn execute_retained_memory_curator(
     cg: &TraceDecay,

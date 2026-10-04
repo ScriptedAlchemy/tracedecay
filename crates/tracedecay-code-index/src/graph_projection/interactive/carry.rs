@@ -107,11 +107,10 @@ pub(super) fn carry_interactive_catalog(
         parent_hidden_relations,
         &parent_delta_relations[..],
     ]);
-    hotpath::gauge!("code_graph.catalog.carry.rows_compared")
-        .inc((entity_ids.len() + relation_ids.len()) as u64);
 
     let mut layer = CatalogLayerScan::new(&rows);
-    let changed_entities = hotpath::measure_block!("code_graph.catalog.carry.read_entities", {
+    let changed_entities = {
+        let _span = tracing::trace_span!("code_graph.catalog.carry.read_entities").entered();
         let mut changed = Vec::new();
         for identity in entity_ids {
             check_cancelled(cancellation.as_ref())?;
@@ -123,9 +122,10 @@ pub(super) fn carry_interactive_catalog(
                 changed.push((old, new));
             }
         }
-        Ok::<_, CodeGraphProjectionError>(changed)
-    })?;
-    let changed_relations = hotpath::measure_block!("code_graph.catalog.carry.read_relations", {
+        changed
+    };
+    let changed_relations = {
+        let _span = tracing::trace_span!("code_graph.catalog.carry.read_relations").entered();
         let mut changed = Vec::new();
         for identity in relation_ids {
             check_cancelled(cancellation.as_ref())?;
@@ -137,12 +137,11 @@ pub(super) fn carry_interactive_catalog(
                 changed.push((old, new));
             }
         }
-        Ok::<_, CodeGraphProjectionError>(changed)
-    })?;
-    hotpath::gauge!("code_graph.catalog.carry.rows_changed")
-        .inc((changed_entities.len() + changed_relations.len()) as u64);
+        changed
+    };
 
-    hotpath::measure_block!("code_graph.catalog.carry.apply", {
+    {
+        let _span = tracing::trace_span!("code_graph.catalog.carry.apply").entered();
         let mut carry = CatalogCarry::new(parent);
         for (old, _) in &changed_entities {
             check_cancelled(cancellation.as_ref())?;
@@ -176,7 +175,7 @@ pub(super) fn carry_interactive_catalog(
                 projection_node_count,
             )
             .map(Ok)
-    })
+    }
 }
 
 fn merge_sorted<T: Ord + Clone, const N: usize>(lists: [&[T]; N]) -> Vec<T> {

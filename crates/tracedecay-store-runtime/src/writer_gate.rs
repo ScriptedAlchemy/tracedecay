@@ -169,30 +169,29 @@ impl StoreWriterGates {
     }
 
     /// Acquires admission for `scope`, waiting as long as necessary.
-    #[hotpath::skip]
     pub async fn acquire(&self, scope: &WriterScope) -> WriterAdmissionGuard {
         match scope {
             WriterScope::Daemon => WriterAdmissionGuard {
                 _class: None,
                 _daemon: DaemonGuard::Exclusive(
-                    hotpath::future!(
+                    tracing::Instrument::instrument(
                         Arc::clone(&self.daemon).write_owned(),
-                        label = "daemon.writer_gate.acquire.daemon"
+                        tracing::trace_span!("daemon.writer_gate.acquire.daemon"),
                     )
                     .await,
                 ),
                 _gate: None,
             },
             WriterScope::Store { data_root, class } => {
-                let daemon = hotpath::future!(
+                let daemon = tracing::Instrument::instrument(
                     Arc::clone(&self.daemon).read_owned(),
-                    label = "daemon.writer_gate.acquire.store"
+                    tracing::trace_span!("daemon.writer_gate.acquire.store"),
                 )
                 .await;
                 let gate = self.store_gate(data_root);
-                let class_guard = hotpath::future!(
+                let class_guard = tracing::Instrument::instrument(
                     gate.class_mutex(*class).lock_owned(),
-                    label = "daemon.writer_gate.acquire.class"
+                    tracing::trace_span!("daemon.writer_gate.acquire.class"),
                 )
                 .await;
                 WriterAdmissionGuard {
@@ -205,7 +204,7 @@ impl StoreWriterGates {
     }
 
     /// Acquires admission only if every level is free right now.
-    #[hotpath::measure(label = "daemon.writer_gate.try_acquire")]
+    #[tracing::instrument(name = "daemon.writer_gate.try_acquire", level = "trace", skip_all)]
     pub fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {

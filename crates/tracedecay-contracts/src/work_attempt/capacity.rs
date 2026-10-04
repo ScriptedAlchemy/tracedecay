@@ -55,22 +55,18 @@ impl WorkAttemptCapacityV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn global_active(&self) -> u64 {
         self.global_active
     }
 
-    #[hotpath::skip]
     pub const fn repository_active(&self) -> u64 {
         self.repository_active
     }
 
-    #[hotpath::skip]
     pub const fn task_active(&self) -> u64 {
         self.task_active
     }
 
-    #[hotpath::skip]
     pub const fn concurrency(&self) -> &TopologyConcurrencyPolicyV1 {
         &self.concurrency
     }
@@ -118,7 +114,11 @@ where
     /// Reads one coherent capacity snapshot for a canonical task set. Inputs
     /// must be strictly sorted and unique so callers cannot hide duplicate
     /// census work or produce order-dependent evidence.
-    #[hotpath::measure(label = "application.work.attempt.admission_capacities")]
+    #[tracing::instrument(
+        name = "application.work.attempt.admission_capacities",
+        level = "trace",
+        skip_all
+    )]
     pub fn admission_capacities_against_registered_topology(
         &self,
         context: &RequestContext,

@@ -47,7 +47,7 @@ pub fn store_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Collect kernel store telemetry from an admitted database and its paths.
-#[hotpath::measure(label = "runtime_ports.database", future = true)]
+#[tracing::instrument(name = "runtime_ports.database", level = "trace", skip_all)]
 pub async fn collect_store_telemetry(
     db: &Database,
     project_root: PathBuf,

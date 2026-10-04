@@ -32,7 +32,6 @@ pub struct TranscriptCatchUpFailure {
 }
 
 impl TranscriptCatchUpFailure {
-    #[hotpath::skip]
     pub(super) const fn new(
         provider: &'static str,
         source: &'static str,
@@ -48,7 +47,6 @@ impl TranscriptCatchUpFailure {
         }
     }
 
-    #[hotpath::skip]
     const fn with_source_locator(
         mut self,
         source_locator: Option<ObservationSourceRangeV1>,
@@ -58,18 +56,15 @@ impl TranscriptCatchUpFailure {
     }
 
     /// Typed overload when the bounded multi-source pass cannot admit more work.
-    #[hotpath::skip]
     pub(super) const fn pass_backpressured() -> Self {
         Self::new("scheduler", "pass", "ingest_pass_backpressured", true)
     }
 
     /// Typed cancellation before the pass finished covering admitted work.
-    #[hotpath::skip]
     pub(super) const fn pass_cancelled() -> Self {
         Self::new("scheduler", "pass", "ingest_pass_cancelled", true)
     }
 
-    #[hotpath::skip]
     pub(super) const fn pass_frontier_unavailable() -> Self {
         Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
     }
@@ -77,7 +72,6 @@ impl TranscriptCatchUpFailure {
     /// The authority carries no session review scheduler, so the user pass
     /// could ingest transcripts it can never hand to review. A composition
     /// defect, not a transient condition.
-    #[hotpath::skip]
     pub(super) const fn session_review_unwired() -> Self {
         Self::new(
             "scheduler",
@@ -87,12 +81,10 @@ impl TranscriptCatchUpFailure {
         )
     }
 
-    #[hotpath::skip]
     pub(super) const fn source_discovery_partial(provider: &'static str) -> Self {
         Self::new(provider, "discovery", "source_discovery_partial", true)
     }
 
-    #[hotpath::skip]
     pub(super) const fn source_scan_partial(provider: &'static str, retryable: bool) -> Self {
         Self::new(provider, "scan", "source_scan_partial", retryable)
     }
@@ -101,7 +93,6 @@ impl TranscriptCatchUpFailure {
     /// Compatibility callers without that mount must fail before touching the
     /// legacy database or any provider source.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
         Self::new(
             provider,
@@ -190,7 +181,6 @@ pub enum IngestPassCoverage {
 }
 
 impl IngestPassCoverage {
-    #[hotpath::skip]
     pub const fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }

@@ -184,30 +184,6 @@ pub async fn join_shutdown_owner_phases(
     prepare_shutdown_owner_phases(phases).join(deadline).await
 }
 
-/// RAII drain marker: increments its gauge while a shutdown owner or phase is
-/// draining and decrements on drop, so cancellation, panic, and abort cannot
-/// leak a phantom straggler. A non-zero gauge during a hung shutdown names the
-/// lane that is still draining live, before any receipt exists to consult.
-pub struct DrainingGauge {
-    key: &'static str,
-}
-
-impl DrainingGauge {
-    pub fn arm(key: &'static str) -> Self {
-        hotpath::gauge!(key).inc(1_u64);
-        Self { key }
-    }
-}
-
-impl Drop for DrainingGauge {
-    fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!(self.key).dec(1_u64);
-        #[cfg(not(feature = "hotpath"))]
-        let _ = self.key;
-    }
-}
-
 /// One prepared owner: its original ordinal, name, cancellation-time panic
 /// message (if cancelling it panicked), and its join factory.
 type PreparedShutdownOwner = (usize, &'static str, Option<String>, ShutdownJoinFactory);
@@ -239,7 +215,7 @@ pub fn prepare_shutdown_owner_phases(phases: Vec<Vec<ShutdownOwner>>) -> Prepare
 }
 
 impl PreparedShutdownOwners {
-    #[hotpath::measure(label = "daemon.shutdown.owners.join", future = true)]
+    #[tracing::instrument(name = "daemon.shutdown.owners.join", level = "trace", skip_all)]
     pub async fn join(self, deadline: Instant) -> ShutdownReceipt {
         let mut receipts = Vec::new();
         for phase in self.phases {
@@ -262,14 +238,7 @@ impl PreparedShutdownOwners {
     }
 }
 
-#[hotpath::measure(label = "daemon.shutdown.phase.join", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Shutdown-phase join waits out one named owner group under the shared budget."
-    )
-)]
+#[tracing::instrument(name = "daemon.shutdown.phase.join", level = "trace", skip_all)]
 async fn join_shutdown_phase(
     deadline: Instant,
     owners: Vec<(usize, &'static str, Option<String>, ShutdownJoinFactory)>,
@@ -278,7 +247,6 @@ async fn join_shutdown_phase(
     let mut pending = std::collections::HashMap::new();
     for (ordinal, name, cancellation_error, join) in owners {
         let handle = joins.spawn(async move {
-            let _draining = DrainingGauge::arm("daemon.shutdown.owners_draining");
             let started = std::time::Instant::now();
             log_daemon_event(
                 "daemon_shutdown",
@@ -323,23 +291,11 @@ async fn join_shutdown_phase(
                     ShutdownStatus::Failed(format!("{error}; join timed out"))
                 }
             };
-            // Failed and timed-out drains are counted too: success-only
-            // counters would hide exactly the stuck owners being diagnosed.
             // The timed-out owner name is a bounded static vocabulary fixed by
-            // the shutdown plan, recorded so a post-deadline report names the
+            // the shutdown plan, traced so a post-deadline report names the
             // straggler without replaying the receipt.
-            match &status {
-                ShutdownStatus::Clean => {
-                    hotpath::gauge!("daemon.shutdown.owner.clean_total").inc(1_u64);
-                }
-                ShutdownStatus::Failed(_) => {
-                    hotpath::gauge!("daemon.shutdown.owner.failed_total").inc(1_u64);
-                }
-                ShutdownStatus::TimedOut => {
-                    hotpath::gauge!("daemon.shutdown.owner.timed_out_total").inc(1_u64);
-                    #[cfg(feature = "hotpath")]
-                    hotpath::val!("daemon.shutdown.straggler.owner").set(&name);
-                }
+            if let ShutdownStatus::TimedOut = &status {
+                tracing::trace!(name: "daemon.shutdown.straggler.owner", value = ?name);
             }
             (ordinal, ShutdownOwnerReceipt { name, status })
         });

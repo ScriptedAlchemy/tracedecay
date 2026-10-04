@@ -221,7 +221,7 @@ impl AnalyzerAdmissionEvaluatorV1 {
 }
 
 impl AnalyzerAdmissionEvaluator for AnalyzerAdmissionEvaluatorV1 {
-    #[hotpath::measure(label = "policy.analyzer.evaluate")]
+    #[tracing::instrument(name = "policy.analyzer.evaluate", level = "trace", skip_all)]
     fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1 {
         if input.settings.validate().is_err()
             || input.language_id.validate().is_err()

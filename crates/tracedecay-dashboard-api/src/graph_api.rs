@@ -52,14 +52,14 @@ pub async fn overview(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             graph_response(
                 &state,
                 graph_service::overview_payload(&state, &control).await,
             )
         },
-        label = "dashboard_api.graph.overview"
+        tracing::trace_span!("dashboard_api.graph.overview"),
     )
     .await
 }
@@ -70,7 +70,7 @@ pub async fn search(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = coerce_limit(params.limit, 50, 200);
             let offset = params.offset.unwrap_or(0).max(0);
@@ -80,7 +80,7 @@ pub async fn search(
                     .await,
             )
         },
-        label = "dashboard_api.graph.search"
+        tracing::trace_span!("dashboard_api.graph.search"),
     )
     .await
 }
@@ -91,7 +91,7 @@ pub async fn node(
     RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNodePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             match graph_service::node_payload(&state, &control, &node_id).await {
                 Ok(read) if read.payload.is_some() => {
@@ -109,7 +109,7 @@ pub async fn node(
                 Err(error) => graph_read_failed(&state, error),
             }
         },
-        label = "dashboard_api.graph.node"
+        tracing::trace_span!("dashboard_api.graph.node"),
     )
     .await
 }
@@ -121,7 +121,7 @@ pub async fn neighbors(
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNeighborsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = coerce_limit(params.limit, 50, 200);
             match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
@@ -140,7 +140,7 @@ pub async fn neighbors(
                 Err(error) => graph_read_failed(&state, error),
             }
         },
-        label = "dashboard_api.graph.neighbors"
+        tracing::trace_span!("dashboard_api.graph.neighbors"),
     )
     .await
 }
@@ -156,7 +156,7 @@ pub async fn subgraph(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSubgraphPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let node_limit = coerce_limit(params.limit_nodes, 80, 250);
             let edge_limit = coerce_limit(params.limit_edges, 120, 500);
@@ -173,7 +173,7 @@ pub async fn subgraph(
                 .await,
             )
         },
-        label = "dashboard_api.graph.subgraph"
+        tracing::trace_span!("dashboard_api.graph.subgraph"),
     )
     .await
 }
@@ -184,7 +184,7 @@ pub async fn path(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<PathParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphPathPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let max_depth = coerce_limit(params.max_depth, 6, 10);
             graph_response(
@@ -199,7 +199,7 @@ pub async fn path(
                 .await,
             )
         },
-        label = "dashboard_api.graph.path"
+        tracing::trace_span!("dashboard_api.graph.path"),
     )
     .await
 }

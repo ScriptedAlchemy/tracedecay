@@ -24,7 +24,6 @@ enum BudgetLimit {
 }
 
 impl BudgetLimit {
-    #[hotpath::skip]
     const fn omission_reason(self) -> ContextOmissionReasonV1 {
         match self {
             Self::Byte => ContextOmissionReasonV1::ByteBudget,
@@ -402,7 +401,7 @@ pub fn materialize_admission<P: ContextPayload>(
     Ok(())
 }
 
-#[hotpath::measure(label = "temporal.context.measure")]
+#[tracing::instrument(name = "temporal.context.measure", level = "trace", skip_all)]
 pub fn measure_context<P: ContextPayload>(
     bundle: &CompactContextBundleV1,
     summary_omissions: &[SummaryOmission],

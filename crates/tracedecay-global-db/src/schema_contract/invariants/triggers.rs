@@ -1641,9 +1641,10 @@ pub(super) async fn replace_trigger(
     .map_err(audit_read_error)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.contracts_intact"
+#[tracing::instrument(
+    name = "global_db.schema_contract.triggers.contracts_intact",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,

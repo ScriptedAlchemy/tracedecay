@@ -16,7 +16,7 @@ fn branch_list_rpc_args() -> serde_json::Value {
     })
 }
 
-#[hotpath::measure(label = "cli.branch.dispatch", future = true)]
+#[tracing::instrument(name = "cli.branch.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_branch_action(
     profile: &ProfileRoot,
     action: BranchAction,

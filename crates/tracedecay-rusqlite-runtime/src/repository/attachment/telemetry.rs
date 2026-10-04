@@ -40,7 +40,6 @@ pub struct RepositoryRuntimePhysicalSnapshot {
 }
 
 impl RepositoryRuntimePhysicalSnapshot {
-    #[hotpath::skip]
     pub const fn is_drained(&self) -> bool {
         !self.writer_present
             && self.reader_handles == 0

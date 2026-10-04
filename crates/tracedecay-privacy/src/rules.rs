@@ -712,7 +712,7 @@ fn line_containing(text: &str, offset: usize) -> &str {
 /// Supplement-first is load-bearing for the merge in `detect::redact_text`,
 /// which resolves overlapping candidates by kind priority and, at equal
 /// priority, by the order it saw them.
-#[hotpath::measure(label = "runtime_core.privacy.rules_compile")]
+#[tracing::instrument(name = "runtime_core.privacy.rules_compile", level = "trace", skip_all)]
 pub fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {
@@ -1690,9 +1690,8 @@ mod tests {
     }
 
     /// Loading a ruleset compiles none of its regexes, so a first scan pays
-    /// only for the rules its text reaches. Asserted as a latency class
-    /// against compiling the rest of the catalogue afterwards, which keeps
-    /// the check calibrated to the host.
+    /// only for the rules its text reaches. Observed through each regex's
+    /// compile cell, which reading does not initialize.
     #[test]
     fn a_first_scan_compiles_only_the_rules_its_text_reaches() {
         let scan = |set: &CredentialPatternSet, text: &str| {
@@ -1701,11 +1700,27 @@ mod tests {
                 .map(|(pattern, ranges)| (pattern.id().to_owned(), ranges))
                 .collect::<Vec<_>>()
         };
-        let started = std::time::Instant::now();
+        let compiled = |set: &CredentialPatternSet| {
+            set.iter()
+                .flat_map(regexes)
+                .filter(|regex| regex.compiled.get().is_some())
+                .count()
+        };
         let set = pattern_set(CredentialPatternProfile::Observation);
+        let catalogue = set.iter().flat_map(regexes).count();
+        assert_eq!(compiled(&set), 0, "loading compiles no regex");
+
         let clean = scan(&set, "pub fn alpha() -> u32 { 1 }\n");
-        let first_scan = started.elapsed();
         assert_eq!(clean, Vec::new());
+        let first_scan = compiled(&set);
+        assert!(
+            first_scan * 4 < catalogue,
+            "the first scan compiled {first_scan} of {catalogue} regexes"
+        );
+        assert!(
+            rule(&set, "github-pat").regex.compiled.get().is_none(),
+            "a rule the text does not reach stays uncompiled"
+        );
 
         let token = "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ";
         let leaked = format!("let token = \"{token}\";\n");
@@ -1719,17 +1734,9 @@ mod tests {
             "a lazily compiled rule still detects its credential"
         );
         assert!(set.checked(()).is_ok());
-
-        let started = std::time::Instant::now();
-        for pattern in set.iter() {
-            for regex in regexes(pattern) {
-                assert!(regex.get().is_some(), "rule `{}` compiles", regex.rule_id);
-            }
-        }
-        let rest_of_catalogue = started.elapsed();
         assert!(
-            first_scan * 4 < rest_of_catalogue,
-            "load and first scan took {first_scan:?}; compiling the rest took {rest_of_catalogue:?}"
+            rule(&set, "github-pat").regex.compiled.get().is_some(),
+            "the scan that reaches a rule compiles it"
         );
     }
 

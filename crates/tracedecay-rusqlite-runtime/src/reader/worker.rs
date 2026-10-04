@@ -555,19 +555,23 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             }
             SnapshotCommand::Execute { request, reply } => {
                 let started = Instant::now();
-                let result = hotpath::measure_block!("rusqlite.reader.execute", {
-                    executor
-                        .execute_read(&transaction, &request)
-                        .map_err(ReaderWorkerError::Storage)
-                });
+                let result = {
+                    let _span = tracing::trace_span!("rusqlite.reader.execute").entered();
+                    {
+                        executor
+                            .execute_read(&transaction, &request)
+                            .map_err(ReaderWorkerError::Storage)
+                    }
+                };
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }
             SnapshotCommand::ExactSqlQuery { request, reply } => {
                 let started = Instant::now();
-                let result = hotpath::measure_block!("rusqlite.reader.exact_sql", {
+                let result = {
+                    let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
                     execute_query(&transaction, request)
-                });
+                };
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }

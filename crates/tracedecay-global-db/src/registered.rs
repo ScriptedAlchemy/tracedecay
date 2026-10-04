@@ -115,7 +115,7 @@ impl RegisteredGlobalDbOwnerV1 {
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
     /// whose guard triggers were altered) fails the attach instead of opening
     /// on unaudited authority rows.
-    #[hotpath::measure(future = true, label = "global_db.registered.admit")]
+    #[tracing::instrument(name = "global_db.registered.admit", level = "trace", skip_all)]
     pub async fn admit_and_attach(
         database: DatabaseOwnerV1,
     ) -> tracedecay_domain::errors::Result<Self> {
@@ -149,7 +149,7 @@ impl RegisteredGlobalDbOwnerV1 {
     /// typed reset-required state has no plan: its reset deletes it. A
     /// `cancellation` observed before the admission transaction commits rolls
     /// it back and fails with [`TraceDecayError::store_open_cancelled`].
-    #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
+    #[tracing::instrument(name = "global_db.registered.admit_daemon", level = "trace", skip_all)]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
         cancellation: &CancellationToken,
@@ -353,7 +353,7 @@ pub struct RegisteredGlobalDb {
 }
 
 impl RegisteredGlobalDb {
-    #[hotpath::measure(future = true, label = "global_db.registered.schema")]
+    #[tracing::instrument(name = "global_db.registered.schema", level = "trace", skip_all)]
     pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
@@ -365,7 +365,6 @@ impl RegisteredGlobalDb {
         self.database.release_connection_memory().await
     }
 
-    #[hotpath::skip]
     pub(crate) async fn checkpoint_database(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.checkpoint().await
     }
@@ -381,7 +380,6 @@ impl RegisteredGlobalDb {
 
     /// Truncates the drained WAL file through the runtime's exclusive
     /// maintenance facade.
-    #[hotpath::skip]
     pub(crate) async fn truncate_database_wal(&self) -> tracedecay_domain::errors::Result<()> {
         self.database.truncate_wal_for_offline_maintenance().await
     }
@@ -500,7 +498,7 @@ impl RegisteredGlobalDb {
         self.project_graph.get()
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.txn.snapshot")]
+    #[tracing::instrument(name = "global_db.registered.txn.snapshot", level = "trace", skip_all)]
     pub async fn read_snapshot(
         &self,
     ) -> tracedecay_domain::errors::Result<DatabaseEngineReadSnapshot> {
@@ -510,14 +508,12 @@ impl RegisteredGlobalDb {
     }
 
     /// Opens the reader capacity reserved for health diagnostics.
-    #[hotpath::skip]
     pub async fn health_read_snapshot(&self) -> EngineResult<DatabaseEngineReadSnapshot> {
         self.database.begin_engine_health_read_snapshot().await
     }
 
     /// Rebuilds the registered observation projection through this client's
     /// guarded database capability.
-    #[hotpath::skip]
     pub async fn rebuild_observation_projection(
         &self,
         frontier_sequence: u64,
@@ -526,7 +522,6 @@ impl RegisteredGlobalDb {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn validate_registry_schema_contract_for_test(
         &self,
     ) -> tracedecay_domain::errors::Result<()> {
@@ -554,7 +549,7 @@ impl RegisteredGlobalDb {
         })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.txn.begin")]
+    #[tracing::instrument(name = "global_db.registered.txn.begin", level = "trace", skip_all)]
     pub async fn begin_write_transaction(
         &self,
     ) -> tracedecay_domain::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
@@ -618,12 +613,11 @@ impl RegisteredGlobalDb {
         self.database.storage_telemetry_handle()
     }
 
-    #[hotpath::skip]
     pub async fn storage_page_counts(&self) -> tracedecay_domain::errors::Result<(u64, u64, u64)> {
         self.database.storage_page_counts().await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.compact")]
+    #[tracing::instrument(name = "global_db.registered.compact", level = "trace", skip_all)]
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
@@ -631,7 +625,11 @@ impl RegisteredGlobalDb {
         self.database.run_incremental_vacuum(max_pages).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.retention.sessions")]
+    #[tracing::instrument(
+        name = "global_db.registered.retention.sessions",
+        level = "trace",
+        skip_all
+    )]
     pub async fn run_session_lcm_retention(
         &self,
         provider: &str,
@@ -659,7 +657,11 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.retention.observations")]
+    #[tracing::instrument(
+        name = "global_db.registered.retention.observations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn run_observation_retention(
         &self,
         generation: Option<&str>,
@@ -703,7 +705,6 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
 }
 
 impl RegisteredGlobalDbWriterConnection<'_> {
-    #[hotpath::skip]
     pub async fn execute<P>(
         &self,
         sql: &str,
@@ -718,7 +719,6 @@ impl RegisteredGlobalDbWriterConnection<'_> {
             .map_err(engine_error)
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -730,7 +730,6 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.database.read_connection().query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(
         &self,
         sql: &str,
@@ -748,7 +747,6 @@ pub struct RegisteredGlobalDbWriteTransaction<'a> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -762,7 +760,6 @@ impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn execute<P>(
         &self,
         sql: &str,
@@ -774,7 +771,6 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
         RegisteredGlobalDbWriteTransaction::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql).await
     }
@@ -825,7 +821,7 @@ impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
 impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
     for RegisteredGlobalDbWriteTransaction<'_>
 {
-    #[hotpath::measure(future = true, label = "global_db.registered.txn.attach")]
+    #[tracing::instrument(name = "global_db.registered.txn.attach", level = "trace", skip_all)]
     async fn attach_database(
         &self,
         path: &Path,
@@ -841,7 +837,6 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
 }
 
 impl RegisteredGlobalDbWriteTransaction<'_> {
-    #[hotpath::skip]
     pub async fn execute<P>(
         &self,
         sql: &str,
@@ -853,7 +848,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(
         &self,
         sql: &str,
@@ -865,7 +859,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(
         &self,
         sql: &str,
@@ -873,7 +866,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute_batch(sql).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.txn.commit")]
+    #[tracing::instrument(name = "global_db.registered.txn.commit", level = "trace", skip_all)]
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         if let Err(error) = self
             .authority
@@ -892,7 +885,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.commit().await.map_err(engine_error)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.txn.rollback")]
+    #[tracing::instrument(name = "global_db.registered.txn.rollback", level = "trace", skip_all)]
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
     }

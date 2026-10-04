@@ -52,7 +52,6 @@ pub struct ConnectionLocalRequestSequence {
 }
 
 impl ConnectionLocalRequestSequence {
-    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self { next: first }
     }
@@ -80,7 +79,6 @@ pub struct ProcessLocalRequestSequence {
 }
 
 impl ProcessLocalRequestSequence {
-    #[hotpath::skip]
     pub const fn starting_at(first: u64) -> Self {
         Self {
             next: AtomicU64::new(first),

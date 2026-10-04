@@ -38,7 +38,11 @@ impl NativeHistoricalBlobReaderV1 {
     }
 
     /// Read one exact commit/path blob through the mounted Git authority.
-    #[hotpath::measure(label = "query.native_git.historical_blob.read")]
+    #[tracing::instrument(
+        name = "query.native_git.historical_blob.read",
+        level = "trace",
+        skip_all
+    )]
     pub fn read(
         &self,
         request: &GitHistoricalBlobRequestV1,

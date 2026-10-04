@@ -29,20 +29,12 @@ pub(super) struct QueuedFrame {
     pub(super) payload: LspFrame,
     pub(super) publication: Option<PublicationTag>,
     pub(super) server_request: Option<LspRequestId>,
-    /// Enqueue instant, sampled as `lsp.outbound.queue_wait_us` when the frame
-    /// first goes in flight. The depth gauges alone cannot separate a deep
-    /// queue from a bridge that is slow to poll.
-    pub(super) queued_at: std::time::Instant,
 }
 
 #[derive(Default)]
 pub(super) struct OutboundController {
     pub(super) queue: VecDeque<QueuedFrame>,
     pub(super) in_flight: bool,
-    /// When the current in-flight frame was first polled; drives the
-    /// `lsp.outbound.ack_wait_us` sample at acknowledgement so poll-to-ack
-    /// bridge latency is separable from handler and queue time.
-    pub(super) in_flight_since: Option<std::time::Instant>,
     pub(super) queued_bytes: usize,
 }
 
@@ -136,11 +128,6 @@ where
     /// frame. It cannot fetch arbitrary daemon socket data.
     pub fn poll_outbound(&mut self) -> Option<&[u8]> {
         let frame = self.outbound.queue.front()?;
-        if !self.outbound.in_flight {
-            hotpath::gauge!("lsp.outbound.queue_wait_us")
-                .set(frame.queued_at.elapsed().as_micros() as u64);
-            self.outbound.in_flight_since = Some(std::time::Instant::now());
-        }
         self.outbound.in_flight = true;
         Some(frame.payload.as_slice())
     }
@@ -153,14 +140,9 @@ where
         }
         let Some(frame) = self.outbound.queue.pop_front() else {
             self.outbound.in_flight = false;
-            self.outbound.in_flight_since = None;
             return false;
         };
         self.outbound.in_flight = false;
-        if let Some(in_flight_since) = self.outbound.in_flight_since.take() {
-            hotpath::gauge!("lsp.outbound.ack_wait_us")
-                .set(in_flight_since.elapsed().as_micros() as u64);
-        }
         self.outbound.queued_bytes = self
             .outbound
             .queued_bytes
@@ -183,9 +165,6 @@ where
     /// state is preserved across temporary backpressure.
     pub fn drain_outbound(&mut self) -> Vec<LspFrame> {
         self.outbound.in_flight = false;
-        // Drained frames were never acknowledged by the bridge; an ack-latency
-        // sample here would misattribute drain time as bridge latency.
-        self.outbound.in_flight_since = None;
         let mut frames = Vec::with_capacity(self.outbound.queue.len());
         while let Some(frame) = self.outbound.queue.pop_front() {
             self.outbound.queued_bytes = self
@@ -279,7 +258,6 @@ where
             payload,
             publication: None,
             server_request,
-            queued_at: std::time::Instant::now(),
         });
         true
     }
@@ -353,7 +331,6 @@ where
             payload,
             publication,
             server_request,
-            queued_at: std::time::Instant::now(),
         });
         true
     }
@@ -427,14 +404,6 @@ where
         self.outbound.queue = retained;
         self.lifecycle.control.remove_publication(uri);
         self.diagnostics.published.remove(uri);
-    }
-
-    /// Samples the outbound queue after one dispatch/flush cycle. The queue
-    /// is session-local and mutated at many sites; a per-cycle sample is the
-    /// truthful depth at each pump boundary, not a per-mutation ledger.
-    pub(super) fn observe_outbound_queue(&self) {
-        hotpath::gauge!("lsp.outbound.queue_depth").set(self.outbound.queue.len());
-        hotpath::gauge!("lsp.outbound.queue_bytes").set(self.outbound.queued_bytes);
     }
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {

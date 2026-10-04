@@ -85,51 +85,16 @@ enum GenerationResolutionSettlementV1<T> {
     Terminated(code_search::CodeIndexSearchUnavailableReasonV1),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GenerationResolutionTerminalV1 {
-    Ready,
-    Unavailable,
-    Failed,
-}
-
-fn finish_generation_resolution_with<T>(
+fn finish_generation_resolution<T>(
     settlement: GenerationResolutionSettlementV1<T>,
-    observe: impl FnOnce(GenerationResolutionTerminalV1),
 ) -> GenerationResolutionResultV1<T> {
-    let result = match settlement {
+    match settlement {
         GenerationResolutionSettlementV1::Completed(result) => result,
         GenerationResolutionSettlementV1::JoinFailed => {
             Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
         }
         GenerationResolutionSettlementV1::Terminated(reason) => Err(reason),
-    };
-    observe(match &result {
-        Ok(Some(_)) => GenerationResolutionTerminalV1::Ready,
-        Ok(None) => GenerationResolutionTerminalV1::Unavailable,
-        Err(_) => GenerationResolutionTerminalV1::Failed,
-    });
-    result
-}
-
-fn finish_generation_resolution<T>(
-    settlement: GenerationResolutionSettlementV1<T>,
-) -> GenerationResolutionResultV1<T> {
-    finish_generation_resolution_with(settlement, |terminal| {
-        #[cfg(feature = "hotpath")]
-        match terminal {
-            GenerationResolutionTerminalV1::Ready => {
-                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Unavailable => {
-                hotpath::gauge!("query.generation.resolve.outcome.unavailable_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Failed => {
-                hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
-            }
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = terminal;
-    })
+    }
 }
 
 /// Validated once per process. Live query pages and the unavailable
@@ -218,7 +183,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "query.generation.resolve")]
+    #[tracing::instrument(name = "query.generation.resolve", level = "trace", skip_all)]
     pub async fn generation_for_controlled(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -226,8 +191,6 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -272,29 +235,34 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
                 return Ok(Some(generation));
             }
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
-            let scheduler = hotpath::measure_block!("query.generation.resolve.scheduler_wait", {
-                scheduler
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            });
-            let generation = hotpath::measure_block!("query.generation.resolve.load", {
-                scheduler
-                    .generation(&generation_id)
-                    .map_err(|error| match error {
+
+            let scheduler = {
+                let _span =
+                    tracing::trace_span!("query.generation.resolve.scheduler_wait").entered();
+                {
+                    scheduler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
+            };
+            let generation =
+                {
+                    let _span = tracing::trace_span!("query.generation.resolve.load").entered();
+                    {
+                        scheduler.generation(&generation_id).map_err(|error| {
+                            match error {
                         super::CodeIndexSchedulerErrorV1::Production(
                             crate::code_index::production::CodeIndexProductionErrorV1::Publication(
                                 error,
                             ),
                         ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
                         _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    })
-            })?;
+                    }
+                        })
+                    }
+                }?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
         let settlement = match crate::ports::park_admission(
@@ -2412,7 +2380,7 @@ fn disclose_symbol_omissions<T>(
     }
 }
 
-#[hotpath::measure(label = "query.graph.relation_keys")]
+#[tracing::instrument(name = "query.graph.relation_keys", level = "trace", skip_all)]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
@@ -2506,7 +2474,7 @@ fn graph_relation_keys(
     Ok(GraphRelationKeysV1 { keys, complete })
 }
 
-#[hotpath::measure(label = "query.graph.relation_hydrate")]
+#[tracing::instrument(name = "query.graph.relation_hydrate", level = "trace", skip_all)]
 fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],
@@ -4492,7 +4460,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_resolution_terminal_projection_records_exactly_one_outcome() {
+    fn generation_resolution_settlement_maps_to_one_result() {
         use code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
         let cases = [
@@ -4500,47 +4468,40 @@ mod tests {
                 "serving hit",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("serving"))),
                 Ok(Some("serving")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "durable ready",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("durable"))),
                 Ok(Some("durable")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "unavailable",
                 GenerationResolutionSettlementV1::Completed(Ok(None)),
                 Ok(None),
-                GenerationResolutionTerminalV1::Unavailable,
             ),
             (
                 "generation error",
                 GenerationResolutionSettlementV1::Completed(Err(Reason::GenerationUnavailable)),
                 Err(Reason::GenerationUnavailable),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "cancellation",
                 GenerationResolutionSettlementV1::Terminated(Reason::Cancelled),
                 Err(Reason::Cancelled),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "join error",
                 GenerationResolutionSettlementV1::JoinFailed,
                 Err(Reason::Internal),
-                GenerationResolutionTerminalV1::Failed,
             ),
         ];
 
-        for (label, settlement, expected_result, expected_terminal) in cases {
-            let mut terminals = Vec::new();
-            let result = finish_generation_resolution_with(settlement, |terminal| {
-                terminals.push(terminal);
-            });
-            assert_eq!(result, expected_result, "{label}");
-            assert_eq!(terminals, vec![expected_terminal], "{label}");
+        for (label, settlement, expected_result) in cases {
+            assert_eq!(
+                finish_generation_resolution(settlement),
+                expected_result,
+                "{label}"
+            );
         }
     }
 

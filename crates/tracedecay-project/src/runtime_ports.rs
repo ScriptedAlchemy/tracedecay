@@ -47,7 +47,7 @@ static DAEMON_CLIENT_PORTS: OnceLock<DaemonClientPortsV1> = OnceLock::new();
 /// Call this as early as possible in a process: the slots below are read by
 /// transcript ingest, agent-host installers, hooks, branch locking, and
 /// project open, all of which fail closed when nothing registered.
-#[hotpath::measure(label = "runtime_ports.register")]
+#[tracing::instrument(name = "runtime_ports.register", level = "trace", skip_all)]
 pub fn register_runtime_ports(daemon_client: DaemonClientPortsV1) -> Result<()> {
     register_session_ports();
     register_agent_host_ports();
@@ -186,7 +186,7 @@ fn fixture_notify_hook_event<'a>(
     Box::pin(async {})
 }
 
-#[hotpath::measure(label = "runtime_ports.codex_app_server")]
+#[tracing::instrument(name = "runtime_ports.codex_app_server", level = "trace", skip_all)]
 fn run_codex_app_server_prompt(
     prompt: &str,
     config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
@@ -235,13 +235,13 @@ fn resolve_project_root_with_identity<'a>(
     profile: &'a ProfileRoot,
     start: &'a Path,
 ) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + 'a>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         crate::config::discover_project_root_with_identity(profile, start),
-        label = "runtime_ports.resolve_project_root"
+        tracing::trace_span!("runtime_ports.resolve_project_root"),
     ))
 }
 
-#[hotpath::measure(label = "runtime_ports.resolve_hook_scope")]
+#[tracing::instrument(name = "runtime_ports.resolve_hook_scope", level = "trace", skip_all)]
 fn resolve_hook_scope(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
@@ -261,7 +261,7 @@ fn resolve_hook_store_layout<'a>(
     project_root: &'a Path,
 ) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + 'a>>
 {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         async move {
             crate::project::TraceDecay::resolve_store_layout_for_identity_with_options(
                 project_root,
@@ -269,7 +269,7 @@ fn resolve_hook_store_layout<'a>(
             )
             .await
         },
-        label = "runtime_ports.resolve_store_layout"
+        tracing::trace_span!("runtime_ports.resolve_store_layout"),
     ))
 }
 

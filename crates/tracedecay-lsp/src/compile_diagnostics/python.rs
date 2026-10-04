@@ -39,7 +39,7 @@ impl Driver for PyrightDriver {
         project_root: &'a Path,
         _scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let mut cmd = tokio::process::Command::new("pyright");
                 cmd.arg("--outputjson")
@@ -61,7 +61,7 @@ impl Driver for PyrightDriver {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 Ok(parse_pyright_output(&stdout, project_root))
             },
-            label = "compile_diagnostics.python.pyright"
+            tracing::trace_span!("compile_diagnostics.python.pyright"),
         ))
     }
 }
@@ -69,7 +69,7 @@ impl Driver for PyrightDriver {
 /// Parse a pyright `--outputjson` document into a flat diagnostic list.
 /// Returns an empty Vec for unparseable input rather than erroring, a
 /// pyright crash shouldn't take down a sync.
-#[hotpath::measure(label = "compile_diagnostics.python.parse")]
+#[tracing::instrument(name = "compile_diagnostics.python.parse", level = "trace", skip_all)]
 pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic> {
     let parsed: PyrightReport = match serde_json::from_str(stdout) {
         Ok(p) => p,

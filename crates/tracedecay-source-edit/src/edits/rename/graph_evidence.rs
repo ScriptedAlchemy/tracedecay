@@ -174,7 +174,7 @@ fn looks_like_example(path: &str) -> bool {
     path.starts_with("examples/") || path.contains("/examples/")
 }
 
-#[hotpath::measure(label = "edits.rename.neighbor_batches")]
+#[tracing::instrument(name = "edits.rename.neighbor_batches", level = "trace", skip_all)]
 fn neighbor_batches(
     graph: &SourceEditGraphReadV1,
     occurrences: &[SymbolOccurrenceId],
@@ -242,7 +242,7 @@ pub(super) fn ensure_active(graph: &SourceEditGraphReadV1) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure(label = "edits.rename.load_evidence")]
+#[tracing::instrument(name = "edits.rename.load_evidence", level = "trace", skip_all)]
 pub(super) fn load(
     graph: &SourceEditGraphReadV1,
     binding: &RenameSymbolBindingV1,
@@ -392,42 +392,44 @@ pub(super) fn load(
     if looks_like_test(target_path, &target_metadata.simple_name) {
         affected_tests.insert(target_path.to_owned());
     }
-    hotpath::gauge!("edits.rename.evidence_edges_total").inc(all_revision_edges.len() as u64);
-    let graph_revision = hotpath::measure_block!("edits.rename.evidence_digest", {
-        all_revision_edges.sort_by(|left, right| {
-            left.edge
-                .from_occurrence
-                .cmp(&right.edge.from_occurrence)
-                .then(left.edge.to_occurrence.cmp(&right.edge.to_occurrence))
-                .then(left.edge.kind.cmp(&right.edge.kind))
-                .then(left.edge.evidence_span.cmp(&right.edge.evidence_span))
-        });
-        let revision_rows = all_revision_edges
-            .iter()
-            .map(|edge| {
-                (
-                    &edge.edge,
-                    &edge.neighbor.occurrence,
-                    &edge.neighbor.binding,
-                    &edge.neighbor.metadata,
-                )
+    let graph_revision = {
+        let _span = tracing::trace_span!("edits.rename.evidence_digest").entered();
+        {
+            all_revision_edges.sort_by(|left, right| {
+                left.edge
+                    .from_occurrence
+                    .cmp(&right.edge.from_occurrence)
+                    .then(left.edge.to_occurrence.cmp(&right.edge.to_occurrence))
+                    .then(left.edge.kind.cmp(&right.edge.kind))
+                    .then(left.edge.evidence_span.cmp(&right.edge.evidence_span))
+            });
+            let revision_rows = all_revision_edges
+                .iter()
+                .map(|edge| {
+                    (
+                        &edge.edge,
+                        &edge.neighbor.occurrence,
+                        &edge.neighbor.binding,
+                        &edge.neighbor.metadata,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let revision_symbols = same_name
+                .iter()
+                .map(|summary| (&summary.occurrence, &summary.binding, &summary.metadata))
+                .collect::<Vec<_>>();
+            canonical_sha256(&(
+                "tracedecay.rename-graph-evidence.v2",
+                graph.reader().generation(),
+                &files,
+                &revision_symbols,
+                &revision_rows,
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("cannot derive rename graph revision: {error}"),
             })
-            .collect::<Vec<_>>();
-        let revision_symbols = same_name
-            .iter()
-            .map(|summary| (&summary.occurrence, &summary.binding, &summary.metadata))
-            .collect::<Vec<_>>();
-        canonical_sha256(&(
-            "tracedecay.rename-graph-evidence.v2",
-            graph.reader().generation(),
-            &files,
-            &revision_symbols,
-            &revision_rows,
-        ))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("cannot derive rename graph revision: {error}"),
-        })
-    })?;
+        }
+    }?;
 
     Ok(RenameGraphEvidenceLoadV1::Ready(RenameGraphEvidenceV1 {
         files: files

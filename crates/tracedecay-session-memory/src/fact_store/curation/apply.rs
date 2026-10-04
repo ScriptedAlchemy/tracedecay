@@ -552,7 +552,7 @@ async fn correction_assertion_payload_tx(
     Ok(payload)
 }
 
-#[hotpath::measure(label = "runtime_core.memory.curation_apply")]
+#[tracing::instrument(name = "runtime_core.memory.curation_apply", level = "trace", skip_all)]
 pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
@@ -575,9 +575,6 @@ pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
     // Every child request is bound to the exact snapshot verified above. Children retain that
     // immutable request for receipts while advancing from this transaction's current lineage, so
     // legal edits to the same fact compose without mistaking an earlier child for a foreign write.
-    // Counted after the replay check so replays do not re-count their batch.
-    hotpath::gauge!("runtime_core.memory.curation_operations")
-        .inc(request.operations().len() as f64);
     let now = project_memory_now()?;
     let mut changed_ids = Vec::new();
     let mut effects = Vec::new();

@@ -26,9 +26,10 @@ pub(crate) fn tighten_existing_file(path: &Path) -> Result<(), SpoolError> {
 }
 
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), SpoolError> {
-    hotpath::measure_block!("usecases.admission.fsync.directory", {
+    {
+        let _span = tracing::trace_span!("usecases.admission.fsync.directory").entered();
         shared_sync_parent_directory(path, DIRECTORY_POLICY).map_err(io_error)
-    })
+    }
 }
 
 fn replace_file_atomically(
@@ -68,7 +69,8 @@ pub(crate) fn with_owned_temp_publish<T>(
 }
 
 pub(crate) fn append_frame_durable(path: &Path, frame: &[u8]) -> Result<u64, SpoolError> {
-    hotpath::measure_block!("usecases.admission.fsync.append", {
+    {
+        let _span = tracing::trace_span!("usecases.admission.fsync.append").entered();
         append_durable(path, frame, DIRECTORY_POLICY).map_err(io_error)
-    })
+    }
 }

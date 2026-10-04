@@ -10,7 +10,7 @@
 //!     --features test-helpers -- --run all
 //! Run (per-stage attribution):
 //!   cargo bench -p tracedecay --bench transcript_ingest \
-//!     --features test-helpers,hotpath -- --run claude
+//!     --features test-helpers -- --run claude
 //!
 //! Providers: `claude` and `codex` exercise the observation capture +
 //! projection pipeline; `kiro` exercises the content-hash full-file reader.
@@ -355,7 +355,7 @@ async fn run_provider_bench(
     loop {
         let started = Instant::now();
         // Boxed so the ingest pass's future layout stays out of this loop
-        // body: with the hotpath wrappers compiled in, the inlined chain
+        // body: with instrumentation compiled in, the inlined chain
         // overflows rustc's query depth for this bench.
         let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_profile(
             tracedecay_runtime_core::config::ProfileRoot::new(&sandbox.profile).with_home(&home),
@@ -420,17 +420,10 @@ fn main() {
         small_bytes: parse_usize(&arguments, "--small-bytes", defaults.small_bytes),
     };
 
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("transcript-ingest-bench")
-        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
-        .build();
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
-    #[cfg(feature = "hotpath")]
-    hotpath::tokio_runtime!(runtime.handle());
 
     runtime.block_on(async {
         let mut outcomes = Vec::new();

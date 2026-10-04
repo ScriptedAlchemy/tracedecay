@@ -92,7 +92,7 @@ pub(super) fn apply_install_policy(
 ///
 /// The binary path is baked into `plugin_api.py`; the dashboard resolves its
 /// real project from the Hermes process cwd or an explicit `TraceDecay` env var.
-#[hotpath::measure(label = "hermes_wrapper_deploy")]
+#[tracing::instrument(name = "hermes_wrapper_deploy", level = "trace", skip_all)]
 fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
     let dashboard_dir = plugin_dir.join("dashboard");
     let dist_dir = dashboard_dir.join("dist");

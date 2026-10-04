@@ -275,7 +275,7 @@ fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
     body
 }
 
-#[hotpath::measure(label = "mcp.graph.context.total")]
+#[tracing::instrument(name = "mcp.graph.context.total", level = "trace", skip_all)]
 pub async fn compute_context<G, F>(
     ctx: &McpToolContext<'_>,
     open_graph: G,
@@ -408,29 +408,32 @@ where
     };
     let (graph, projection, verified_graph_evidence, graph_stage) = match (graph, complete.as_ref())
     {
-        (Ok(graph), Some(complete)) => match hotpath::measure_block!(
-            "mcp.graph.context.graph",
-            context_graph_projection(
-                ctx,
-                &graph,
-                complete,
-                scope_prefix,
-                max_nodes,
-                include_code,
-                max_code_blocks,
-            )
-        ) {
-            Ok(projection) => {
-                let stage = ContextStageV1::ran(max_nodes, projection.selected.len(), false);
-                (Some(graph), projection, None, stage)
+        (Ok(graph), Some(complete)) => {
+            let match_result = {
+                let _span = tracing::trace_span!("mcp.graph.context.graph").entered();
+                context_graph_projection(
+                    ctx,
+                    &graph,
+                    complete,
+                    scope_prefix,
+                    max_nodes,
+                    include_code,
+                    max_code_blocks,
+                )
+            };
+            match match_result {
+                Ok(projection) => {
+                    let stage = ContextStageV1::ran(max_nodes, projection.selected.len(), false);
+                    (Some(graph), projection, None, stage)
+                }
+                Err(error) => (
+                    None,
+                    ContextGraphProjection::default(),
+                    Some(dependency_hints::unavailable_evidence(&error)),
+                    ContextStageV1::Unavailable,
+                ),
             }
-            Err(error) => (
-                None,
-                ContextGraphProjection::default(),
-                Some(dependency_hints::unavailable_evidence(&error)),
-                ContextStageV1::Unavailable,
-            ),
-        },
+        }
         (Ok(graph), None) => (
             Some(graph),
             ContextGraphProjection::default(),

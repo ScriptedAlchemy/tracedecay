@@ -75,7 +75,7 @@ type SummaryAvailabilityById = BTreeMap<String, (String, Option<String>)>;
 /// message anchors, child-summary availability, are then each read once for
 /// the whole publication instead of once per source, and the bindings are
 /// assembled in source order from those results.
-#[hotpath::measure(future = true, label = "session_temporal.sources.prepare")]
+#[tracing::instrument(name = "session_temporal.sources.prepare", level = "trace", skip_all)]
 pub(super) async fn prepare_sources(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: &LcmImmutableSummaryPublication,

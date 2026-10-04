@@ -20,7 +20,7 @@ use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
 
 pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
-#[hotpath::measure(label = "daemon.engine.hooks.notify", future = true)]
+#[tracing::instrument(name = "daemon.engine.hooks.notify", level = "trace", skip_all)]
 pub async fn notify_hook_event(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
@@ -46,7 +46,7 @@ pub async fn notify_hook_event(
     }
 }
 
-#[hotpath::measure(label = "daemon.engine.hooks.deliver", future = true)]
+#[tracing::instrument(name = "daemon.engine.hooks.deliver", level = "trace", skip_all)]
 async fn notify_hook_event_to_connection(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,

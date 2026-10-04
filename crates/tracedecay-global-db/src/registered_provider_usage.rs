@@ -15,7 +15,6 @@ const MAX_PROVIDER_USAGE_READ: usize = 1_000;
 impl RegisteredGlobalDb {
     /// Reads immutable provider usage observations without consulting
     /// conversational rows or the Claude-only accounting import.
-    #[hotpath::skip]
     pub async fn provider_usage_observations(
         &self,
         scope: &ObservationScopeV1,
@@ -28,7 +27,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Reads the next immutable page after an exact observation/usage ordinal.
-    #[hotpath::measure(future = true, label = "global_db.registered.provider_usage.query")]
+    #[tracing::instrument(
+        name = "global_db.registered.provider_usage.query",
+        level = "trace",
+        skip_all
+    )]
     pub async fn provider_usage_observations_after(
         &self,
         scope: &ObservationScopeV1,

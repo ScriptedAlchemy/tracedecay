@@ -195,7 +195,6 @@ def main() -> None:
             "TRACEDECAY_DAEMON_HARNESS_PROFILE_DIR": str(runtime / "profile"),
             "TRACEDECAY_FEEDBACK_EVIDENCE": str(EVIDENCE),
             "TRACEDECAY_AUDIT_BIN": str(BIN),
-            "HOTPATH_METRICS_SERVER_OFF": "1",
         })
         with BIN.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()

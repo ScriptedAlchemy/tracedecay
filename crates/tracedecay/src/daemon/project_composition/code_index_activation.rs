@@ -64,7 +64,7 @@ pub(super) fn code_index_activation_mount(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
@@ -104,7 +104,7 @@ pub(super) fn code_index_activation_mount(
                 });
                 Ok(())
             },
-            label = "daemon.project.activate.mount"
+            tracing::trace_span!("daemon.project.activate.mount"),
         ))
     });
     mount
@@ -140,7 +140,7 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         route_registered,
         cancellation,
     } = inputs;
-    tokio::spawn(hotpath::future!(
+    tokio::spawn(tracing::Instrument::instrument(
         async move {
             let schedulers = invocation.code_index_schedulers.clone();
             let mut awaiting_generation_logged = false;
@@ -189,7 +189,7 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
                 () = retry => {}
             }
         },
-        label = "daemon.project.activate.query_authority"
+        tracing::trace_span!("daemon.project.activate.query_authority"),
     ));
 }
 

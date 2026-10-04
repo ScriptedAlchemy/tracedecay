@@ -654,9 +654,11 @@ where
         }
         Err(error) => return application_contract_error_response(error),
     }
-    let request = match hotpath::measure_block!("api.http.admission", {
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
         admit_http_application_request(operation, request_id, controls, page, body)
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return *response,
     };
@@ -677,7 +679,9 @@ where
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
         HttpApplicationOwnerKind::Retained => owners.invoke_retained(request),
     };
-    match hotpath::future!(invocation, label = "api.http.handler").await {
+    match tracing::Instrument::instrument(invocation, tracing::trace_span!("api.http.handler"))
+        .await
+    {
         Ok(result) => result.into_http_response(),
         Err(error) => application_contract_error_response(error),
     }

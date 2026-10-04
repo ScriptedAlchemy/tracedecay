@@ -167,7 +167,7 @@ fn current_feedback_finding(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.handoff.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.handoff.execute", level = "trace", skip_all)]
 pub(super) async fn execute_handoff_application(
     registered: RegisteredWorkRuntime,
     feedback: Option<Arc<FeedbackRuntime>>,

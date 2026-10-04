@@ -33,7 +33,7 @@ impl TemporalRetrievalPort for ResetRequiredSessionLookupV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.project.owners.primitive", future = true)]
+#[tracing::instrument(name = "daemon.project.owners.primitive", level = "trace", skip_all)]
 pub(super) async fn open_and_register_project_primitive_runtime(
     invocation: &DaemonInvocationState,
     project_root: &Path,

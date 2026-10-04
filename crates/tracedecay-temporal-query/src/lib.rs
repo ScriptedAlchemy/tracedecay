@@ -142,7 +142,6 @@ impl TemporalHydratedResult {
         Self::unavailable(rank, stable_id.into(), anchor_id, state)
     }
 
-    #[hotpath::skip]
     pub const fn rank(&self) -> u32 {
         self.rank
     }
@@ -155,7 +154,6 @@ impl TemporalHydratedResult {
         &self.anchor_id
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> HydrationStateV1 {
         self.state
     }
@@ -271,7 +269,6 @@ impl TemporalCandidateExport {
         self.next_cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> RetrieverCoverage {
         self.coverage
     }
@@ -301,7 +298,7 @@ pub enum TemporalKernelError {
     Context(#[from] ContextError),
 }
 
-#[hotpath::measure(future = true, label = "temporal.kernel.execute")]
+#[tracing::instrument(name = "temporal.kernel.execute", level = "trace", skip_all)]
 pub async fn execute_temporal_kernel(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -316,9 +313,9 @@ pub async fn execute_temporal_kernel(
 /// Execute the canonical Plan-23 candidate, temporal-resolution, fusion,
 /// dedupe, diversity, and pagination phases without reading payload bytes.
 ///
-/// Hotpath names are static crate stages. Candidate-page and record-page
+/// Span names are static crate stages. Candidate-page and record-page
 /// ports are left unmeasured so storage/query crates own those spans.
-#[hotpath::measure(future = true, label = "temporal.candidates.export")]
+#[tracing::instrument(name = "temporal.candidates.export", level = "trace", skip_all)]
 /// Read one bounded candidate cohort window, resuming past `resume`'s keyset.
 ///
 /// The window is the unit a cursor can rank inside: scores are cohort-relative,
@@ -336,13 +333,16 @@ async fn read_candidate_window(
     limits: ExecutionLimits,
     resume: &CursorPosition,
 ) -> Result<(Vec<RankingCandidate>, Option<String>), TemporalKernelError> {
-    let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
-        plan_temporal_candidates(
-            &request.query,
-            request.direct_anchor.as_ref(),
-            snapshot.request().semantic_filter().goals,
-        )
-    });
+    let plan = {
+        let _span = tracing::trace_span!("temporal_query.candidates.plan").entered();
+        {
+            plan_temporal_candidates(
+                &request.query,
+                request.direct_anchor.as_ref(),
+                snapshot.request().semantic_filter().goals,
+            )
+        }
+    };
     let candidate_limits = PageLimits::new(
         limits.candidate_limit,
         limits.candidate_total_bytes,
@@ -356,22 +356,27 @@ async fn read_candidate_window(
     );
     let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
     let mut next_window_keyset = None;
-    hotpath::measure_block!("temporal_query.candidates.generate", {
-        loop {
-            let page = pull_candidate_page(read_port, snapshot, &plan, &mut state)
-                .await
-                .map_err(map_port_error)?;
-            let status = page.status();
-            candidates.extend(page.into_items());
-            if status == PageStatus::Complete {
-                break;
-            }
-            if state.is_exhausted() {
-                next_window_keyset = state.keyset().map(|keyset| keyset.as_str().to_owned());
-                break;
+    {
+        use tracing::Instrument as _;
+        let generate_span = tracing::trace_span!("temporal_query.candidates.generate");
+        {
+            loop {
+                let page = pull_candidate_page(read_port, snapshot, &plan, &mut state)
+                    .instrument(generate_span.clone())
+                    .await
+                    .map_err(map_port_error)?;
+                let status = page.status();
+                candidates.extend(page.into_items());
+                if status == PageStatus::Complete {
+                    break;
+                }
+                if state.is_exhausted() {
+                    next_window_keyset = state.keyset().map(|keyset| keyset.as_str().to_owned());
+                    break;
+                }
             }
         }
-    });
+    };
     if state.is_exhausted() && next_window_keyset.is_none() {
         return Err(map_port_error(TemporalPortError::Read {
             operation: "bound candidate cohort window",
@@ -390,26 +395,10 @@ pub async fn execute_temporal_candidate_export(
         return Err(TemporalKernelError::InvalidLimit);
     }
     let snapshot = request.snapshot.clone();
-    if let Err(error) = hotpath::measure_block!(
-        "temporal_query.participant_manifest.validate",
+    if let Err(error) = {
+        let _span = tracing::trace_span!("temporal_query.participant_manifest.validate").entered();
         snapshot.participant_manifest().validate()
-    ) {
-        match &error {
-            TemporalPortError::ParticipantLimitExceeded { .. } => {
-                hotpath::gauge!("temporal_query.refusal.participant_manifest.participants_total")
-                    .inc(1_u64);
-            }
-            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
-                hotpath::gauge!(
-                    "temporal_query.refusal.participant_manifest.canonical_bytes_total"
-                )
-                .inc(1_u64);
-            }
-            _ => {
-                hotpath::gauge!("temporal_query.refusal.participant_manifest.invalid_total")
-                    .inc(1_u64);
-            }
-        }
+    } {
         return Err(map_port_error(error));
     }
     check_control(&snapshot)?;
@@ -438,7 +427,6 @@ pub async fn execute_temporal_candidate_export(
         Some(prepared) => (prepared.candidates().to_vec(), None),
         None => read_candidate_window(read_port, &snapshot, request, limits, &resume).await?,
     };
-    hotpath::gauge!("temporal_query.candidates.generated").set(candidates.len());
 
     let after = resume.last_sort_key.clone();
     check_control(&snapshot)?;
@@ -564,21 +552,17 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
-    hotpath::gauge!("temporal_query.candidates.visible").set(visible_candidates.len());
     let eligible =
         u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     let excluded = examined
         .checked_sub(eligible)
         .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
-    hotpath::gauge!("temporal_query.candidates.ranked").set(ranked.len());
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
-    hotpath::gauge!("temporal_query.candidates.after_cursor").set(ranked.len());
     let mut deduplicated_anchors = BTreeSet::new();
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
-    hotpath::gauge!("temporal_query.candidates.deduped").set(ranked.len());
 
     // Two independent reasons to continue: this window still ranks rows past
     // the page, or the window itself was bounded and storage holds more. The
@@ -588,7 +572,6 @@ pub async fn execute_temporal_candidate_export(
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
-    hotpath::gauge!("temporal_query.candidates.paged").set(ranked.len());
     let next_position = if strict_population.is_some() {
         None
     } else if window_has_more {
@@ -903,7 +886,6 @@ enum SummaryRejectionClass {
 }
 
 impl SummaryRejectionClass {
-    #[hotpath::skip]
     const fn coverage(self) -> CoverageClass {
         match self {
             Self::Unauthorized | Self::SessionMismatch => CoverageClass::Hidden,
@@ -912,7 +894,6 @@ impl SummaryRejectionClass {
         }
     }
 
-    #[hotpath::skip]
     const fn hides_details(self) -> bool {
         match self {
             Self::Unauthorized | Self::SessionMismatch => true,

@@ -46,7 +46,7 @@ where
     })
 }
 
-#[hotpath::measure(label = "dashboard_api.feedback.status", future = true)]
+#[tracing::instrument(name = "dashboard_api.feedback.status", level = "trace", skip_all)]
 pub async fn status(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<FeedbackObservationReadModelV1>> {

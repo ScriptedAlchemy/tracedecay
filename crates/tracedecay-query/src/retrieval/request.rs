@@ -69,7 +69,7 @@ impl RawRetrievalRequestV1 {
         }
     }
 
-    #[hotpath::measure(label = "query.request.sanitize")]
+    #[tracing::instrument(name = "query.request.sanitize", level = "trace", skip_all)]
     pub fn sanitize(
         self,
         sanitizer_revision: SanitizerRevision,

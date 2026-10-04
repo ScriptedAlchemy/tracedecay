@@ -124,9 +124,7 @@ impl RemoteBrainTlsListener {
         router: Router,
         mut shutdown_requested: oneshot::Receiver<()>,
     ) -> Result<()> {
-        let router = crate::application_surface::with_hotpath_server_layer(
-            router.layer(middleware::from_fn(force_remote_connection_close)),
-        );
+        let router = router.layer(middleware::from_fn(force_remote_connection_close));
         let graceful = CancellationToken::new();
         let mut connections = JoinSet::new();
         loop {
@@ -142,12 +140,9 @@ impl RemoteBrainTlsListener {
                     if let Some((io, address)) = accepted {
                         let router = router.clone();
                         let graceful = graceful.clone();
-                        connections.spawn(hotpath::future!(
-                            async move {
+                        connections.spawn(tracing::Instrument::instrument(async move {
                                 serve_remote_brain_tls_connection(io, router, graceful, address).await;
-                            },
-                            label = "daemon.http.application.remote_tls_connection"
-                        ));
+                            }, tracing::trace_span!("daemon.http.application.remote_tls_connection")));
                     }
                 }
             }
@@ -171,7 +166,7 @@ impl RemoteBrainTlsListener {
         Ok(())
     }
 
-    #[hotpath::measure(label = "daemon.http.application.tls_bind", future = true)]
+    #[tracing::instrument(name = "daemon.http.application.tls_bind", level = "trace", skip_all)]
     pub async fn bind(config: &RemoteBrainTlsConfig) -> Result<Self> {
         let certificates = CertificateDer::pem_file_iter(config.certificate_chain())
             .map_err(|error| tls_configuration_error("open Remote Brain TLS certificate", error))?
@@ -223,7 +218,7 @@ impl RemoteBrainTlsListener {
         self.listener.local_addr()
     }
 
-    #[hotpath::measure(label = "daemon.http.application.tls_accept", future = true)]
+    #[tracing::instrument(name = "daemon.http.application.tls_accept", level = "trace", skip_all)]
     async fn accept(&self) -> Option<(RemoteBrainTlsIo, SocketAddr)> {
         let (stream, address) = match self.listener.accept().await {
             Ok(accepted) => accepted,
@@ -253,7 +248,11 @@ impl RemoteBrainTlsListener {
     }
 }
 
-#[hotpath::measure(label = "daemon.http.application.tls_validate_identity")]
+#[tracing::instrument(
+    name = "daemon.http.application.tls_validate_identity",
+    level = "trace",
+    skip_all
+)]
 fn validate_remote_brain_tls_identity(
     certificates: &[CertificateDer<'_>],
     listen: SocketAddr,
@@ -569,7 +568,11 @@ impl RemoteBrainTlsIo {
         }
     }
 
-    #[hotpath::measure(label = "daemon.http.application.observe_http_request")]
+    #[tracing::instrument(
+        name = "daemon.http.application.observe_http_request",
+        level = "trace",
+        skip_all
+    )]
     fn observe_http_request(&mut self, bytes: &[u8]) -> io::Result<()> {
         if self.request_read_complete {
             return Ok(());
@@ -820,7 +823,11 @@ impl Drop for RemoteBrainTlsIo {
     }
 }
 
-#[hotpath::measure(label = "daemon.http.application.parse_body_length")]
+#[tracing::instrument(
+    name = "daemon.http.application.parse_body_length",
+    level = "trace",
+    skip_all
+)]
 fn declared_http11_body_length(header_bytes: &[u8]) -> io::Result<u64> {
     let headers = std::str::from_utf8(header_bytes).map_err(|_| {
         io::Error::new(

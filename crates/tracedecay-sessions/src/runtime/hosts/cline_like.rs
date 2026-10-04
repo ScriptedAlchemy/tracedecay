@@ -366,7 +366,7 @@ impl ClineLikeSource {
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
-#[hotpath::measure(label = "sessions.hosts.cline_like.capture", future = true)]
+#[tracing::instrument(name = "sessions.hosts.cline_like.capture", level = "trace", skip_all)]
 pub async fn capture_cline_like_snapshot_observations(
     facade: &dyn HostAdmission,
     source: &ClineLikeSource,
@@ -431,7 +431,11 @@ fn ensure_bounded_file(
         .map_err(|_| non_durable(provider, path, "snapshot exceeds provider byte bound"))
 }
 
-#[hotpath::measure(label = "sessions.hosts.cline_like.snapshot_input_bytes")]
+#[tracing::instrument(
+    name = "sessions.hosts.cline_like.snapshot_input_bytes",
+    level = "trace",
+    skip_all
+)]
 fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngestResult<u64> {
     let Some(task_dir) = path.parent() else {
         return Ok(0);
@@ -457,7 +461,11 @@ fn non_durable(provider: &'static str, path: &Path, reason: &'static str) -> Tra
     non_durable_snapshot_record(provider, path, reason)
 }
 
-#[hotpath::measure(label = "sessions.hosts.cline_like.collect_task_api_paths")]
+#[tracing::instrument(
+    name = "sessions.hosts.cline_like.collect_task_api_paths",
+    level = "trace",
+    skip_all
+)]
 fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -494,7 +502,11 @@ fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-#[hotpath::measure(label = "sessions.hosts.cline_like.read_task_metadata")]
+#[tracing::instrument(
+    name = "sessions.hosts.cline_like.read_task_metadata",
+    level = "trace",
+    skip_all
+)]
 fn read_task_metadata(provider: &'static str, task_dir: &Path) -> Option<Value> {
     for name in TASK_METADATA_FILES {
         let path = task_dir.join(name);
@@ -542,7 +554,11 @@ fn collect_metadata_project_paths(value: &Value, key: Option<&str>, out: &mut Ve
     }
 }
 
-#[hotpath::measure(label = "sessions.hosts.cline_like.usage_records")]
+#[tracing::instrument(
+    name = "sessions.hosts.cline_like.usage_records",
+    level = "trace",
+    skip_all
+)]
 fn usage_records(
     provider: &'static str,
     task_id: &str,
@@ -796,7 +812,11 @@ fn native_record_id(entry: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-#[hotpath::measure(label = "sessions.hosts.cline_like.normalize")]
+#[tracing::instrument(
+    name = "sessions.hosts.cline_like.normalize",
+    level = "trace",
+    skip_all
+)]
 pub fn normalize_cline_like_snapshot_observations(
     provider: &'static str,
     messages: &[SessionMessageRecord],

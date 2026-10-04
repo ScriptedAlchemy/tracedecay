@@ -71,15 +71,12 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
     Ok(normalized)
 }
 
-#[hotpath::measure(label = "usecases.edit.state_digest")]
+#[tracing::instrument(name = "usecases.edit.state_digest", level = "trace", skip_all)]
 pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
         let state = match read_source_edit_candidate(root, Path::new(relative))? {
-            Some(bytes) => {
-                hotpath::gauge!("usecases.edit.digest_bytes").inc(bytes.len() as f64);
-                Some(hash_source_edit_content(&bytes)?)
-            }
+            Some(bytes) => Some(hash_source_edit_content(&bytes)?),
             None => None,
         };
         states.push((relative, state));
@@ -93,7 +90,7 @@ pub(super) fn source_edit_recovery_digest(
     canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
 }
 
-#[hotpath::measure(label = "usecases.edit.planned_state_digest")]
+#[tracing::instrument(name = "usecases.edit.planned_state_digest", level = "trace", skip_all)]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
     planned_files: &[PlannedSourceEditFile],
@@ -206,7 +203,7 @@ impl Write for BoundedRecordBytes {
     }
 }
 
-#[hotpath::measure(label = "usecases.edit.persist_record")]
+#[tracing::instrument(name = "usecases.edit.persist_record", level = "trace", skip_all)]
 pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -> Result<()> {
     let mut sink = BoundedRecordBytes::new(MAX_DURABLE_RECORD_BYTES);
     if let Err(error) = serde_json::to_writer(&mut sink, value) {
@@ -237,7 +234,7 @@ pub(super) fn persist_record<T: Serialize>(path: &Path, kind: &str, value: &T) -
     .map_err(|error| io_error("persist source edit durable record", error))
 }
 
-#[hotpath::measure(label = "usecases.edit.load_record")]
+#[tracing::instrument(name = "usecases.edit.load_record", level = "trace", skip_all)]
 pub(super) fn load_record<T>(path: &Path, kind: &'static str) -> Result<Option<T>>
 where
     T: for<'de> Deserialize<'de>,

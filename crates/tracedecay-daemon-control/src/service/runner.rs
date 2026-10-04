@@ -148,7 +148,7 @@ impl ServiceRunner {
         })
     }
 
-    #[hotpath::measure(label = "daemon.service.runner.install")]
+    #[tracing::instrument(name = "daemon.service.runner.install", level = "trace", skip_all)]
     pub(super) fn install(
         &self,
         profile: &ProfileRoot,
@@ -183,7 +183,7 @@ impl ServiceRunner {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.runner.refresh")]
+    #[tracing::instrument(name = "daemon.service.runner.refresh", level = "trace", skip_all)]
     pub(super) fn refresh(
         &self,
         profile: &ProfileRoot,
@@ -262,7 +262,11 @@ impl ServiceRunner {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.runner.before_uninstall")]
+    #[tracing::instrument(
+        name = "daemon.service.runner.before_uninstall",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn before_uninstall(&self, stop: bool, expected_version: &str) -> Result<()> {
         match self {
             // Best effort: the unit file is removed either way, but a unit the
@@ -279,7 +283,7 @@ impl ServiceRunner {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.runner.start")]
+    #[tracing::instrument(name = "daemon.service.runner.start", level = "trace", skip_all)]
     pub(super) fn start(
         &self,
         service_path: &Path,
@@ -309,7 +313,7 @@ impl ServiceRunner {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.runner.stop")]
+    #[tracing::instrument(name = "daemon.service.runner.stop", level = "trace", skip_all)]
     pub(super) fn stop(&self, expected_version: &str) -> Result<()> {
         match self {
             Self::Systemd { systemctl, unit } => {

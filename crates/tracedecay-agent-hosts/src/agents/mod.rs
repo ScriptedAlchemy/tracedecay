@@ -106,7 +106,11 @@ pub use mcp_registration::{
     read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
 };
 
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.install_index")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.install_index",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn install_managed_skill_prompt_index(
     profile_root: &Path,
     prompt_path: &Path,
@@ -121,7 +125,11 @@ pub(crate) fn install_managed_skill_prompt_index(
     Ok(())
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.remove_index")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.remove_index",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn remove_managed_skill_prompt_index(
     prompt_path: &Path,
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
@@ -146,7 +154,11 @@ pub(crate) fn remove_managed_skill_prompt_index(
 /// serve, so doctor names the deploy command that reconverges it. Absent files
 /// and files with no managed block read as converged, so a host the operator
 /// does not use stays silent. Doctor never repairs.
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.doctor_index")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.doctor_index",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn doctor_check_managed_skill_prompt_indexes(
     dc: &mut DoctorCounters,
     profile_root: &Path,
@@ -184,7 +196,11 @@ pub(crate) fn doctor_check_managed_skill_prompt_indexes(
 /// export for one host must not block the others (or the lifecycle action
 /// that triggered the refresh). Agents with no export destinations are
 /// omitted from the result.
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.export",
+    level = "trace",
+    skip_all
+)]
 pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
@@ -218,7 +234,11 @@ pub fn export_managed_skills_to_agents(
 /// Re-runs managed-skill exports for global installs under `home` plus
 /// project-local installs under `project_root`. Reports are merged per agent
 /// so dashboard callers can present one lifecycle refresh result per host.
-#[hotpath::measure(label = "agent_hosts.agents.managed_skill.export_hosts")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.managed_skill.export_hosts",
+    level = "trace",
+    skip_all
+)]
 pub fn export_managed_skills_to_agent_hosts(
     home: &Path,
     project_root: &Path,
@@ -762,7 +782,11 @@ impl host_bundle::HostBundleRegistrationInspectorV1 for AgentRegistrationInspect
     }
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_bundle.inspect")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_bundle.inspect",
+    level = "trace",
+    skip_all
+)]
 pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,

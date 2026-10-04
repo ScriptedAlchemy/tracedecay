@@ -15,7 +15,7 @@ use crate::decode_primitive_request;
 use crate::handlers::graph::graph_tool_completion;
 
 /// Structured TOML / JSON queries by dotted key path.
-#[hotpath::measure(label = "mcp.info.config.total")]
+#[tracing::instrument(name = "mcp.info.config.total", level = "trace", skip_all)]
 pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToolCompletionV1> {
     let ConfigSurfaceRequestV1 {
         key,
@@ -35,7 +35,7 @@ pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToo
     }
 
     let scan_root = project_root.to_path_buf();
-    let (result, touched) = hotpath::future!(
+    let (result, touched) = tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut files: Vec<String> = Vec::new();
             if let Some(p) = path {
@@ -97,7 +97,7 @@ pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToo
                 touched,
             ))
         }),
-        label = "mcp.info.config.scan"
+        tracing::trace_span!("mcp.info.config.scan"),
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {

@@ -12,8 +12,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::branch::{
-    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
+    BranchAddOutcome, BranchTrackingPreparation, prepare_branch_tracking_in_layout,
+    rollback_prepared_branch_tracking,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -59,7 +59,7 @@ pub(super) fn parse_branch_add_request(
     })
 }
 
-#[hotpath::measure(label = "daemon.branch_add.response", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.response", level = "trace", skip_all)]
 pub(super) async fn branch_add_response(
     administration: &StoreAdministration,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
@@ -142,7 +142,11 @@ pub(super) async fn branch_add_response(
 /// Production branch-add journey: activate the requested linked worktree,
 /// then ask the code-index runtime to seal its exact generation and provenance.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.activate_and_track", future = true)]
+#[tracing::instrument(
+    name = "daemon.branch_add.activate_and_track",
+    level = "trace",
+    skip_all
+)]
 async fn activate_and_track_manual_branch(
     administration: &StoreAdministration,
     project_root: &Path,
@@ -197,7 +201,7 @@ async fn activate_and_track_manual_branch(
                 )
                 .await;
                 if let (Err(error), Some(prepared)) = (&tracked, prepared.as_deref()) {
-                    match rollback_prepared_branch_tracking(&data_root, prepared).map_err(
+                    rollback_prepared_branch_tracking(&data_root, prepared).map_err(
                         |rollback| {
                             TraceDecayError::project_route(
                                 BRANCH_TRACKING_FAILED,
@@ -207,10 +211,7 @@ async fn activate_and_track_manual_branch(
                                 ),
                             )
                         },
-                    )? {
-                        PreparedBranchRollbackOutcome::RolledBack
-                        | PreparedBranchRollbackOutcome::NoMatch => {}
-                    }
+                    )?;
                 }
                 tracked
             }
@@ -269,7 +270,7 @@ async fn activate_and_track_manual_branch(
 /// missing session mount or cursor key must not retract it. The exact branch
 /// read falls back to borrowing a peer authority when this could not run.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.query_authority", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.query_authority", level = "trace", skip_all)]
 async fn mount_published_branch_query_authority(
     registries: Option<&(super::branch_admin::SharedSessionRuntimeRegistries, PathBuf)>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -345,7 +346,7 @@ async fn mount_published_branch_query_authority(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.owner", level = "trace", skip_all)]
 pub(super) async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
     graph: Arc<tracedecay_project::project::TraceDecay>,

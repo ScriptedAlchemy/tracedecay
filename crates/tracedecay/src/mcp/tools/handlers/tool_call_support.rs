@@ -23,7 +23,7 @@ pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Va
     args.get("project_selector").is_some()
 }
 
-#[hotpath::measure(future = true, label = "mcp.project.route.resolve")]
+#[tracing::instrument(name = "mcp.project.route.resolve", level = "trace", skip_all)]
 pub(crate) async fn resolve_registered_project_route_for_tool(
     tool_name: String,
     args: Value,

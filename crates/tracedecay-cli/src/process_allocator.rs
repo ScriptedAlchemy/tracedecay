@@ -3,11 +3,7 @@
 //! The `mimalloc` crate keeps its FFI private, so the calls used here are
 //! declared against the statically linked library.
 
-#[cfg(all(
-    feature = "alloc-mimalloc",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
-))]
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
 pub(crate) mod mimalloc_v3 {
     use std::cell::Cell;
     use std::ffi::{c_int, c_void};
@@ -443,11 +439,7 @@ pub(crate) mod mimalloc_v3 {
 /// call as the runtime's allocator release. Runs once at startup, before any
 /// daemon work.
 pub(crate) fn configure_process_allocator() {
-    #[cfg(all(
-        feature = "alloc-mimalloc",
-        not(feature = "alloc-jemalloc"),
-        not(feature = "hotpath-alloc")
-    ))]
+    #[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
     {
         mimalloc_v3::route_c_libraries();
         mimalloc_v3::install();

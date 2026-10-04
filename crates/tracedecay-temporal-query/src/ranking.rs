@@ -37,7 +37,6 @@ pub struct DiversityLimits {
 }
 
 impl DiversityLimits {
-    #[hotpath::skip]
     pub const fn unbounded() -> Self {
         Self {
             per_logical_message: usize::MAX,
@@ -129,7 +128,7 @@ impl<'a> SourcePartitionKey<'a> {
     }
 }
 
-#[hotpath::measure(label = "temporal.rank")]
+#[tracing::instrument(name = "temporal.rank", level = "trace", skip_all)]
 pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
     let mut by_channel_and_source: BTreeMap<
         (CandidateChannel, SourcePartitionKey<'_>),

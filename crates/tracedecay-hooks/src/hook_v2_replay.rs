@@ -40,7 +40,6 @@ pub enum HookReplayTombstoneReasonV1 {
 }
 
 impl HookReplayTombstoneReasonV1 {
-    #[hotpath::skip]
     pub const fn as_key(self) -> &'static str {
         match self {
             Self::BindingStale => "binding_stale",
@@ -149,7 +148,7 @@ impl ReplaySettlement {
 /// Each lease acquisition waits out a live writer for at most its lease: an
 /// append wakes the drain while the appender still holds the lease, so
 /// skipping a held lease would strand that record until the next sweep.
-#[hotpath::measure(label = "hooks.replay.host_drain", future = true)]
+#[tracing::instrument(name = "hooks.replay.host_drain", level = "trace", skip_all)]
 pub async fn drain_host_spool_once<A, F>(
     root: &Path,
     config: HookSpoolConfigV1,
@@ -182,7 +181,6 @@ where
         let outcomes = spool.acknowledge_many(&acknowledgements, now)?;
         for (record, outcome) in expired.iter().zip(outcomes) {
             if outcome? {
-                hotpath::gauge!("hooks.replay.expired").inc(1.0);
                 log_tombstone(host, record, HookReplayTombstoneReasonV1::Expired);
                 pass.tombstoned = pass.tombstoned.saturating_add(1);
             }
@@ -192,7 +190,6 @@ where
     let Some(binding) = binding.filter(|binding| binding.project_id == project_id) else {
         // Without a current binding for this project nothing can be
         // reauthorized. Records stay durable and pending; a later pass retries.
-        hotpath::gauge!("hooks.replay.binding_unavailable").inc(1.0);
         pass.binding_unavailable = true;
         return Ok(pass);
     };
@@ -204,11 +201,9 @@ where
             u16::try_from(batch.records.len()).map_err(|_| HookSpoolError::ReplayBatchExceeded)?;
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             spool.release_replay_claim(batch.claim_id)?;
-            hotpath::gauge!("hooks.replay.retained").inc(f64::from(record_count));
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
-        hotpath::gauge!("hooks.replay.batch_events").set(f64::from(record_count));
         replay_batches.push((batch.records, record_count));
     }
 
@@ -229,9 +224,9 @@ where
                 ));
                 continue;
             }
-            let outcome = hotpath::future!(
+            let outcome = tracing::Instrument::instrument(
                 admit(record.envelope.clone(), record.native_lifecycle.clone()),
-                label = "hooks.replay.delivery"
+                tracing::trace_span!("hooks.replay.delivery"),
             )
             .await;
             match outcome {
@@ -280,7 +275,6 @@ where
                 settled.push((record, ReplaySettlement::Tombstone(reason)));
             }
             ReplayCompletion::Retained(count) => {
-                hotpath::gauge!("hooks.replay.retained").inc(f64::from(count));
                 pass.retained = pass.retained.saturating_add(count);
             }
         }
@@ -300,23 +294,12 @@ where
         }
         match settlement {
             ReplaySettlement::Committed => {
-                hotpath::gauge!("hooks.replay.delivered").inc(1.0);
                 pass.committed = pass.committed.saturating_add(1);
             }
             ReplaySettlement::ExactDuplicate => {
-                hotpath::gauge!("hooks.replay.duplicate").inc(1.0);
                 pass.duplicates = pass.duplicates.saturating_add(1);
             }
             ReplaySettlement::Tombstone(reason) => {
-                match reason {
-                    HookReplayTombstoneReasonV1::Expired => {
-                        hotpath::gauge!("hooks.replay.expired").inc(1.0);
-                    }
-                    HookReplayTombstoneReasonV1::BindingStale
-                    | HookReplayTombstoneReasonV1::IdentityConflict => {
-                        hotpath::gauge!("hooks.replay.refused").inc(1.0);
-                    }
-                }
                 log_tombstone(host, &record, reason);
                 pass.tombstoned = pass.tombstoned.saturating_add(1);
             }

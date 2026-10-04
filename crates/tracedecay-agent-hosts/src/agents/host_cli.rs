@@ -131,7 +131,7 @@ fn require_host_cli_from(
 /// rest of the environment is cleared. This lets an isolated-HOME test drive a
 /// real lifecycle without touching the operator's own configuration or
 /// workspace.
-#[hotpath::measure(label = "hosts.agent.host_cli.invoke")]
+#[tracing::instrument(name = "hosts.agent.host_cli.invoke", level = "trace", skip_all)]
 pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result<HostCliOutcomeV1> {
     let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
     let rendered_program = resolved_program
@@ -234,7 +234,7 @@ pub(crate) struct HostServerChild {
 
 /// Start `program args` under the admitted `home` (see [`run_host_cli`]) with
 /// `env` added to the cleared environment, and keep it running.
-#[hotpath::measure(label = "hosts.agent.host_cli.spawn_server")]
+#[tracing::instrument(name = "hosts.agent.host_cli.spawn_server", level = "trace", skip_all)]
 pub(crate) fn spawn_host_server(
     program: &Path,
     args: &[&str],
@@ -421,7 +421,7 @@ fn read_mcp_config_observation(
 /// verification step rejects the effect. Snapshot once after the child exits:
 /// reading again after recording would let a foreign writer be absorbed into
 /// the transaction's intended state.
-#[hotpath::measure(label = "hosts.agent.host_cli.registry_step")]
+#[tracing::instrument(name = "hosts.agent.host_cli.registry_step", level = "trace", skip_all)]
 pub(crate) fn run_mcp_registry_step(
     program: &Path,
     args: &[&str],

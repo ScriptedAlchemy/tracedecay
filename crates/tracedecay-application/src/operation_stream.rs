@@ -512,7 +512,7 @@ impl OperationEventAuthority {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.operation.resolve_context", future = true)]
+    #[tracing::instrument(name = "usecases.operation.resolve_context", level = "trace", skip_all)]
     async fn resolve_invocation_context_inner(
         &self,
         operation_id: &OperationId,
@@ -584,7 +584,7 @@ impl OperationEventAuthority {
     }
 
     /// Registers an admitted operation and publishes its sole accepted event.
-    #[hotpath::measure(label = "usecases.operation.begin", future = true)]
+    #[tracing::instrument(name = "usecases.operation.begin", level = "trace", skip_all)]
     pub async fn begin(
         &self,
         context: &RequestContext,
@@ -668,7 +668,7 @@ impl OperationEventAuthority {
     /// Starts one trusted project-local managed test run. The caller is the
     /// already-routed project workflow handler, so the retained authorization
     /// key is the canonical admitted root URI rather than client payload.
-    #[hotpath::measure(label = "usecases.operation.begin_test_run", future = true)]
+    #[tracing::instrument(name = "usecases.operation.begin_test_run", level = "trace", skip_all)]
     pub async fn begin_managed_test_run(
         &self,
         root_uri: String,
@@ -793,7 +793,7 @@ impl OperationEventAuthority {
     }
 
     /// Requests cancellation for one exact trusted project-local test run.
-    #[hotpath::measure(label = "usecases.operation.cancel_test_run", future = true)]
+    #[tracing::instrument(name = "usecases.operation.cancel_test_run", level = "trace", skip_all)]
     pub(crate) async fn cancel_managed_test_run(
         &self,
         operation_id: &OperationId,
@@ -827,7 +827,7 @@ impl OperationEventAuthority {
 
     /// Replays retained events from `requested_next_sequence`, then follows
     /// the same bounded Tokio broadcast stream used by live producers.
-    #[hotpath::measure(label = "usecases.operation.subscribe", future = true)]
+    #[tracing::instrument(name = "usecases.operation.subscribe", level = "trace", skip_all)]
     pub async fn subscribe(
         &self,
         operation_id: &OperationId,
@@ -908,7 +908,7 @@ impl OperationEventAuthority {
 
     /// Requests cancellation after revalidating actor, scope, grant, and
     /// disclosure. Subscription disconnects never call this method.
-    #[hotpath::measure(label = "usecases.operation.cancel", future = true)]
+    #[tracing::instrument(name = "usecases.operation.cancel", level = "trace", skip_all)]
     pub async fn cancel(
         &self,
         operation_id: &OperationId,
@@ -946,7 +946,7 @@ impl OperationEventAuthority {
     /// truncate a stream another producer is between admission and its first
     /// result on. The emitter is the only holder of the cancellation
     /// receiver, so its receiver count is the producer liveness signal.
-    #[hotpath::measure(label = "usecases.operation.expire_idle", future = true)]
+    #[tracing::instrument(name = "usecases.operation.expire_idle", level = "trace", skip_all)]
     pub async fn expire_idle(&self) {
         let mut state = self.inner.state.lock().await;
         let AuthorityState {
@@ -957,7 +957,7 @@ impl OperationEventAuthority {
         insertion_order.retain(|operation_id| operations.contains_key(operation_id));
     }
 
-    #[hotpath::measure(label = "usecases.operation.emit_progress", future = true)]
+    #[tracing::instrument(name = "usecases.operation.emit_progress", level = "trace", skip_all)]
     async fn emit_progress(
         &self,
         operation_id: &OperationId,
@@ -987,7 +987,11 @@ impl OperationEventAuthority {
         Ok(event)
     }
 
-    #[hotpath::measure(label = "usecases.operation.emit_test_result", future = true)]
+    #[tracing::instrument(
+        name = "usecases.operation.emit_test_result",
+        level = "trace",
+        skip_all
+    )]
     async fn emit_test_result(
         &self,
         operation_id: &OperationId,
@@ -1024,7 +1028,7 @@ impl OperationEventAuthority {
         Ok(event)
     }
 
-    #[hotpath::measure(label = "usecases.operation.emit_terminal", future = true)]
+    #[tracing::instrument(name = "usecases.operation.emit_terminal", level = "trace", skip_all)]
     async fn emit_terminal(
         &self,
         operation_id: &OperationId,

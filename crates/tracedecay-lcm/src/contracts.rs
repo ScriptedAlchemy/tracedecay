@@ -187,22 +187,18 @@ pub enum LcmRetrievalOutcome {
 }
 
 impl LcmRetrievalOutcome {
-    #[hotpath::skip]
     pub const fn complete(freshness: LcmDataFreshness) -> Self {
         Self::Complete { freshness }
     }
 
-    #[hotpath::skip]
     pub const fn partial(freshness: LcmDataFreshness, omitted: u64) -> Self {
         Self::Partial { freshness, omitted }
     }
 
-    #[hotpath::skip]
     pub const fn stale(freshness: LcmDataFreshness) -> Self {
         Self::Stale { freshness }
     }
 
-    #[hotpath::skip]
     pub const fn freshness(self) -> LcmDataFreshness {
         match self {
             Self::Complete { freshness }
@@ -211,7 +207,6 @@ impl LcmRetrievalOutcome {
         }
     }
 
-    #[hotpath::skip]
     pub const fn omitted(self) -> u64 {
         match self {
             Self::Partial { omitted, .. } => omitted,

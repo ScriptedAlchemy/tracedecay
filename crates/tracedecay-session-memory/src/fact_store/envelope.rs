@@ -167,7 +167,6 @@ pub(super) fn project_memory_receipt_u64(
 }
 
 impl DatabaseFactStore<'_> {
-    #[hotpath::skip]
     pub(super) async fn project_memory_read<T>(
         &self,
         work: impl for<'tx> FnOnce(
@@ -201,7 +200,6 @@ impl DatabaseFactStore<'_> {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn project_memory_write<T: Send + 'static>(
         &self,
         write_control: &FactWriteControl,
@@ -224,7 +222,6 @@ impl DatabaseFactStore<'_> {
 
     /// Like [`Self::project_memory_write`], but names the fact content the
     /// test-transport commit barrier may match against `expect_content`.
-    #[hotpath::skip]
     pub(super) async fn project_memory_write_with_barrier_content<T: Send + 'static>(
         &self,
         write_control: &FactWriteControl,

@@ -91,7 +91,6 @@ impl RemoteRecoveryProjectLifecycleV1 {
         })
     }
 
-    #[hotpath::skip]
     pub(in crate::daemon) async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
@@ -109,7 +108,6 @@ impl RemoteRecoveryProjectLifecycleV1 {
         Ok(writer)
     }
 
-    #[hotpath::skip]
     async fn settle_retained_runtime_retirement(&self, project_id: &ProjectId) -> Result<()> {
         let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
         let receipt = super::project_retirement::settle_project_retirements(
@@ -133,7 +131,6 @@ impl RemoteRecoveryProjectLifecycleV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn ensure_project_recovery_active(&self, project_id: &ProjectId) -> Result<()> {
         let registry = {
             let registries = self.session_runtime_registries.lock().await;

@@ -42,7 +42,7 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SessionLookupRequest,
     ) -> TemporalRetrievalFuture<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let limit = usize::try_from(request.meta.page.page_size)
                     .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
@@ -86,7 +86,7 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
                     .await;
                 map_outcome(outcome, request, now_micros())
             },
-            label = "daemon.session_retrieval.lookup"
+            tracing::trace_span!("daemon.session_retrieval.lookup"),
         ))
     }
 }

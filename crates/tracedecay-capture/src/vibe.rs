@@ -30,19 +30,11 @@ pub fn normalize_observation(
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Vibe records order by file bytes, so the range length is the source
-    // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.vibe.record_bytes").inc(range.end() - range.start());
-    let envelope =
-        normalize_vibe_record(native, session_id, model, location, stable_record_id, range);
-    if envelope.is_err() {
-        hotpath::gauge!("capture.vibe.normalize_failures").inc(1u64);
-    }
-    envelope
+    normalize_vibe_record(native, session_id, model, location, stable_record_id, range)
 }
 
 /// One source-record canonicalization, not a per-call walk.
-#[hotpath::measure(label = "capture.vibe.normalize")]
+#[tracing::instrument(name = "capture.vibe.normalize", level = "trace", skip_all)]
 fn normalize_vibe_record(
     native: &Value,
     session_id: &str,

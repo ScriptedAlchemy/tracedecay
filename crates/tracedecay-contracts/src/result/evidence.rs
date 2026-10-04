@@ -33,7 +33,6 @@ pub enum PageCursor {
 }
 
 impl PageCursor {
-    #[hotpath::skip]
     pub const fn as_opaque(&self) -> Option<&OpaqueCursor> {
         match self {
             Self::Opaque { cursor } => Some(cursor),

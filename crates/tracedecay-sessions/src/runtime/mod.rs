@@ -15,7 +15,7 @@ pub use native_ingest_source::native_ingest_source_identity;
 mod observation;
 pub use observation::snapshot_observation;
 pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
-mod pipeline_metrics;
+mod jsonl_io;
 pub mod registered_db;
 pub mod shared;
 pub mod source;

@@ -23,7 +23,6 @@ impl RegisteredGitTopologyAnchorAuthority {
         Self { database }
     }
 
-    #[hotpath::skip]
     async fn publish_records(
         &self,
         publication: GitTopologyAnchorPublication,
@@ -85,7 +84,6 @@ impl RegisteredGitTopologyAnchorAuthority {
         })
     }
 
-    #[hotpath::skip]
     async fn resolve_record(
         &self,
         resolution: GitTopologyAnchorResolution,
@@ -157,9 +155,10 @@ async fn read_record(
     decode_record(&anchor_json, &owner_json, &projection_generation).map(Some)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.git_topology_anchor.query.publication_candidates"
+#[tracing::instrument(
+    name = "global_db.git_topology_anchor.query.publication_candidates",
+    level = "trace",
+    skip_all
 )]
 async fn read_records(
     connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,

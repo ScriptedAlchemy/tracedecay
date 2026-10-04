@@ -45,18 +45,10 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
         {
             Ok(request) => request,
-            Err(_) => {
-                hotpath::gauge!("daemon.code_index.watch.ingress.worker_unavailable_total")
-                    .inc(1_u64);
-                GitStateChangeRequestV1::WorkerUnavailable
-            }
+            Err(_) => GitStateChangeRequestV1::WorkerUnavailable,
         }
     }
 
-    // Every routing outcome below increments one member of a closed counter
-    // set, so a stalled worktree is diagnosable as "the watcher never fired",
-    // "every frontier bounced Busy", or "the probe kept proving quiet" without
-    // per-frontier logging.
     fn request_for_root_blocking(
         &self,
         identity: &GitRepositoryIdentity,
@@ -64,30 +56,24 @@ impl CodeIndexSchedulerRegistryV1 {
         // Discovery spells the worktree through `canonicalize` (verbatim on
         // Windows); mounts are keyed by the product root identity.
         let Ok(mount_key) = canonical_existing_identity(&identity.worktree_root) else {
-            hotpath::gauge!("daemon.code_index.watch.ingress.unmounted_total").inc(1_u64);
             return GitStateChangeRequestV1::Unmounted;
         };
         let Ok(mounted) = self.mounted.try_lock() else {
-            hotpath::gauge!("daemon.code_index.watch.ingress.busy_total").inc(1_u64);
             return GitStateChangeRequestV1::Busy;
         };
         let Some(worktree) = mounted.get(&mount_key) else {
-            hotpath::gauge!("daemon.code_index.watch.ingress.unmounted_total").inc(1_u64);
             return GitStateChangeRequestV1::Unmounted;
         };
         let Ok(repository_id) =
             super::super::identity::repository_id_for_common_dir(&identity.common_dir)
         else {
-            hotpath::gauge!("daemon.code_index.watch.ingress.identity_mismatch_total").inc(1_u64);
             return GitStateChangeRequestV1::IdentityMismatch;
         };
         let Ok(worktree_id) = super::super::identity::worktree_id_for(&identity.worktree_root)
         else {
-            hotpath::gauge!("daemon.code_index.watch.ingress.identity_mismatch_total").inc(1_u64);
             return GitStateChangeRequestV1::IdentityMismatch;
         };
         if worktree.repository_id != repository_id || worktree.worktree_id != worktree_id {
-            hotpath::gauge!("daemon.code_index.watch.ingress.identity_mismatch_total").inc(1_u64);
             return GitStateChangeRequestV1::IdentityMismatch;
         }
         let scheduler = std::sync::Arc::clone(&worktree.scheduler);
@@ -98,16 +84,13 @@ impl CodeIndexSchedulerRegistryV1 {
             Ok(scheduler) => scheduler,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
-                hotpath::gauge!("daemon.code_index.watch.ingress.busy_total").inc(1_u64);
                 return GitStateChangeRequestV1::Busy;
             }
         };
         let verdict = scheduler.freshness_probe_verdict();
         if verdict == FreshnessProbeVerdictV1::Current {
-            hotpath::gauge!("daemon.code_index.watch.ingress.quiet_total").inc(1_u64);
             return GitStateChangeRequestV1::Accepted;
         }
-        hotpath::gauge!("daemon.code_index.watch.ingress.woke_total").inc(1_u64);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::GitWatcher);
         // Only a ladder that proved movement carries observed source change.
         // A mount no pass has verified yet has no baseline to move from: its

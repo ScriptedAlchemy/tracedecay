@@ -65,7 +65,6 @@ pub enum WorkApplicationInvocationV1 {
 }
 
 impl WorkApplicationInvocationV1 {
-    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::GenerateProposal(_) => "generate_proposal",

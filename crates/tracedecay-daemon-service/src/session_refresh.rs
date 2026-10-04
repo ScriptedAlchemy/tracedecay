@@ -116,7 +116,6 @@ impl DaemonSessionRefreshService {
         token
     }
 
-    #[hotpath::skip]
     async fn execute_command(
         &self,
         command: SessionRefreshCommand,

@@ -131,33 +131,37 @@ async fn operation<O>(
 where
     O: HandoffApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        match HandoffOperation::parse(&segment) {
-            None => Err(adapter_problem_response(
-                request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            )),
-            Some(operation) => match body {
-                Ok(Json(body)) => Ok(HandoffHttpRequest {
-                    operation,
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
+            match HandoffOperation::parse(&segment) {
+                None => Err(adapter_problem_response(
                     request_id,
-                    controls,
-                    body,
-                }),
-                Err(_) => Err(invalid_request_response(
-                    request_id,
-                    "handoff.invalid_body",
-                    "The handoff-open request body is invalid or exceeds the configured limit",
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
                 )),
-            },
+                Some(operation) => match body {
+                    Ok(Json(body)) => Ok(HandoffHttpRequest {
+                        operation,
+                        request_id,
+                        controls,
+                        body,
+                    }),
+                    Err(_) => Err(invalid_request_response(
+                        request_id,
+                        "handoff.invalid_body",
+                        "The handoff-open request body is invalid or exceeds the configured limit",
+                    )),
+                },
+            }
         }
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move { owner.invoke_handoff(request).await },
-        label = "api.http.handler"
+        tracing::trace_span!("api.http.handler"),
     )
     .await
 }

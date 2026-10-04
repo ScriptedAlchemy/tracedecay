@@ -1,4 +1,3 @@
-#[cfg(any(test, feature = "hotpath"))]
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -19,7 +18,7 @@ use super::{
     should_resume_jsonl, stable_jsonl_file_id,
 };
 
-pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
+pub use crate::runtime::jsonl_io::{JsonlChangeKind, JsonlIoAccounting};
 
 /// Why strict JSONL framing stopped before consuming the next record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,58 +509,26 @@ fn unchanged_generation_cache_key(
     })
 }
 
-#[cfg(any(test, feature = "hotpath"))]
 struct ScanPayloadMeter(Cell<u64>);
-
-#[cfg(not(any(test, feature = "hotpath")))]
-struct ScanPayloadMeter;
 
 impl ScanPayloadMeter {
     fn new() -> Self {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            Self(Cell::new(0))
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            Self
-        }
+        Self(Cell::new(0))
     }
 
     fn get(&self) -> u64 {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            self.0.get()
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            0
-        }
+        self.0.get()
     }
 }
 
 struct MeasuredJsonlFile<'a> {
     inner: std::fs::File,
-    #[cfg(any(test, feature = "hotpath"))]
     meter: &'a ScanPayloadMeter,
-    #[cfg(not(any(test, feature = "hotpath")))]
-    meter: std::marker::PhantomData<&'a ScanPayloadMeter>,
 }
 
 impl<'a> MeasuredJsonlFile<'a> {
     fn new(inner: std::fs::File, meter: &'a ScanPayloadMeter) -> Self {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            Self { inner, meter }
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            let _ = meter;
-            Self {
-                inner,
-                meter: std::marker::PhantomData,
-            }
-        }
+        Self { inner, meter }
     }
 
     fn inner(&self) -> &std::fs::File {
@@ -576,7 +543,7 @@ impl<'a> MeasuredJsonlFile<'a> {
 impl Read for MeasuredJsonlFile<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
-        #[cfg(any(test, feature = "hotpath"))]
+
         self.meter
             .0
             .set(self.meter.0.get().saturating_add(read as u64));
@@ -1228,7 +1195,6 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
     };
-    crate::runtime::pipeline_metrics::record_file_opened();
     try_stream_new_jsonl_raw_from_file(
         path,
         file,
@@ -1522,7 +1488,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != expected.change
             {
-                crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
                     path: path.to_path_buf(),
                 });
@@ -1539,7 +1504,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != self.generation.change
             {
-                crate::runtime::pipeline_metrics::record_scan_generation_changed();
                 return Err(TranscriptIngestError::ScanGenerationChanged {
                     path: path.to_path_buf(),
                 });
@@ -1552,7 +1516,6 @@ impl<'a> PreparedJsonlScan<'a> {
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
                 io.snapshot_hash_bytes = io.snapshot_hash_bytes.saturating_add(snapshot_hashed);
                 if final_snapshot != expected_snapshot {
-                    crate::runtime::pipeline_metrics::record_scan_generation_changed();
                     return Err(TranscriptIngestError::ScanGenerationChanged {
                         path: path.to_path_buf(),
                     });
@@ -1977,7 +1940,6 @@ impl<'a> RawJsonlBatchScanner<'a> {
             || changed_consumed_prefix
             || final_metadata.len() < self.read_through
         {
-            crate::runtime::pipeline_metrics::record_scan_generation_changed();
             return Err(TranscriptIngestError::ScanGenerationChanged {
                 path: path.to_path_buf(),
             });
@@ -2047,7 +2009,6 @@ fn try_stream_new_jsonl_raw_from_file(
     let scan_payload_reads = ScanPayloadMeter::new();
     let file = MeasuredJsonlFile::new(file, &scan_payload_reads);
     let mut io = JsonlIoAccounting::default();
-    let mut classified = false;
     let result = (|| {
         let prepared = match PreparedJsonlScan::capture(
             path,
@@ -2064,7 +2025,6 @@ fn try_stream_new_jsonl_raw_from_file(
                 return Ok(RawNewJsonl::prefix_diverged(previous, file_identity, io));
             }
         };
-        classified = true;
         if prepared.is_complete() {
             prepared.into_empty_outcome(path, &mut io)
         } else {
@@ -2081,7 +2041,6 @@ fn try_stream_new_jsonl_raw_from_file(
         }
     })();
     io.scan_payload_read_bytes = scan_payload_reads.get();
-    crate::runtime::pipeline_metrics::record_jsonl_io(&io, classified.then_some(io.change));
     result.map(|mut raw| {
         raw.io = io;
         raw

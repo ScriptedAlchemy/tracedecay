@@ -167,20 +167,23 @@ where
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        hotpath::measure_block!("api.http.admission", {
-            let authorization = authorization_header(&parts.headers)
-                .map_err(|_| concealed_authentication_rejection())?;
-            let credential = authorization.into_credential();
-            let session = state
-                .credential_admission
-                .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
-                .map_err(|_| concealed_authentication_rejection())?;
-            Ok(Self {
-                session,
-                credential,
-                request: PhantomData,
-            })
-        })
+        {
+            let _span = tracing::trace_span!("api.http.admission").entered();
+            {
+                let authorization = authorization_header(&parts.headers)
+                    .map_err(|_| concealed_authentication_rejection())?;
+                let credential = authorization.into_credential();
+                let session = state
+                    .credential_admission
+                    .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
+                    .map_err(|_| concealed_authentication_rejection())?;
+                Ok(Self {
+                    session,
+                    credential,
+                    request: PhantomData,
+                })
+            }
+        }
     }
 }
 
@@ -221,26 +224,29 @@ where
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        hotpath::measure_block!("api.http.admission", {
-            let authorization = authorization_header(&parts.headers)
-                .map_err(|_| concealed_authentication_rejection())?;
-            let grant_credential = authorization.into_credential();
-            let session = state
-                .credential_admission
-                .admit_before_body(
-                    &grant_credential,
-                    <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
-                    (state.clock)(),
-                )
-                .map_err(|_| concealed_authentication_rejection())?;
-            let enrollment_credential = enrollment_credential(&parts.headers)
-                .map_err(|_| concealed_authentication_rejection())?;
-            Ok(Self {
-                session,
-                grant_credential,
-                enrollment_credential,
-            })
-        })
+        {
+            let _span = tracing::trace_span!("api.http.admission").entered();
+            {
+                let authorization = authorization_header(&parts.headers)
+                    .map_err(|_| concealed_authentication_rejection())?;
+                let grant_credential = authorization.into_credential();
+                let session = state
+                    .credential_admission
+                    .admit_before_body(
+                        &grant_credential,
+                        <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
+                        (state.clock)(),
+                    )
+                    .map_err(|_| concealed_authentication_rejection())?;
+                let enrollment_credential = enrollment_credential(&parts.headers)
+                    .map_err(|_| concealed_authentication_rejection())?;
+                Ok(Self {
+                    session,
+                    grant_credential,
+                    enrollment_credential,
+                })
+            }
+        }
     }
 }
 
@@ -301,8 +307,9 @@ where
     Request: DeserializeOwned + RemoteSessionBoundProtocolBodyV1 + Send + 'static,
     Port::Output: Serialize + Send + 'static,
 {
-    let (request, credential, control, mut cancel_on_drop, service) =
-        hotpath::measure_block!("api.http.admission", {
+    let (request, credential, control, mut cancel_on_drop, service) = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
             let Json(request) = match payload {
                 Ok(payload) => payload,
                 Err(_) => {
@@ -366,15 +373,16 @@ where
                 cancel_on_drop,
                 Arc::clone(&state.service),
             )
-        });
-    let execution = hotpath::future!(
+        }
+    };
+    let execution = tracing::Instrument::instrument(
         async move {
             tokio::task::spawn_blocking(move || {
                 service.execute_controlled(request.request, credential, control)
             })
             .await
         },
-        label = "api.http.handler"
+        tracing::trace_span!("api.http.handler"),
     )
     .await;
     cancel_on_drop.disarm();
@@ -393,14 +401,17 @@ async fn enrollment_route<Port>(
 where
     Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static + ?Sized,
 {
-    let request = hotpath::measure_block!("api.http.admission", {
-        let Json(request) = match payload {
-            Ok(payload) => payload,
-            Err(_) => {
-                return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract);
-            }
-        };
-        if <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+    let request = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
+            let Json(request) = match payload {
+                Ok(payload) => payload,
+                Err(_) => {
+                    return invalid_remote_request_response()
+                        .map_err(RemoteHttpRejection::Contract);
+                }
+            };
+            if <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
             &admission.session,
             &request.request,
         )
@@ -408,15 +419,20 @@ where
         {
             return Err(concealed_authentication_rejection());
         }
-        request
-    });
-    match hotpath::measure_block!("api.http.handler", {
-        state.service.execute_enrollment(
-            request.request,
-            admission.grant_credential,
-            admission.enrollment_credential,
-        )
-    }) {
+            request
+        }
+    };
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.handler").entered();
+        {
+            state.service.execute_enrollment(
+                request.request,
+                admission.grant_credential,
+                admission.enrollment_credential,
+            )
+        }
+    };
+    match match_result {
         Ok(response) => Ok(remote_protocol_response(response.into())),
         Err(error) => Err(RemoteHttpRejection::Contract(error)),
     }

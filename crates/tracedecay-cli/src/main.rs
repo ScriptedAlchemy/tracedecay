@@ -1,36 +1,23 @@
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 // binary crate: match lib allow policy for CLI dispatch
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
-#[cfg(any(feature = "hotpath", test))]
-use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-#[cfg(feature = "hotpath")]
-use std::sync::{Arc, Mutex};
-
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 // Opt-in allocator features (see Cargo.toml). Exactly one global allocator
 // may exist per binary, so overlapping selections resolve by fixed precedence
-// rather than a compile error: hotpath-alloc's counting allocator wins in
-// measurement builds, then jemalloc, then mimalloc. `production` selects
+// rather than a compile error: jemalloc wins, then mimalloc. `production` selects
 // mimalloc (see Cargo.toml for the measurements); only a build that opts out
 // of it keeps the system allocator, and the installed service unit must not
 // cap glibc's arenas either way: `MALLOC_ARENA_MAX=2` once did, to bound
 // retained memory, and put 60% of a 20-worker daemon's CPU into two arena
 // locks while RSS still reached 15 GB.
-#[cfg(all(feature = "alloc-jemalloc", not(feature = "hotpath-alloc")))]
+#[cfg(feature = "alloc-jemalloc")]
 #[global_allocator]
 static JEMALLOC_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(all(
-    feature = "alloc-mimalloc",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
-))]
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
 #[global_allocator]
 static MIMALLOC_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -255,14 +242,7 @@ enum AsyncRuntimeFlavor {
     CurrentThread,
     MultiThread,
 }
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
-#[cfg(feature = "hotpath")]
-const HOTPATH_FOCUS_ENV: &str = "HOTPATH_FOCUS";
-#[cfg(feature = "hotpath")]
-const HOTPATH_METRICS_SERVER_OFF_ENV: &str = "HOTPATH_METRICS_SERVER_OFF";
+
 const MIN_SERVING_BLOCKING_RESERVE: usize = 4;
 const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
@@ -410,203 +390,17 @@ fn restore_sigpipe_default() -> std::io::Result<()> {
     }
 }
 
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_output_format_is_valid(output_format: Option<&OsStr>) -> bool {
-    output_format.is_none_or(|value| {
-        value.to_str().is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "table" | "json" | "json-pretty" | "jsonpretty" | "none"
-            )
-        })
-    })
-}
-
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_output_format_is_none(output_format: Option<&OsStr>) -> bool {
-    output_format
-        .and_then(OsStr::to_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case("none"))
-}
-
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_output_path_is_valid(output_path: Option<&OsStr>) -> bool {
-    output_path.is_none_or(|value| value.to_str().is_some_and(|value| !value.is_empty()))
-}
-
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_focus_is_valid(focus: Option<&OsStr>) -> bool {
-    let Some(focus) = focus.and_then(OsStr::to_str) else {
-        // Hotpath also uses `std::env::var`, so non-Unicode focus is treated
-        // as absent rather than parsed.
-        return true;
-    };
-    focus
-        .strip_prefix('/')
-        .and_then(|pattern| pattern.strip_suffix('/'))
-        .is_none_or(|pattern| regex::Regex::new(pattern).is_ok())
-}
-
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_requires_protocol_safe_output(
-    hook_protocol: bool,
-    usable_output_path: bool,
-    output_format: Option<&OsStr>,
-) -> bool {
-    !usable_output_path && (hook_protocol || output_format.is_none())
-}
-
-#[cfg(feature = "hotpath")]
-fn configure_hotpath_output(args: &[std::ffi::OsString]) -> Result<(), String> {
-    let hook_protocol = hook_capture_cmd::is_hook_protocol_invocation(args);
-    if hook_protocol {
-        // Hook stderr belongs to the host and the process serves exactly one
-        // request, so the live metrics endpoint has no consumer here. Losing
-        // the fixed-port race would print a hotpath error onto the host's
-        // stderr stream, which hosts read as a hook failure.
-        unsafe {
-            std::env::set_var(HOTPATH_METRICS_SERVER_OFF_ENV, "1");
-        }
-    }
-    let output_path = std::env::var_os(HOTPATH_OUTPUT_PATH_ENV);
-    let output_format = std::env::var_os(HOTPATH_OUTPUT_FORMAT_ENV);
-    let focus = std::env::var_os(HOTPATH_FOCUS_ENV);
-    let valid_path = hotpath_output_path_is_valid(output_path.as_deref());
-    let valid_format = hotpath_output_format_is_valid(output_format.as_deref());
-    let valid_focus = hotpath_focus_is_valid(focus.as_deref());
-    if !hook_protocol && !valid_path {
-        return Err(format!(
-            "{HOTPATH_OUTPUT_PATH_ENV} must be a non-empty Unicode path"
-        ));
-    }
-    if !hook_protocol && !valid_focus {
-        return Err(format!(
-            "{HOTPATH_FOCUS_ENV} contains an invalid /regular expression/"
-        ));
-    }
-    if hook_protocol && !valid_focus {
-        // Hotpath compiles /regex/ focus lazily from the first measurement
-        // guard and panics on an invalid pattern. An empty text focus matches
-        // every label and preserves the hook's status without host output.
-        unsafe {
-            std::env::set_var(HOTPATH_FOCUS_ENV, "");
-        }
-    }
-    let force_report_off = hook_protocol && (!valid_path || !valid_format);
-    if !hook_protocol && !valid_format {
-        return Err(format!(
-            "{HOTPATH_OUTPUT_FORMAT_ENV} must be one of table, json, json-pretty, or none"
-        ));
-    }
-    let report_off = hotpath_output_format_is_none(output_format.as_deref())
-        || force_report_off
-        || hotpath_requires_protocol_safe_output(
-            hook_protocol,
-            output_path.is_some() && valid_path,
-            output_format.as_deref(),
-        );
-    if report_off {
-        // No feature-enabled process may append a default table to an ordinary
-        // CLI protocol stream. Hooks are stricter: malformed output variables
-        // and an explicit stdout format are ignored unless Hotpath can read a
-        // non-empty report path through its Unicode environment API.
-        unsafe {
-            std::env::set_var(HOTPATH_OUTPUT_FORMAT_ENV, "none");
-        }
-        // Hotpath resolves and opens its writer before it handles the `none`
-        // format. Remove even a valid path whenever reports are off so guard
-        // drop cannot create, truncate, or diagnose an output destination.
-        unsafe {
-            std::env::remove_var(HOTPATH_OUTPUT_PATH_ENV);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "hotpath")]
-fn hotpath_guard() -> hotpath::HotpathGuard {
-    // The CPU report section autospawns an external `hotpath-samply`/`samply`
-    // profiler that SIGSTOPs this process while it attaches perf sampling and
-    // SIGCONTs it only once the attach succeeds. A profiler failure inside
-    // that window leaves the process stopped forever, so headless invocations
-    // (hooks, `--yes` flows, protocol streams) must never enter it implicitly.
-    // CPU sampling remains available only by explicit operator request:
-    // `HOTPATH_REPORT` (e.g. `functions-cpu`) takes precedence over this
-    // default exclusion.
-    // Hotpath 0.24 reads HOTPATH_FUNCTIONS_LIMIT only when the exit report is
-    // built. Live functions_timing and functions_alloc use the builder limit
-    // captured when this guard starts, so the same env is applied here.
-    tracedecay_hotpath_guard::with_functions_display_limit(
-        hotpath::HotpathGuardBuilder::new("tracedecay")
-            .sections_exclude(vec![hotpath::Section::FunctionsCpu]),
-    )
-    .build()
-}
-
-#[cfg(feature = "hotpath")]
-struct ProcessHotpathGuard {
-    guard: Arc<Mutex<Option<hotpath::HotpathGuard>>>,
-}
-
-#[cfg(feature = "hotpath")]
-impl ProcessHotpathGuard {
-    #[hotpath::measure(label = "cli.hotpath.install_shutdown_finalizer")]
-    fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
-        let guard = Arc::new(Mutex::new(Some(guard)));
-        let watchdog_guard = Arc::clone(&guard);
-        if !tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer(move || {
-            let guard = watchdog_guard
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            drop(guard);
-        }) {
-            return Err("Hotpath shutdown finalizer is already installed".to_owned());
-        }
-        Ok(Self { guard })
-    }
-}
-
-#[cfg(feature = "hotpath")]
-impl Drop for ProcessHotpathGuard {
-    fn drop(&mut self) {
-        let guard = self
-            .guard
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        drop(guard);
-    }
-}
-
 fn main() -> ExitCode {
     admit_process_host_program_search_path();
     let args = std::env::args_os().collect::<Vec<_>>();
-    #[cfg(feature = "hotpath")]
-    if let Err(message) = configure_hotpath_output(&args) {
-        eprintln!("Error: {message}");
-        return ExitCode::FAILURE;
-    }
-    #[cfg(feature = "hotpath")]
-    let _hotpath = match ProcessHotpathGuard::install(hotpath_guard()) {
-        Ok(guard) => guard,
-        Err(message) => {
-            eprintln!("Error: {message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // The guard belongs to the real process boundary rather than the async
-    // command body. Native capture hooks intentionally bypass the ordinary
-    // composition root, and Clap can terminate before a Tokio runtime exists;
-    // both still need one complete Hotpath lifetime and a flushed report in a
-    // feature-enabled profiling build.
-    #[cfg(feature = "hotpath")]
+
     if let Some(command) = args.get(1).and_then(|value| value.to_str()) {
-        hotpath::val!("cli.command.name").set(&command);
+        tracing::trace!(name: "cli.command.name", value = ?command);
     }
-    if let Some(code) =
-        hotpath::measure_block!("cli.hook.native_capture", hook_capture_cmd::try_run(&args))
-    {
+    if let Some(code) = {
+        let _span = tracing::trace_span!("cli.hook.native_capture").entered();
+        hook_capture_cmd::try_run(&args)
+    } {
         return process_exit_code(code);
     }
     let spawned = std::thread::Builder::new()
@@ -664,11 +458,11 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // pays nothing for the ~160 schemas it never looks at.
     tracedecay::register_runtime_ports()?;
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(feature = "hotpath")]
+
     if let Some(command) = args.get(1) {
         // Fallback identity for Clap help/version/parse failures. A successful
         // parse replaces it below with the exact canonical nested command path.
-        hotpath::val!("cli.command.name").set(&command.as_str());
+        tracing::trace!(name: "cli.command.name", value = ?command.as_str());
     }
     if render_dynamic_command_help(&args) {
         return Ok(CommandOutcome::Success);
@@ -681,7 +475,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             return Ok(CommandOutcome::Exit(code));
         }
     };
-    #[cfg(feature = "hotpath")]
+
     let command_name = command_profile_label(&matches);
     let json_requested = json_flag_set(&matches);
     let mut cli = match Cli::from_arg_matches(&matches) {
@@ -717,48 +511,45 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // Bound only Rayon's global pool for daemon workloads that actually use
     // it. Code indexing owns a separately planned pool shared by semantic
     // projection, so changing this ceiling cannot silently narrow that budget.
-    hotpath::measure_block!(
-        "daemon_cpu_pool_install",
+    {
+        let _span = tracing::trace_span!("daemon_cpu_pool_install").entered();
         install_daemon_cpu_pool(cli.command.as_ref())
-    )?;
+    }?;
     let runtime_flavor = async_runtime_flavor(cli.command.as_ref());
     let worker_threads = match runtime_flavor {
         AsyncRuntimeFlavor::CurrentThread => 1,
         AsyncRuntimeFlavor::MultiThread => async_worker_threads(),
     };
     let blocking_threads = tokio_blocking_thread_limit();
-    let runtime = hotpath::measure_block!("tokio_runtime_build", {
-        let build = match runtime_flavor {
-            AsyncRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .max_blocking_threads(blocking_threads)
-                .thread_stack_size(ASYNC_STACK_BYTES)
-                .build(),
-            AsyncRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(worker_threads)
-                .max_blocking_threads(blocking_threads)
-                .thread_stack_size(ASYNC_STACK_BYTES)
-                .on_thread_park(collect_idle_thread_heap_v1)
-                .build(),
-        };
-        build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("failed to start async runtime: {e}"),
-        })
-    })?;
-    #[cfg(feature = "hotpath")]
+    let runtime = {
+        let _span = tracing::trace_span!("tokio_runtime_build").entered();
+        {
+            let build = match runtime_flavor {
+                AsyncRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .max_blocking_threads(blocking_threads)
+                    .thread_stack_size(ASYNC_STACK_BYTES)
+                    .build(),
+                AsyncRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(worker_threads)
+                    .max_blocking_threads(blocking_threads)
+                    .thread_stack_size(ASYNC_STACK_BYTES)
+                    .on_thread_park(collect_idle_thread_heap_v1)
+                    .build(),
+            };
+            build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("failed to start async runtime: {e}"),
+            })
+        }
+    }?;
+
     {
-        hotpath::tokio_runtime!(runtime.handle());
-        // Process-level runtime shape only. Request, project-server, history,
-        // and projection gauges belong on those authorities, not bootstrap.
-        hotpath::gauge!("tokio_worker_threads").set(worker_threads);
-        hotpath::gauge!("tokio_blocking_threads").set(blocking_threads);
         let command_family = cli.command.as_ref().map_or("none", |command| {
             CommandFamily::for_command(command).as_profile_label()
         });
-        hotpath::val!("process_command_family").set(&command_family);
-        hotpath::val!("cli.command.name").set(&command_name.as_str());
-        hotpath::gauge!("process_in_command").set(1);
+        tracing::trace!(name: "process_command_family", value = ?command_family);
+        tracing::trace!(name: "cli.command.name", value = ?command_name.as_str());
     }
     let foreground_daemon = matches!(
         cli.command.as_ref(),
@@ -766,15 +557,15 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             action: DaemonAction::Run { .. }
         })
     );
-    #[cfg(feature = "hotpath")]
-    let result = hotpath::measure_block!(
-        "process_command",
-        runtime.block_on(hotpath::future!(run(cli), label = "process_command_future"))
-    );
-    #[cfg(not(feature = "hotpath"))]
-    let result = runtime.block_on(run(cli));
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("process_in_command").set(0);
+
+    let result = {
+        let _span = tracing::trace_span!("process_command").entered();
+        runtime.block_on(tracing::Instrument::instrument(
+            run(cli),
+            tracing::trace_span!("process_command_future"),
+        ))
+    };
+
     // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
     // can leave OS-backed watcher work behind after their async handles abort,
     // so bound teardown after the command's own graceful shutdown completes.
@@ -851,7 +642,6 @@ fn render_dynamic_command_help(args: &[String]) -> bool {
 /// Derive the exact static Clap command path from Clap's own parsed authority.
 /// Dynamic `tool`, `work`, and `workflow` operation identities are recorded by
 /// their dispatch adapters because they are arguments rather than subcommands.
-#[cfg(any(feature = "hotpath", test))]
 fn command_profile_label(matches: &ArgMatches) -> String {
     let mut path = String::new();
     let mut cursor = matches;
@@ -905,7 +695,7 @@ fn command_profile(command: Option<&Commands>) -> tracedecay_domain::errors::Res
     }
 }
 
-#[hotpath::measure(label = "cli.startup.preamble", future = true)]
+#[tracing::instrument(name = "cli.startup.preamble", level = "trace", skip_all)]
 async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
@@ -1059,7 +849,6 @@ enum CommandFamily {
 }
 
 impl CommandFamily {
-    #[cfg(feature = "hotpath")]
     fn as_profile_label(self) -> &'static str {
         match self {
             Self::Project => "project",
@@ -1368,7 +1157,7 @@ async fn dispatch_project_command(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.memory.status", future = true)]
+#[tracing::instrument(name = "cli.memory.status", level = "trace", skip_all)]
 async fn dispatch_memory_command(
     profile: &ProfileRoot,
     action: MemoryAction,
@@ -1443,7 +1232,7 @@ async fn dispatch_runtime_command(
         Commands::Remote { action } => {
             let profile = profile.clone();
             let command = action.into();
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     tokio::task::spawn_blocking(move || {
                         crate::remote_command::run(&profile, command)
@@ -1455,7 +1244,7 @@ async fn dispatch_runtime_command(
                         }
                     })?
                 },
-                label = "cli.remote.run"
+                tracing::trace_span!("cli.remote.run"),
             )
             .await?;
         }
@@ -1469,7 +1258,7 @@ async fn dispatch_runtime_command(
             open,
         } => {
             let project_path = tracedecay_configuration::resolve_path_with_discovery(profile, path);
-            let result = hotpath::future!(
+            let result = tracing::Instrument::instrument(
                 commands::daemon_tool_json(
                     profile,
                     Some(&project_path),
@@ -1481,7 +1270,7 @@ async fn dispatch_runtime_command(
                         "format": "json",
                     }),
                 ),
-                label = "cli.dashboard.start"
+                tracing::trace_span!("cli.dashboard.start"),
             )
             .await?;
             let url = result
@@ -1551,9 +1340,9 @@ async fn dispatch_runtime_command(
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
             tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 serve_cmd::run_serve(profile, path, timings),
-                label = "cli.serve.run"
+                tracing::trace_span!("cli.serve.run"),
             )
             .await?;
         }
@@ -1587,13 +1376,13 @@ async fn dispatch_daemon_command(
                 remote_tls_key.map(PathBuf::from),
             )?;
             // Boxed on purpose: `run_foreground` is the daemon's entire
-            // bootstrap state machine, and `hotpath::future!` wraps by value -
-            // unboxed, the whole machine inlines into this dispatch future and
+            // bootstrap state machine, and `Instrument::instrument` wraps by
+            // value — unboxed, the whole machine inlines into this dispatch future and
             // overflows the main thread's stack at startup (measured tonight;
             // same class as the 37MB serve_broker_socket_client machine).
-            Box::pin(hotpath::future!(
+            Box::pin(tracing::Instrument::instrument(
                 tracedecay::daemon::run_foreground(profile.clone(), socket_path, remote_tls),
-                label = "cli.daemon.run"
+                tracing::trace_span!("cli.daemon.run"),
             ))
             .await?;
         }
@@ -1619,14 +1408,14 @@ async fn dispatch_daemon_command(
                 socket,
                 remote_tls,
             )?;
-            let service_path = hotpath::measure_block!(
-                "cli.daemon.install_service",
+            let service_path = {
+                let _span = tracing::trace_span!("cli.daemon.install_service").entered();
                 tracedecay_daemon_control::install_service(
                     &spec,
                     !no_start,
                     crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
-            )?;
+            }?;
             eprintln!(
                 "Installed TraceDecay daemon service at {}",
                 service_path.display()
@@ -1646,50 +1435,50 @@ async fn dispatch_daemon_command(
             }
         }
         DaemonAction::UninstallService { no_stop } => {
-            let service_path = hotpath::measure_block!(
-                "cli.daemon.uninstall_service",
+            let service_path = {
+                let _span = tracing::trace_span!("cli.daemon.uninstall_service").entered();
                 tracedecay_daemon_control::uninstall_service(
                     profile,
                     !no_stop,
                     crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
-            )?;
+            }?;
             eprintln!(
                 "Removed TraceDecay daemon service at {}",
                 service_path.display()
             );
         }
         DaemonAction::Start => {
-            hotpath::measure_block!(
-                "cli.daemon.start",
+            {
+                let _span = tracing::trace_span!("cli.daemon.start").entered();
                 tracedecay_daemon_control::start_service(
                     profile,
-                    crate::product_runtime::PRODUCT_BUILD_VERSION
+                    crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
-            )?;
+            }?;
             eprintln!("Started TraceDecay daemon service");
         }
         DaemonAction::Stop => {
-            hotpath::measure_block!(
-                "cli.daemon.stop",
+            {
+                let _span = tracing::trace_span!("cli.daemon.stop").entered();
                 tracedecay_daemon_control::stop_service(
                     profile,
-                    crate::product_runtime::PRODUCT_BUILD_VERSION
+                    crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
-            )?;
+            }?;
             eprintln!("Stopped TraceDecay daemon service");
         }
         DaemonAction::Restart => {
-            hotpath::measure_block!(
-                "cli.daemon.restart",
+            {
+                let _span = tracing::trace_span!("cli.daemon.restart").entered();
                 update_cmd::restart_daemon_service(profile)
-            )?;
+            }?;
         }
         DaemonAction::Status => {
             let socket_path =
                 tracedecay_daemon_control::socket_path_or_default(profile.data_dir(), None)?;
-            hotpath::measure_block!(
-                "cli.daemon.status",
+            {
+                let _span = tracing::trace_span!("cli.daemon.status").entered();
                 print!(
                     "{}",
                     tracedecay_daemon_control::service_status(
@@ -1698,7 +1487,7 @@ async fn dispatch_daemon_command(
                         crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
                 )
-            );
+            };
         }
     }
     Ok(())
@@ -1870,38 +1659,39 @@ async fn dispatch_update_command(
                 package_id,
                 state_file,
             } => {
-                hotpath::measure_block!(
-                    "cli.package_hook.prepare",
+                {
+                    let _span = tracing::trace_span!("cli.package_hook.prepare").entered();
                     tracedecay_daemon_control::prepare_scoop_package_service(
                         &package_id,
                         &state_file,
                         crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
-                )?;
+                }?;
             }
             ScoopPackageHookAction::Restore {
                 package_id,
                 state_file,
             } => {
-                hotpath::measure_block!(
-                    "cli.package_hook.restore",
+                {
+                    let _span = tracing::trace_span!("cli.package_hook.restore").entered();
                     tracedecay_daemon_control::restore_scoop_package_service(
                         &package_id,
                         &state_file,
                         crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
-                )?;
+                }?;
             }
         },
         Commands::Channel { channel } => match channel {
             Some(target) => {
-                hotpath::measure_block!(
-                    "cli.channel.switch",
+                {
+                    let _span = tracing::trace_span!("cli.channel.switch").entered();
                     crate::upgrade::switch_channel(profile, &target)
-                )?;
+                }?;
             }
             None => {
-                hotpath::measure_block!("cli.channel.show", crate::upgrade::show_channel())
+                let _span = tracing::trace_span!("cli.channel.show").entered();
+                crate::upgrade::show_channel()
             }
         },
         _ => unreachable!("non-update command passed to update dispatcher"),
@@ -1916,9 +1706,9 @@ async fn dispatch_configuration_command(
     match command {
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay_configuration::resolve_path(path);
-            let value = hotpath::future!(
+            let value = tracing::Instrument::instrument(
                 commands::local_counter(profile, &project_path),
-                label = "cli.counter.current"
+                tracing::trace_span!("cli.counter.current"),
             )
             .await?;
             println!("{value}");
@@ -1926,13 +1716,13 @@ async fn dispatch_configuration_command(
         Commands::ResetCounter { path } => {
             let project_path = tracedecay_configuration::resolve_path(path);
             let prev = commands::local_counter(profile, &project_path).await?;
-            let reset = hotpath::future!(
+            let reset = tracing::Instrument::instrument(
                 commands::admin_project(
                     profile,
                     &project_path,
                     AdminProjectSurfaceRequestV1::CounterReset {},
                 ),
-                label = "cli.counter.reset"
+                tracing::trace_span!("cli.counter.reset"),
             )
             .await?;
             if !matches!(reset, AdminProjectResultV1::CounterReset(_)) {
@@ -1957,13 +1747,13 @@ async fn dispatch_diagnostics_command(
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
         Commands::Doctor { json } => {
-            let completion = hotpath::future!(
+            let completion = tracing::Instrument::instrument(
                 tracedecay::doctor::run_doctor(
                     profile,
                     crate::cloud::doctor_network_probes(),
-                    json
+                    json,
                 ),
-                label = "cli.doctor.run"
+                tracing::trace_span!("cli.doctor.run"),
             )
             .await?;
             match completion {
@@ -1994,7 +1784,10 @@ async fn dispatch_diagnostics_command(
             commands::handle_gain(profile, all, history, &range, json).await?;
         }
         Commands::Monitor => {
-            hotpath::measure_block!("cli.monitor.run", monitor_cmd::run(profile))?;
+            {
+                let _span = tracing::trace_span!("cli.monitor.run").entered();
+                monitor_cmd::run(profile)
+            }?;
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }
@@ -2015,16 +1808,16 @@ async fn dispatch_knowledge_command(
         }
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync } => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     analytics_cmd::run_analytics_diagnostics(profile, all, no_sync),
-                    label = "cli.analytics.diagnostics"
+                    tracing::trace_span!("cli.analytics.diagnostics"),
                 )
                 .await?;
             }
             AnalyticsAction::Sync => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     analytics_cmd::run_analytics_sync(profile),
-                    label = "cli.analytics.sync"
+                    tracing::trace_span!("cli.analytics.sync"),
                 )
                 .await?;
             }

@@ -38,7 +38,7 @@ pub struct SourceEditFileAuthority {
 }
 
 impl SourceEditFileAuthority {
-    #[hotpath::measure(label = "edits.file_authority.open")]
+    #[tracing::instrument(name = "edits.file_authority.open", level = "trace", skip_all)]
     pub fn open(project_root: &Path, relative: &Path) -> Result<Self> {
         let relative = normalize_source_edit_relative_path(relative)?;
         let root = Dir::open_ambient_dir(project_root, ambient_authority())
@@ -195,7 +195,7 @@ impl SourceEditFileAuthority {
         Ok(())
     }
 
-    #[hotpath::measure(label = "edits.file_authority.publish")]
+    #[tracing::instrument(name = "edits.file_authority.publish", level = "trace", skip_all)]
     pub fn publish(
         &self,
         relative_path: &str,
@@ -302,7 +302,7 @@ impl SourceEditFileAuthority {
         })
     }
 
-    #[hotpath::measure(label = "edits.file_authority.remove")]
+    #[tracing::instrument(name = "edits.file_authority.remove", level = "trace", skip_all)]
     pub(crate) fn remove(
         &self,
         relative_path: &str,
@@ -340,7 +340,7 @@ impl SourceEditFileAuthority {
 
 /// Reads one candidate's current bytes (`None` when it does not exist yet)
 /// through the descriptor-scoped authority.
-#[hotpath::measure(label = "usecases.edit.read")]
+#[tracing::instrument(name = "usecases.edit.read", level = "trace", skip_all)]
 pub(crate) fn read_source_edit_candidate(
     project_root: &Path,
     relative: &Path,

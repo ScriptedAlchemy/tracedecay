@@ -114,7 +114,7 @@ pub fn packaged_evaluator_files() -> &'static [(&'static str, &'static [u8])] {
     FILES
 }
 
-#[hotpath::measure(label = "search_eval.packaged.load_workload")]
+#[tracing::instrument(name = "search_eval.packaged.load_workload", level = "trace", skip_all)]
 pub fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     let workload = serde_json::from_slice::<CandidateWorkloadV1>(FILES[0].1).map_err(|error| {
         SearchEvalError::Contract(format!("parse packaged evaluator workload: {error}"))

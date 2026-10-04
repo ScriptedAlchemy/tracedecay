@@ -23,7 +23,11 @@ fn store_operation_message(operation: &'static str, message: impl Into<String>) 
 }
 
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.frontiers")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.frontiers",
+        level = "trace",
+        skip_all
+    )]
     /// Reads every committed source cursor through bounded `rowid` keyset
     /// pages.
     ///
@@ -60,7 +64,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         Ok(frontiers)
     }
 
-    #[hotpath::skip]
     pub async fn read_session_sync_journal(
         &self,
         key: &str,
@@ -88,7 +91,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| store_operation_error("decode session sync journal", error))
     }
 
-    #[hotpath::skip]
     pub async fn list_session_sync_journals(
         &self,
         key_prefix: &str,
@@ -117,16 +119,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         read_journal_values_for_keys(&snapshot, keys).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.session_sync.recovery_page"
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.recovery_page",
+        level = "trace",
+        skip_all
     )]
     /// Reads one keyset page of journals that can still require recovery.
     /// Journals may each retain multi-megabyte source frontiers, so the page
     /// query returns keys only, a page of values could exceed the exact-SQL
     /// byte budget together even though each value fits alone, and every
     /// value then arrives through its own single-row read.
-    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,
@@ -140,7 +142,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page_through(
         &self,
         key_prefix: &str,
@@ -186,7 +187,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         read_journal_values_for_keys(&snapshot, keys).await
     }
 
-    #[hotpath::skip]
     pub async fn session_sync_journal_high_water(
         &self,
         key_prefix: &str,
@@ -218,7 +218,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| store_operation_error("decode session sync journal high water", error))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.insert")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.insert",
+        level = "trace",
+        skip_all
+    )]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
@@ -238,7 +242,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .map_err(|error| store_operation_error("insert session sync journal", error))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.cas")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.cas",
+        level = "trace",
+        skip_all
+    )]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,
@@ -260,7 +268,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .map_err(|error| store_operation_error("update session sync journal", error))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.session_sync.cas_delete")]
+    #[tracing::instrument(
+        name = "global_db.registered.session_sync.cas_delete",
+        level = "trace",
+        skip_all
+    )]
     pub async fn compare_and_delete_session_sync_journal(
         &self,
         key: &str,

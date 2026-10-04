@@ -8,7 +8,7 @@ use super::*;
 
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
-#[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
+#[tracing::instrument(name = "mcp.analysis.recursion.total", level = "trace", skip_all)]
 pub(super) async fn compute_recursion(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -21,47 +21,54 @@ pub(super) async fn compute_recursion(
 
     require_positive_limit(limit, "tracedecay_recursion")?;
 
-    let (symbols, call_edges) = hotpath::measure_block!("mcp.analysis.recursion.graph", {
-        let symbols = verified_analysis_symbols(graph, path_prefix)?;
-        let call_edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
-        (symbols, call_edges)
-    });
-    let (cycles, symbol_by_id) = hotpath::measure_block!("mcp.analysis.recursion.compute", {
-        let symbol_by_id = symbols
-            .iter()
-            .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
-            .collect::<HashMap<_, _>>();
-        let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-        for edge in call_edges {
-            let src = edge.from_occurrence.as_str().to_string();
-            let tgt = edge.to_occurrence.as_str().to_string();
-            adj.entry(src).or_default().insert(tgt.clone());
-            adj.entry(tgt).or_default();
+    let (symbols, call_edges) = {
+        let _span = tracing::trace_span!("mcp.analysis.recursion.graph").entered();
+        {
+            let symbols = verified_analysis_symbols(graph, path_prefix)?;
+            let call_edges =
+                verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Calls])?;
+            (symbols, call_edges)
         }
-
-        // Collect only the cyclic SCCs, then sort smallest-first so we keep
-        // shorter / more interesting cycles when the cap kicks in. We still need
-        // every cyclic SCC enumerated before sorting (truncating early would bias
-        // toward Tarjan emission order), but we cap the per-SCC path search.
-        let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_graph_query::scc::tarjan_scc(&adj)
-            .into_iter()
-            .filter(|scc| tracedecay_graph_query::scc::is_cyclic_scc(scc, &adj))
-            .collect();
-        cyclic_sccs.sort_by_key(Vec::len);
-
-        let mut cycles: Vec<Vec<String>> = Vec::new();
-        for mut scc in cyclic_sccs {
-            if cycles.len() >= limit {
-                break;
+    };
+    let (cycles, symbol_by_id) = {
+        let _span = tracing::trace_span!("mcp.analysis.recursion.compute").entered();
+        {
+            let symbol_by_id = symbols
+                .iter()
+                .map(|symbol| (symbol.occurrence.as_str().to_string(), symbol))
+                .collect::<HashMap<_, _>>();
+            let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
+            for edge in call_edges {
+                let src = edge.from_occurrence.as_str().to_string();
+                let tgt = edge.to_occurrence.as_str().to_string();
+                adj.entry(src).or_default().insert(tgt.clone());
+                adj.entry(tgt).or_default();
             }
-            if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
-                cycles.push(path);
+
+            // Collect only the cyclic SCCs, then sort smallest-first so we keep
+            // shorter / more interesting cycles when the cap kicks in. We still need
+            // every cyclic SCC enumerated before sorting (truncating early would bias
+            // toward Tarjan emission order), but we cap the per-SCC path search.
+            let mut cyclic_sccs: Vec<Vec<String>> = tracedecay_graph_query::scc::tarjan_scc(&adj)
+                .into_iter()
+                .filter(|scc| tracedecay_graph_query::scc::is_cyclic_scc(scc, &adj))
+                .collect();
+            cyclic_sccs.sort_by_key(Vec::len);
+
+            let mut cycles: Vec<Vec<String>> = Vec::new();
+            for mut scc in cyclic_sccs {
+                if cycles.len() >= limit {
+                    break;
+                }
+                if let Some(path) = cycle_path_for_scc(&mut scc, &adj) {
+                    cycles.push(path);
+                }
             }
+            cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+            cycles.truncate(limit);
+            (cycles, symbol_by_id)
         }
-        cycles.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        cycles.truncate(limit);
-        (cycles, symbol_by_id)
-    });
+    };
 
     let mut result_cycles: Vec<RecursionCycleV1> = Vec::with_capacity(cycles.len());
     let mut touched: Vec<&str> = Vec::new();

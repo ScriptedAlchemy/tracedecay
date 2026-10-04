@@ -10,7 +10,7 @@ use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
 /// Counts commits touching each exact UTF-8 Git path during the requested window.
 /// Missing/unborn repositories have no history. Unreadable history and paths that
 /// cannot be represented by the graph's string identity are errors, not zero churn.
-#[hotpath::measure(label = "runtime_core.git.file_churn", future = true)]
+#[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
     let root = project_root.to_owned();
     tokio::task::spawn_blocking(move || read_file_churn(&root, days, &GitCommandBounds::default()))

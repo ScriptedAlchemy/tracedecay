@@ -94,14 +94,14 @@ async fn admitted_graph_query_for_operation(
     // graph-backed tool in the graph/info/git groups and the graph-tool owner funnels
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
-    let query = hotpath::future!(
+    let query = tracing::Instrument::instrument(
         port.open(VerifiedGraphQueryRequest::new(
             &operation,
             request_id,
             deadline,
             cancellation,
         )),
-        label = "mcp.dispatch.graph_query_admission"
+        tracing::trace_span!("mcp.dispatch.graph_query_admission"),
     )
     .await?;
     // Every graph-backed tool funnels through this open, so this is the
@@ -118,7 +118,7 @@ async fn admitted_graph_query_for_operation(
 }
 
 /// Dispatch catalog-owned application surfaces.
-#[hotpath::measure(future = true, label = "mcp.dispatch.application")]
+#[tracing::instrument(name = "mcp.dispatch.application", level = "trace", skip_all)]
 pub(super) async fn dispatch_application_surface_tools(
     tool_name: &str,
     cg: &TraceDecay,
@@ -487,7 +487,12 @@ async fn admitted_generation_census(
 async fn admitted_doctor_report(options: &ToolCallRegistryOptions<'_>) -> DoctorReportSnapshotV1 {
     match options.doctor_report_reader.as_ref() {
         Some(reader) => {
-            match hotpath::future!(reader(), label = "mcp.health.runtime.doctor_report").await {
+            match tracing::Instrument::instrument(
+                reader(),
+                tracing::trace_span!("mcp.health.runtime.doctor_report"),
+            )
+            .await
+            {
                 Ok(report) => DoctorReportSnapshotV1::Read(report),
                 Err(_) => DoctorReportSnapshotV1::ReadFailed,
             }
@@ -503,9 +508,9 @@ async fn admitted_status_snapshots(
     options: &ToolCallRegistryOptions<'_>,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        generation_census: hotpath::future!(
+        generation_census: tracing::Instrument::instrument(
             admitted_generation_census(options),
-            label = "mcp.info.status.generation_census"
+            tracing::trace_span!("mcp.info.status.generation_census"),
         )
         .await,
         ..AdmittedRequestSnapshotsV1::default()
@@ -519,9 +524,9 @@ async fn admitted_runtime_snapshots(
     include_doctor: bool,
 ) -> AdmittedRequestSnapshotsV1 {
     AdmittedRequestSnapshotsV1 {
-        generation_census: hotpath::future!(
+        generation_census: tracing::Instrument::instrument(
             admitted_generation_census(options),
-            label = "runtime_ports.generation_census"
+            tracing::trace_span!("runtime_ports.generation_census"),
         )
         .await,
         doctor_report: if include_doctor {

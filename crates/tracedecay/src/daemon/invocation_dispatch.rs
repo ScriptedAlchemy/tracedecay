@@ -24,7 +24,6 @@ fn record_project_open_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    hotpath::gauge!("daemon.invocation.route.project_open_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -39,7 +38,6 @@ fn record_project_route_refusal(
     operation: &str,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    hotpath::gauge!("daemon.invocation.route.project_route_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -51,7 +49,6 @@ fn record_project_route_refusal(
 }
 
 fn record_admitted_root_refusal(operation: &str) {
-    hotpath::gauge!("daemon.invocation.route.admitted_root_failed_total").inc(1_u64);
     tracing::warn!(
         event = "daemon_invocation_route",
         outcome = "refused",
@@ -388,8 +385,8 @@ pub(super) async fn execute_portable_daemon_invocation(
         _ => ProjectServerRequirement::Core,
     };
     if request.requires_project() {
-        let project_server = hotpath::measure_block!(
-            "daemon.invocation.project_open",
+        let project_server = {
+            use tracing::Instrument as _;
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),
@@ -401,8 +398,9 @@ pub(super) async fn execute_portable_daemon_invocation(
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ))
+            .instrument(tracing::trace_span!("daemon.invocation.project_open"))
             .await
-        );
+        };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
             return project_open_refusal_response(
@@ -758,12 +756,13 @@ pub(super) async fn execute_daemon_invocation(
         _ => None,
     };
     if request.requires_project() {
-        let project_server = hotpath::measure_block!(
-            "daemon.invocation.project_open",
+        let project_server = {
+            use tracing::Instrument as _;
             engine
                 .project_server_for_request(handshake, ProjectServerRequirement::Core)
+                .instrument(tracing::trace_span!("daemon.invocation.project_open"))
                 .await
-        );
+        };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
             return project_open_refusal_response(

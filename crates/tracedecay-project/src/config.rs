@@ -327,7 +327,7 @@ pub fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// A fresh project receives one canonical registry-backed revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
-#[hotpath::measure(label = "daemon.config.open", future = true)]
+#[tracing::instrument(name = "daemon.config.open", level = "trace", skip_all)]
 pub async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -367,7 +367,7 @@ pub async fn read_or_initialize_profile_code_index_worker_configuration(
 
 /// Resolve every user-profile setting from the exact registered
 /// `ProfileSessions` authority. No project is consulted.
-#[hotpath::measure(label = "daemon.config.profile.read", future = true)]
+#[tracing::instrument(name = "daemon.config.profile.read", level = "trace", skip_all)]
 pub async fn read_or_initialize_profile_configuration(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
@@ -599,7 +599,7 @@ pub async fn ensure_runtime_configuration_for_registered_database(
 
 /// Loads an already-persisted current configuration without creating a store
 /// or publishing a fallback revision.
-#[hotpath::measure(label = "daemon.config.open.read_only", future = true)]
+#[tracing::instrument(name = "daemon.config.open.read_only", level = "trace", skip_all)]
 pub async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
@@ -757,7 +757,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure(label = "daemon.config.discover", future = true)]
+#[tracing::instrument(name = "daemon.config.discover", level = "trace", skip_all)]
 pub async fn discover_project_root_with_identity(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     start: &Path,

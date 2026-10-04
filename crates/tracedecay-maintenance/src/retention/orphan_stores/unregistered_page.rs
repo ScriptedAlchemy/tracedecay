@@ -80,9 +80,10 @@ pub struct UnregisteredStoreSweepReport {
 /// honoring cancellation/deadline before each bounded filesystem/registry
 /// action. A cancellation never reports an empty successful page or mutates a
 /// partially inspected plan.
-#[hotpath::measure(
-    label = "maintenance.orphan_stores.sweep_unregistered_page",
-    future = true
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.sweep_unregistered_page",
+    level = "trace",
+    skip_all
 )]
 pub async fn sweep_unregistered_store_page(
     db: &RegisteredGlobalDb,
@@ -93,10 +94,7 @@ pub async fn sweep_unregistered_store_page(
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(interrupted_report(
-            completion,
-            CollectionOutcome::default(),
-        )));
+        return Ok(interrupted_report(completion, CollectionOutcome::default()));
     }
     let census = census_unregistered_project_dirs_page(
         db,
@@ -109,32 +107,32 @@ pub async fn sweep_unregistered_store_page(
     )
     .await?;
     let Some((findings, next_cursor)) = census else {
-        return Ok(observed_page_report(interrupted_report(
+        return Ok(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
                 .unwrap_or(UnregisteredSweepCompletionV1::DeadlineExceeded),
             CollectionOutcome::default(),
-        )));
+        ));
     };
     let plan = plan_unregistered_collection(findings, request.retention_secs);
     if !request.apply {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan,
             applied: false,
             outcome: CollectionOutcome::default(),
             next_cursor,
             completion: UnregisteredSweepCompletionV1::Complete,
-        }));
+        });
     }
     if let Some(completion) =
         UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
     {
-        return Ok(observed_page_report(UnregisteredStoreSweepReport {
+        return Ok(UnregisteredStoreSweepReport {
             plan: UnregisteredCollectionPlan::default(),
             applied: false,
             outcome: CollectionOutcome::default(),
             next_cursor: request.cursor,
             completion,
-        }));
+        });
     }
     let outcome = execute_unregistered_collection_controlled(
         db,
@@ -148,7 +146,7 @@ pub async fn sweep_unregistered_store_page(
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,
         CollectionCompletionV1::DeadlineExceeded => UnregisteredSweepCompletionV1::DeadlineExceeded,
     };
-    Ok(observed_page_report(UnregisteredStoreSweepReport {
+    Ok(UnregisteredStoreSweepReport {
         plan,
         applied: completion == UnregisteredSweepCompletionV1::Complete,
         outcome,
@@ -156,7 +154,7 @@ pub async fn sweep_unregistered_store_page(
             .then_some(next_cursor)
             .flatten(),
         completion,
-    }))
+    })
 }
 
 fn interrupted_report(
@@ -168,33 +166,6 @@ fn interrupted_report(
         completion,
         ..UnregisteredStoreSweepReport::default()
     }
-}
-
-/// Page-terminal census: cancelled and deadline-bounded pages count next to
-/// complete ones so a starved sweep is visible, and collected/failed items
-/// are attributed even when the page ends early.
-fn observed_page_report(report: UnregisteredStoreSweepReport) -> UnregisteredStoreSweepReport {
-    match report.completion {
-        UnregisteredSweepCompletionV1::Complete => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_complete_total")
-                .inc(1_u64);
-        }
-        UnregisteredSweepCompletionV1::Cancelled => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_cancelled_total")
-                .inc(1_u64);
-        }
-        UnregisteredSweepCompletionV1::DeadlineExceeded => {
-            hotpath::gauge!("maintenance.orphan_stores.unregistered.page_deadline_total")
-                .inc(1_u64);
-        }
-    }
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.collected_total")
-        .inc(report.outcome.collected.len());
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.failed_total")
-        .inc(report.outcome.errors.len());
-    hotpath::gauge!("maintenance.orphan_stores.unregistered.reclaimed_bytes_total")
-        .inc(report.outcome.reclaimed_bytes);
-    report
 }
 
 /// Builds only one page of costly child inventories. Its directory cursor is
@@ -722,14 +693,18 @@ pub(super) fn advance_portable_inventory(
     // The canonical sidecar lock already owns this inventory exclusively.
     // Move its iterator out of the shared map so unrelated profile admissions
     // never wait for this inventory's filesystem reads or durable appends.
-    let retained = hotpath::measure_block!("maintenance.orphan_inventory.builder_admission", {
-        builders
-            .lock()
-            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "unregistered inventory builder lock is poisoned".to_owned(),
-            })?
-            .remove(inventory)
-    });
+    let retained = {
+        let _span =
+            tracing::trace_span!("maintenance.orphan_inventory.builder_admission").entered();
+        {
+            builders
+                .lock()
+                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "unregistered inventory builder lock is poisoned".to_owned(),
+                })?
+                .remove(inventory)
+        }
+    };
     let mut builder = if let Some(builder) = retained {
         builder
     } else {
@@ -848,8 +823,9 @@ pub(super) fn advance_portable_inventory(
                 continue;
             };
             if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
-                let append = hotpath::measure_block!(
-                    "maintenance.orphan_inventory.durable_append",
+                let append = {
+                    let _span = tracing::trace_span!("maintenance.orphan_inventory.durable_append")
+                        .entered();
                     (|| {
                         // Build one complete record before its single locked write.
                         // A crash can leave only this final record torn; the bounded
@@ -861,7 +837,7 @@ pub(super) fn advance_portable_inventory(
                             .write_all(record.as_bytes())
                             .and_then(|()| output.sync_data())
                     })()
-                );
+                };
                 if let Err(error) = append {
                     append_error = Some(error);
                     break;

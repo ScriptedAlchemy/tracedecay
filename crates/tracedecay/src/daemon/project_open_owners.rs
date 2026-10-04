@@ -168,7 +168,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 /// Registers the owners that serve code reads on an admitted route: the
 /// callable-code authorization and the primitive runtime. Returns the
 /// admitted root URI they were bound to.
-#[hotpath::measure(label = "daemon.project.owners.code_reads", future = true)]
+#[tracing::instrument(name = "daemon.project.owners.code_reads", level = "trace", skip_all)]
 async fn register_project_code_read_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -181,7 +181,7 @@ async fn register_project_code_read_owners(
     // Primitive reads are part of the admitted core route. Publish their
     // runtime and callable-code authorization before the slower mutation,
     // delivery, native-integration, and Work owners finish mounting.
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         invocation.feedback_runtime_registrar().open_and_register(
             graph.db().clone(),
             project_root.to_path_buf(),
@@ -194,7 +194,7 @@ async fn register_project_code_read_owners(
                 Arc::clone(graph.configuration_runtime()),
             )),
         ),
-        label = "daemon.project.open.owners.feedback"
+        tracing::trace_span!("daemon.project.open.owners.feedback"),
     )
     .await
     {
@@ -228,9 +228,10 @@ async fn register_project_code_read_owners(
 /// reads serve from the retained core; session lookups answer the refusal.
 /// `session_store` is the project session store for its non-session
 /// authorities (the primitive cursor keys).
-#[hotpath::measure(
-    label = "daemon.project.owners.reset_required_code_reads",
-    future = true
+#[tracing::instrument(
+    name = "daemon.project.owners.reset_required_code_reads",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn register_reset_required_route_code_read_owners(
     invocation: &DaemonInvocationState,
@@ -276,13 +277,10 @@ pub(super) async fn register_reset_required_route_code_read_owners(
 }
 
 /// Registers code-index-independent owners for one newly inserted project.
-#[hotpath::measure(label = "daemon.project.owners.register", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Production owner registration is one ordered phase list for a project open."
-    )
+#[tracing::instrument(name = "daemon.project.owners.register", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production owner registration is one ordered phase list for a project open."
 )]
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
@@ -337,10 +335,7 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    let configuration = hotpath::future!(
-        graph.configuration_runtime().client().current(),
-        label = "daemon.project.open.owners.configuration_read"
-    )
+    let configuration = tracing::Instrument::instrument(graph.configuration_runtime().client().current(), tracing::trace_span!("daemon.project.open.owners.configuration_read"))
     .await
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open configuration currentness failed: {error}"),
@@ -358,17 +353,14 @@ pub(super) async fn register_project_open_production_owners(
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
-    let _scout_registry = match hotpath::future!(
-        invocation
+    let _scout_registry = match tracing::Instrument::instrument(invocation
             .context_scout_runtime_registrar()
             .open_and_register(
                 database.clone(),
                 session_db.binding().shard_id.profile_id.clone(),
                 project_id.clone(),
                 project_root.to_path_buf(),
-            ),
-        label = "daemon.project.open.owners.scout"
-    )
+            ), tracing::trace_span!("daemon.project.open.owners.scout"))
     .await
     {
         Ok(registry) => registry,
@@ -432,16 +424,13 @@ pub(super) async fn register_project_open_production_owners(
     if let Some(repository_root) = repository_root.as_deref() {
         // Mounting reconciles durable Git transaction records before the
         // mutation lane below opens.
-        hotpath::future!(
-            git_transactions.mount(
+        tracing::Instrument::instrument(git_transactions.mount(
                 session_db.clone(),
                 repository_root.to_path_buf(),
                 access.clone(),
                 now_micros(),
                 tokio::runtime::Handle::current(),
-            ),
-            label = "daemon.project.open.owners.git_transactions"
-        )
+            ), tracing::trace_span!("daemon.project.open.owners.git_transactions"))
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open Git transaction owner did not mount: {error}"),
@@ -468,8 +457,7 @@ pub(super) async fn register_project_open_production_owners(
         })?
         .profile_id()
         .clone();
-    hotpath::future!(
-        invocation.configuration_runtime_registrar().register(
+    tracing::Instrument::instrument(invocation.configuration_runtime_registrar().register(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
@@ -478,9 +466,7 @@ pub(super) async fn register_project_open_production_owners(
             grant_expires_at,
             None,
             configuration_policy_digest.clone(),
-        ),
-        label = "daemon.project.open.owners.configuration"
-    )
+        ), tracing::trace_span!("daemon.project.open.owners.configuration"))
     .await
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open configuration runtime registration failed: {error}"),
@@ -497,16 +483,13 @@ pub(super) async fn register_project_open_production_owners(
         scope.project_id.clone(),
         access.configuration_digest.clone(),
     );
-    hotpath::future!(
-        invocation.retained_runtime_registrar().register(
+    tracing::Instrument::instrument(invocation.retained_runtime_registrar().register(
             project_root.to_path_buf(),
             scope.clone(),
             requester.clone(),
             retained_grant,
             retained_ports,
-        ),
-        label = "daemon.project.open.owners.retained"
-    )
+        ), tracing::trace_span!("daemon.project.open.owners.retained"))
     .await
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open retained runtime registration failed: {error}"),
@@ -522,8 +505,7 @@ pub(super) async fn register_project_open_production_owners(
             scope.clone(),
             tokio::runtime::Handle::current(),
         ));
-        let native_owner = hotpath::future!(
-            async {
+        let native_owner = tracing::Instrument::instrument(async {
                 let native_owner = native_integration
                     .ensure(
                         session_db.clone(),
@@ -552,9 +534,7 @@ pub(super) async fn register_project_open_production_owners(
                         ),
                     })?;
                 Ok::<_, TraceDecayError>(native_owner)
-            },
-            label = "daemon.project.open.owners.native"
-        )
+            }, tracing::trace_span!("daemon.project.open.owners.native"))
         .await?;
         Some(native_owner)
     } else {
@@ -633,8 +613,7 @@ pub(super) async fn register_project_open_production_owners(
         })?;
         let work_evidence_retrieval =
             server.work_evidence_retrieval(&scope, invocation.work_federated_query_authority())?;
-        hotpath::future!(
-            async {
+        tracing::Instrument::instrument(async {
             invocation
                 .work_runtime_registrar()
                 .register(
@@ -673,9 +652,7 @@ pub(super) async fn register_project_open_production_owners(
                 });
             }
             Ok::<_, TraceDecayError>(())
-            },
-            label = "daemon.project.open.owners.work"
-        )
+            }, tracing::trace_span!("daemon.project.open.owners.work"))
         .await?;
     }
     tracing::info!(
@@ -690,12 +667,9 @@ pub(super) async fn register_project_open_production_owners(
     let mut lsp_session_factory = None;
     let diagnostic_broker = server.diagnostics_lsp();
     // The census is the sealed manifest's file list; it never decodes.
-    let indexed_generation = hotpath::future!(
-        invocation
+    let indexed_generation = tracing::Instrument::instrument(invocation
             .code_index_schedulers
-            .latest_feedback_generation_for_scope(project_root, &scope),
-        label = "daemon.project.open.owners.lsp_census"
-    )
+            .latest_feedback_generation_for_scope(project_root, &scope), tracing::trace_span!("daemon.project.open.owners.lsp_census"))
     .await;
     if let Some(generation) = indexed_generation {
         let mut indexed_files = generation
@@ -895,7 +869,11 @@ pub(super) async fn register_project_open_production_owners(
 /// Mounts the checked-in exact/lexical/graph query authority for the admitted
 /// scope. A missing generation parks a deferred mount on the project owner;
 /// every other refusal leaves the non-search surfaces mounted.
-#[hotpath::measure(label = "daemon.project.activate.query_authority", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.activate.query_authority",
+    level = "trace",
+    skip_all
+)]
 async fn register_project_query_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -946,7 +924,7 @@ async fn register_project_query_authority(
     }
 }
 
-#[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]
+#[tracing::instrument(name = "daemon.project.activate.lsp", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Composition supplies distinct capability, database, analyzer and diagnostic owners without merging their authority."

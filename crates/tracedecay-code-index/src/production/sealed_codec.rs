@@ -1092,12 +1092,10 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
 pub(super) fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
-    let authorities = collect_bounded_ordered(&pages, |page, _worker| {
-        hotpath::measure_block!(
-            "code_index.sealed_decode.file_page",
-            ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
-                .map_err(CodeIndexProductionErrorV1::Chunk)
-        )
+    let authorities = collect_bounded_ordered(&pages, |page| {
+        let _span = tracing::trace_span!("code_index.sealed_decode.file_page").entered();
+        ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
+            .map_err(CodeIndexProductionErrorV1::Chunk)
     })?;
     Ok(pages
         .into_iter()
@@ -1173,17 +1171,21 @@ pub(super) fn assemble_published_generation(
         unresolved_calls.sort();
         unresolved_calls.dedup();
     }
-    let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
-        hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
-            let ignored_source_roster =
-                hotpath::measure_block!("code_index.sealed_decode.ignored_roster", {
+    let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) = {
+        let _span = tracing::trace_span!("code_index.sealed_decode.authority_restore").entered();
+        {
+            let ignored_source_roster = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.ignored_roster").entered();
+                {
                     IgnoredSourceRosterV1::restore(
                         &snapshot,
                         &repository_parse_identity,
                         ignored_source_admissions,
                         ignored_source_admissions_digest,
                     )
-                })?;
+                }
+            }?;
             // Persist pages moved into `files` exactly once, and chunk/symbol
             // rows are `Arc`-shared between those pages and the generation
             // aggregates: this flatten clones row pointers and per-file
@@ -1196,34 +1198,43 @@ pub(super) fn assemble_published_generation(
                 .iter()
                 .flat_map(|file| file.artifacts.symbols.iter().cloned())
                 .collect::<Vec<_>>();
-            let chunks = hotpath::measure_block!("code_index.sealed_decode.chunk_manifest", {
-                // Aggregate validation fans out over chunks too. Keep it on
-                // the same admitted pool as file restoration instead of
-                // entering Rayon's unrelated global worker pool.
-                parallelism::install(|| {
-                    GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
-                })
-            })?
+            let chunks = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.chunk_manifest").entered();
+                {
+                    // Aggregate validation fans out over chunks too. Keep it on
+                    // the same admitted pool as file restoration instead of
+                    // entering Rayon's unrelated global worker pool.
+                    parallelism::install(|| {
+                        GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                    })
+                }
+            }?
             .map_err(CodeIndexProductionErrorV1::Increment)?;
             probe.sample();
-            let symbols = hotpath::measure_block!("code_index.sealed_decode.symbol_index", {
+            let symbols = {
+                let _span = tracing::trace_span!("code_index.sealed_decode.symbol_index").entered();
                 GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
-            })
+            }
             .map_err(CodeIndexProductionErrorV1::Lineage)?;
             probe.sample();
-            let imports = hotpath::measure_block!("code_index.sealed_decode.import_evidence", {
+            let imports = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.import_evidence").entered();
                 derive_import_evidence(&files)
-            });
-            let (edges, edge_abstentions) =
-                hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
-                    edge_evidence(&files, cross_file_edges)
-                });
+            };
+            let (edges, edge_abstentions) = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.edge_evidence").entered();
+                edge_evidence(&files, cross_file_edges)
+            };
             probe.sample();
-            let projection =
-                hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
-                    ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
-                })
-                .map_err(CodeIndexProductionErrorV1::Projection)?;
+            let projection = {
+                let _span =
+                    tracing::trace_span!("code_index.sealed_decode.projection_handoff").entered();
+                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
+            }
+            .map_err(CodeIndexProductionErrorV1::Projection)?;
             Ok::<_, CodeIndexProductionErrorV1>((
                 ignored_source_roster,
                 chunks,
@@ -1233,17 +1244,18 @@ pub(super) fn assemble_published_generation(
                 edge_abstentions,
                 projection,
             ))
-        })?;
+        }
+    }?;
     probe.sample();
     let mut published = CodeIndexPublishedGenerationV1 {
-        statistics: hotpath::measure_block!(
-            "code_index.sealed_decode.statistics",
+        statistics: {
+            let _span = tracing::trace_span!("code_index.sealed_decode.statistics").entered();
             CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &files,
                 symbols.symbols.len(),
                 edges.len(),
             )
-        )?,
+        }?,
         manifest,
         snapshot,
         repository_parse_identity,
@@ -1270,10 +1282,10 @@ pub(super) fn assemble_published_generation(
         retained_bytes: OnceLock::new(),
         decode_peak_growth_bytes: None,
     };
-    hotpath::measure_block!(
-        "code_index.sealed_decode.corpus_validation",
+    {
+        let _span = tracing::trace_span!("code_index.sealed_decode.corpus_validation").entered();
         published.validate_fresh()
-    )?;
+    }?;
     probe.sample();
     published.decode_peak_growth_bytes = probe.growth_bytes();
     Ok(published)

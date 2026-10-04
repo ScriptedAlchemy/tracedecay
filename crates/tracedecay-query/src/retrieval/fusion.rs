@@ -605,7 +605,7 @@ impl CompositionKernel {
         self.compose_required(input, policy, &[lane], &BTreeMap::new())
     }
 
-    #[hotpath::measure(label = "query.fusion")]
+    #[tracing::instrument(name = "query.fusion", level = "trace", skip_all)]
     fn compose_required(
         &self,
         input: &FusionStageInput,
@@ -636,8 +636,6 @@ impl CompositionKernel {
 
         let mut all_dedupe_decisions = dedupe_decisions;
         all_dedupe_decisions.append(&mut copy_decisions);
-        hotpath::gauge!("query.fusion.candidates").set(ranked_candidates.len());
-        hotpath::gauge!("query.fusion.results").set(ranked_candidates.len());
         Ok(CompositionOutputV1 {
             profile_id: input.profile.profile_id.clone(),
             ranked_candidates,
@@ -675,7 +673,7 @@ impl CompositionKernel {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "query.stream.paginate")]
+    #[tracing::instrument(name = "query.stream.paginate", level = "trace", skip_all)]
     pub fn paginate_at(
         &self,
         request: &RetrievalRequest,
@@ -750,7 +748,6 @@ impl CompositionKernel {
         } else {
             None
         };
-        hotpath::gauge!("query.stream.results").set(ranked_candidates.len());
         Ok(CompositionPageV1 {
             ranked_candidates,
             cursor,
@@ -898,7 +895,7 @@ impl DeterministicFixedPointFusion {
         }
     }
 
-    #[hotpath::measure(label = "query.fusion.compact")]
+    #[tracing::instrument(name = "query.fusion.compact", level = "trace", skip_all)]
     fn fuse_compact(
         &self,
         profile: &FusionProfile,
@@ -1003,7 +1000,7 @@ impl DeterministicFixedPointFusion {
     /// comparator provenance. The returned records parallel the ordered
     /// candidates; the ranked survivors report theirs unchanged because no
     /// later stage alters a comparator field.
-    #[hotpath::measure(label = "query.fusion.order")]
+    #[tracing::instrument(name = "query.fusion.order", level = "trace", skip_all)]
     fn order_fused(
         &self,
         candidates: Vec<FusedCandidate>,

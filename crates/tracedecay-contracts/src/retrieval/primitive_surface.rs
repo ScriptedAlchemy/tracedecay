@@ -29,7 +29,6 @@ pub enum ContextModeV1 {
 }
 
 impl ContextModeV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Explore => "explore",
@@ -73,7 +72,6 @@ pub enum PrimitiveFreshnessStateV1 {
 }
 
 impl PrimitiveFreshnessStateV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Fresh => "fresh",

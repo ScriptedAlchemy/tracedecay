@@ -109,7 +109,7 @@ struct RenameReferenceSiteInput {
 /// current-text snippet, plus a per-file count of literal name occurrences
 /// that are NOT backed by a graph edge ("text-only matches, review
 /// manually"). Nothing is rewritten.
-#[hotpath::measure(label = "mcp.graph.rename_preview.total")]
+#[tracing::instrument(name = "mcp.graph.rename_preview.total", level = "trace", skip_all)]
 pub async fn compute_rename_preview(
     ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -125,8 +125,9 @@ pub async fn compute_rename_preview(
     let mut touched: Vec<String> = Vec::new();
     // Graph phase: extract owned declaration fields and per-reference-site
     // inputs so the blocking file walk below needs no graph value at all.
-    let (mut declaration, declaration_line, symbol_name, reference_inputs) =
-        hotpath::measure_block!("mcp.graph.rename_preview.graph", {
+    let (mut declaration, declaration_line, symbol_name, reference_inputs) = {
+        let _span = tracing::trace_span!("mcp.graph.rename_preview.graph").entered();
+        {
             let Some(node) = graph.symbol_summary(&occurrence)? else {
                 return Ok(graph_tool_completion(
                     GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(
@@ -182,7 +183,8 @@ pub async fn compute_rename_preview(
                 symbol_name,
                 reference_inputs,
             )
-        });
+        }
+    };
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
@@ -194,8 +196,7 @@ pub async fn compute_rename_preview(
     let walk_symbol_name = symbol_name.clone();
     let walk_graph_counts = graph_counts;
     let walk_touched_files = touched_files.clone();
-    let (decl_snippet, references, text_only_matches) = hotpath::future!(
-        tokio::task::spawn_blocking(
+    let (decl_snippet, references, text_only_matches) = tracing::Instrument::instrument(tokio::task::spawn_blocking(
         move || -> Result<(
             Option<String>,
             Vec<RenamePreviewReferenceV1>,
@@ -256,9 +257,7 @@ pub async fn compute_rename_preview(
             }
             Ok((decl_snippet, references, text_only_matches))
         }
-        ),
-        label = "mcp.graph.rename_preview.walk"
-    )
+        ), tracing::trace_span!("mcp.graph.rename_preview.walk"))
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("rename preview file scan task failed: {join_error}"),

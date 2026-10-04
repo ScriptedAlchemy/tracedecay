@@ -34,7 +34,7 @@ pub struct HermesSkillBridgeOptions {
 }
 
 /// Loads Hermes-owned skill state from the one supported user install.
-#[hotpath::measure(label = "automation.hermes.inventory")]
+#[tracing::instrument(name = "automation.hermes.inventory", level = "trace", skip_all)]
 pub fn load_standard_hermes_skill_bridge(
     user_home: Option<&Path>,
     options: HermesSkillBridgeOptions,

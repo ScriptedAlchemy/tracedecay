@@ -149,7 +149,7 @@ impl RegisteredProjectLspAuthority {
             .transpose()
     }
 
-    #[hotpath::measure(label = "usecases.lsp.document.read", future = true)]
+    #[tracing::instrument(name = "usecases.lsp.document.read", level = "trace", skip_all)]
     pub(super) async fn read_disk_document(
         &self,
         relative: &Path,
@@ -163,7 +163,7 @@ impl RegisteredProjectLspAuthority {
         Ok(text)
     }
 
-    #[hotpath::measure(label = "usecases.lsp.scope.current", future = true)]
+    #[tracing::instrument(name = "usecases.lsp.scope.current", level = "trace", skip_all)]
     pub(super) async fn current_scope(
         &self,
         document_relative_path: Option<String>,
@@ -189,7 +189,7 @@ impl LspFeedbackProjectionScopePort for RegisteredProjectLspAuthority {
         document_uri: Option<String>,
     ) -> LspRuntimeFuture<Result<LspFeedbackProjectionScope, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 authority.validate_root(&root)?;
                 let document_relative_path = document_uri
@@ -198,7 +198,7 @@ impl LspFeedbackProjectionScopePort for RegisteredProjectLspAuthority {
                     .transpose()?;
                 authority.current_scope(document_relative_path).await
             },
-            label = "usecases.lsp.scope.resolve"
+            tracing::trace_span!("usecases.lsp.scope.resolve"),
         ))
     }
 }
@@ -209,7 +209,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<LspDocument, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 authority.validate_root(&request.root)?;
                 let (path, relative_path) = authority.document_path(&request.document_uri)?;
@@ -253,7 +253,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                 }
                 Ok(document)
             },
-            label = "usecases.lsp.document.load"
+            tracing::trace_span!("usecases.lsp.document.load"),
         ))
     }
 }
@@ -284,7 +284,7 @@ impl LspFeedbackDocumentSnapshotPort for RegisteredProjectLspAuthority {
         document_uri: String,
     ) -> LspRuntimeFuture<Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>> {
         let authority = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 authority.validate_root(&root)?;
                 let (_, relative_path) = authority.document_path(&document_uri)?;
@@ -293,7 +293,7 @@ impl LspFeedbackDocumentSnapshotPort for RegisteredProjectLspAuthority {
                     .await?;
                 Ok(LspFeedbackDocumentSnapshot { text })
             },
-            label = "usecases.lsp.document.snapshot"
+            tracing::trace_span!("usecases.lsp.document.snapshot"),
         ))
     }
 }

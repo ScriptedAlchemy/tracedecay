@@ -26,8 +26,8 @@ use super::{
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
     QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_WRITE_CONTEXT,
-    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
-    sync_directory, total_bytes, validate_generation_file, write_active_pointer,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, read_optional_active_pointer, storage, sync_directory,
+    total_bytes, validate_generation_file, write_active_pointer,
 };
 
 pub(super) const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<
@@ -128,7 +128,7 @@ pub(super) fn validate_transaction(
     Ok(())
 }
 
-#[hotpath::measure(label = "usecases.retention.stage")]
+#[tracing::instrument(name = "usecases.retention.stage", level = "trace", skip_all)]
 pub(super) fn stage_collectable_generations(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
@@ -150,14 +150,6 @@ pub(super) fn stage_collectable_generations(
             Ok(())
         })?;
     }
-    crate::hotpath_observe::retention_quarantined(
-        transaction
-            .receipt
-            .deleted_generations
-            .iter()
-            .map(|generation| generation.size_bytes)
-            .sum(),
-    );
     Ok(())
 }
 
@@ -238,8 +230,7 @@ impl GraphReplayPoolLockV1 {
         // the daemon writer gate for the whole seal-hash.
         let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
         loop {
-            if observe_cancel(is_cancelled) {
-                crate::hotpath_observe::retention_replay_pool_acquire_cancelled();
+            if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             // One non-blocking try comes before the elapsed-deadline
@@ -252,14 +243,12 @@ impl GraphReplayPoolLockV1 {
             GRAPH_REPLAY_POOL_ACQUIRE_TRIES.with(|tries| tries.set(tries.get() + 1));
             match try_acquire_code_generation_store_lock(pool_root)? {
                 Some(guard) => {
-                    crate::hotpath_observe::retention_replay_pool_acquired();
                     return Ok(Self {
                         root: guard.generation_store_root()?.to_path_buf(),
                         guard: Some(guard),
                     });
                 }
                 None if Instant::now() >= deadline => {
-                    crate::hotpath_observe::retention_replay_pool_busy();
                     return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
                 }
                 None => Self::wait_for_exclusive(deadline),
@@ -270,7 +259,6 @@ impl GraphReplayPoolLockV1 {
     fn wait_for_exclusive(deadline: Instant) {
         #[cfg(test)]
         GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(waits.get() + 1));
-        crate::hotpath_observe::retention_replay_pool_acquire_wait();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return;
@@ -279,9 +267,7 @@ impl GraphReplayPoolLockV1 {
     }
 
     fn release_exclusive(&mut self) {
-        if self.guard.take().is_some() {
-            crate::hotpath_observe::retention_replay_pool_released();
-        }
+        self.guard = None;
     }
 }
 
@@ -623,16 +609,13 @@ pub(super) fn open_file_sha256_hex_cancellable(
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         let read = read_full(&mut reader, &mut buffer)?;
         if read == 0 {
             return Ok(encode_lowercase_hex(&hasher.finalize()));
         }
-        let hashed = read as u64;
-        crate::hotpath_observe::retention_inspected(hashed);
-        crate::hotpath_observe::retention_hashed(hashed);
         hasher.update(&buffer[..read]);
     }
 }

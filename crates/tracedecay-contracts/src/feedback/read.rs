@@ -370,7 +370,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.feedback.diagnostics", future = true)]
+    #[tracing::instrument(name = "application.feedback.diagnostics", level = "trace", skip_all)]
     pub async fn diagnostics(
         &self,
         context: &RequestContext,
@@ -391,7 +391,7 @@ where
         .await
     }
 
-    #[hotpath::measure(label = "application.feedback.get", future = true)]
+    #[tracing::instrument(name = "application.feedback.get", level = "trace", skip_all)]
     pub async fn get(
         &self,
         context: &RequestContext,
@@ -412,7 +412,7 @@ where
         .await
     }
 
-    #[hotpath::measure(label = "application.feedback.expand", future = true)]
+    #[tracing::instrument(name = "application.feedback.expand", level = "trace", skip_all)]
     pub async fn expand(
         &self,
         context: &RequestContext,
@@ -437,7 +437,7 @@ where
         .await
     }
 
-    #[hotpath::measure(label = "application.feedback.list", future = true)]
+    #[tracing::instrument(name = "application.feedback.list", level = "trace", skip_all)]
     pub async fn list(
         &self,
         context: &RequestContext,

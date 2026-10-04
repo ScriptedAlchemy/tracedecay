@@ -119,7 +119,6 @@ pub enum WorkDuplicateAttemptClassificationReadV1 {
 }
 
 impl WorkDuplicateAttemptClassificationReadV1 {
-    #[hotpath::skip]
     pub const fn complete(&self) -> Option<&WorkDuplicateAttemptClassificationV1> {
         match self {
             Self::Complete { classification } => Some(classification),
@@ -148,14 +147,12 @@ pub enum WorkDuplicateAdjudicationAppendOutcomeV1 {
 }
 
 impl WorkDuplicateAdjudicationAppendOutcomeV1 {
-    #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkDuplicateAdjudicationReceiptV1 {
         match self {
             Self::Appended(receipt) | Self::Replayed(receipt) => receipt,
         }
     }
 
-    #[hotpath::skip]
     pub const fn replayed(&self) -> bool {
         matches!(self, Self::Replayed(_))
     }
@@ -192,12 +189,15 @@ impl<S> WorkDuplicateAdjudicationServiceV1<S>
 where
     S: WorkDuplicateAdjudicationPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
 
-    #[hotpath::measure(label = "application.work.duplicate.adjudicate")]
+    #[tracing::instrument(
+        name = "application.work.duplicate.adjudicate",
+        level = "trace",
+        skip_all
+    )]
     pub fn adjudicate(
         &self,
         context: &RequestContext,
@@ -222,21 +222,11 @@ where
                 },
             )
             .map_err(storage_problem)?;
-        // Idempotent replays are the interesting half of this decision: a
-        // rising replay share means callers are re-adjudicating settled pairs.
-        match &outcome {
-            WorkDuplicateAdjudicationAppendOutcomeV1::Appended(_) => {
-                hotpath::gauge!("application.work.duplicate.adjudicate.appended").inc(1u64);
-            }
-            WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(_) => {
-                hotpath::gauge!("application.work.duplicate.adjudicate.replayed").inc(1u64);
-            }
-        }
         Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.work.duplicate.prepare")]
+    #[tracing::instrument(name = "application.work.duplicate.prepare", level = "trace", skip_all)]
     pub fn prepare_adjudication(
         &self,
         context: &RequestContext,
@@ -273,7 +263,11 @@ where
     /// one pinned Work projection and topology generation. Missing,
     /// conflicting, censored, and unknown relations stay explicitly
     /// unavailable.
-    #[hotpath::measure(label = "application.work.duplicate.classify")]
+    #[tracing::instrument(
+        name = "application.work.duplicate.classify",
+        level = "trace",
+        skip_all
+    )]
     pub fn classify_attempts(
         &self,
         context: &RequestContext,
@@ -297,35 +291,13 @@ where
                 &attempts,
             )
             .map_err(storage_problem)?;
-        let read = classify_complete_attempt_relations(
+        Ok(classify_complete_attempt_relations(
             &authority,
             request.work_generation,
             request.topology_generation,
             attempts,
             receipts,
-        );
-        // Bounded per-reason counters: classification refusals are typed
-        // product states, and each reason implicates a different authority
-        // (missing pair matrix, conflicting receipts, unresolved verdicts).
-        match &read {
-            WorkDuplicateAttemptClassificationReadV1::Complete { .. } => {
-                hotpath::gauge!("application.work.duplicate.classify.complete").inc(1u64);
-            }
-            WorkDuplicateAttemptClassificationReadV1::Unavailable { reason } => match reason {
-                WorkDuplicateClassificationUnavailableReasonV1::MissingPair => {
-                    hotpath::gauge!("application.work.duplicate.classify.missing_pair").inc(1u64);
-                }
-                WorkDuplicateClassificationUnavailableReasonV1::ConflictingPair => {
-                    hotpath::gauge!("application.work.duplicate.classify.conflicting_pair")
-                        .inc(1u64);
-                }
-                WorkDuplicateClassificationUnavailableReasonV1::UnresolvedVerdict => {
-                    hotpath::gauge!("application.work.duplicate.classify.unresolved_verdict")
-                        .inc(1u64);
-                }
-            },
-        }
-        Ok(read)
+        ))
     }
 }
 

@@ -43,7 +43,6 @@ enum DashboardLcmRequestAdmissionErrorV1 {
 }
 
 impl DashboardLcmRequestAdmissionErrorV1 {
-    #[hotpath::skip]
     const fn read_state_and_reason(self) -> (DashboardLcmReadStateV1, &'static str) {
         match self {
             Self::DeadlineElapsed => (
@@ -81,13 +80,10 @@ impl DashboardLcmReadAdapter {
         })
     }
 
-    #[hotpath::measure(future = true, label = "mcp.lcm.total")]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Dashboard LCM execute is one action match onto the session-memory authority."
-        )
+    #[tracing::instrument(name = "mcp.lcm.total", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Dashboard LCM execute is one action match onto the session-memory authority."
     )]
     async fn execute(
         &self,
@@ -140,10 +136,10 @@ impl DashboardLcmReadAdapter {
                     "lcm_dashboard_request_invalid",
                 );
             };
-            let (page, omitted, paged_partial) = match hotpath::future!(
+            let (page, omitted, paged_partial) = match tracing::Instrument::instrument(
                 self.retrieval
-                    .retrieve_admitted_with_cancellation(&context, &cancellation, query,),
-                label = "mcp.lcm.retrieve"
+                    .retrieve_admitted_with_cancellation(&context, &cancellation, query),
+                tracing::trace_span!("mcp.lcm.retrieve"),
             )
             .await
             {
@@ -387,16 +383,19 @@ impl DashboardLcmReadAdapter {
         }
 
         let next_cursor = page.temporal.cursor;
-        let canonical_page = hotpath::measure_block!("mcp.lcm.assemble", {
-            DashboardLcmCanonicalPageV1 {
-                messages,
-                summary_nodes,
-                overview_matches: None,
-                stats,
-                has_more: next_cursor.is_some(),
-                next_cursor,
+        let canonical_page = {
+            let _span = tracing::trace_span!("mcp.lcm.assemble").entered();
+            {
+                DashboardLcmCanonicalPageV1 {
+                    messages,
+                    summary_nodes,
+                    overview_matches: None,
+                    stats,
+                    has_more: next_cursor.is_some(),
+                    next_cursor,
+                }
             }
-        });
+        };
         let total_omitted = omitted.saturating_add(partial_description_count);
         // A windowed page with a continuation cursor stays visibly partial
         // even when nothing was genuinely omitted (omitted stays 0): the
@@ -412,7 +411,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
-    #[hotpath::measure(future = true, label = "mcp.lcm.overview")]
+    #[tracing::instrument(name = "mcp.lcm.overview", level = "trace", skip_all)]
     async fn execute_overview_with_matches(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -483,7 +482,7 @@ impl DashboardLcmReadAdapter {
         }
     }
 
-    #[hotpath::measure(future = true, label = "mcp.lcm.hydrate")]
+    #[tracing::instrument(name = "mcp.lcm.hydrate", level = "trace", skip_all)]
     async fn hydrate_summary(
         &self,
         context: &RequestContext,
@@ -531,7 +530,6 @@ impl DashboardLcmReadAdapter {
         ))
     }
 
-    #[hotpath::skip]
     async fn describe(
         &self,
         context: &RequestContext,
@@ -541,7 +539,7 @@ impl DashboardLcmReadAdapter {
         target: LcmDescribeTarget,
         grain: RetrievalGrainV1,
     ) -> Result<(LcmDescribeResponse, bool), (DashboardLcmReadStateV1, &'static str)> {
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             self.retrieval.describe_lcm_admitted(
                 context,
                 cancellation,
@@ -553,7 +551,7 @@ impl DashboardLcmReadAdapter {
                     SessionRetrievalStoreScope::Project,
                 ),
             ),
-            label = "mcp.lcm.describe"
+            tracing::trace_span!("mcp.lcm.describe"),
         )
         .await
         {

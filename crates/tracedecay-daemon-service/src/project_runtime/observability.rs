@@ -54,7 +54,6 @@ impl StoreObservabilityCoreV1 {
         })
     }
 
-    #[hotpath::skip]
     async fn shutdown(&self) -> Result<(), tracedecay_contracts::ApplicationContractError> {
         let mut first_error = None;
         if let Err(error) = self.work_observations.shutdown().await {
@@ -215,7 +214,11 @@ impl StoreObservabilityRegistryV1 {
     /// store, or start them via `start_producer`. An incumbent that does not
     /// match the mount's store-authority fields refuses the mount instead of
     /// running a second store owner.
-    #[hotpath::measure(label = "daemon.service.project_runtime.observability_acquire")]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.observability_acquire",
+        level = "trace",
+        skip_all
+    )]
     pub fn acquire_or_start(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -397,9 +400,10 @@ impl StoreObservabilityRegistryV1 {
     }
 
     /// Shutdown's join of every background retirement drain started so far.
-    #[hotpath::measure(
-        label = "daemon.service.project_runtime.observability_join_retirements",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.observability_join_retirements",
+        level = "trace",
+        skip_all
     )]
     pub async fn join_retirement_drains(&self) {
         self.retirement_drains.close();
@@ -568,9 +572,10 @@ impl RegisteredObservabilityProducerV1 {
     /// Releases this alias; the last release drains and closes the store
     /// owners. Consuming the handle is what makes the release single-shot:
     /// the token taken here is the same one drop would take.
-    #[hotpath::measure(
-        label = "daemon.service.project_runtime.observability_shutdown",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.observability_shutdown",
+        level = "trace",
+        skip_all
     )]
     pub async fn shutdown(mut self) -> Result<(), ApplicationContractError> {
         let Some(core) = self.release.take() else {

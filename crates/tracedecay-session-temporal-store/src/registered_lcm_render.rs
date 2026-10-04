@@ -75,7 +75,7 @@ async fn session_summary_ids(
     Ok(ids)
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.describe")]
+#[tracing::instrument(name = "session_temporal.describe", level = "trace", skip_all)]
 pub(super) async fn describe(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
@@ -136,7 +136,7 @@ pub(super) async fn describe(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.expand")]
+#[tracing::instrument(name = "session_temporal.expand", level = "trace", skip_all)]
 pub(super) async fn expand(
     snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmExpandRequest,

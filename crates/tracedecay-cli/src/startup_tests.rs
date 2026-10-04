@@ -2,11 +2,9 @@ use super::{
     AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
     ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
-    daemon_cpu_threads_from, hotpath_focus_is_valid, hotpath_output_format_is_none,
-    hotpath_output_format_is_valid, hotpath_output_path_is_valid,
-    hotpath_requires_protocol_safe_output, normalize_tool_reserved_global_flags,
-    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
-    stderr_tracing_default, validate_host_bundle_options,
+    daemon_cpu_threads_from, normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
+    validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -28,92 +26,7 @@ fn parsed_command_profile_label(args: &[&str]) -> String {
 }
 
 #[test]
-fn hotpath_output_format_validation_matches_the_pinned_runtime() {
-    for valid in ["table", "json", "json-pretty", "jsonpretty", "none"] {
-        assert!(hotpath_output_format_is_valid(Some(std::ffi::OsStr::new(
-            valid
-        ))));
-    }
-    assert!(hotpath_output_format_is_valid(None));
-    assert!(!hotpath_output_format_is_valid(Some(std::ffi::OsStr::new(
-        "unexpected"
-    ))));
-    assert!(hotpath_output_format_is_none(Some(std::ffi::OsStr::new(
-        "NoNe"
-    ))));
-    assert!(!hotpath_output_format_is_none(Some(std::ffi::OsStr::new(
-        "json"
-    ))));
-}
-
-#[test]
-fn hotpath_output_path_and_focus_validation_match_the_pinned_runtime() {
-    assert!(hotpath_output_path_is_valid(None));
-    assert!(hotpath_output_path_is_valid(Some(std::ffi::OsStr::new(
-        "/tmp/hotpath.json"
-    ))));
-    assert!(!hotpath_output_path_is_valid(Some(std::ffi::OsStr::new(
-        ""
-    ))));
-    assert!(hotpath_focus_is_valid(None));
-    assert!(hotpath_focus_is_valid(Some(std::ffi::OsStr::new(
-        "/mcp\\.tool_call/"
-    ))));
-    assert!(!hotpath_focus_is_valid(Some(std::ffi::OsStr::new("/[/"))));
-}
-
-#[cfg(unix)]
-#[test]
-fn non_unicode_hotpath_output_path_cannot_authorize_hook_stdout_output() {
-    use std::os::unix::ffi::OsStringExt as _;
-
-    let path = std::ffi::OsString::from_vec(vec![0xff]);
-    assert!(!hotpath_output_path_is_valid(Some(path.as_os_str())));
-    assert!(hotpath_requires_protocol_safe_output(
-        true,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-}
-
-#[test]
-fn hook_hotpath_reports_never_write_to_protocol_stdout() {
-    assert!(hotpath_requires_protocol_safe_output(true, false, None));
-    assert!(hotpath_requires_protocol_safe_output(
-        true,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-    assert!(!hotpath_requires_protocol_safe_output(true, true, None));
-    assert!(hotpath_requires_protocol_safe_output(false, false, None));
-    assert!(!hotpath_requires_protocol_safe_output(
-        false,
-        false,
-        Some(std::ffi::OsStr::new("json")),
-    ));
-}
-
-#[test]
-fn hook_protocols_are_identified_before_the_hotpath_guard_is_built() {
-    let args = |command: &str| {
-        ["tracedecay", command]
-            .into_iter()
-            .map(std::ffi::OsString::from)
-            .collect::<Vec<_>>()
-    };
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-stop"
-    )));
-    assert!(super::hook_capture_cmd::is_hook_protocol_invocation(&args(
-        "hook-codex-stop"
-    )));
-    assert!(!super::hook_capture_cmd::is_hook_protocol_invocation(
-        &args("status")
-    ));
-}
-
-#[test]
-fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
+fn command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(
         parsed_command_profile_label(&["daemon", "install-service", "--no-start"]),
         "daemon.install-service"

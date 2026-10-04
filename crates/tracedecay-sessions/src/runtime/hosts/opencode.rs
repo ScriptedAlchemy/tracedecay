@@ -97,7 +97,6 @@ enum OpenCodeScanKind {
 }
 
 impl OpenCodeScanKind {
-    #[hotpath::skip]
     const fn frontier_key(self) -> &'static str {
         match self {
             Self::Messages => OPENCODE_SQL_FRONTIER_KEY,

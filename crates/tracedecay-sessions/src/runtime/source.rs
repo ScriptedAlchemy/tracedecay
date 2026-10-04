@@ -244,7 +244,6 @@ pub enum TranscriptIngestError {
 }
 
 impl TranscriptIngestError {
-    #[hotpath::skip]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled { .. })
     }
@@ -421,7 +420,7 @@ pub use discovery::{
     bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
 };
 
-pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
+pub use crate::runtime::jsonl_io::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 use jsonl::stream_new_jsonl_raw_strict;
 #[cfg(test)]

@@ -458,7 +458,7 @@ where
     Ok(joined)
 }
 
-#[hotpath::measure(future = true, label = "mcp.git.diff_context.total")]
+#[tracing::instrument(name = "mcp.git.diff_context.total", level = "trace", skip_all)]
 pub async fn compute_diff_context<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
@@ -486,10 +486,10 @@ where
     let files = unique_file_paths(request.files.iter().map(String::as_str));
 
     let requested_paths = files.iter().cloned().collect::<HashSet<_>>();
-    let requested_symbols = hotpath::measure_block!(
-        "mcp.git.diff_context.symbols",
+    let requested_symbols = {
+        let _span = tracing::trace_span!("mcp.git.diff_context.symbols").entered();
         all_symbols_in_files(&graph, &requested_paths)?
-    );
+    };
 
     // First pass: gather all modified symbols.
     let mut modified_ids: Vec<SymbolOccurrenceId> = Vec::new();
@@ -514,8 +514,8 @@ where
             complete: true,
         }
     } else {
-        hotpath::measure_block!(
-            "mcp.git.diff_context.impact",
+        {
+            let _span = tracing::trace_span!("mcp.git.diff_context.impact").entered();
             graph.impact(
                 &modified_ids,
                 &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
@@ -525,7 +525,7 @@ where
                 PR_CONTEXT_MAX_IMPACT_NODES,
                 PR_CONTEXT_MAX_IMPACT_EDGES,
             )?
-        )
+        }
     };
     let impacted_paths = impacted
         .impacted
@@ -536,14 +536,14 @@ where
         .union(&impacted_paths)
         .cloned()
         .collect::<HashSet<_>>();
-    let files_with_inline_tests = hotpath::measure_block!(
-        "mcp.git.diff_context.test_annotations",
+    let files_with_inline_tests = {
+        let _span = tracing::trace_span!("mcp.git.diff_context.test_annotations").entered();
         graph.test_annotated_logical_files(
             &annotation_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
-    );
+    };
     let has_tests = |path: &str| {
         tracedecay_code_index::is_test_file(path) || files_with_inline_tests.contains(path)
     };
@@ -564,9 +564,9 @@ where
         }
     }
 
-    let traversal = hotpath::future!(
+    let traversal = tracing::Instrument::instrument(
         collect_verified_affected_test_files(&graph, &files, depth, None),
-        label = "mcp.git.diff_context.affected"
+        tracing::trace_span!("mcp.git.diff_context.affected"),
     )
     .await?;
     affected_tests.extend(traversal.test_distances.into_keys());
@@ -601,7 +601,7 @@ where
 /// takes no verified graph query at all, a repository that git itself refuses
 /// must report its typed git error rather than whatever state the graph
 /// projection mount is in.
-#[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
+#[tracing::instrument(name = "mcp.git.changelog.total", level = "trace", skip_all)]
 pub async fn compute_changelog(
     ctx: &McpToolContext<'_>,
     args: Value,
@@ -614,11 +614,11 @@ pub async fn compute_changelog(
         let project_root = ctx.project_root().to_path_buf();
         let from_ref = from_ref.clone();
         let to_ref = to_ref.clone();
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             blocking_git_span("tree diff", move || {
                 git_diff_file_changes(&project_root, &from_ref, &to_ref)
             }),
-            label = "mcp.git.changelog.diff"
+            tracing::trace_span!("mcp.git.changelog.diff"),
         )
         .await?
         {
@@ -637,9 +637,9 @@ pub async fn compute_changelog(
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let touched_files: Vec<String> = changed_files.clone();
 
-    let symbol_diff = hotpath::future!(
+    let symbol_diff = tracing::Instrument::instrument(
         exact_semantic_symbol_diff(ctx, &from_ref, &to_ref, None, None),
-        label = "mcp.git.changelog.symbol_diff"
+        tracing::trace_span!("mcp.git.changelog.symbol_diff"),
     )
     .await;
     let result = match symbol_diff {
@@ -676,7 +676,7 @@ pub async fn compute_changelog(
     ))
 }
 
-#[hotpath::measure(future = true, label = "mcp.git.commit_context.total")]
+#[tracing::instrument(name = "mcp.git.commit_context.total", level = "trace", skip_all)]
 pub async fn compute_commit_context<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
@@ -703,11 +703,11 @@ where
     // request runtime's workers so the carried dispatch deadline can preempt it.
     let changed_files = {
         let project_root = ctx.project_root().to_path_buf();
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             blocking_git_span("status", move || {
                 git_changed_files(&project_root, staged_only)
             }),
-            label = "mcp.git.commit_context.status"
+            tracing::trace_span!("mcp.git.commit_context.status"),
         )
         .await?
         {
@@ -720,9 +720,9 @@ where
 
     let recent_commits = {
         let project_root = ctx.project_root().to_path_buf();
-        hotpath::future!(
+        tracing::Instrument::instrument(
             blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
-            label = "mcp.git.commit_context.recent_commits"
+            tracing::trace_span!("mcp.git.commit_context.recent_commits"),
         )
     };
 
@@ -747,18 +747,18 @@ where
     }
 
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
-    let files_with_inline_tests = hotpath::measure_block!(
-        "mcp.git.commit_context.test_annotations",
+    let files_with_inline_tests = {
+        let _span = tracing::trace_span!("mcp.git.commit_context.test_annotations").entered();
         graph.test_annotated_logical_files(
             &changed_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
-    );
-    let graph_symbols = hotpath::measure_block!(
-        "mcp.git.commit_context.symbols",
+    };
+    let graph_symbols = {
+        let _span = tracing::trace_span!("mcp.git.commit_context.symbols").entered();
         all_symbols_in_files(&graph, &changed_paths)?
-    );
+    };
     let mut symbols_by_file: HashMap<String, Vec<&CodeGraphSymbolSummaryV1>> = HashMap::new();
     for symbol in &graph_symbols {
         symbols_by_file
@@ -1066,7 +1066,7 @@ impl PrContextGitEvidence {
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.pr_context.total")]
+#[tracing::instrument(name = "mcp.pr_context.total", level = "trace", skip_all)]
 pub async fn compute_pr_context<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
@@ -1094,7 +1094,7 @@ where
         let project_root = ctx.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.clone();
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             blocking_git_span_controlled(
                 "PR comparison",
                 controls.cancellation.clone(),
@@ -1103,7 +1103,7 @@ where
                     git_pr_comparison_controlled(&project_root, &base_ref, &head_ref, cancelled)
                 },
             ),
-            label = "mcp.pr_context.git"
+            tracing::trace_span!("mcp.pr_context.git"),
         )
         .await?
         {
@@ -1154,7 +1154,12 @@ where
     };
 
     let stage_started = std::time::Instant::now();
-    let graph = match hotpath::future!(graph, label = "mcp.pr_context.graph_admission").await {
+    let graph = match tracing::Instrument::instrument(
+        graph,
+        tracing::trace_span!("mcp.pr_context.graph_admission"),
+    )
+    .await
+    {
         Ok(graph) => {
             ctx.verify_graph_scope(&graph)?;
             graph
@@ -1237,7 +1242,7 @@ where
     timings.graph = elapsed_micros(stage_started);
 
     let stage_started = std::time::Instant::now();
-    let symbol_diff = match hotpath::future!(
+    let symbol_diff = match tracing::Instrument::instrument(
         exact_semantic_symbol_diff(
             ctx,
             &evidence.base,
@@ -1245,7 +1250,7 @@ where
             Some(evidence.merge_base.as_str()),
             Some(evidence.head_oid.as_str()),
         ),
-        label = "mcp.pr_context.symbol_diff"
+        tracing::trace_span!("mcp.pr_context.symbol_diff"),
     )
     .await
     {
@@ -1299,9 +1304,9 @@ where
     );
     let cursor_authority = match ctx.authorized_project_session_db() {
         Some(_) => Some(
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 pr_context_cursor_authority(ctx, &cursor_binding),
-                label = "mcp.pr_context.cursor_authority"
+                tracing::trace_span!("mcp.pr_context.cursor_authority"),
             )
             .await?,
         ),
@@ -1339,14 +1344,14 @@ where
 
     // Pre-compute files with inline test modules.
     let stage_started = std::time::Instant::now();
-    let mut files_with_inline_tests = hotpath::measure_block!(
-        "mcp.pr_context.test_annotations.changed",
+    let mut files_with_inline_tests = {
+        let _span = tracing::trace_span!("mcp.pr_context.test_annotations.changed").entered();
         graph.test_annotated_logical_files(
             &changed_paths,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
-    );
+    };
     controls.checkpoint()?;
     timings.test_annotations = Some(elapsed_micros(stage_started));
     let added_ids = symbol_diff
@@ -1370,15 +1375,15 @@ where
     test_files_changed.dedup();
 
     let stage_started = std::time::Instant::now();
-    let symbol_page = hotpath::measure_block!(
-        "mcp.pr_context.symbol_page",
+    let symbol_page = {
+        let _span = tracing::trace_span!("mcp.pr_context.symbol_page").entered();
         graph.symbols_in_logical_files_page(
             &changed_paths,
             cursor_position.as_ref().map(|position| &position.after),
             maximum_symbols,
             VERIFIED_GRAPH_MAX_SYMBOLS,
         )?
-    );
+    };
     controls.checkpoint()?;
     timings.symbol_page = Some(elapsed_micros(stage_started));
     let symbol_has_more = symbol_page.has_more;
@@ -1437,10 +1442,10 @@ where
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact = hotpath::measure_block!(
-        "mcp.pr_context.impact",
+    let impact = {
+        let _span = tracing::trace_span!("mcp.pr_context.impact").entered();
         pr_context_impact_snapshot(&graph, &nodes, 2, prior_impact_budget, &controls)?
-    );
+    };
     controls.checkpoint()?;
     let impact_paths: Vec<String> = impact
         .nodes
@@ -1448,14 +1453,14 @@ where
         .map(|node| symbol_path(node).map(str::to_owned))
         .collect::<Result<Vec<_>>>()?;
     let impact_path_set = impact_paths.iter().cloned().collect::<HashSet<_>>();
-    files_with_inline_tests.extend(hotpath::measure_block!(
-        "mcp.pr_context.test_annotations.impacted",
+    files_with_inline_tests.extend({
+        let _span = tracing::trace_span!("mcp.pr_context.test_annotations.impacted").entered();
         graph.test_annotated_logical_files(
             &impact_path_set,
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
-    ));
+    });
     let impacted_by_id: HashMap<&str, &CodeGraphSymbolSummaryV1> = impact
         .nodes
         .iter()

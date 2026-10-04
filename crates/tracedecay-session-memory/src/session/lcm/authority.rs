@@ -131,7 +131,6 @@ pub enum LcmAuthorityTarget {
 }
 
 impl LcmAuthorityRequest {
-    #[hotpath::skip]
     pub const fn operation(&self) -> LcmAuthorityOperation {
         match self {
             Self::Compact(_) => LcmAuthorityOperation::Compact,

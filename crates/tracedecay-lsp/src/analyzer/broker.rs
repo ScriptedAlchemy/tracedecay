@@ -468,7 +468,7 @@ impl DiagnosticBroker {
         }
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_prepare_refresh", impl_type = "DiagnosticBroker")]
+    #[tracing::instrument(name = "lsp_analyzer_prepare_refresh", level = "trace", skip_all)]
     pub fn prepare_refresh(
         &mut self,
         language: &str,
@@ -670,7 +670,7 @@ impl DiagnosticBroker {
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_refresh", impl_type = "DiagnosticBroker")]
+    #[tracing::instrument(name = "lsp_analyzer_refresh", level = "trace", skip_all)]
     pub async fn refresh_documents_with_timeouts(
         &mut self,
         language: &str,
@@ -688,7 +688,7 @@ impl DiagnosticBroker {
         self.finish_refresh_snapshot(completed).map(|_| ())
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_finish_refresh", impl_type = "DiagnosticBroker")]
+    #[tracing::instrument(name = "lsp_analyzer_finish_refresh", level = "trace", skip_all)]
     pub fn finish_refresh_snapshot(
         &mut self,
         completed: CompletedRefresh,

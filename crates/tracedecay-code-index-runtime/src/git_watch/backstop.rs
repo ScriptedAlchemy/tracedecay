@@ -41,7 +41,7 @@ pub async fn run(watcher: GitWatcher) {
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.backstop_tick", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.backstop_tick", level = "trace", skip_all)]
 async fn tick(watcher: &GitWatcher, due_by_root: &mut HashMap<PathBuf, (Duration, Instant)>) {
     retire_missing_repository_owners(&watcher.inner).await;
     super::overflow::cover_overflowed_repositories(watcher).await;

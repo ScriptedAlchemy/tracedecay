@@ -233,7 +233,7 @@ pub struct McpDispatchCatalogV1 {
 }
 
 impl McpDispatchCatalogV1 {
-    #[cfg_attr(feature = "hotpath", hotpath::measure(label = "tool_catalog.mcp.load"))]
+    #[tracing::instrument(name = "tool_catalog.mcp.load", level = "trace", skip_all)]
     pub fn new(
         contracts: impl IntoIterator<Item = McpDispatchContractV1>,
     ) -> Result<Self, McpDispatchCatalogError> {
@@ -251,7 +251,6 @@ impl McpDispatchCatalogV1 {
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
         let fingerprint = CatalogDigest::from_manifest_digest(fingerprint)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
-        crate::hotpath_observe::mcp_catalog_entries(by_name.len());
         Ok(Self {
             contracts: by_name,
             fingerprint,
@@ -267,9 +266,7 @@ impl McpDispatchCatalogV1 {
     }
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
-        let contract = self.contracts.get(tool_name);
-        crate::hotpath_observe::mcp_contract_lookup(contract.is_some());
-        contract
+        self.contracts.get(tool_name)
     }
 
     pub fn contracts(&self) -> impl ExactSizeIterator<Item = &McpDispatchContractV1> {

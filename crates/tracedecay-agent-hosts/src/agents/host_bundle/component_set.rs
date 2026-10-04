@@ -195,7 +195,11 @@ impl HostBundleWriterV1 {
         )
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_execute")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.component_set_execute",
+        level = "trace",
+        skip_all
+    )]
     fn execute_component_set_with_preview<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,

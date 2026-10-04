@@ -25,7 +25,6 @@ pub struct SessionAuthorities<'a> {
 }
 
 impl<'a> SessionAuthorities<'a> {
-    #[hotpath::skip]
     pub const fn new(
         project: Option<&'a RegisteredGlobalDbLeaseV1>,
         user: Option<&'a RegisteredGlobalDbLeaseV1>,
@@ -58,7 +57,6 @@ impl<'a> SessionAuthorities<'a> {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn with_project_lcm_authority(
         mut self,
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,

@@ -43,11 +43,10 @@ struct CachedSessionTemporalHealth {
     report: SessionTemporalHealthReport,
 }
 
-// Both aliases resolve to the plain std/tokio mutex until the binary selects
-// the profiler backend; naming them through `hotpath` keeps the type in step
-// with what the unconditional `hotpath::mutex!` wrappers below return.
-type SessionDoctorCacheLock<T> = hotpath::mutexes::Mutex<T>;
-type SessionDoctorLaneLock<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+// The cache aliases keep the lock type at the alias site so a later
+// contention-instrumented wrapper can land in one place.
+type SessionDoctorCacheLock<T> = std::sync::Mutex<T>;
+type SessionDoctorLaneLock<T> = tokio::sync::Mutex<T>;
 
 type SessionTemporalHealthCacheCell =
     Arc<SessionDoctorLaneLock<Option<CachedSessionTemporalHealth>>>;
@@ -57,12 +56,7 @@ static SESSION_TEMPORAL_HEALTH_CACHE: OnceLock<
 > = OnceLock::new();
 
 fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCacheCell {
-    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| {
-        hotpath::mutex!(
-            Mutex::new(HashMap::new()),
-            label = "session_temporal.doctor.cache"
-        )
-    });
+    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -75,12 +69,11 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     {
         cache.remove(&evict);
     }
-    Arc::clone(cache.entry(path.to_path_buf()).or_insert_with(|| {
-        Arc::new(hotpath::mutex!(
-            tokio::sync::Mutex::new(None),
-            label = "session_temporal.doctor.lane"
-        ))
-    }))
+    Arc::clone(
+        cache
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+    )
 }
 
 fn store_file_fingerprint(
@@ -103,20 +96,23 @@ fn store_file_fingerprint(
 fn session_temporal_store_fingerprint(
     database_path: &Path,
 ) -> std::io::Result<SessionTemporalStoreFingerprint> {
-    hotpath::measure_block!("session_temporal.doctor.fingerprint", {
-        let Some(database) = store_file_fingerprint(database_path)? else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "session temporal database is absent",
-            ));
-        };
-        let mut wal_path = database_path.as_os_str().to_os_string();
-        wal_path.push("-wal");
-        Ok(SessionTemporalStoreFingerprint {
-            database,
-            wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
-        })
-    })
+    {
+        let _span = tracing::trace_span!("session_temporal.doctor.fingerprint").entered();
+        {
+            let Some(database) = store_file_fingerprint(database_path)? else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "session temporal database is absent",
+                ));
+            };
+            let mut wal_path = database_path.as_os_str().to_os_string();
+            wal_path.push("-wal");
+            Ok(SessionTemporalStoreFingerprint {
+                database,
+                wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
+            })
+        }
+    }
 }
 
 const REQUIRED_BASE_TABLES: &[&str] =
@@ -734,12 +730,10 @@ pub struct SessionTemporalHealthFinding {
 }
 
 impl SessionTemporalHealthFinding {
-    #[hotpath::skip]
     pub const fn kind(&self) -> SessionTemporalHealthFindingKind {
         self.kind
     }
 
-    #[hotpath::skip]
     pub const fn count(&self) -> u64 {
         self.count
     }
@@ -757,7 +751,6 @@ pub struct SessionTemporalHealthReport {
 }
 
 impl SessionTemporalHealthReport {
-    #[hotpath::skip]
     pub const fn status(&self) -> SessionTemporalHealthStatus {
         self.status
     }
@@ -792,7 +785,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// retained registered reader pool. Identical requests coalesce behind one
     /// per-store lane and reuse a very short-lived result only while the exact
     /// database/WAL fingerprint remains unchanged.
-    #[hotpath::measure(future = true, label = "session_temporal.doctor.query")]
+    #[tracing::instrument(name = "session_temporal.doctor.query", level = "trace", skip_all)]
     pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
         let cache = session_temporal_health_cache_cell(database_path);
@@ -802,12 +795,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             && observed.fingerprint == fingerprint
             && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
         {
-            record_session_doctor_cache_hit();
             return self
                 .with_relation_graph_health(observed.report.clone())
                 .await;
         }
-        record_session_doctor_cache_miss();
         let snapshot = match self.health_read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -833,7 +824,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.doctor.diagnose")]
+#[tracing::instrument(name = "session_temporal.doctor.diagnose", level = "trace", skip_all)]
 async fn diagnose_snapshot(
     conn: &impl crate::handle::SessionTemporalQuery,
 ) -> SessionTemporalHealthReport {
@@ -947,7 +938,6 @@ async fn diagnose_snapshot(
             status = SessionTemporalHealthStatus::Partial;
             continue;
         }
-        record_session_doctor_check();
         if diagnose_health_check(
             conn,
             check,
@@ -1012,7 +1002,11 @@ struct SchemaInventory {
     triggers: BTreeMap<String, String>,
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.doctor.query.inventory")]
+#[tracing::instrument(
+    name = "session_temporal.doctor.query.inventory",
+    level = "trace",
+    skip_all
+)]
 async fn snapshot_schema_inventory(
     conn: &impl crate::handle::SessionTemporalQuery,
 ) -> tracedecay_runtime_core::db::engine::Result<SchemaInventory> {
@@ -1050,7 +1044,11 @@ async fn snapshot_schema_inventory(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.doctor.query.column_shape")]
+#[tracing::instrument(
+    name = "session_temporal.doctor.query.column_shape",
+    level = "trace",
+    skip_all
+)]
 async fn snapshot_column_shape_drift(
     conn: &impl crate::handle::SessionTemporalQuery,
     inventory: &SchemaInventory,
@@ -1083,7 +1081,11 @@ fn normalize_sql(sql: &str) -> String {
         .collect()
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.doctor.query.schema_version")]
+#[tracing::instrument(
+    name = "session_temporal.doctor.query.schema_version",
+    level = "trace",
+    skip_all
+)]
 async fn snapshot_schema_version(
     conn: &impl crate::handle::SessionTemporalQuery,
 ) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
@@ -1097,7 +1099,11 @@ async fn snapshot_schema_version(
     rows.next().await?.map(|row| row.get(0)).transpose()
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.doctor.query.count")]
+#[tracing::instrument(
+    name = "session_temporal.doctor.query.count",
+    level = "trace",
+    skip_all
+)]
 async fn snapshot_count(
     conn: &impl crate::handle::SessionTemporalQuery,
     check: &HealthCheck,
@@ -1230,24 +1236,6 @@ fn unavailable_report_with_detail(
         findings: Vec::new(),
         reason: Some(format!("{probe}: {error}")),
     }
-}
-
-#[inline(always)]
-fn record_session_doctor_cache_hit() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.doctor.cache_hits").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_session_doctor_cache_miss() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.doctor.cache_misses").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_session_doctor_check() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.doctor.checks").inc(1_u64);
 }
 
 #[cfg(test)]

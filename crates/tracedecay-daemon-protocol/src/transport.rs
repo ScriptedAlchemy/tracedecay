@@ -150,7 +150,6 @@ pub enum BrokerWriteHalf {
 }
 
 impl BrokerStream {
-    #[hotpath::skip]
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self> {
         match endpoint {
             #[cfg(unix)]
@@ -233,7 +232,6 @@ impl BrokerWriteHalf {
     /// Poll the native writable-readiness future once without waiting while a
     /// caller holds the shared writer mutex. A pending readiness registration
     /// is retried by the caller on its next bounded polling interval.
-    #[hotpath::skip]
     pub async fn peer_write_readiness_now(&self) -> Option<std::io::Result<tokio::io::Ready>> {
         let mut readiness = Box::pin(self.peer_write_readiness());
         std::future::poll_fn(|context| match readiness.as_mut().poll(context) {
@@ -243,7 +241,6 @@ impl BrokerWriteHalf {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
         match self {
             #[cfg(unix)]
@@ -379,7 +376,6 @@ fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener
 }
 
 impl BrokerListener {
-    #[hotpath::skip]
     pub async fn bind(endpoint: &DaemonEndpoint) -> Result<(Self, DaemonEndpoint)> {
         match endpoint {
             #[cfg(unix)]
@@ -409,7 +405,6 @@ impl BrokerListener {
         }
     }
 
-    #[hotpath::skip]
     pub async fn accept(&self) -> Result<BrokerStream> {
         match self {
             #[cfg(unix)]

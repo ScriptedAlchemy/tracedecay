@@ -104,7 +104,11 @@ pub(super) struct DaemonEngine {
         Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
 }
 
-#[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
+#[tracing::instrument(
+    name = "daemon.engine.context_scout.ensure_owner",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn ensure_context_scout_owner_before_advertising(
     project: &tracedecay_project::project::TraceDecay,
 ) -> Result<()> {
@@ -179,7 +183,7 @@ impl DaemonEngine {
 
     /// A doctor-facing read of one project's watch coverage; `git_watcher` is
     /// module-private, so the core Doctor route reads through this accessor.
-    #[hotpath::measure(label = "daemon.engine.git_watcher_health", future = true)]
+    #[tracing::instrument(name = "daemon.engine.git_watcher_health", level = "trace", skip_all)]
     pub(super) async fn git_watcher_health(
         &self,
         project_root: Option<&std::path::Path>,
@@ -202,7 +206,6 @@ impl DaemonEngine {
         self
     }
 
-    #[hotpath::skip]
     pub(super) async fn with_pr_autotrack_task(
         self,
         task: crate::daemon::pr_autotrack::PrAutotrackTask,
@@ -211,7 +214,6 @@ impl DaemonEngine {
         self
     }
 
-    #[hotpath::skip]
     pub(super) async fn maintenance_transition_gate(
         &self,
         key: &ProjectServerKey,
@@ -221,7 +223,7 @@ impl DaemonEngine {
 
     /// Runs destructive branch administration before any project server is
     /// opened for the request, under the daemon-wide store administration gate.
-    #[hotpath::measure(label = "daemon.engine.execute_branch_admin", future = true)]
+    #[tracing::instrument(name = "daemon.engine.execute_branch_admin", level = "trace", skip_all)]
     pub(super) async fn execute_branch_admin(
         &self,
         handshake: &DaemonHandshake,
@@ -257,7 +259,6 @@ impl DaemonEngine {
 
     /// Returns the client version to log for this handshake, once per distinct
     /// skewed version; repeat connections from the same client return `None`.
-    #[hotpath::skip]
     pub(super) async fn client_version_skew_to_log(
         &self,
         handshake: &DaemonHandshake,
@@ -271,7 +272,7 @@ impl DaemonEngine {
 
     /// Logs a `daemon_version_skew` event when this handshake's client runs a
     /// different binary version, deduped per distinct client version.
-    #[hotpath::measure(label = "daemon.engine.log_version_skew", future = true)]
+    #[tracing::instrument(name = "daemon.engine.log_version_skew", level = "trace", skip_all)]
     pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
             return Ok(());
@@ -303,7 +304,11 @@ impl DaemonEngine {
     /// exactly what arms its notification for the first request after warm-up
     /// completes; marking it would strand the provisional catalog for the rest
     /// of the daemon's life, because this set is never otherwise cleared.
-    #[hotpath::measure(label = "daemon.engine.claim_catalog_refresh", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.claim_catalog_refresh",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
@@ -359,7 +364,6 @@ impl DaemonEngine {
         Some(key)
     }
 
-    #[hotpath::skip]
     pub(super) async fn release_catalog_refresh(&self, key: CatalogRefreshClientKey) {
         self.catalog_refresh_notified_clients
             .lock()
@@ -368,7 +372,6 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -378,7 +381,11 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.project_server_until_cancelled", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.project_server_until_cancelled",
+        level = "trace",
+        skip_all
+    )]
     async fn project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
@@ -411,7 +418,6 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::skip]
     pub(super) async fn cached_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -420,7 +426,11 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.cached_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.cached_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn cached_project_server_for_requirement(
         &self,
         handshake: &DaemonHandshake,
@@ -487,7 +497,11 @@ impl DaemonEngine {
     /// resolution (`ensure_registered_project_route` +
     /// `resolved_project_server_key`) on every wait iteration re-derived
     /// registry and repository identity dozens of times per warming request.
-    #[hotpath::measure(label = "daemon.engine.route_bound_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.route_bound_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn route_bound_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -508,7 +522,7 @@ impl DaemonEngine {
         }
     }
 
-    #[hotpath::measure(label = "daemon.engine.begin_project_open", future = true)]
+    #[tracing::instrument(name = "daemon.engine.begin_project_open", level = "trace", skip_all)]
     pub(super) async fn begin_project_open(
         &self,
         handshake: DaemonHandshake,
@@ -560,7 +574,6 @@ impl DaemonEngine {
     /// work before session-store resolution eventually notices the missing
     /// enrollment. Registry alias and repository-identity lookups preserve
     /// linked-worktree routing without manufacturing path-derived authority.
-    #[hotpath::skip]
     pub(super) async fn ensure_registered_project_route(
         &self,
         project_path: &Path,
@@ -569,7 +582,7 @@ impl DaemonEngine {
         ensure_registered_project_route(&self.store_administration, project_path, allow_init).await
     }
 
-    #[hotpath::measure(label = "daemon.engine.schedule_warmup", future = true)]
+    #[tracing::instrument(name = "daemon.engine.schedule_warmup", level = "trace", skip_all)]
     pub(super) async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
@@ -598,7 +611,11 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure(label = "daemon.engine.project_server_for_request", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.project_server_for_request",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,
@@ -724,7 +741,7 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure(label = "daemon.engine.cached_open_failure", future = true)]
+    #[tracing::instrument(name = "daemon.engine.cached_open_failure", level = "trace", skip_all)]
     pub(super) async fn cached_project_open_failure(
         &self,
         handshake: &DaemonHandshake,
@@ -735,7 +752,6 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn shutdown_project_open_tasks(&self) {
         project_open_tasks(&self.project_open_gates)
             .await
@@ -747,7 +763,6 @@ impl DaemonEngine {
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
     #[cfg(test)]
-    #[hotpath::skip]
     pub(super) async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -757,7 +772,7 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.engine.open_project_server", future = true)]
+    #[tracing::instrument(name = "daemon.engine.open_project_server", level = "trace", skip_all)]
     pub(super) async fn open_project_server_until_cancelled(
         &self,
         handshake: &DaemonHandshake,
@@ -823,7 +838,11 @@ impl DaemonEngine {
         project_route_for_handshake(handshake, self.store_administration.owner_home()?)
     }
 
-    #[hotpath::measure(label = "daemon.engine.activate_project_server", future = true)]
+    #[tracing::instrument(
+        name = "daemon.engine.activate_project_server",
+        level = "trace",
+        skip_all
+    )]
     async fn activate_project_server(
         &self,
         project_path: PathBuf,
@@ -900,17 +919,17 @@ impl DaemonEngine {
         let recovery_server = Arc::clone(&server);
         spawn_lifecycle_automation_scheduler_activation(
             self.lifecycle.clone(),
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async move {
                     let cg = recovery_server.cg().await;
                     project_open_owners::reconcile_project_open_automation_effects(cg).await;
                 },
-                label = "daemon.engine.reconcile_automation_effects"
+                tracing::trace_span!("daemon.engine.reconcile_automation_effects"),
             ),
         );
         spawn_lifecycle_automation_scheduler_activation(
             self.lifecycle.clone(),
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async move {
                     let cg = server.cg().await;
                     engine
@@ -922,12 +941,12 @@ impl DaemonEngine {
                         )
                         .await;
                 },
-                label = "daemon.engine.activate_automation_scheduler"
+                tracing::trace_span!("daemon.engine.activate_automation_scheduler"),
             ),
         );
     }
 
-    #[hotpath::measure(label = "daemon.engine.rekey_maintenance", future = true)]
+    #[tracing::instrument(name = "daemon.engine.rekey_maintenance", level = "trace", skip_all)]
     pub(super) async fn rekey_project_maintenance(
         &self,
         old_key: &ProjectServerKey,
@@ -1009,7 +1028,7 @@ impl DaemonEngine {
             let route_registered = Arc::clone(&route_registered);
             let route_cancellation = route_cancellation.clone();
             let handshake = handshake.clone();
-            Box::pin(hotpath::future!(
+            Box::pin(tracing::Instrument::instrument(
                 async move {
                     let scope = crate::daemon::branch_admin::graph_writer_scope(
                         &fresh,
@@ -1106,7 +1125,7 @@ impl DaemonEngine {
                         }
                     }
                 },
-                label = "daemon.engine.database_owner_reconcile"
+                tracing::trace_span!("daemon.engine.database_owner_reconcile"),
             ))
         })
     }

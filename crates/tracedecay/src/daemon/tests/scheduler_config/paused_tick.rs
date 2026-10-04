@@ -21,11 +21,10 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
 }
 
 /// The daemon polls its automation scheduler on Tokio workers with a 16 MiB
-/// stack (`ASYNC_STACK_BYTES` in the CLI). Under `--features hotpath` every
+/// stack (`ASYNC_STACK_BYTES` in the CLI). With instrumentation every
 /// instrumented future is wrapped by value, which is what overflowed that
 /// stack in production (#835). Run the same tick on a thread of exactly that
 /// size so a regression aborts here instead of in the live daemon.
-#[cfg(feature = "hotpath")]
 #[test]
 fn automation_scheduler_tick_fits_the_daemon_worker_stack() {
     const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;

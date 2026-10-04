@@ -83,10 +83,8 @@ use tracedecay_domain::{FactEventId, FactId, ProjectId, TemporalModeV1};
 
 use super::RetainedSurfaceOperation;
 
-/// Exact registered-project selector for retained requests.
-///
-/// Reads may select any registered project. Writes accept only the served
-/// project and refuse another as `memory.cross_project_write_unsupported`.
+/// Exact registered-project selector. Reads and fact effects run against the
+/// selected project.
 ///
 /// Inlined so every request schema advertises the closed selector contract
 /// (`required: ["project_id"]`, no additional properties) directly on its
@@ -612,7 +610,6 @@ pub enum SessionRefreshScopeV1 {
 
 impl SessionRefreshScopeV1 {
     /// Wire spelling of the selected owner, echoed in refresh results.
-    #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Project {} => "project",
@@ -687,7 +684,6 @@ pub struct SessionRefreshRequestV1 {
 }
 
 impl SessionRefreshRequestV1 {
-    #[hotpath::skip]
     pub const fn with_action(
         action: SessionRefreshActionV1,
         request: SessionRefreshActionRequestV1,
@@ -695,7 +691,6 @@ impl SessionRefreshRequestV1 {
         Self { action, request }
     }
 
-    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self.action {
             SessionRefreshActionV1::Status => RetainedSurfaceOperation::SessionRefreshStatus,
@@ -869,7 +864,6 @@ pub enum RetainedSurfaceRequestV1 {
 }
 
 impl RetainedSurfaceRequestV1 {
-    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self {
             Self::FactStoreCurate(_) => RetainedSurfaceOperation::FactStoreCurate,

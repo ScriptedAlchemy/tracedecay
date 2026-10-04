@@ -101,9 +101,10 @@ const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(any(test, feature = "
     Duration::from_mins(10)
 };
 
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "code_index.graph_seat.noop_follow_up")
+#[tracing::instrument(
+    name = "code_index.graph_seat.noop_follow_up",
+    level = "trace",
+    skip_all
 )]
 pub(crate) fn retained_noop_requires_follow_up_wake(
     serving_empty: bool,
@@ -210,7 +211,6 @@ impl GraphSeatGateV1 {
     /// from which it can first try to recover an already-verified graph head.
     /// A retained full replay is gated separately on text readiness after that
     /// recovery attempt.
-    #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
         activation_deferred: bool,
@@ -252,7 +252,6 @@ impl GraphSeatGateV1 {
     ///
     /// `Disabled` is not a skip: a worktree with graph activation off is not
     /// waiting for a seat, and logging one per pass would be noise.
-    #[hotpath::skip]
     pub const fn skip_reason(self) -> Option<&'static str> {
         match self {
             Self::Prepare | Self::Disabled => None,
@@ -295,7 +294,6 @@ impl GraphActivationGateV1 {
     /// readiness, not the bound generation's: a restored owner carries its
     /// Ready graph across the bind, and that owner is the authority status
     /// reads.
-    #[hotpath::skip]
     pub const fn decide(
         graph_already_serves: bool,
         replaces_serving_generation: bool,
@@ -317,7 +315,6 @@ impl GraphActivationGateV1 {
         Self::Activate
     }
 
-    #[hotpath::skip]
     pub const fn activates(self) -> bool {
         matches!(self, Self::Activate)
     }
@@ -351,7 +348,6 @@ impl ServingSwapOutcomeV1 {
     /// arm exists because activation of a large generation outlives the
     /// checkout it sealed from, and refusing that seat left the graph route
     /// serving nothing at all rather than serving something stale.
-    #[hotpath::skip]
     pub const fn decide(
         publication_matches: bool,
         incumbent_is_active: bool,
@@ -373,7 +369,6 @@ impl ServingSwapOutcomeV1 {
     }
 
     /// Whether this outcome writes the serving slot.
-    #[hotpath::skip]
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
@@ -664,9 +659,9 @@ pub struct CodeIndexMountedScopeV1 {
     pub shutting_down: Arc<AtomicBool>,
 }
 
-/// One worktree's graph-bearing serving seat. Every read path takes it, so it
-/// is Hotpath instrumented; each writer bumps the worktree's serving epoch.
-pub type ServingGenerationSlot = hotpath::rw_locks::RwLock<Option<LatestCompleteCodeIndexV1>>;
+/// One worktree's graph-bearing serving seat. Every read path takes it, so
+/// it is instrumented; each writer bumps the worktree's serving epoch.
+pub type ServingGenerationSlot = std::sync::RwLock<Option<LatestCompleteCodeIndexV1>>;
 
 /// Outcome of retiring the retained generation from a failed branch
 /// publication. A no-match preserves a newer generation that won the race.
@@ -1867,7 +1862,11 @@ impl CodeIndexSchedulerRegistryV1 {
             })
     }
 
-    #[hotpath::measure(label = "daemon.code_index.registry.register_activation")]
+    #[tracing::instrument(
+        name = "daemon.code_index.registry.register_activation",
+        level = "trace",
+        skip_all
+    )]
     pub fn register_activation(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -2227,7 +2226,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Atomically marks the exact current serving generation as owned by one
     /// branch publication. A subsequent serving-slot replacement invalidates
     /// this token before rollback can observe it.
-    #[hotpath::measure(label = "daemon.code_index.registry.install_serving", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.registry.install_serving",
+        level = "trace",
+        skip_all
+    )]
     pub async fn install_exact_serving_generation(
         &self,
         project_root: &Path,
@@ -2660,11 +2663,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 break;
             }
             let advancing = text.clone();
-            let advance = hotpath::future!(
-                tokio::task::spawn_blocking(
-                    move || advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
-                ),
-                label = "daemon.code_index.text_projection"
+            let advance = tracing::Instrument::instrument(
+                tokio::task::spawn_blocking(move || {
+                    advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
+                }),
+                tracing::trace_span!("daemon.code_index.text_projection"),
             )
             .await;
             if matches!(advance, Ok(Ok(_)))
@@ -2851,13 +2854,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // swap, so this is the truthful end-to-end wake-to-queryable sample.
         // An un-attributable follow-up pass remains absent rather than
         // fabricating a zero-latency sample.
-        #[cfg(feature = "hotpath")]
-        if let Some(ttfq_micros) = receipt.event_to_ready_micros() {
-            hotpath::gauge!("daemon.code_index.reconcile.wake_to_queryable_micros")
-                .set(ttfq_micros as f64);
-        } else {
-            hotpath::gauge!("daemon.code_index.reconcile.wake_without_arrival_total").inc(1_u64);
-        }
+
         // A successful publication is the terminal outcome operators need to see
         // to know a rebuild window actually closed, so it is `info`, not `debug`:
         // the cadence receipt below is debug-level and was invisible in the
@@ -3393,7 +3390,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.scheduler))
     }
 
-    #[hotpath::measure(label = "daemon.code_index.shutdown", future = true)]
+    #[tracing::instrument(name = "daemon.code_index.shutdown", level = "trace", skip_all)]
     pub async fn shutdown(&self) {
         self.cancel();
         let cold_mount_completions = self.cold_mount_reservation_completions();
@@ -3424,9 +3421,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         ("root", root.display().to_string()),
                     ],
                 );
-                let _ = hotpath::future!(
+                let _ = tracing::Instrument::instrument(
                     &mut worktree.task,
-                    label = "daemon.code_index.shutdown.worker_join"
+                    tracing::trace_span!("daemon.code_index.shutdown.worker_join"),
                 )
                 .await;
                 tracedecay_runtime_core::logging::log_daemon_event(
@@ -3447,10 +3444,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // release runs on the blocking pool. Shutdown still joins it
                 // below: ownership must be gone when this returns.
                 owner_releases.push(tokio::task::spawn_blocking(move || {
-                    hotpath::measure_block!(
-                        "daemon.code_index.shutdown.owner_release",
-                        drop(worktree)
-                    );
+                    let _span =
+                        tracing::trace_span!("daemon.code_index.shutdown.owner_release").entered();
+                    drop(worktree);
                 }));
             }
         }
@@ -3462,9 +3458,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let release_started = std::time::Instant::now();
         let release_count = owner_releases.len();
         for release in owner_releases {
-            let _ = hotpath::future!(
+            let _ = tracing::Instrument::instrument(
                 release,
-                label = "daemon.code_index.shutdown.owner_release_join"
+                tracing::trace_span!("daemon.code_index.shutdown.owner_release_join"),
             )
             .await;
         }
@@ -3825,7 +3821,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// A caller that already handled `known` gets `None` from one pointer
     /// read while no newer seal exists; only a new seal pays for decoding
     /// the generation's manifest.
-    #[hotpath::measure(label = "daemon.code_index.sealed_publication_identity", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.sealed_publication_identity",
+        level = "trace",
+        skip_all
+    )]
     pub async fn sealed_publication_identity(
         &self,
         project_root: &Path,

@@ -86,7 +86,7 @@ impl GeneratedDirScope {
     }
 }
 
-#[hotpath::measure(label = "code_index.capture.source_walk")]
+#[tracing::instrument(name = "code_index.capture.source_walk", level = "trace", skip_all)]
 pub fn source_walk(
     project_root: &Path,
     path_glob: Option<&str>,

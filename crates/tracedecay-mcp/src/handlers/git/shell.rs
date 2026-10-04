@@ -28,7 +28,7 @@ fn open_project_repository(
     Ok(repo)
 }
 
-#[hotpath::measure(label = "mcp.git.shell.resolve")]
+#[tracing::instrument(name = "mcp.git.shell.resolve", level = "trace", skip_all)]
 fn resolve_pr_comparison_commit(
     repo: &gix::Repository,
     requested: &str,
@@ -117,7 +117,7 @@ pub(super) fn git_pr_comparison(
     git_pr_comparison_controlled(project_root, base_ref, head_ref, &|| false)
 }
 
-#[hotpath::measure(label = "mcp.git.shell.pr_comparison")]
+#[tracing::instrument(name = "mcp.git.shell.pr_comparison", level = "trace", skip_all)]
 pub(super) fn git_pr_comparison_controlled(
     project_root: &std::path::Path,
     base_ref: &str,
@@ -138,13 +138,11 @@ pub(super) fn git_pr_comparison_controlled(
     let head_oid = head_commit.id.to_string();
     check_git_pr_cancelled(cancelled)?;
     ensure_pr_ancestry_bounded(&repo, base_commit.id, head_commit.id, cancelled)?;
-    let merge_base = hotpath::measure_block!(
-        "mcp.git.shell.merge_base",
+    let merge_base = {
+        let _span = tracing::trace_span!("mcp.git.shell.merge_base").entered();
         repo.merge_base(base_commit.id, head_commit.id)
-            .map_err(|e| format!(
-                "cannot find merge base for '{base_ref}' and '{head_ref}': {e}"
-            ))?
-    );
+            .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?
+    };
     let merge_base = merge_base.to_string();
     check_git_pr_cancelled(cancelled)?;
 
@@ -157,7 +155,7 @@ pub(super) fn git_pr_comparison_controlled(
     })
 }
 
-#[hotpath::measure(label = "mcp.git.shell.ancestry")]
+#[tracing::instrument(name = "mcp.git.shell.ancestry", level = "trace", skip_all)]
 fn ensure_pr_ancestry_bounded(
     repo: &gix::Repository,
     base: gix::ObjectId,
@@ -192,7 +190,7 @@ fn check_git_pr_cancelled(
     }
 }
 
-#[hotpath::measure(label = "mcp.git.shell.diff")]
+#[tracing::instrument(name = "mcp.git.shell.diff", level = "trace", skip_all)]
 fn git_diff_file_changes_controlled(
     project_root: &std::path::Path,
     from_ref: &str,
@@ -310,7 +308,7 @@ pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
 /// staged-only), from the repository status authority. Its worktree side
 /// compares content for entries the index stat cannot vouch for, so an edit
 /// inside the index's own mtime second is still reported.
-#[hotpath::measure(label = "mcp.git.shell.changed_files")]
+#[tracing::instrument(name = "mcp.git.shell.changed_files", level = "trace", skip_all)]
 pub(super) fn git_changed_files(
     project_root: &std::path::Path,
     staged_only: bool,
@@ -342,7 +340,7 @@ pub(super) fn git_changed_files(
 }
 
 /// Returns the last N commit subjects from HEAD.
-#[hotpath::measure(label = "mcp.git.shell.recent_commits")]
+#[tracing::instrument(name = "mcp.git.shell.recent_commits", level = "trace", skip_all)]
 pub(super) fn git_recent_commits(
     project_root: &std::path::Path,
     count: usize,
@@ -386,7 +384,7 @@ pub(super) fn git_recent_commits(
 }
 
 /// Returns commit subjects between two refs.
-#[hotpath::measure(label = "mcp.git.shell.commit_log")]
+#[tracing::instrument(name = "mcp.git.shell.commit_log", level = "trace", skip_all)]
 fn git_commit_log_controlled(
     project_root: &std::path::Path,
     base_ref: &str,

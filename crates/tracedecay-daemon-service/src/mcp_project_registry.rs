@@ -28,7 +28,6 @@ pub struct DaemonProjectRegistryReadService {
 }
 
 impl DaemonProjectRegistryReadService {
-    #[hotpath::skip]
     pub const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
         Self { registry }
     }
@@ -52,7 +51,6 @@ impl DaemonProjectRegistryReadService {
             .map(|context| context.project.project_id))
     }
 
-    #[hotpath::skip]
     async fn listing(
         &self,
         active_project_root: Option<&Path>,
@@ -85,7 +83,6 @@ impl DaemonProjectRegistryReadService {
         })
     }
 
-    #[hotpath::skip]
     async fn execute_list(
         &self,
         command: ProjectRegistryListingCommand,
@@ -107,7 +104,6 @@ impl DaemonProjectRegistryReadService {
             .await
     }
 
-    #[hotpath::skip]
     async fn resolve_context(
         &self,
         selector: &ProjectRegistrySelector,
@@ -140,7 +136,6 @@ impl DaemonProjectRegistryReadService {
         }
     }
 
-    #[hotpath::skip]
     async fn execute_context(
         &self,
         command: ProjectRegistryContextCommand,

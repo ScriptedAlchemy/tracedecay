@@ -76,7 +76,7 @@ impl RequestCancellationRegistryV1 {
         })
     }
 
-    #[hotpath::measure(label = "daemon.invocation.cancel")]
+    #[tracing::instrument(name = "daemon.invocation.cancel", level = "trace", skip_all)]
     pub fn cancel(&self, request_id: &str) -> bool {
         let mut state = self.lock();
         let now = Instant::now();

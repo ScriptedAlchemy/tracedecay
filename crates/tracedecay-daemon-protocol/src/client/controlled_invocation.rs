@@ -169,7 +169,7 @@ impl DaemonInvocationClient {
         }
     }
 
-    #[hotpath::measure(label = "daemon.client.invoke_controlled", future = true)]
+    #[tracing::instrument(name = "daemon.client.invoke_controlled", level = "trace", skip_all)]
     pub async fn invoke_controlled(
         &self,
         request: crate::contract::DaemonInvocationRequest,
@@ -182,7 +182,11 @@ impl DaemonInvocationClient {
             .map(DaemonInvocationResult::into_response)
     }
 
-    #[hotpath::measure(label = "daemon.client.invoke_controlled.delivery", future = true)]
+    #[tracing::instrument(
+        name = "daemon.client.invoke_controlled.delivery",
+        level = "trace",
+        skip_all
+    )]
     pub async fn invoke_controlled_with_delivery(
         &self,
         request: crate::contract::DaemonInvocationRequest,

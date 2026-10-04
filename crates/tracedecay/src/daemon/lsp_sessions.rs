@@ -43,7 +43,7 @@ pub(super) fn update_connection_lsp_sessions(
     }
 }
 
-#[hotpath::measure(label = "daemon.lsp_sessions.cleanup", future = true)]
+#[tracing::instrument(name = "daemon.lsp_sessions.cleanup", level = "trace", skip_all)]
 pub(super) async fn cleanup_connection_lsp_sessions(
     invocation: &DaemonInvocationState,
     sessions: HashMap<String, DaemonLspSessionAccess>,
@@ -83,7 +83,7 @@ pub(super) async fn admitted_lsp_workspace_for_request(
 /// an authorized next root set is applied with the client's active root
 /// preserved as the anchor; anything else rejects the intent so the actor's
 /// fence never dangles.
-#[hotpath::measure(label = "daemon.lsp_sessions.settle", future = true)]
+#[tracing::instrument(name = "daemon.lsp_sessions.settle", level = "trace", skip_all)]
 pub(super) async fn settle_pending_lsp_workspace_mutation(
     store_administration: &StoreAdministration,
     service: &DaemonInvocationService,
@@ -113,7 +113,7 @@ pub(super) async fn settle_pending_lsp_workspace_mutation(
         .await;
 }
 
-#[hotpath::measure(label = "daemon.lsp_sessions.authorize", future = true)]
+#[tracing::instrument(name = "daemon.lsp_sessions.authorize", level = "trace", skip_all)]
 async fn authorize_lsp_workspace_for_uris(
     store_administration: &StoreAdministration,
     service: &DaemonInvocationService,

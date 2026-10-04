@@ -200,7 +200,11 @@ pub struct CallableCodeQueryService<P, A> {
 
 macro_rules! callable_code_service_method {
     ($name:ident, $kind:ident, $request:ty, $item:ty, $port_method:ident) => {
-        #[hotpath::measure(label = "application.retrieval.callable_code", future = true)]
+        #[tracing::instrument(
+            name = "application.retrieval.callable_code",
+            level = "trace",
+            skip_all
+        )]
         pub async fn $name(
             &self,
             context: &RequestContext,

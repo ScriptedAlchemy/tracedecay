@@ -26,7 +26,7 @@ pub fn should_check_external_import_hint(result_count: usize, limit: usize) -> b
 /// The bound context carries the graph's admitted scope plus the caller's
 /// deadline and cancellation, so this read cannot outlive the request or reach
 /// a graph admitted for another checkout.
-#[hotpath::measure(label = "mcp.search.import_hint.total")]
+#[tracing::instrument(name = "mcp.search.import_hint.total", level = "trace", skip_all)]
 pub fn external_import_hint(
     ctx: &McpToolContext<'_>,
     graph: &VerifiedGraphQuery,
@@ -34,9 +34,10 @@ pub fn external_import_hint(
     limit: usize,
     scope_prefix: Option<&str>,
 ) -> Result<Option<SearchExternalImportCandidatesV1>> {
-    let candidates = hotpath::measure_block!("mcp.search.import_hint.scan", {
+    let candidates = {
+        let _span = tracing::trace_span!("mcp.search.import_hint.scan").entered();
         ignored_dependency_candidates(ctx, graph, query, limit, scope_prefix)?
-    });
+    };
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -78,7 +79,7 @@ pub fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvid
     }
 }
 
-#[hotpath::measure(label = "mcp.search.import_admit.total")]
+#[tracing::instrument(name = "mcp.search.import_admit.total", level = "trace", skip_all)]
 pub async fn admit_verified_ignored_dependency(
     ctx: &McpToolContext<'_>,
     admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
@@ -98,13 +99,13 @@ pub async fn admit_verified_ignored_dependency(
         ));
     };
     let source_generation = graph.generation();
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         admission.admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
             graph.request_context(),
             source_generation,
             std::slice::from_ref(import),
         )),
-        label = "mcp.search.import_admit.execute"
+        tracing::trace_span!("mcp.search.import_admit.execute"),
     )
     .await
     {

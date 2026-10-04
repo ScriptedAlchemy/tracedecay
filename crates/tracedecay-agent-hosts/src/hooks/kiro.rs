@@ -118,7 +118,11 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 ///
 /// Resets the per-turn counter, catches up transcripts, and injects bounded
 /// user/project memory relevant to the submitted prompt.
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.prompt_submit")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.kiro.prompt_submit",
+    level = "trace",
+    skip_all
+)]
 pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!(

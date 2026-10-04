@@ -656,7 +656,6 @@ impl CallableCodeOperationKind {
         Self::References,
     ];
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ExactOccurrence => "exact_occurrence",

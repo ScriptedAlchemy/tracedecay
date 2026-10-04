@@ -66,7 +66,6 @@ impl ApplicationInvocationBinding {
         &self.binding_id
     }
 
-    #[hotpath::skip]
     pub const fn surface(&self) -> BindingSurface {
         self.surface
     }
@@ -248,7 +247,6 @@ impl ApplicationRequest {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_cancellation(&self) -> bool {
         matches!(self, Self::OperationCancel { .. })
     }

@@ -150,7 +150,11 @@ impl Default for HostBundleDoctorReportV1 {
     }
 }
 
-#[hotpath::measure(label = "hosts.agent.host_bundle.inspect_installed")]
+#[tracing::instrument(
+    name = "hosts.agent.host_bundle.inspect_installed",
+    level = "trace",
+    skip_all
+)]
 pub fn inspect_installed_host_bundle_components_at(
     artifact_root: &Path,
     lifecycle_root: &Path,

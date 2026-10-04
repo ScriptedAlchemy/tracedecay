@@ -59,7 +59,7 @@ pub(crate) struct AutomationSkillsPayloadV1 {
     count: usize,
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.list", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.list", level = "trace", skip_all)]
 pub async fn list(
     State(state): State<DashboardState>,
 ) -> std::result::Result<Json<AutomationSkillsPayloadV1>, JsonError> {
@@ -73,7 +73,7 @@ pub async fn list(
     }))
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.view", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.view", level = "trace", skip_all)]
 pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     let profile_root = profile_root(&state)?;
     let skill = load_managed_skill(profile_root, &id)
@@ -90,7 +90,7 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     skill_payload_with_deployment(profile_root, skill, None).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.create", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.create", level = "trace", skip_all)]
 pub async fn create(
     State(state): State<DashboardState>,
     Json(request): Json<ManagedSkillCreateRequest>,
@@ -98,7 +98,7 @@ pub async fn create(
     execute_skill_command(&state, request.into_create_command()).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.update", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.update", level = "trace", skip_all)]
 pub async fn update(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
@@ -115,17 +115,17 @@ pub async fn update(
     .await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.disable", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.disable", level = "trace", skip_all)]
 pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Disable { id }).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.archive", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.archive", level = "trace", skip_all)]
 pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Archive { id }).await
 }
 
-#[hotpath::measure(label = "dashboard_api.skills.restore", future = true)]
+#[tracing::instrument(name = "dashboard_api.skills.restore", level = "trace", skip_all)]
 pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     execute_skill_command(&state, DashboardManagedSkillCommandV1::Restore { id }).await
 }

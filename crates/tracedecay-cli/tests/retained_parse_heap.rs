@@ -3,11 +3,7 @@
 //!
 //! One test in its own binary: it measures this process's anonymous RSS.
 
-#![cfg(all(
-    target_os = "linux",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
-))]
+#![cfg(all(target_os = "linux", not(feature = "alloc-jemalloc")))]
 
 #[path = "../src/process_allocator.rs"]
 mod process_allocator;

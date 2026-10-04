@@ -268,7 +268,7 @@ impl ProjectFeedbackObservationSinkV1 {
         })
     }
 
-    #[hotpath::measure(label = "usecases.feedback.close_drain", future = true)]
+    #[tracing::instrument(name = "usecases.feedback.close_drain", level = "trace", skip_all)]
     async fn close_and_drain(&self) -> Result<(), FeedbackRuntimeError> {
         let terminal = {
             let _admission = self
@@ -370,10 +370,6 @@ impl ProjectFeedbackObservationSinkV1 {
     }
 
     fn record_drop(&self) {
-        // Enqueue-side losses (queue full, sink closed, delivery assignment
-        // refused) are the waste being diagnosed; count them even though the
-        // durable drop tally also travels inside later envelopes.
-        hotpath::gauge!("usecases.feedback.observations_dropped").inc(1.0);
         saturating_add(&self.dropped_count, 1);
     }
 
@@ -474,7 +470,7 @@ pub async fn open_feedback_runtime(
 }
 
 impl FeedbackRuntime {
-    #[hotpath::measure(label = "usecases.feedback.open_runtime", future = true)]
+    #[tracing::instrument(name = "usecases.feedback.open_runtime", level = "trace", skip_all)]
     pub async fn open(
         database: Database,
         project_root: impl Into<PathBuf>,
@@ -948,7 +944,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackDiagnosticsReadRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackDiagnosticsReadResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let domains = vec![
                     EvidenceDomain::Diagnostic,
@@ -989,7 +985,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     finished_at,
                 )
             },
-            label = "usecases.feedback.read_diagnostics"
+            tracing::trace_span!("usecases.feedback.read_diagnostics"),
         ))
     }
 
@@ -998,7 +994,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackGetRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackGetResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let domains = vec![EvidenceDomain::Diagnostic];
                 if let Some(interrupted) =
@@ -1033,7 +1029,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     finished_at,
                 )
             },
-            label = "usecases.feedback.read_get"
+            tracing::trace_span!("usecases.feedback.read_get"),
         ))
     }
 
@@ -1042,7 +1038,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackExpandRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackExpandResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let domains = vec![EvidenceDomain::Anchor];
                 let started_at = now_micros();
@@ -1166,7 +1162,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     finished_at,
                 )
             },
-            label = "usecases.feedback.read_expand"
+            tracing::trace_span!("usecases.feedback.read_expand"),
         ))
     }
 
@@ -1175,7 +1171,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
         context: &'a FeedbackReadPortContext<'a>,
         request: &'a FeedbackListRequestV1,
     ) -> FeedbackReadPortFuture<'a, FeedbackListResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let domains = vec![EvidenceDomain::Diagnostic];
                 if let Some(interrupted) =
@@ -1263,7 +1259,7 @@ impl FeedbackReadPort for ProjectFeedbackStore {
                     finished_at,
                 )
             },
-            label = "usecases.feedback.read_list"
+            tracing::trace_span!("usecases.feedback.read_list"),
         ))
     }
 }
@@ -1305,7 +1301,11 @@ impl ProjectFeedbackStore {
         );
     }
 
-    #[hotpath::measure(label = "usecases.feedback.load_publications", future = true)]
+    #[tracing::instrument(
+        name = "usecases.feedback.load_publications",
+        level = "trace",
+        skip_all
+    )]
     async fn load_publications(&self) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
         let Some(encoded) = self
             .database
@@ -1335,7 +1335,7 @@ impl ProjectFeedbackStore {
     /// Latest validated durable publication visible in the exact admitted
     /// project/repository/worktree/ref scope. Doctor consumes this mounted read
     /// store; it does not scan provider-local state or mutable paths.
-    #[hotpath::measure(label = "usecases.feedback.doctor_latest", future = true)]
+    #[tracing::instrument(name = "usecases.feedback.doctor_latest", level = "trace", skip_all)]
     pub async fn doctor_latest_publication(
         &self,
         context: &RequestContext,
@@ -1353,7 +1353,11 @@ impl ProjectFeedbackStore {
         Ok(publication)
     }
 
-    #[hotpath::measure(label = "usecases.feedback.record_publication", future = true)]
+    #[tracing::instrument(
+        name = "usecases.feedback.record_publication",
+        level = "trace",
+        skip_all
+    )]
     async fn record_publication(
         &self,
         publication: FeedbackPublicationV1,
@@ -1562,7 +1566,11 @@ impl ProjectFeedbackStore {
 /// Read the canonical durable Plan-26 observation projection from an already
 /// admitted project database. Doctor uses this same projection rather than
 /// deriving a second telemetry model.
-#[hotpath::measure(label = "usecases.feedback.observation_read_model", future = true)]
+#[tracing::instrument(
+    name = "usecases.feedback.observation_read_model",
+    level = "trace",
+    skip_all
+)]
 pub async fn feedback_observation_read_model(
     database: &Database,
 ) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
@@ -1711,7 +1719,11 @@ fn interruption_outcome(context: &RequestContext, observed_at: UtcMicros) -> Fee
     }
 }
 
-#[hotpath::measure(label = "usecases.feedback.persist_observation", future = true)]
+#[tracing::instrument(
+    name = "usecases.feedback.persist_observation",
+    level = "trace",
+    skip_all
+)]
 async fn persist_feedback_observation(
     database: &Database,
     envelope: FeedbackObservationEnvelopeV1,
@@ -1793,7 +1805,7 @@ async fn persist_feedback_observation(
         .map_err(|_| FeedbackRuntimeError::Store)
 }
 
-#[hotpath::measure(label = "usecases.feedback.persist_boot", future = true)]
+#[tracing::instrument(name = "usecases.feedback.persist_boot", level = "trace", skip_all)]
 async fn persist_feedback_producer_boot(
     database: &Database,
     boot_id: ManifestDigest,
@@ -1840,7 +1852,7 @@ async fn persist_feedback_producer_boot(
         .map_err(|_| FeedbackRuntimeError::Store)
 }
 
-#[hotpath::measure(label = "usecases.feedback.load_ledger", future = true)]
+#[tracing::instrument(name = "usecases.feedback.load_ledger", level = "trace", skip_all)]
 async fn load_observation_ledger(
     transaction: &DatabaseWriteTransaction<'_>,
 ) -> Result<StoredFeedbackObservationLedgerV1, FeedbackRuntimeError> {

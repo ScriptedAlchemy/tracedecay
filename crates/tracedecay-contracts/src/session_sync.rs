@@ -42,7 +42,6 @@ impl SessionSyncScopeV1 {
 pub struct SessionTranscriptImportV1;
 
 impl SessionTranscriptImportV1 {
-    #[hotpath::skip]
     pub const fn all_hosts() -> Self {
         Self
     }
@@ -79,17 +78,14 @@ impl SessionGitSyncV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn since_unix(self) -> i64 {
         self.since_unix
     }
 
-    #[hotpath::skip]
     pub const fn max_sessions(self) -> usize {
         self.max_sessions
     }
 
-    #[hotpath::skip]
     pub const fn dry_run(self) -> bool {
         self.dry_run
     }
@@ -103,7 +99,6 @@ pub enum SessionSyncCommandV1 {
 }
 
 impl SessionSyncCommandV1 {
-    #[hotpath::skip]
     pub const fn source(self) -> SessionSyncSourceV1 {
         match self {
             Self::ImportTranscripts(_) => SessionSyncSourceV1::ImportTranscripts,
@@ -172,7 +167,6 @@ impl SessionSyncRequestV1 {
         &self.cancellation
     }
 
-    #[hotpath::skip]
     pub const fn command(&self) -> SessionSyncCommandV1 {
         self.command
     }
@@ -227,12 +221,10 @@ pub enum SessionSyncCoverageV1 {
 }
 
 impl SessionSyncCoverageV1 {
-    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
 
-    #[hotpath::skip]
     pub const fn remaining_work(&self) -> u64 {
         match self {
             Self::Complete => 0,

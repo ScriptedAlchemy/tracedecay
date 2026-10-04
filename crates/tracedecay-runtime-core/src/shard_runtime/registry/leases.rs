@@ -191,7 +191,11 @@ pub enum ProfileAuthorityPinResult {
 }
 
 impl StoreRuntimeRegistry {
-    #[hotpath::measure(label = "runtime_core.registry.lease_acquire")]
+    #[tracing::instrument(
+        name = "runtime_core.registry.lease_acquire",
+        level = "trace",
+        skip_all
+    )]
     pub fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
         if let Err(error) = lease.validate() {
             return StoreRuntimeLeaseAcquireResult::Rejected(
@@ -324,7 +328,6 @@ impl StoreRuntimeRegistry {
                 .entry(key)
                 .or_default()
                 .insert(token);
-            hotpath::gauge!("runtime_core.registry.profile_pins").inc(1.0);
             return ProfileAuthorityPinResult::Pinned(ProfileAuthorityPin {
                 inner: Arc::new(ProfileAuthorityPinToken {
                     registry: self.clone(),
@@ -357,7 +360,6 @@ impl StoreRuntimeRegistry {
         if !tokens.remove(&token) {
             return;
         }
-        hotpath::gauge!("runtime_core.registry.profile_pins").dec(1.0);
         if tokens.is_empty() {
             state.profile_pin_tokens.remove(&key);
         }

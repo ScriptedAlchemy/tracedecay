@@ -70,7 +70,7 @@ pub(super) async fn status_for_provider(
     .await
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.provider", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.provider", level = "trace", skip_all)]
 async fn status_for_provider_with_work(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -136,7 +136,7 @@ pub(super) async fn aggregate_provider_status(
     )
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.aggregate", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.aggregate", level = "trace", skip_all)]
 async fn aggregate_provider_status_with_work(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -252,7 +252,7 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
     (sql, values)
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.counts", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.counts", level = "trace", skip_all)]
 async fn status_counts(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -487,7 +487,11 @@ async fn store_status_for_depth(
     }
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.store_count_only")]
+#[tracing::instrument(
+    name = "sessions.lcm.status.store_count_only",
+    level = "trace",
+    skip_all
+)]
 fn store_status_without_token_scan(messages: i64) -> LcmStoreStatus {
     LcmStoreStatus {
         messages,
@@ -507,7 +511,7 @@ fn store_status_without_token_scan(messages: i64) -> LcmStoreStatus {
 /// the true one. The token estimate has to read text, so it stops at the budget
 /// and reports the resume cursor instead of streaming a multi-gigabyte store
 /// past the caller's deadline.
-#[hotpath::measure(label = "sessions.lcm.status.store_scan", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.store_scan", level = "trace", skip_all)]
 async fn store_status_within(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -641,7 +645,7 @@ fn dag_status_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Va
     (sql, scope.into_values())
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.dag", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.dag", level = "trace", skip_all)]
 async fn dag_status(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -707,7 +711,7 @@ fn python_round_ratio_to_tenths(total_source_tokens: i64, total_tokens: i64) -> 
     format!("{whole}.{fractional}:1")
 }
 
-#[hotpath::measure(label = "sessions.lcm.status.lifecycle", future = true)]
+#[tracing::instrument(name = "sessions.lcm.status.lifecycle", level = "trace", skip_all)]
 async fn load_lifecycle_metadata(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -1786,8 +1790,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual perf harness; seeds a large store and prints timings"]
     async fn measure_status_probe_cost_against_preindex_shape() {
-        #[cfg(feature = "hotpath")]
-        let _hotpath = hotpath::HotpathGuardBuilder::new("lcm-status-probe").build();
         let rows = std::env::var("LCM_STATUS_PERF_ROWS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -1858,7 +1860,7 @@ mod tests {
         );
 
         // Profiling lanes attribute the indexed shape alone: the pre-index
-        // phase would dominate every hotpath aggregate with already-diagnosed
+        // phase would dominate every measured aggregate with already-diagnosed
         // full scans.
         if std::env::var("LCM_STATUS_PERF_SKIP_PREINDEX").is_ok() {
             println!(

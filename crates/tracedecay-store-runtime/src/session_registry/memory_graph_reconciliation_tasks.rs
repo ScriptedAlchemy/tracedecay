@@ -54,7 +54,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     pub async fn shutdown_memory_graph_reconciliation_tasks(
         &self,
     ) -> std::result::Result<(), String> {
@@ -86,7 +85,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     pub async fn retire_memory_graph_reconciliation_task(
         &self,
         shard_id: &StoreShardIdV1,

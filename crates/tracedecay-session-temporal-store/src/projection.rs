@@ -10,7 +10,6 @@ use tracedecay_store::{
 use super::query::{storage, storage_message};
 use super::refresh::SessionRefreshRecoveryV1;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use crate::support as hotpath_observe;
 
 mod derived;
 mod materialize;
@@ -404,7 +403,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// output-producing effects committed past `cursor` left them behind their
     /// projection frontier, plus active generations that lack an applied
     /// relation receipt.
-    #[hotpath::measure(future = true, label = "session_temporal.query.pending_refresh")]
+    #[tracing::instrument(
+        name = "session_temporal.query.pending_refresh",
+        level = "trace",
+        skip_all
+    )]
     pub async fn pending_session_temporal_refresh_page_result(
         &self,
         limit: usize,
@@ -415,7 +418,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        hotpath_observe::record_snapshot_admissions(1);
         if limit == 0 {
             return Ok(SessionTemporalRefreshDiscoveryPage {
                 requests: Vec::new(),
@@ -522,7 +524,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
 
         let requests = requests.into_values().collect::<Vec<_>>();
-        hotpath_observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
         next.active_swept = active_exhausted;
         next.active_after = if active_exhausted {
             None
@@ -537,7 +538,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         })
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.projection.materialize")]
+    #[tracing::instrument(
+        name = "session_temporal.projection.materialize",
+        level = "trace",
+        skip_all
+    )]
     pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
@@ -547,7 +552,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        hotpath_observe::record_snapshot_admissions(1);
         materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
     }
 }

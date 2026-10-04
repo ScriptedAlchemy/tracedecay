@@ -11,13 +11,6 @@ use tracedecay_search_eval::{
     validate_default_workload, validate_direct_workload, write_generate_outputs,
 };
 
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
-#[cfg(feature = "hotpath")]
-const HOTPATH_FOCUS_ENV: &str = "HOTPATH_FOCUS";
-
 #[derive(Debug, Parser)]
 #[command(
     name = "tracedecay-search-eval",
@@ -66,12 +59,6 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    #[cfg(feature = "hotpath")]
-    if let Err(message) = configure_hotpath_output() {
-        return invalid("hotpath", message);
-    }
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay-search-eval").build();
     match Cli::parse().command {
         Command::Validate {
             repo_root,
@@ -134,64 +121,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(feature = "hotpath")]
-fn configure_hotpath_output() -> Result<(), String> {
-    let output_path = std::env::var_os(HOTPATH_OUTPUT_PATH_ENV);
-    let output_format = std::env::var_os(HOTPATH_OUTPUT_FORMAT_ENV);
-    let focus = std::env::var_os(HOTPATH_FOCUS_ENV);
-    if output_path
-        .as_deref()
-        .is_some_and(|path| path.to_str().is_none_or(str::is_empty))
-    {
-        return Err(format!(
-            "{HOTPATH_OUTPUT_PATH_ENV} must be a non-empty Unicode path"
-        ));
-    }
-    if output_format.as_deref().is_some_and(|format| {
-        format.to_str().is_none_or(|format| {
-            !matches!(
-                format.to_ascii_lowercase().as_str(),
-                "table" | "json" | "json-pretty" | "jsonpretty" | "none"
-            )
-        })
-    }) {
-        return Err(format!(
-            "{HOTPATH_OUTPUT_FORMAT_ENV} must be one of table, json, json-pretty, or none"
-        ));
-    }
-    if !hotpath_focus_is_supported(focus.as_deref()) {
-        return Err(format!(
-            "{HOTPATH_FOCUS_ENV} must be Unicode text; regular-expression form is unsupported"
-        ));
-    }
-    let report_disabled = output_format
-        .as_deref()
-        .and_then(|format| format.to_str())
-        .is_some_and(|format| format.eq_ignore_ascii_case("none"));
-    if output_path.is_none() || report_disabled {
-        // This evaluator writes a single JSON protocol document to stdout.
-        // Profiling therefore stays silent unless the operator supplies an
-        // explicit report destination.
-        unsafe {
-            std::env::set_var(HOTPATH_OUTPUT_FORMAT_ENV, "none");
-            std::env::remove_var(HOTPATH_OUTPUT_PATH_ENV);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(any(feature = "hotpath", test))]
-fn hotpath_focus_is_supported(focus: Option<&std::ffi::OsStr>) -> bool {
-    focus.is_none_or(|focus| {
-        focus.to_str().is_some_and(|focus| {
-            focus
-                .strip_prefix('/')
-                .and_then(|pattern| pattern.strip_suffix('/'))
-                .is_none()
-        })
-    })
-}
-
 fn validate_requested_workload(
     repo_root: &std::path::Path,
     workload: Option<&std::path::Path>,
@@ -225,18 +154,7 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
-
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_hotpath_focus_is_rejected() {
-        let focus = std::ffi::OsString::from_vec(vec![0xff]);
-
-        assert!(!hotpath_focus_is_supported(Some(focus.as_os_str())));
-    }
 
     #[test]
     fn default_validation_binds_the_packaged_workload_identity() {

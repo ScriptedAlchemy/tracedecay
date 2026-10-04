@@ -56,7 +56,7 @@ impl TokenSummary {
         }
     }
 
-    #[hotpath::measure(label = "temporal.context.estimate")]
+    #[tracing::instrument(name = "temporal.context.estimate", level = "trace", skip_all)]
     pub fn scan(
         policy: TokenPolicy,
         fragment: &str,

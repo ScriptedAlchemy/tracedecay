@@ -18,71 +18,18 @@ pub fn maintenance_futures_active() -> usize {
     MAINTENANCE_FUTURES_ACTIVE.load(Ordering::SeqCst)
 }
 
-struct MaintenanceLifecycleInstrumentation;
+struct MaintenanceLoopActive;
 
-impl MaintenanceLifecycleInstrumentation {
-    fn new() -> Self {
-        let active = MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-        hotpath::gauge!("daemon_maintenance_futures_active").set(active);
+impl MaintenanceLoopActive {
+    fn enter() -> Self {
+        MAINTENANCE_FUTURES_ACTIVE.fetch_add(1, Ordering::SeqCst);
         Self
     }
-
-    fn record_outcome(&self, outcome: MaintenanceTickOutcome) {
-        match outcome {
-            MaintenanceTickOutcome::Complete => {
-                hotpath::gauge!("daemon_maintenance_outcome_complete").inc(1.0);
-            }
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_outcome_code_generation_progress").inc(1.0);
-            }
-            MaintenanceTickOutcome::Retry => {
-                hotpath::gauge!("daemon_maintenance_outcome_retry").inc(1.0);
-            }
-        }
-    }
-
-    fn record_cancellation(&self) {
-        hotpath::gauge!("daemon_maintenance_outcome_cancelled").inc(1.0);
-    }
 }
 
-impl Drop for MaintenanceLifecycleInstrumentation {
+impl Drop for MaintenanceLoopActive {
     fn drop(&mut self) {
-        let active = MAINTENANCE_FUTURES_ACTIVE
-            .fetch_sub(1, Ordering::SeqCst)
-            .saturating_sub(1);
-        hotpath::gauge!("daemon_maintenance_futures_active").set(active);
-    }
-}
-
-struct MaintenancePhaseInstrumentation {
-    continuation: Option<MaintenanceContinuation>,
-}
-
-impl MaintenancePhaseInstrumentation {
-    fn new(continuation: Option<MaintenanceContinuation>) -> Self {
-        match continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(1.0);
-            }
-            None => {
-                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(1.0);
-            }
-        }
-        Self { continuation }
-    }
-}
-
-impl Drop for MaintenancePhaseInstrumentation {
-    fn drop(&mut self) {
-        match self.continuation {
-            Some(MaintenanceContinuation::CodeGenerationRetention) => {
-                hotpath::gauge!("daemon_maintenance_phase_code_generation_active").inc(-1.0);
-            }
-            None => {
-                hotpath::gauge!("daemon_maintenance_phase_full_tick_active").inc(-1.0);
-            }
-        }
+        MAINTENANCE_FUTURES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -133,7 +80,7 @@ pub async fn run_maintenance_loop<F, Fut>(
     F: FnMut(Option<MaintenanceContinuation>) -> Fut,
     Fut: Future<Output = MaintenanceTickOutcome>,
 {
-    let lifecycle = MaintenanceLifecycleInstrumentation::new();
+    let _active = MaintenanceLoopActive::enter();
     let mut cadence = MaintenanceCadence::new(interval);
     let mut deadline = CadenceInstant::now() + cadence.retry_delay();
     let mut continuation = None;
@@ -141,14 +88,12 @@ pub async fn run_maintenance_loop<F, Fut>(
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                lifecycle.record_cancellation();
                 break;
             }
             () = wake.notify.notified() => {}
             () = tokio::time::sleep_until(deadline) => {}
         }
         if cancellation.is_cancelled() {
-            lifecycle.record_cancellation();
             break;
         }
         let now = CadenceInstant::now();
@@ -158,13 +103,10 @@ pub async fn run_maintenance_loop<F, Fut>(
         if now < deadline || !cadence.reserve(now) {
             continue;
         }
-        let _phase = MaintenancePhaseInstrumentation::new(continuation);
         let outcome = run_tick(continuation).await;
         if cancellation.is_cancelled() {
-            lifecycle.record_cancellation();
             break;
         }
-        lifecycle.record_outcome(outcome);
         continuation = outcome.continuation();
         deadline = cadence.finish(CadenceInstant::now(), outcome);
     }

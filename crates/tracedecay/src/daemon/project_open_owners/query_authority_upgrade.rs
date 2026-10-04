@@ -41,8 +41,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
         );
         return false;
     }
-    owner.spawn_background_task(hotpath::future!(
-        async move {
+    owner.spawn_background_task(tracing::Instrument::instrument(async move {
             let schedulers = invocation.code_index_schedulers.clone();
             retry_deferred_query_authority_until_serving(&schedulers, project_root.clone(), || {
                 let invocation = invocation.clone();
@@ -52,12 +51,14 @@ pub(super) fn spawn_deferred_query_authority_mount(
                 async move { try_deferred_mount(&invocation, &project_root, &scope, &session_db).await }
             })
             .await;
-        },
-        label = "daemon.project.query_authority_deferred"
-    ))
+        }, tracing::trace_span!("daemon.project.query_authority_deferred")))
 }
 
-#[hotpath::measure(label = "daemon.project.query_authority_retry", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.query_authority_retry",
+    level = "trace",
+    skip_all
+)]
 async fn try_deferred_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,

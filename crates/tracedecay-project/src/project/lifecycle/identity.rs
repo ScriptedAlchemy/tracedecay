@@ -10,7 +10,11 @@ use tracedecay_runtime_core::storage::{self, StoreLayout};
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
-    #[hotpath::measure(label = "lifecycle.resolve_registered_layout", future = true)]
+    #[tracing::instrument(
+        name = "lifecycle.resolve_registered_layout",
+        level = "trace",
+        skip_all
+    )]
     pub async fn resolve_registered_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -33,7 +37,6 @@ impl TraceDecay {
     /// This differs from [`Self::resolve_registered_configuration_layout`] only
     /// in that a project with no repository identity marker or registry match
     /// falls through to a default identity instead of failing closed.
-    #[hotpath::skip]
     pub async fn resolve_first_touch_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -52,7 +55,11 @@ impl TraceDecay {
     /// store evidence still names the previous registry root, only under an
     /// explicit operator adoption decision; ambient first-touch passes
     /// [`MovedStoreAdoption::Never`] and always mints fresh.
-    #[hotpath::measure(label = "lifecycle.resolve_first_touch_layout", future = true)]
+    #[tracing::instrument(
+        name = "lifecycle.resolve_first_touch_layout",
+        level = "trace",
+        skip_all
+    )]
     pub async fn resolve_first_touch_configuration_layout_with_adoption(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -69,7 +76,7 @@ impl TraceDecay {
         .await
     }
 
-    #[hotpath::measure(label = "lifecycle.resolve_store_layout", future = true)]
+    #[tracing::instrument(name = "lifecycle.resolve_store_layout", level = "trace", skip_all)]
     async fn resolve_store_layout_for_authority(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -188,7 +195,6 @@ impl TraceDecay {
             || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
-    #[hotpath::skip]
     pub async fn has_initialized_store_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -201,7 +207,6 @@ impl TraceDecay {
     /// Resolves the store layout for a project using the same registry/alias
     /// aware path as [`Self::has_initialized_store`], returning it only when
     /// the resolved store's graph database actually exists.
-    #[hotpath::skip]
     pub async fn initialized_store_layout_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -215,7 +220,7 @@ impl TraceDecay {
     /// Resolves an initialized store without discarding identity conflicts or
     /// other storage errors. User-facing diagnostics must use this variant so
     /// a preserved split store is never mislabeled as uninitialized.
-    #[hotpath::measure(label = "lifecycle.try_initialized_layout", future = true)]
+    #[tracing::instrument(name = "lifecycle.try_initialized_layout", level = "trace", skip_all)]
     pub async fn try_initialized_store_layout_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -228,8 +233,6 @@ impl TraceDecay {
     /// Resolves the profile store layout for a local path using the `.git/`
     /// repository identity marker first, then the global registry aliases for
     /// the git identity. Nothing in the working tree carries identity.
-
-    #[hotpath::skip]
     pub async fn resolve_store_layout_for_identity_with_options(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -237,7 +240,6 @@ impl TraceDecay {
         Self::resolve_store_layout_for_local_identity(project_root, open_options).await
     }
 
-    #[hotpath::skip]
     async fn resolve_store_layout_for_local_identity(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,

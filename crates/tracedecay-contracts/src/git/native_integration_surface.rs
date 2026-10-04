@@ -85,12 +85,15 @@ pub struct NativeIntegrationStackSnapshotService<P> {
 }
 
 impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotService<P> {
-    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
 
-    #[hotpath::measure(label = "application.git.native_integration.stack_snapshot")]
+    #[tracing::instrument(
+        name = "application.git.native_integration.stack_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub fn snapshot(
         &self,
         request: NativeIntegrationStackResolutionRequestV1,
@@ -423,14 +426,12 @@ pub enum NativeIntegrationSurfaceResultV1 {
 }
 
 impl NativeIntegrationSurfaceResultV1 {
-    #[hotpath::skip]
     pub const fn unavailable(reason: NativeIntegrationSurfaceUnavailableV1) -> Self {
         Self::Unavailable { reason }
     }
 
     /// Whether this result advanced or proved durable state. Every other
     /// result is read-only evidence and never authorizes apply.
-    #[hotpath::skip]
     pub const fn is_advancing(&self) -> bool {
         matches!(
             self,

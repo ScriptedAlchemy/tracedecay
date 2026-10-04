@@ -329,9 +329,9 @@ pub async fn projection_payload(
             let rows = vector_rows(snapshot.into_points())?;
             let blocking_control = read_control.clone();
             let computed = tokio::task::spawn_blocking(move || {
-                hotpath::measure_block!("dashboard_api.memory.projection_compute", {
-                    compute_projection(rows, point_limit, blocking_control)
-                })
+                let _span =
+                    tracing::trace_span!("dashboard_api.memory.projection_compute").entered();
+                compute_projection(rows, point_limit, blocking_control)
             })
             .await
             .map_err(|error| format!("projection task failed: {error}"))??;

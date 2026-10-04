@@ -50,7 +50,7 @@ pub fn run_command_with_stdin(
     let mut child = command
         .spawn()
         .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    let Some(stdin) = child.stdin.take() else {
+    let Some(mut stdin) = child.stdin.take() else {
         return Err(missing_child_pipe(&mut child, "stdin"));
     };
     let stdout = child.stdout.take();
@@ -60,10 +60,7 @@ pub fn run_command_with_stdin(
     // pipes and deadlock the parent and child. Keep the writer scoped so every
     // return path joins it, while sibling readers drain stdout and stderr.
     let (status, write_result, stdout_result, stderr_result) = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || {
-            let mut stdin = hotpath::io!(stdin, label = "usecases.git_index_tx.git.stdin");
-            stdin.write_all(input)
-        });
+        let writer = scope.spawn(move || stdin.write_all(input));
         let stdout_reader = stdout.map(|mut stdout| {
             scope.spawn(move || {
                 let mut bytes = Vec::new();
@@ -146,8 +143,7 @@ fn terminate_and_reap(child: &mut Child) -> String {
 
 pub fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {
     match File::open(path) {
-        Ok(file) => {
-            let mut file = hotpath::io!(file, label = "usecases.git_index_tx.optional.file");
+        Ok(mut file) => {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
@@ -185,7 +181,11 @@ pub fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.git.index_tx.fsync.directory")]
+#[tracing::instrument(
+    name = "daemon.git.index_tx.fsync.directory",
+    level = "trace",
+    skip_all
+)]
 pub fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexError> {
     let parent = path
         .parent()

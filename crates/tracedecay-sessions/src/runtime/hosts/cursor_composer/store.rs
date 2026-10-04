@@ -106,7 +106,11 @@ fn store_blob_message(bytes: &[u8]) -> Option<(String, Value)> {
 /// One length-gated blob fetch. This runs once per visited blob during a
 /// store walk, so the fixed statement goes through the connection's
 /// prepared-statement cache instead of re-parsing per call.
-#[hotpath::measure(label = "sessions.hosts.cursor.store_blob_fetch")]
+#[tracing::instrument(
+    name = "sessions.hosts.cursor.store_blob_fetch",
+    level = "trace",
+    skip_all
+)]
 fn fetch_store_blob_bounded_sync(
     conn: &rusqlite::Connection,
     blob_id: &str,

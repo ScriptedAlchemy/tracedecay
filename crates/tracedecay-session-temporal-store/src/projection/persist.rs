@@ -39,7 +39,11 @@ fn observation_envelope(
         .map_err(|error| storage(PERSIST_OPERATION, error))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.projection_batch")]
+#[tracing::instrument(
+    name = "session_temporal.persist.projection_batch",
+    level = "trace",
+    skip_all
+)]
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -77,8 +81,7 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     }
     require_contiguous_checkpoint(conn, batch).await?;
 
-    let occurrence_work = persist_occurrences(conn, batch, control).await?;
-    record_occurrence_persistence_work(occurrence_work);
+    persist_occurrences(conn, batch, control).await?;
     for copy in batch.copies() {
         checkpoint_relation_rebuild_control(control)?;
         validate_copy(conn, batch, copy).await?;
@@ -128,14 +131,6 @@ struct CanonicalOccurrenceProjection {
     observation: DurableObservationV1,
     envelope: CanonicalObservationEnvelopeV1,
     outputs: Vec<SessionMessageProjection>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct OccurrencePersistenceWork {
-    pub(super) source_projections: u64,
-    pub(super) envelope_parses: u64,
-    pub(super) indexed_outputs: u64,
-    pub(super) output_lookups: u64,
 }
 
 async fn canonical_occurrence_projection(
@@ -197,13 +192,16 @@ async fn canonical_occurrence_projection(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.occurrences")]
+#[tracing::instrument(
+    name = "session_temporal.persist.occurrences",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn persist_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
-) -> SessionStoreResult<OccurrencePersistenceWork> {
-    let mut work = OccurrencePersistenceWork::default();
+) -> SessionStoreResult<()> {
     let mut occurrences_by_source = BTreeMap::<_, Vec<_>>::new();
     for occurrence in batch.occurrences() {
         occurrences_by_source
@@ -220,24 +218,6 @@ pub(super) async fn persist_occurrences(
             )
         })?;
         let canonical = canonical_occurrence_projection(conn, batch, first).await?;
-        work.source_projections = work.source_projections.checked_add(1).ok_or_else(|| {
-            storage_message(PERSIST_OPERATION, "source projection work count overflow")
-        })?;
-        work.envelope_parses = work.envelope_parses.checked_add(1).ok_or_else(|| {
-            storage_message(PERSIST_OPERATION, "source envelope parse count overflow")
-        })?;
-        work.indexed_outputs = work
-            .indexed_outputs
-            .checked_add(
-                u64::try_from(canonical.outputs.len())
-                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            )
-            .ok_or_else(|| {
-                storage_message(
-                    PERSIST_OPERATION,
-                    "indexed projection output count overflow",
-                )
-            })?;
         for occurrence in occurrences {
             checkpoint_relation_rebuild_control(control)?;
             let ordinal = usize::try_from(occurrence.projection_output_ordinal.value())
@@ -248,13 +228,10 @@ pub(super) async fn persist_occurrences(
                     "canonical observation has no atomically recorded temporal effect output",
                 )
             })?;
-            work.output_lookups = work.output_lookups.checked_add(1).ok_or_else(|| {
-                storage_message(PERSIST_OPERATION, "projection output lookup count overflow")
-            })?;
             persist_occurrence(conn, batch, occurrence, &canonical, output).await?;
         }
     }
-    Ok(work)
+    Ok(())
 }
 
 async fn persist_occurrence(
@@ -555,22 +532,6 @@ pub(super) async fn canonical_occurrence(
     Ok((record, copied_from))
 }
 
-#[inline(always)]
-fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("session_temporal.persistence.source_projections")
-            .inc(work.source_projections);
-        hotpath::gauge!("session_temporal.persistence.envelope_parses").inc(work.envelope_parses);
-        hotpath::gauge!("session_temporal.persistence.projection_output_index_rows")
-            .inc(work.indexed_outputs);
-        hotpath::gauge!("session_temporal.persistence.projection_output_lookups")
-            .inc(work.output_lookups);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
-}
-
 /// Versions a thread whose earliest grouping or creation time moved. The
 /// candidate reads its own version first, then its base's; an unchanged
 /// thread writes nothing.
@@ -780,7 +741,11 @@ pub(super) async fn require_exact_occurrence(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.validate_copy")]
+#[tracing::instrument(
+    name = "session_temporal.projection.validate_copy",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn validate_copy(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -995,7 +960,7 @@ pub(super) async fn validate_copy_proof(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.assertion")]
+#[tracing::instrument(name = "session_temporal.persist.assertion", level = "trace", skip_all)]
 pub(super) async fn persist_assertion(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1285,9 +1250,10 @@ const CURRENT_ENTITY_VERSION_INSERT: &str = "
         current_occurrence_id = excluded.current_occurrence_id,
         coverage_json = excluded.coverage_json";
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.rebuild_occurrences"
+#[tracing::instrument(
+    name = "session_temporal.projection.rebuild_occurrences",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn rebuild_current_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -1349,9 +1315,10 @@ pub(super) async fn rebuild_current_occurrences(
 /// a candidate that added assertions can change them. Their direct edges
 /// compare two assertions' own fields, so the closure over the visible
 /// assertions contains every edge the base already holds.
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.rebuild_assertions"
+#[tracing::instrument(
+    name = "session_temporal.projection.rebuild_assertions",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn extend_assertion_derivatives(
     conn: &impl crate::handle::SessionTemporalExec,

@@ -25,15 +25,13 @@ impl GitWatcher {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.git.watch.ensure", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.ensure", level = "trace", skip_all)]
     pub async fn ensure_watching_with_config(
         &self,
         project_root: &Path,
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
-        let admission = self.ensure_watching_admission(project_root, config).await;
-        record_admission_outcome(admission);
-        admission
+        self.ensure_watching_admission(project_root, config).await
     }
 
     /// Admission body behind [`Self::ensure_watching_with_config`], separated
@@ -100,7 +98,7 @@ impl GitWatcher {
 
     /// Admission for a repository whose identity is already resolved: pure
     /// in-memory registration against the live capacity caps, no git IO.
-    #[hotpath::measure(label = "daemon.git.watch.admit", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.admit", level = "trace", skip_all)]
     pub async fn admit_resolved(
         &self,
         identity: GitRepositoryIdentity,
@@ -150,8 +148,6 @@ impl GitWatcher {
                     WorktreeRegistration::Capacity => return GitWatcherAdmission::Capacity,
                     WorktreeRegistration::Retired => {
                         projects.remove(&common_dir);
-                        hotpath::gauge!("daemon.git.watch.repositories.watched")
-                            .set(projects.len());
                         drop(admission);
                         join_retired_repository_state(&state).await;
                         drop(projects);
@@ -176,7 +172,6 @@ impl GitWatcher {
             let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
             state.retain_task(handle);
             projects.insert(common_dir.clone(), Arc::clone(&state));
-            hotpath::gauge!("daemon.git.watch.repositories.watched").set(projects.len());
             #[cfg(test)]
             self.inner.lifecycle_receipts.record_repository();
             log_daemon_event(
@@ -206,17 +201,16 @@ impl GitWatcher {
         }
         let watcher = self.clone();
         let root = project_root.clone();
-        let owner = tokio::spawn(hotpath::future!(
+        let owner = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 watcher.retry_identity_discovery(root, config).await;
             },
-            label = "daemon.git.watch.identity_retry"
+            tracing::trace_span!("daemon.git.watch.identity_retry"),
         ));
         retries.insert(project_root, owner);
     }
 
     async fn retry_identity_discovery(&self, project_root: PathBuf, config: SyncConfig) {
-        let _retry_owner = IdentityRetryGaugeGuard::enter();
         let mut backoff = Duration::from_millis(500);
         loop {
             log_daemon_event(
@@ -231,7 +225,6 @@ impl GitWatcher {
                 () = self.inner.cancellation.cancelled() => break,
                 () = tokio::time::sleep(backoff) => {}
             }
-            hotpath::gauge!("daemon.git.watch.identity_retry.attempts_total").inc(1_u64);
             match self
                 .ensure_watching_with_config(&project_root, &config)
                 .await
@@ -250,51 +243,5 @@ impl GitWatcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retries.remove(&project_root);
-    }
-}
-
-/// Bounded typed admission counters. Refusals are first-class evidence: a
-/// profile must separate capacity pressure from identity-discovery churn and
-/// shutdown races without recording repository paths.
-fn record_admission_outcome(admission: GitWatcherAdmission) {
-    match admission {
-        GitWatcherAdmission::Ready => {
-            hotpath::gauge!("daemon.git.watch.admission.ready_total").inc(1_u64);
-        }
-        GitWatcherAdmission::Disabled => {
-            hotpath::gauge!("daemon.git.watch.admission.disabled_total").inc(1_u64);
-        }
-        GitWatcherAdmission::LinkedWorktreeDisabled => {
-            hotpath::gauge!("daemon.git.watch.admission.linked_worktree_disabled_total").inc(1_u64);
-        }
-        GitWatcherAdmission::ShuttingDown => {
-            hotpath::gauge!("daemon.git.watch.admission.shutting_down_total").inc(1_u64);
-        }
-        GitWatcherAdmission::Capacity => {
-            hotpath::gauge!("daemon.git.watch.admission.capacity_total").inc(1_u64);
-        }
-        GitWatcherAdmission::NotRepository => {
-            hotpath::gauge!("daemon.git.watch.admission.not_repository_total").inc(1_u64);
-        }
-        GitWatcherAdmission::IdentityUnavailable => {
-            hotpath::gauge!("daemon.git.watch.admission.identity_unavailable_total").inc(1_u64);
-        }
-    }
-}
-
-/// RAII gauge for live single-flight identity-retry owners so cancellation,
-/// panic, or definitive admission can never leak the count.
-struct IdentityRetryGaugeGuard;
-
-impl IdentityRetryGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("daemon.git.watch.identity_retry.active").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for IdentityRetryGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("daemon.git.watch.identity_retry.active").dec(1_u64);
     }
 }

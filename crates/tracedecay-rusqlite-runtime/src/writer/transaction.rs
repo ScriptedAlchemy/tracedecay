@@ -73,7 +73,11 @@ pub(super) struct WriterReporting<'reporting> {
     pub(super) watermark_publisher: &'reporting CommittedWatermarkPublisher,
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.writer.transaction_batch")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.writer.transaction_batch",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn process_batch<E: StorageOperationExecutor>(
     connection: &mut Connection,
     binding: &StoreRuntimeBindingV1,
@@ -94,9 +98,9 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     let command_count = u64::try_from(batch.items.len()).unwrap_or(u64::MAX);
     let rows_before = connection.total_changes();
     let lock_work = LockWorkScope::enter();
-    let mut transaction = match hotpath::measure_block!("rusqlite.writer.begin", {
-        connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    }) {
+    let mut transaction = match tracing::trace_span!("rusqlite.writer.begin")
+        .in_scope(|| connection.transaction_with_behavior(TransactionBehavior::Immediate))
+    {
         Ok(transaction) => transaction,
         Err(error) => {
             let failure = driver_failure(error, "begin writer transaction");
@@ -216,7 +220,11 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         return;
     }
 
-    let commit_failure = match hotpath::measure_block!("rusqlite.commit", transaction.commit()) {
+    let match_result = {
+        let _span = tracing::trace_span!("rusqlite.commit").entered();
+        transaction.commit()
+    };
+    let commit_failure = match match_result {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,

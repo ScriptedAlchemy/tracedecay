@@ -92,7 +92,6 @@ pub enum DoctorFamilyUnavailableReasonV1 {
 impl DoctorFamilyUnavailableReasonV1 {
     /// The honest evidence state a synthesized placeholder finding carries for
     /// this unavailability reason.
-    #[hotpath::skip]
     const fn evidence_state(self) -> DoctorEvidenceStateV1 {
         match self {
             // An unwired family is not supported by this composition build.
@@ -107,7 +106,6 @@ impl DoctorFamilyUnavailableReasonV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn slug(self) -> &'static str {
         match self {
             Self::Unwired => "unwired",
@@ -137,7 +135,6 @@ pub enum DoctorFamilyConsultationV1 {
 
 impl DoctorFamilyConsultationV1 {
     #[must_use]
-    #[hotpath::skip]
     const fn is_consulted(self) -> bool {
         matches!(self, Self::Consulted)
     }
@@ -148,7 +145,6 @@ impl DoctorFamilyConsultationV1 {
     /// A NAMED degradation outranks a bare `Unknown`: a source that explained
     /// why it is unavailable must not be masked by a peer that merely could not
     /// be determined. This is the single ranking the composer uses everywhere.
-    #[hotpath::skip]
     const fn rank(self) -> u8 {
         match self {
             Self::Consulted => 8,
@@ -511,7 +507,7 @@ impl<'a> DoctorReportComposerV1<'a> {
     }
 
     /// Gather findings across every family and assemble the report.
-    #[hotpath::measure(label = "application.doctor.compose", future = true)]
+    #[tracing::instrument(name = "application.doctor.compose", level = "trace", skip_all)]
     pub async fn compose(
         &self,
         context: &RequestContext,
@@ -546,7 +542,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         })
     }
 
-    #[hotpath::skip]
     async fn compose_configuration(
         &self,
         context: &RequestContext,
@@ -575,7 +570,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
-    #[hotpath::skip]
     async fn compose_runtime(
         &self,
         context: &RequestContext,
@@ -633,7 +627,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((entries, strongest_consultation(consultations)?))
     }
 
-    #[hotpath::skip]
     async fn compose_host(
         &self,
         context: &RequestContext,
@@ -656,7 +649,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
-    #[hotpath::skip]
     async fn compose_advisory(
         &self,
         context: &RequestContext,
@@ -707,7 +699,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((entries, strongest_consultation(consultations)?))
     }
 
-    #[hotpath::skip]
     async fn compose_code_index(
         &self,
         context: &RequestContext,
@@ -734,7 +725,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
-    #[hotpath::skip]
     async fn compose_language_server(
         &self,
         context: &RequestContext,
@@ -759,7 +749,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
-    #[hotpath::skip]
     async fn compose_observability(
         &self,
         context: &RequestContext,
@@ -792,7 +781,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         ))
     }
 
-    #[hotpath::skip]
     async fn compose_memory(
         &self,
         context: &RequestContext,
@@ -815,7 +803,6 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((entries, consultation))
     }
 
-    #[hotpath::skip]
     async fn compose_storage(
         &self,
         context: &RequestContext,

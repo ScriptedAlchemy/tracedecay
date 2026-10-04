@@ -12,7 +12,6 @@ pub enum ProjectRouteFailureKind {
 }
 
 impl ProjectRouteFailureKind {
-    #[hotpath::skip]
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::NotFound => "project_route_not_found",
@@ -33,7 +32,6 @@ impl ProjectRouteFailureKind {
         .find(|kind| kind.reason_code() == reason_code)
     }
 
-    #[hotpath::skip]
     pub const fn retryable(self) -> bool {
         matches!(self, Self::Unavailable)
     }

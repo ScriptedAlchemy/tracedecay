@@ -108,9 +108,10 @@ impl CodeGenerationProtectionUnavailableV1 {
 /// liveness roots. The bindings are keyed by repository, a pure function of
 /// the checkout's git common dir, so a root that is not mounted in this daemon
 /// still resolves them.
-#[hotpath::measure(
-    label = "daemon.git.maintenance.code_generation_protection",
-    future = true
+#[tracing::instrument(
+    name = "daemon.git.maintenance.code_generation_protection",
+    level = "trace",
+    skip_all
 )]
 pub async fn code_generation_protection(
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -318,9 +319,10 @@ fn collection_left_work(report: &CodeGenerationRetentionReportV1) -> bool {
 /// cadence against [`code_generation_protection`]. A root that yields no
 /// repository identity or an unreadable binding inventory fails the pass
 /// closed instead of sweeping blind.
-#[hotpath::measure(
-    label = "daemon.git.maintenance.code_generation_retention",
-    future = true
+#[tracing::instrument(
+    name = "daemon.git.maintenance.code_generation_retention",
+    level = "trace",
+    skip_all
 )]
 pub async fn run_code_generation_retention(
     lease: &ProjectStoreMaintenanceLeaseV1,
@@ -535,9 +537,10 @@ pub struct RegisteredProjectStoreV1 {
 /// the executor's pointer compare-and-swap refuses a batch a concurrent
 /// publication invalidated. A scope whose root no record proves, or whose
 /// recorded checkout is gone, is left to stranded-scope reconciliation.
-#[hotpath::measure(
-    label = "daemon.git.maintenance.registered_code_generation_retention",
-    future = true
+#[tracing::instrument(
+    name = "daemon.git.maintenance.registered_code_generation_retention",
+    level = "trace",
+    skip_all
 )]
 pub async fn run_registered_code_generation_retention(
     store: &RegisteredProjectStoreV1,
@@ -628,9 +631,10 @@ pub async fn run_registered_code_generation_retention(
 
 /// The generation the mounted scheduler is currently serving, when one is
 /// mounted at all.
-#[hotpath::measure(
-    label = "daemon.git.maintenance.serving_generation_pins",
-    future = true
+#[tracing::instrument(
+    name = "daemon.git.maintenance.serving_generation_pins",
+    level = "trace",
+    skip_all
 )]
 async fn serving_generation_pins(
     schedulers: &CodeIndexSchedulerRegistryV1,

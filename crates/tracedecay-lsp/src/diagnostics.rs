@@ -283,7 +283,7 @@ impl DiagnosticMerge {
         )
     }
 
-    #[hotpath::measure(label = "lsp_diagnostics_merge", impl_type = "DiagnosticMerge")]
+    #[tracing::instrument(name = "lsp_diagnostics_merge", level = "trace", skip_all)]
     fn from_filtered(
         upstream: Vec<GatewayDiagnostic>,
         tracedecay: Vec<GatewayDiagnostic>,

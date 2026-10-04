@@ -207,7 +207,6 @@ pub enum WorkLeakAdjudicationOutcomeV1 {
 }
 
 impl WorkLeakAdjudicationOutcomeV1 {
-    #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkLeakAdjudicationReceiptV1 {
         match self {
             Self::Appended(receipt) | Self::Replayed(receipt) => receipt,
@@ -256,12 +255,11 @@ where
     S: WorkLeakAdjudicationStoragePortV1,
     E: WorkLeakEvidencePortV1,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S, evidence: E) -> Self {
         Self { storage, evidence }
     }
 
-    #[hotpath::measure(label = "application.work.leak.adjudicate")]
+    #[tracing::instrument(name = "application.work.leak.adjudicate", level = "trace", skip_all)]
     pub fn adjudicate(
         &self,
         context: &RequestContext,

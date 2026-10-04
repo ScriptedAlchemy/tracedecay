@@ -50,29 +50,12 @@ pub struct MountedSessionRefreshAuthorityV1<'a> {
     pub refresh: &'a dyn RetainedSessionRefreshPortV1,
 }
 
-#[hotpath::measure(label = "daemon.retained.session.refresh_admit")]
+#[tracing::instrument(
+    name = "daemon.retained.session.refresh_admit",
+    level = "trace",
+    skip_all
+)]
 pub fn admitted_session_refresh_command(
-    request: &SessionRefreshRequestV1,
-    context: &RequestContext,
-    cancellation_signal: &CancellationSignal,
-    mounted: &MountedSessionRefreshAuthorityV1<'_>,
-) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
-    let admitted = session_refresh_command(request, context, cancellation_signal, mounted);
-    // Refused admissions are recorded so trigger volume that never reaches
-    // refresh execution stays visible in profiles.
-    match &admitted {
-        Ok(_) => {}
-        Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {
-            hotpath::gauge!("daemon.retained.session.refresh_admit.denied").inc(1.0);
-        }
-        Err(_) => {
-            hotpath::gauge!("daemon.retained.session.refresh_admit.refused").inc(1.0);
-        }
-    }
-    admitted
-}
-
-fn session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
     cancellation_signal: &CancellationSignal,

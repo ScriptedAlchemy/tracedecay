@@ -34,7 +34,6 @@ impl Default for ShutdownCoordinatorV1 {
 }
 
 impl ShutdownCoordinatorV1 {
-    #[hotpath::skip]
     pub async fn coordinate_until<Work>(
         &self,
         deadline: tokio::time::Instant,
@@ -110,7 +109,6 @@ impl ShutdownCoordinatorV1 {
     ///
     /// Callers reach this while still inside their own deadline and fall through
     /// to a bounded wait, so a running coordinator must not block them.
-    #[hotpath::skip]
     async fn reap_completed_coordinator(&self) {
         let result = {
             let mut coordinator_task = self.state.coordinator_task.lock().await;
@@ -141,7 +139,6 @@ impl ShutdownCoordinatorV1 {
     /// Every caller reaches this only once the coordinator has published a
     /// terminal receipt or cleared `running`, so the work is already complete
     /// and holding the handle's lock across the join costs only task teardown.
-    #[hotpath::skip]
     async fn join_coordinator(&self) {
         let result = {
             let mut coordinator_task = self.state.coordinator_task.lock().await;
@@ -170,7 +167,6 @@ impl ShutdownCoordinatorV1 {
             .clone()
     }
 
-    #[hotpath::skip]
     async fn wait_for_terminal_status_until(
         &self,
         deadline: tokio::time::Instant,

@@ -550,22 +550,6 @@ fn compare_installed_plan(
     }
 }
 
-fn record_plan(plan: CodeIndexWorkerPlanV1) {
-    hotpath::gauge!("code_index_workers_requested").set(plan.requested_workers);
-    hotpath::gauge!("code_index_workers_effective").set(plan.effective_workers);
-    hotpath::gauge!("code_index_workers_memory_safe").set(plan.memory_safe_workers);
-    hotpath::gauge!("code_index_workers_memory_headroom_bytes")
-        .set(plan.memory_headroom_bytes as f64);
-    hotpath::gauge!("code_index_workers_limiting_reason").set(match plan.limiting_reason {
-        CodeIndexWorkerLimitingReasonV1::AutomaticAllCores => 1,
-        CodeIndexWorkerLimitingReasonV1::AutomaticHalfCores => 2,
-        CodeIndexWorkerLimitingReasonV1::ResidentMemory => 3,
-        CodeIndexWorkerLimitingReasonV1::ConfiguredExact => 4,
-        CodeIndexWorkerLimitingReasonV1::EnvironmentOverride => 5,
-    });
-    hotpath::gauge!("code_index_workers_reservation_bytes").set(plan.reservation_bytes as f64);
-}
-
 /// Install the process-resident plan before the first code-index build.
 /// Repeating the byte-identical plan is idempotent and returns the same
 /// installed authority; a second owner asking for a different process-wide
@@ -586,7 +570,6 @@ pub fn install_worker_plan(
         && installed.0.plan.configured == configured
         && installed.0.plan.environment_override_workers == environment_override_workers
     {
-        record_plan(installed.0.plan);
         return Ok(installed.0.installed_plan());
     }
     let requested = worker_plan_from(
@@ -597,7 +580,6 @@ pub fn install_worker_plan(
     )?;
     if let Some(existing) = WORKER_RUNTIME.get() {
         compare_installed_plan(&existing.0.plan, &requested)?;
-        record_plan(existing.0.plan);
         return Ok(existing.0.installed_plan());
     }
     let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
@@ -607,7 +589,6 @@ pub fn install_worker_plan(
         .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
             message: "worker runtime installation did not settle".to_owned(),
         })?;
-    record_plan(requested);
     Ok(installed)
 }
 
@@ -779,13 +760,12 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
 /// pool. Building one all-core pool per request oversubscribes concurrent
 /// tests and profiling harnesses, which can turn bounded parser work into
 /// false timeout/unsupported-document results.
-#[hotpath::measure(label = "code_index.workers.install")]
+#[tracing::instrument(name = "code_index.workers.install", level = "trace", skip_all)]
 pub fn install<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    hotpath::gauge!("code_index_worker_count").set(indexing_workers());
     #[cfg(test)]
     if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {
@@ -799,7 +779,7 @@ where
     Ok(pool.install(operation))
 }
 
-#[hotpath::measure(label = "code_index.workers.standalone_pool")]
+#[tracing::instrument(name = "code_index.workers.standalone_pool", level = "trace", skip_all)]
 fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
     if let Some(pool) = STANDALONE_POOL.get() {
         return Ok(pool);

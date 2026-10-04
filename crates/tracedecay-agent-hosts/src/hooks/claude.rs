@@ -86,7 +86,7 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 }
 
 /// Claude Code `SessionStart` hook handler.
-#[hotpath::measure(future = true, label = "hosts.hooks.claude.session_start")]
+#[tracing::instrument(name = "hosts.hooks.claude.session_start", level = "trace", skip_all)]
 pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
     claude_guidance_hook(runtime, "SessionStart").await
 }
@@ -97,7 +97,7 @@ pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
 /// compacted source frontier. The daemon therefore treats this event as a
 /// read-only capability probe and returns typed unavailable without publishing
 /// transcript or summary state.
-#[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
+#[tracing::instrument(name = "hosts.hooks.claude.post_compact", level = "trace", skip_all)]
 pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!(
         runtime,
@@ -138,7 +138,7 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
 }
 
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
-#[hotpath::measure(future = true, label = "hosts.hooks.claude.post_tool_use")]
+#[tracing::instrument(name = "hosts.hooks.claude.post_tool_use", level = "trace", skip_all)]
 pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!(
@@ -200,7 +200,7 @@ async fn claude_post_tool_use_response(
 }
 
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
-#[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
+#[tracing::instrument(name = "hosts.hooks.claude.stop", level = "trace", skip_all)]
 pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
     claude_guidance_hook(runtime, "Stop").await
 }

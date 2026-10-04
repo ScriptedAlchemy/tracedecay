@@ -10,7 +10,11 @@ mod settlement;
 pub use profile::{ProfileConfigurationAuthorityV1, execute_profile_configuration};
 use settlement::{configuration_effect, reconcile_configuration_runtime};
 
-#[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.configuration.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -427,7 +431,7 @@ pub(super) async fn execute_configuration(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.configuration.apply", future = true)]
+#[tracing::instrument(name = "daemon.service.configuration.apply", level = "trace", skip_all)]
 pub(super) async fn apply_direct_configuration_mutation(
     registered: &RegisteredConfigurationRuntime,
     authority: ConfigurationMutationAuthority,

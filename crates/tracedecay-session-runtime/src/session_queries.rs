@@ -25,7 +25,11 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
-#[hotpath::measure(label = "daemon.retained.session.sessions_for", future = true)]
+#[tracing::instrument(
+    name = "daemon.retained.session.sessions_for",
+    level = "trace",
+    skip_all
+)]
 pub async fn sessions_for(
     database: Option<&RegisteredGlobalDb>,
     request: &SessionsForRequestV1,
@@ -60,9 +64,9 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
-    let (results, index_presence) = match hotpath::future!(
+    let (results, index_presence) = match tracing::Instrument::instrument(
         correlation.sessions_for_with_relation_and_presence(&query, relation),
-        label = "daemon.retained.session.sessions_for.query"
+        tracing::trace_span!("daemon.retained.session.sessions_for.query"),
     )
     .await
     {
@@ -79,10 +83,10 @@ pub async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             correlation
                 .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
-            label = "daemon.retained.session.sessions_for.observed_fallback"
+            tracing::trace_span!("daemon.retained.session.sessions_for.observed_fallback"),
         )
         .await
         {
@@ -143,7 +147,7 @@ pub async fn sessions_for(
     Ok(result)
 }
 
-#[hotpath::measure(label = "daemon.retained.session.workflows", future = true)]
+#[tracing::instrument(name = "daemon.retained.session.workflows", level = "trace", skip_all)]
 pub async fn workflows(
     workflow_index: Option<&dyn WorkflowIndexReadPort>,
     request: &WorkflowsRequestV1,
@@ -190,14 +194,14 @@ pub async fn workflows(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::Session {
                     session_id: session_id.to_owned(),
                 },
                 limit,
             }),
-            label = "daemon.retained.session.workflows.list"
+            tracing::trace_span!("daemon.retained.session.workflows.list"),
         )
         .await
         .map_err(|error| {
@@ -220,7 +224,7 @@ pub async fn workflows(
             request.commit.as_deref(),
         )
         .map_err(map_git_error)?;
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             port.runs(WorkflowRunListRequest {
                 scope: WorkflowRunScope::GitScope(WorkflowGitScope {
                     branch: filter.branch.clone(),
@@ -229,7 +233,7 @@ pub async fn workflows(
                 }),
                 limit,
             }),
-            label = "daemon.retained.session.workflows.list"
+            tracing::trace_span!("daemon.retained.session.workflows.list"),
         )
         .await
         .map_err(|error| {
@@ -368,20 +372,20 @@ async fn workflow_run_query(
 ) -> Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1> {
     let outcome = match agent_label {
         Some(label) if !label.trim().is_empty() => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 port.agent(run_id.to_owned(), label.to_owned()),
-                label = "daemon.retained.session.workflows.detail"
+                tracing::trace_span!("daemon.retained.session.workflows.detail"),
             )
             .await
         }
         Some(_) => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         None => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 port.run(WorkflowRunDetailRequest {
                     run_id: run_id.to_owned(),
                     limit,
                 }),
-                label = "daemon.retained.session.workflows.detail"
+                tracing::trace_span!("daemon.retained.session.workflows.detail"),
             )
             .await
         }

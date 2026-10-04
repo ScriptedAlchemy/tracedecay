@@ -83,7 +83,11 @@ pub(super) struct CursorSweepCorpus {
 /// plus one `subagents/` probe per session directory) to order them; only
 /// the page is walked and admitted. Keep the listing O(sessions) names; a
 /// corpus where that dominates needs a persisted session index instead.
-#[hotpath::measure(label = "sessions.hosts.cursor.sweep_list_sessions")]
+#[tracing::instrument(
+    name = "sessions.hosts.cursor.sweep_list_sessions",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn list_cursor_sweep_corpus(transcripts_dirs: &[PathBuf]) -> CursorSweepCorpus {
     let mut sessions = BTreeMap::<OsString, Vec<SessionEntry>>::new();
     let mut subagent_stems = HashSet::new();
@@ -167,7 +171,7 @@ impl CursorSweepCorpus {
     /// the corpus shrank below it) and spends at most one discovery budget.
     /// A page always holds whole sessions, except that a single session over
     /// the whole budget is admitted truncated so the sweep still advances.
-    #[hotpath::measure(label = "sessions.hosts.cursor.sweep_page")]
+    #[tracing::instrument(name = "sessions.hosts.cursor.sweep_page", level = "trace", skip_all)]
     pub(super) fn page(
         &self,
         resume_at: u64,

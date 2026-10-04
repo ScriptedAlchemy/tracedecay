@@ -62,7 +62,6 @@ pub enum CodeIndexColdBuildReasonV1 {
 }
 
 impl CodeIndexColdBuildReasonV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoParent => "no_parent",
@@ -290,7 +289,7 @@ pub(super) fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
 
 impl SparseBuildV1<'_> {
     /// The successor of `parent` for `snapshot`, or why it must build cold.
-    #[hotpath::measure(label = "code_index.build.sparse")]
+    #[tracing::instrument(name = "code_index.build.sparse", level = "trace", skip_all)]
     pub(super) fn build<S: CodeChunkProjectionSink>(
         &self,
         projection_sink: &mut S,
@@ -356,7 +355,6 @@ impl SparseBuildV1<'_> {
             return Ok(Err(CodeIndexColdBuildReasonV1::MovesGoMethodSets));
         }
         lexical_page_source::checkpoint(control)?;
-        hotpath::gauge!("code_index.sparse.edited_files").set(edited.len() as u64);
 
         let generation_id = manifest.generation_id.clone();
         let parent_id = parent.manifest().generation_id.clone();
@@ -492,7 +490,6 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-        hotpath::gauge!("code_index.sparse.segments_written").set(segments.len() as u64);
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);
@@ -520,7 +517,7 @@ impl SparseBuildV1<'_> {
         rows: &[&'s SanitizedCodeFileV1],
         manifest: &CodeGenerationManifestV1,
     ) -> Result<Vec<EditedFileV1<'s>>, CodeIndexProductionErrorV1> {
-        let extracted = collect_bounded_ordered(rows, |file, worker| {
+        let extracted = collect_bounded_ordered(rows, |file| {
             lexical_page_source::checkpoint(self.control)?;
             let before = parent.decode_parent_file(&file.logical_path)?;
             let (reuse_key, after, clone_stats) = extract_file(
@@ -538,7 +535,6 @@ impl SparseBuildV1<'_> {
                 Some(&before.artifacts.clone_bodies),
                 self.captured_files,
                 self.control,
-                worker,
             )?;
             let stale_invalidations = before.stale_clone_bindings(&after);
             Ok::<_, CodeIndexProductionErrorV1>((

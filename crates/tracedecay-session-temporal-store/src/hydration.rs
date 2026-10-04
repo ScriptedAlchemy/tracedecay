@@ -15,7 +15,6 @@ use zeroize::Zeroizing;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
-use crate::support::{record_hydration_emitted_bytes, record_hydration_verified_bytes};
 use tracedecay_lcm::payload::{
     PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
 };
@@ -151,7 +150,6 @@ impl BoundedPayload {
                 for chunk in bytes.chunks(max_chunk_bytes) {
                     control.checkpoint()?;
                     emit(chunk)?;
-                    record_hydration_emitted_bytes(chunk.len());
                 }
                 Ok(())
             }
@@ -163,7 +161,6 @@ impl BoundedPayload {
                 stream
                     .emit(&mut window, &mut checkpoint, &mut |chunk| {
                         emit(chunk)?;
-                        record_hydration_emitted_bytes(chunk.len());
                         Ok(())
                     })
                     .map(drop)
@@ -198,7 +195,6 @@ impl SessionTemporalHydrationAdapter<'_> {
     /// payload it names. The snapshot pins every row, so a revocation cannot
     /// land between resolution and read; only the payload file lives outside
     /// it, and [`Self::read_descriptor`] proves that file before emission.
-    #[hotpath::skip]
     async fn read_after_recheck(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -238,7 +234,6 @@ impl SessionTemporalHydrationAdapter<'_> {
         if !payload.matches(descriptor) {
             return Err(HydrationError::Unavailable);
         }
-        record_hydration_verified_bytes(descriptor.byte_count);
         control.checkpoint()?;
         if max_chunk_bytes == 0 && descriptor.byte_count > 0 {
             return Err(HydrationError::BudgetExceeded {
@@ -336,7 +331,6 @@ struct SessionHydrationRelationAuthority<'snapshot> {
 }
 
 impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
-    #[hotpath::skip]
     pub const fn new_registered(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -348,7 +342,6 @@ impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered_with_relations(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -364,7 +357,6 @@ impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
 }
 
 impl<'snapshot> SessionTemporalHydrationAdapter<'snapshot> {
-    #[hotpath::skip]
     pub const fn for_registered_snapshot(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -374,7 +366,6 @@ impl<'snapshot> SessionTemporalHydrationAdapter<'snapshot> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn for_registered_snapshot_with_relations(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -565,13 +556,12 @@ fn canonical_projected_message(
 }
 
 impl SessionTemporalHydrationBackend<'_> {
-    #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
+    #[tracing::instrument(name = "session_temporal.hydrate.resolve", level = "trace", skip_all)]
     async fn resolve_current(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -585,14 +575,13 @@ impl SessionTemporalHydrationBackend<'_> {
         Ok(resolution)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
+    #[tracing::instrument(name = "session_temporal.hydrate.read", level = "trace", skip_all)]
     async fn open_bounded(
         &self,
         descriptor: &PayloadDescriptor,
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<BoundedPayload, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {

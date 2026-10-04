@@ -21,7 +21,7 @@ use super::{
 /// column equals the query exactly. Useful when you already know the symbol
 /// and want the apples-to-apples cost of an index hit instead of
 /// `tracedecay_search`'s ranked query.
-#[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
+#[tracing::instrument(name = "mcp.graph.find_exact_symbol.total", level = "trace", skip_all)]
 pub async fn compute_find_exact_symbol(
     ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -36,12 +36,15 @@ pub async fn compute_find_exact_symbol(
     let name = request.name.as_str();
     let limit = request.limit.map_or(20, |v| v.min(200) as usize);
 
-    let mut nodes = hotpath::measure_block!("mcp.graph.find_exact_symbol.graph", {
-        let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
-        graph_symbols_in_scope(nodes, scope_prefix)?
-    });
+    let mut nodes = {
+        let _span = tracing::trace_span!("mcp.graph.find_exact_symbol.graph").entered();
+        {
+            let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
+            graph_symbols_in_scope(nodes, scope_prefix)?
+        }
+    };
     if nodes.is_empty() && request.lazy_index_ignored_dependencies.unwrap_or(false) {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             dependency_hints::admit_verified_ignored_dependency(
                 ctx,
                 ignored_dependency_admission,
@@ -49,7 +52,7 @@ pub async fn compute_find_exact_symbol(
                 name,
                 scope_prefix,
             ),
-            label = "mcp.graph.find_exact_symbol.admit"
+            tracing::trace_span!("mcp.graph.find_exact_symbol.admit"),
         )
         .await?;
     }

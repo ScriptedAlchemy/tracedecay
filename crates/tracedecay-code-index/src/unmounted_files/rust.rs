@@ -251,7 +251,11 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
 /// script. Re-deriving that judgement here would create a second list to keep
 /// in sync and would report the same false positives the workspace already
 /// wrote down.
-#[hotpath::measure(label = "code_index.unmounted_files.rust.workspace")]
+#[tracing::instrument(
+    name = "code_index.unmounted_files.rust.workspace",
+    level = "trace",
+    skip_all
+)]
 fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathBuf>)> {
     let Ok(text) = std::fs::read_to_string(project_root.join("Cargo.toml")) else {
         // Not a cargo project at the root. Packages may still exist deeper in
@@ -511,7 +515,11 @@ fn on_disk_spelling(listing: &HashMap<String, Vec<OsString>>, wanted: &OsStr) ->
 /// keyed by file *and* the directory its own declarations resolve against: the
 /// same file reached as a crate root and as a module resolves its children
 /// differently, so both visits must happen.
-#[hotpath::measure(label = "code_index.unmounted_files.rust.mounted_walk")]
+#[tracing::instrument(
+    name = "code_index.unmounted_files.rust.mounted_walk",
+    level = "trace",
+    skip_all
+)]
 fn walk_mounted_files(
     roots: &[(PathBuf, PathBuf)],
     mounted: &mut HashSet<PathBuf>,
@@ -597,7 +605,11 @@ fn walk_mounted_files(
     }
 }
 
-#[hotpath::measure(label = "code_index.unmounted_files.rust.parse")]
+#[tracing::instrument(
+    name = "code_index.unmounted_files.rust.parse",
+    level = "trace",
+    skip_all
+)]
 fn parse_rust(source: &str) -> Option<tree_sitter::Tree> {
     let language = tracedecay_code_extraction::ts_provider::try_language("rust").ok()?;
     let mut parser = Parser::new();

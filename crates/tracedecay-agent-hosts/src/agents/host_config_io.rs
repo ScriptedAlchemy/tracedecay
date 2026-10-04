@@ -142,7 +142,11 @@ pub(crate) fn emptied_text_mutation(path: &Path, contents: String) -> TextFileMu
 ///
 /// Returns `Ok(json!({}))` only when the file does not exist or is empty,
 /// which is safe for creating a new config from scratch.
-#[hotpath::measure(label = "agent_hosts.agents.config.load_json")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.config.load_json",
+    level = "trace",
+    skip_all
+)]
 pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
@@ -375,7 +379,11 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8]) -> Result<()> {
     safe_write_bytes_file_with_metadata(path, contents, None)
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_config.write")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_config.write",
+    level = "trace",
+    skip_all
+)]
 pub fn safe_write_bytes_file_with_metadata(
     path: &Path,
     contents: &[u8],
@@ -565,7 +573,11 @@ pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf
 /// its bytes first, checks peer ownership, and then records exactly those
 /// bytes. If a foreign writer races after the snapshot, rollback compares the
 /// recorded digest to the live state and refuses instead of restoring over it.
-#[hotpath::measure(label = "agent_hosts.agents.host_config.observe")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_config.observe",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn record_host_config_observation_bytes(
     path: &Path,
     contents: Option<&[u8]>,
@@ -588,7 +600,11 @@ pub(crate) fn record_host_config_observation_bytes(
     }
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_config.remove")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_config.remove",
+    level = "trace",
+    skip_all
+)]
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
     persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
     std::fs::remove_file(path)?;
@@ -608,7 +624,11 @@ struct HostConfigWriteIntentV2<'a> {
     metadata: Option<&'a HostFileMetadataIdentityV1>,
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_config.persist")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_config.persist",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn persist_host_config_write_intent(
     path: &Path,
     contents: &[u8],
@@ -646,7 +666,11 @@ pub(super) fn persist_host_config_write_intent(
     })
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.host_config.persist_remove")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.host_config.persist_remove",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
     let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
         return Ok(());
@@ -707,7 +731,11 @@ pub fn which_tracedecay() -> Option<String> {
 }
 
 /// Finds the tracedecay binary without converting its platform-native path.
-#[hotpath::measure(label = "agent_hosts.agents.which_tracedecay")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.which_tracedecay",
+    level = "trace",
+    skip_all
+)]
 pub fn which_tracedecay_path() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
@@ -826,7 +854,11 @@ fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::Os
 
 /// Recursively collect every regular file under `root` (following the same
 /// hand-rolled walk both the Cursor and Codex installers rely on).
-#[hotpath::measure(label = "agent_hosts.agents.fs.collect_regular_files")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.fs.collect_regular_files",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     collect_regular_files_inner(root, &mut out)?;
@@ -883,7 +915,11 @@ fn relative_project_path(
         .map(Path::to_path_buf)
 }
 
-#[hotpath::measure(label = "agent_hosts.agents.fs.ensure_project_local")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.fs.ensure_project_local",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
     let root = project_root
         .canonicalize()
@@ -1004,7 +1040,11 @@ pub fn load_jsonc_file(path: &Path) -> serde_json::Value {
 /// - File exists and has content but contains invalid JSONC.
 ///
 /// Returns `Ok(json!({}))` only when the file does not exist or is empty.
-#[hotpath::measure(label = "agent_hosts.agents.config.load_jsonc")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.config.load_jsonc",
+    level = "trace",
+    skip_all
+)]
 pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
@@ -1063,7 +1103,11 @@ pub use tracedecay_sessions::host_ports::kiro_data_dir;
 /// Returns an empty table when the file does not exist. When the file exists
 /// but cannot be parsed as a TOML document, returns a [`TraceDecayError::Config`]
 /// so callers do not silently overwrite the user's data (see issue #63).
-#[hotpath::measure(label = "agent_hosts.agents.config.load_toml")]
+#[tracing::instrument(
+    name = "agent_hosts.agents.config.load_toml",
+    level = "trace",
+    skip_all
+)]
 pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::map::Map::new()));

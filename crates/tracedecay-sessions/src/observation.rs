@@ -48,7 +48,6 @@ impl ObservationCancellation {
 
     /// Wait until this exact operation is cancelled without losing a signal
     /// between the readiness check and waiter registration.
-    #[hotpath::skip]
     pub(crate) async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
@@ -388,12 +387,10 @@ struct PersistedObservationCapture {
 struct ObservationBatchConcurrency(NonZeroUsize);
 
 impl ObservationBatchConcurrency {
-    #[hotpath::skip]
     pub const fn new(max_in_flight: NonZeroUsize) -> Self {
         Self(max_in_flight)
     }
 
-    #[hotpath::skip]
     const fn max_in_flight(self) -> usize {
         self.0.get()
     }
@@ -447,7 +444,11 @@ where
     }
 
     /// Advances a validated non-durable frame cursor without exposing the store.
-    #[hotpath::measure(label = "sessions.observation.advance_cursor", future = true)]
+    #[tracing::instrument(
+        name = "sessions.observation.advance_cursor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn advance_non_durable_source_cursor(
         &self,
         request: AdvanceNonDurableSourceCursorRequest,
@@ -480,7 +481,11 @@ where
     /// making progress. Awaiting a `spawn_blocking` join handle keeps the
     /// worker free, and the background-CPU permit bounds how many of these
     /// spans run at once.
-    #[hotpath::measure(label = "sessions.observation.prepare_capture", future = true)]
+    #[tracing::instrument(
+        name = "sessions.observation.prepare_capture",
+        level = "trace",
+        skip_all
+    )]
     async fn prepare_capture(
         &self,
         request: CaptureObservationRequest,
@@ -592,7 +597,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "sessions.observation.readback", future = true)]
+    #[tracing::instrument(name = "sessions.observation.readback", level = "trace", skip_all)]
     async fn persisted_outcome(
         &self,
         outcome: ObservationPersistOutcome,
@@ -662,7 +667,7 @@ where
                 + '_,
         >,
     > {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 match self.prepare_capture(request).await? {
                     PreparedObservationCapture::Durable {
@@ -683,11 +688,11 @@ where
                     }
                 }
             },
-            label = "sessions.observation.capture"
+            tracing::trace_span!("sessions.observation.capture"),
         ))
     }
 
-    #[hotpath::measure(label = "sessions.observation.get", future = true)]
+    #[tracing::instrument(name = "sessions.observation.get", level = "trace", skip_all)]
     pub async fn get_observation(
         &self,
         request: GetObservationRequest,
@@ -713,7 +718,7 @@ where
         })
     }
 
-    #[hotpath::measure(label = "sessions.observation.replay", future = true)]
+    #[tracing::instrument(name = "sessions.observation.replay", level = "trace", skip_all)]
     pub async fn replay_observations(
         &self,
         request: ReplayObservationsRequest,
@@ -778,7 +783,7 @@ impl<S> ObservationApplication<S>
 where
     S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
 {
-    #[hotpath::measure(label = "sessions.observation.prepare_batch", future = true)]
+    #[tracing::instrument(name = "sessions.observation.prepare_batch", level = "trace", skip_all)]
     async fn prepare_batch_captures(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -848,7 +853,7 @@ where
     /// without touching persist authority. A sanitizer reject or quarantine
     /// in the batch refuses before persistence so the stream owner can retry
     /// one request at a time and advance typed coverage between records.
-    #[hotpath::measure(label = "sessions.observation.capture_batch", future = true)]
+    #[tracing::instrument(name = "sessions.observation.capture_batch", level = "trace", skip_all)]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,

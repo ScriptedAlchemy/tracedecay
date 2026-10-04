@@ -107,7 +107,11 @@ impl GitHubProviderPermissionVerifierV1 {
         }
     }
 
-    #[hotpath::measure(label = "application.github_credential.verify")]
+    #[tracing::instrument(
+        name = "application.github_credential.verify",
+        level = "trace",
+        skip_all
+    )]
     fn verify(
         &self,
         secret: &str,
@@ -321,7 +325,11 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
         );
     }
 
-    #[hotpath::measure(label = "application.github_credential.configure")]
+    #[tracing::instrument(
+        name = "application.github_credential.configure",
+        level = "trace",
+        skip_all
+    )]
     fn configure_profile_with(
         &self,
         profile_id: &UserProfileId,

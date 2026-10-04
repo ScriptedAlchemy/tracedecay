@@ -64,7 +64,7 @@ pub trait ExecutionTopologyRollupQueryPort: Send + Sync {
 /// Returns invalid-request and authority-admission problems with the same
 /// semantics as the live topology metrics operation. Observation and retained
 /// rollup availability are represented by a typed unavailable model.
-#[hotpath::measure(label = "application.topology.rollup.read", future = true)]
+#[tracing::instrument(name = "application.topology.rollup.read", level = "trace", skip_all)]
 pub async fn execution_topology_rollup_metrics<R, O>(
     rollups: &R,
     observations: &O,
@@ -340,7 +340,6 @@ struct InteriorFailureV1 {
 }
 
 impl InteriorFailureV1 {
-    #[hotpath::skip]
     const fn partial() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::StoreUnavailable,
@@ -348,7 +347,6 @@ impl InteriorFailureV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn capped() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::EventBudgetExceeded,
@@ -356,7 +354,6 @@ impl InteriorFailureV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn unknown() -> Self {
         Self {
             reason: ExecutionMetricUnavailableV1::StoreUnavailable,
@@ -364,7 +361,6 @@ impl InteriorFailureV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn from_coverage(coverage: CoverageStateV1) -> Self {
         Self {
             reason: match coverage {

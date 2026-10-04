@@ -297,14 +297,12 @@ integration branch waits behind, so a run spends only what its state earns:
 | `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, and Linux test partitions. |
 | `CI` with `run_os=true` | Adds the macOS and Windows matrices. |
 | `CI` with `run_hosts=true` | Adds stock host integrations. |
-| `CI` with `run_perf=true` | Adds hotpath parity. |
-| Hotpath workflow dispatch | Runs the selected profile, coverage, or runtime-core suite. |
 | Push to `master` | Everything. |
 
 Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add
-`-f run_os=true`, `-f run_hosts=true`, or `-f run_perf=true` only for those
-lanes. Opening, pushing, labeling, and marking ready create no run at all. A
-newer master push cancels the one in flight. Closing or merging a PR cancels
+`-f run_os=true` or `-f run_hosts=true` only for those lanes. Opening,
+pushing, labeling, and marking ready create no run at all. A newer
+master push cancels the one in flight. Closing or merging a PR cancels
 its remaining runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.

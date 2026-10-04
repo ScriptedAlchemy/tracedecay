@@ -40,7 +40,6 @@ enum SessionRefreshOperation {
 }
 
 impl SessionRefreshOperation {
-    #[hotpath::skip]
     const fn tool_name(self) -> &'static str {
         match self {
             Self::Begin => "tracedecay_session_refresh_begin",
@@ -119,7 +118,6 @@ impl SessionRefreshOutcomeView {
         Ok((self, payload))
     }
 
-    #[hotpath::skip]
     const fn is_failure(&self) -> bool {
         !matches!(
             self.outcome,
@@ -156,15 +154,15 @@ where
 {
     match action {
         SessionsRefreshAction::Begin(SessionRefreshBeginArgs { selectors, json }) => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_session_refresh(
                     transport,
                     SessionRefreshOperation::Begin,
                     &selectors,
                     None,
-                    json
+                    json,
                 ),
-                label = "cli.sessions.refresh.begin"
+                tracing::trace_span!("cli.sessions.refresh.begin"),
             )
             .await
         }
@@ -173,7 +171,7 @@ where
             handle,
             json,
         }) => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_session_refresh(
                     transport,
                     SessionRefreshOperation::Status,
@@ -181,7 +179,7 @@ where
                     Some(&handle),
                     json,
                 ),
-                label = "cli.sessions.refresh.status"
+                tracing::trace_span!("cli.sessions.refresh.status"),
             )
             .await
         }
@@ -190,7 +188,7 @@ where
             handle,
             json,
         }) => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_session_refresh(
                     transport,
                     SessionRefreshOperation::Cancel,
@@ -198,7 +196,7 @@ where
                     Some(&handle),
                     json,
                 ),
-                label = "cli.sessions.refresh.cancel"
+                tracing::trace_span!("cli.sessions.refresh.cancel"),
             )
             .await
         }

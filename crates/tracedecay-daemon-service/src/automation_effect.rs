@@ -10,7 +10,6 @@ use crate::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
-    observe_admission_decision,
 };
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, RetainedSurfaceOperation, retained_surface_application_operation,
@@ -31,7 +30,6 @@ mod journal_tests;
 /// Admits the retained request, resolves the memory owner, and hands those
 /// authorities to the runtime settlement kernel.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::skip]
 pub async fn prepare(
     invocation: &DaemonInvocationService,
     memory: &TraceDecay,
@@ -69,9 +67,7 @@ pub async fn prepare(
                 problem,
             )
             .map_err(contract_error)?;
-            let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
-            observe_admission_decision(&admission);
-            return Ok(admission);
+            return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
         }
         Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
     };

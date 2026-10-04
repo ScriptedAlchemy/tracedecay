@@ -24,7 +24,11 @@ pub(crate) async fn handle_lsp_action(
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         LspAction::Servers { json } => {
-            hotpath::future!(print_lsp_servers(profile, json), label = "cli.lsp.servers").await?;
+            tracing::Instrument::instrument(
+                print_lsp_servers(profile, json),
+                tracing::trace_span!("cli.lsp.servers"),
+            )
+            .await?;
         }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
@@ -32,9 +36,9 @@ pub(crate) async fn handle_lsp_action(
                     message: "lsp bridge requires --stdio".to_owned(),
                 });
             }
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 run_stdio_bridge(profile, project.map(PathBuf::from)),
-                label = "cli.lsp.bridge"
+                tracing::trace_span!("cli.lsp.bridge"),
             )
             .await?;
         }

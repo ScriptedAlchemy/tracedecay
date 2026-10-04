@@ -67,7 +67,11 @@ pub(super) struct DiagnosticsFileFingerprint {
 }
 
 impl DiagnosticsFingerprint {
-    #[hotpath::measure(label = "compile_diagnostics.fingerprint.capture", future = true)]
+    #[tracing::instrument(
+        name = "compile_diagnostics.fingerprint.capture",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn capture(project_root: &Path, scope: &Scope) -> Result<Self> {
         let project_root = project_root.to_path_buf();
         let scope = scope.clone();

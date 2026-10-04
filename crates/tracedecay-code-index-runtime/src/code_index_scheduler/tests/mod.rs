@@ -37,10 +37,6 @@ use crate::code_index_scheduler::{
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 mod branch_publication_tests;
 mod cancellation_tests;
 mod deferred_mount_tests;

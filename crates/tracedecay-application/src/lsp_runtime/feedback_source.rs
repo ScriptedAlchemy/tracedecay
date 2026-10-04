@@ -96,7 +96,7 @@ impl ConcreteFeedbackLspSource {
         self.publications.clone()
     }
 
-    #[hotpath::measure(label = "usecases.lsp.changes.queue", future = true)]
+    #[tracing::instrument(name = "usecases.lsp.changes.queue", level = "trace", skip_all)]
     pub(super) async fn queue_feedback_changes(
         &self,
         request: &FeedbackCycleRequest,
@@ -188,7 +188,7 @@ impl ConcreteFeedbackLspSource {
         Ok(current)
     }
 
-    #[hotpath::measure(label = "usecases.lsp.cycle.current", future = true)]
+    #[tracing::instrument(name = "usecases.lsp.cycle.current", level = "trace", skip_all)]
     pub(super) async fn current_cycle(
         &self,
         root: AdmittedRoot,
@@ -257,7 +257,7 @@ impl ConcreteFeedbackLspSource {
         })
     }
 
-    #[hotpath::measure(label = "usecases.lsp.context.findings")]
+    #[tracing::instrument(name = "usecases.lsp.context.findings", level = "trace", skip_all)]
     pub(super) fn current_finding_items<'a>(
         &self,
         target: FindingContextTarget<'_>,
@@ -336,7 +336,7 @@ impl ConcreteFeedbackLspSource {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "usecases.lsp.context.store_handle")]
+    #[tracing::instrument(name = "usecases.lsp.context.store_handle", level = "trace", skip_all)]
     pub(super) fn attach_context_handle(
         &self,
         root: &AdmittedRoot,
@@ -491,7 +491,7 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
         request: FeedbackCycleRequest,
     ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
         let source = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 source.cycle.execute(request.clone()).await?;
                 // Queueing is best-effort: the cycle above already succeeded, and
@@ -499,7 +499,7 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
                 let _ = source.queue_feedback_changes(&request).await;
                 Ok(())
             },
-            label = "usecases.lsp.cycle.execute"
+            tracing::trace_span!("usecases.lsp.cycle.execute"),
         ))
     }
 }
@@ -510,7 +510,7 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
         let source = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cycle_request = FeedbackCycleRequest {
                     root_uri: request.root.uri().to_owned(),
@@ -560,7 +560,7 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
                     diagnostics,
                 })
             },
-            label = "usecases.lsp.diagnostics.snapshot"
+            tracing::trace_span!("usecases.lsp.diagnostics.snapshot"),
         ))
     }
 }
@@ -597,7 +597,7 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 .snapshot(root, request.document_uri, document_content_digest);
         }
         let source = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let current = match source
                     .current_cycle(
@@ -831,7 +831,7 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                     retrieval_handle,
                 })
             },
-            label = "usecases.lsp.context.snapshot"
+            tracing::trace_span!("usecases.lsp.context.snapshot"),
         ))
     }
 
@@ -842,9 +842,9 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
         request: ContextExpansionRequest,
     ) -> LspRuntimeFuture<ContextExpansionOutcome> {
         let source = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move { source.expand_context(root, request).await },
-            label = "usecases.lsp.context.expand"
+            tracing::trace_span!("usecases.lsp.context.expand"),
         ))
     }
 

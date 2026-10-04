@@ -110,7 +110,7 @@ pub trait WorkflowFanOutCensusStoragePort: Send + Sync {
     ) -> Result<(), WorkflowFanOutCensusError>;
 }
 
-#[hotpath::measure(label = "application.workflow.census.derive")]
+#[tracing::instrument(name = "application.workflow.census.derive", level = "trace", skip_all)]
 pub fn derive_workflow_fan_out_census(
     projection: &WorkflowRunProjection,
     evidence: &WorkflowFanOutCensusEvidenceV1<'_>,
@@ -133,10 +133,6 @@ pub fn derive_workflow_fan_out_census(
         .values()
         .flat_map(|plan| &plan.children)
         .collect::<Vec<_>>();
-    // Sweep shape beside the outer derive span: planned children set the
-    // matrix size and read attempts bound the evidence actually joined.
-    hotpath::gauge!("application.workflow.census.children").set(children.len() as u64);
-    hotpath::gauge!("application.workflow.census.attempts").set(evidence.attempts.len() as u64);
     let requested = count(children.len())?;
     let attempts = evidence
         .attempts

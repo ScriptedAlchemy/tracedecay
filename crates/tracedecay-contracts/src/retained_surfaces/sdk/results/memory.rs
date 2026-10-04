@@ -158,9 +158,6 @@ pub enum FactStoreRemoveResultV1 {
         fact: FactProjectionV1,
         remaining_fact_count: u64,
     },
-    NotFound {
-        remaining_fact_count: u64,
-    },
 }
 
 /// Outcome of an explicit supersession. `superseded` carries the durable
@@ -178,7 +175,6 @@ pub enum FactStoreSupersedeResultV1 {
         fact_id: FactId,
         superseded_by: FactId,
     },
-    NotFound,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]

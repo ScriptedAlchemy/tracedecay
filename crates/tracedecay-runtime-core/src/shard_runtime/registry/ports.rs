@@ -54,7 +54,6 @@ impl ResolvedStoreLocator {
         &self.path
     }
 
-    #[hotpath::skip]
     pub(crate) const fn is_prospective(&self) -> bool {
         self.prospective
     }
@@ -87,7 +86,6 @@ impl RuntimeLocatorRecord {
         self.locator.path()
     }
 
-    #[hotpath::skip]
     pub(crate) const fn is_prospective(&self) -> bool {
         self.locator.is_prospective()
     }
@@ -230,7 +228,6 @@ struct LifecycleShardRuntimeAttachment {
 }
 
 impl LifecycleShardRuntimeAttachment {
-    #[hotpath::skip]
     const fn new(repository: RepositoryPhysicalAttachmentFactory) -> Self {
         Self { repository }
     }
@@ -640,12 +637,10 @@ impl ShardRuntimeBuildRequest {
         &self.locator
     }
 
-    #[hotpath::skip]
     pub const fn mode(&self) -> StoreRuntimeOpenMode {
         self.mode
     }
 
-    #[hotpath::skip]
     pub const fn access(&self) -> StoreRuntimeAccessMode {
         self.access
     }
