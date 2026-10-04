@@ -1,4 +1,4 @@
-//! The HTTP, MCP-host, and Rust SDK legs of the typed-terminal journey.
+//! The HTTP, MCP-host, Rust SDK, and TypeScript SDK typed-terminal journey.
 //!
 //! The CLI leg lives in this target's root module. It induces both terminals
 //! through real production mechanisms, a fact that commits durably and then
@@ -29,6 +29,9 @@
 //!   generated typed operations. Its `OperationRequestOptions::deadline_micros`
 //!   is the SDK's own name for the same header.
 //!
+//! - **TypeScript SDK**: a Node process imports the built generated client,
+//!   calls its mounted operation, and verifies the concrete typed error class.
+//!
 //! Every leg asserts the terminal's kind, its legal actions, and, for
 //! `PartialEffect`, the committed receipt, then the daemon process is replaced
 //! and the same contract is re-asserted against the new process over the same
@@ -37,6 +40,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -45,7 +49,9 @@ use tracedecay_sdk::client::{Client, ClientError, ConnectionMode, OperationReque
 use tracedecay_sdk::operations::{ApplicationFactStoreAdd, ApplicationStorageStatus};
 use tracedecay_session_memory::memory::hygiene::detect_secret_like;
 
-use crate::common::{TestChildProcess, http_agent_with_timeout, tracedecay_command_with_home};
+use crate::common::{
+    TestChildProcess, http_agent_with_timeout, output_with_timeout, tracedecay_command_with_home,
+};
 
 /// Route of the fact-add effect on the application mount, as the generated SDK
 /// operation descriptor names it.
@@ -496,20 +502,96 @@ fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
     }
 }
 
+fn typescript_problem(
+    mount: &HttpMount,
+    project_id: &str,
+    operation: &str,
+    request: &Value,
+    deadline_micros: Option<i64>,
+) -> Value {
+    typescript_call(
+        mount,
+        project_id,
+        operation,
+        request,
+        deadline_micros,
+        false,
+    )
+}
+
+fn typescript_call(
+    mount: &HttpMount,
+    project_id: &str,
+    operation: &str,
+    request: &Value,
+    deadline_micros: Option<i64>,
+    allow_success: bool,
+) -> Value {
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/typescript");
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        #[cfg(windows)]
+        let mut build = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "pnpm"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut build = std::process::Command::new("pnpm");
+        build.args(["run", "build"]).current_dir(&sdk_root);
+        let output = output_with_timeout(build, TRANSPORT_TIMEOUT);
+        assert!(
+            output.status.success(),
+            "TypeScript SDK build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+    let mut command = std::process::Command::new("node");
+    command
+        .arg("test/typed-terminal-live.mjs")
+        .current_dir(&sdk_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child =
+        TestChildProcess::new(command.spawn().expect("spawn the TypeScript SDK journey"));
+    writeln!(child.stdin_mut().expect("SDK input"), "{}", json!({
+        "connection": { "baseUrl": mount.base_url, "origin": mount.origin, "token": mount.token, "projectId": project_id },
+        "operation": operation, "request": request, "deadlineMicros": deadline_micros,
+        "allowSuccess": allow_success,
+    })).expect("write the SDK request");
+    let output = child
+        .wait_with_output(TRANSPORT_TIMEOUT)
+        .expect("TypeScript SDK call finishes");
+    assert!(
+        output.status.success(),
+        "TypeScript SDK call failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("TypeScript SDK problem envelope")
+}
+
 #[test]
-fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
+fn partial_effect_survives_http_mcp_and_both_sdks_across_restart() {
     // Each marker stays short enough that production memory hygiene stores
     // the fact instead of refusing it as a high-entropy secret-like token.
     const HTTP_MARKER: &str = "boundaries-partial-http-4a71c8";
     const MCP_MARKER: &str = "boundaries-partial-mcp-4a71c8";
     const SDK_MARKER: &str = "boundaries-partial-sdk-4a71c8";
+    const TS_MARKER: &str = "boundaries-partial-typescript-4a71c8";
     const POST_RESTART_MARKER: &str = "boundaries-partial-restart-4a71c8";
     /// Query that must retrieve every marker above after the restart.
     const MARKER_QUERY: &str = "boundaries-partial";
 
     // A hygiene refusal must never masquerade as the partial-effect terminal
     // this suite induces.
-    for marker in [HTTP_MARKER, MCP_MARKER, SDK_MARKER, POST_RESTART_MARKER] {
+    for marker in [
+        HTTP_MARKER,
+        MCP_MARKER,
+        SDK_MARKER,
+        TS_MARKER,
+        POST_RESTART_MARKER,
+    ] {
         assert!(
             detect_secret_like(marker).is_none(),
             "marker {marker:?} would be refused as secret-like before the commit boundary"
@@ -608,6 +690,25 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         "Rust SDK, pre-restart",
     );
 
+    let ts_mount = HttpMount {
+        base_url: mount.base_url.clone(),
+        origin: mount.origin.clone(),
+        token: mount.token.clone(),
+    };
+    let ts_identity = identity.clone();
+    let ts_envelope = park_at_commit_barrier(&barrier_path, TS_MARKER, move || {
+        typescript_problem(
+            &ts_mount,
+            &ts_identity,
+            "fact_store_add",
+            &fact_add_body(TS_MARKER),
+            Some(parked_request_deadline_micros()),
+        )
+    });
+    let ts_problem = problem_envelope(&ts_envelope, "TypeScript SDK partial effect");
+    assert_eq!(ts_problem["problem"]["kind"], "partial_effect");
+    super::assert_partial_effect_committed_receipt(&ts_problem, "TypeScript SDK, pre-restart");
+
     // Physically replace the serving process. Nothing on disk changes.
     let first_pid = daemon.id();
     let stopped = daemon
@@ -642,7 +743,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         "the post-restart fact search must itself succeed: {search_body}"
     );
     let rendered = search_body.to_string();
-    for marker in [HTTP_MARKER, MCP_MARKER, SDK_MARKER] {
+    for marker in [HTTP_MARKER, MCP_MARKER, SDK_MARKER, TS_MARKER] {
         assert!(
             rendered.contains(marker),
             "the fact committed by the {marker} partial effect must survive the physical restart: {search_body}"
@@ -675,7 +776,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
 }
 
 #[test]
-fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
+fn reset_required_survives_http_mcp_and_both_sdks_across_restart() {
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = crate::common::canonical_existing_path(home.path());
     let project = tempfile::TempDir::new().expect("reset required project");
@@ -750,6 +851,20 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         "Rust SDK, first observation",
     );
 
+    let ts_problem = await_settled_problem("TypeScript SDK, first observation", || {
+        problem_envelope(
+            &typescript_problem(
+                &mount,
+                &identity,
+                "storage_status",
+                &storage_status_body,
+                None,
+            ),
+            "TypeScript SDK reset required",
+        )
+    });
+    super::assert_reset_required(&ts_problem, "TypeScript SDK, first observation");
+
     // Replace the serving process again. The reset-only legal action must be
     // reported identically on every transport: a restart is not a reset.
     let second_pid = daemon.id();
@@ -805,5 +920,208 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
         "Rust SDK, after a physical restart",
     );
 
+    let ts_problem_after =
+        await_settled_problem("TypeScript SDK, after a physical restart", || {
+            problem_envelope(
+                &typescript_problem(
+                    &mount,
+                    &identity,
+                    "storage_status",
+                    &storage_status_body,
+                    None,
+                ),
+                "TypeScript SDK reset required after restart",
+            )
+        });
+    super::assert_reset_required(
+        &ts_problem_after,
+        "TypeScript SDK, after a physical restart",
+    );
+
     let _ = daemon.kill_and_wait();
+}
+
+/// The retained-surfaces lane's missing TypeScript leg: durable memory,
+/// refresh handles, and exact native session retrieval across a new daemon.
+#[test]
+fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
+    const SESSION: &str = "82261fe4-4fb3-4936-8fd7-ed59c1e20aa7";
+    const MESSAGE: &str = "Native Codex session keeps the bronze restart proof";
+    const FACT: &str = "typescript retained bronze restart fact";
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = crate::common::canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("retained project");
+    let project_path = crate::common::canonical_existing_path(project.path());
+    let barrier = tempfile::TempDir::new().expect("unused commit barrier");
+    let source = home_path.join(".codex/sessions/2026/10/01");
+    std::fs::create_dir_all(&source).expect("native transcript directory");
+    std::fs::write(
+        source.join(format!("rollout-2026-10-01T12-00-00-{SESSION}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta", "timestamp": "2026-10-01T12:00:00Z",
+                "payload": { "id": SESSION, "cwd": project_path, "model": "gpt-5.5" }
+            }),
+            json!({
+                "type": "event_msg", "timestamp": "2026-10-01T12:00:01Z",
+                "payload": { "type": "user_message", "message": MESSAGE }
+            })
+        ),
+    )
+    .expect("seed native host transcript");
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, barrier.path());
+    super::initialize_project(&home_path, &project_path, "retained-typescript");
+    let identity = admitted_project_id(&home_path, &project_path);
+    let mount = http_mount(&home_path);
+    let added = typescript_call(
+        &mount,
+        &identity,
+        "fact_store_add",
+        &fact_add_body(FACT),
+        None,
+        true,
+    );
+    assert_eq!(added["kind"], "success", "{added}");
+    let fact_id =
+        added["value"]["outcome"]["value"]["payload"]["result"]["commit"]["fact_id"].clone();
+    assert!(fact_id.is_string(), "add omitted fact identity: {added}");
+
+    let ingested = mcp_tool_call(
+        &home_path,
+        &project_path,
+        "tracedecay_hook_runtime",
+        &json!({ "action": "ingest_transcript", "provider": "codex",
+            "user_scope": false, "session_id": SESSION, "format": "json" }),
+        None,
+    );
+    assert!(ingested.get("error").is_none(), "{ingested}");
+    assert_ne!(ingested["result"]["isError"], true, "{ingested}");
+    let load = json!({ "provider": "codex", "session_id": SESSION,
+        "limit": 10, "content_limit": 4096 });
+    let deadline = Instant::now() + TRANSPORT_TIMEOUT;
+    loop {
+        let result = typescript_call(&mount, &identity, "lcm_load_session", &load, None, true);
+        if result["kind"] == "success" && result.to_string().contains(MESSAGE) {
+            break;
+        }
+        assert_ne!(result["problem"]["kind"], "invalid_request", "{result}");
+        assert!(
+            Instant::now() < deadline,
+            "native session never reached LCM: {result}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut refresh = json!({
+        "scope": { "kind": "project" },
+        "session": { "id": SESSION }, "source": { "scope": "codex" },
+        "target": { "temporal_mode": { "kind": "current" }, "grain": "logical_message",
+            "frontier": { "observed_through": 0, "committed_through": 0 } }
+    });
+    let stale = typescript_call(
+        &mount,
+        &identity,
+        "session_refresh_begin",
+        &refresh,
+        None,
+        true,
+    );
+    assert_eq!(stale["problem"]["kind"], "stale", "{stale}");
+    assert_eq!(
+        stale["problem"]["legal_actions"],
+        json!(["refresh"]),
+        "{stale}"
+    );
+    let frontier = stale["problem"]["detail"]["active"]
+        .as_u64()
+        .expect("stale refusal identifies the admitted frontier");
+    assert!(frontier > 0, "{stale}");
+    refresh["target"]["frontier"] = json!({
+        "observed_through": frontier, "committed_through": frontier
+    });
+    let begun = typescript_call(
+        &mount,
+        &identity,
+        "session_refresh_begin",
+        &refresh,
+        None,
+        true,
+    );
+    assert_eq!(begun["kind"], "success", "{begun}");
+    let begin_payload = &begun["value"]["outcome"]["value"]["payload"];
+    let handle = begin_payload["handle"]
+        .as_str()
+        .expect("refresh handle")
+        .to_owned();
+    assert_eq!(begin_payload["scope"], "project", "{begun}");
+    refresh["handle"] = json!(handle);
+    let status = typescript_call(
+        &mount,
+        &identity,
+        "session_refresh_status",
+        &refresh,
+        None,
+        true,
+    );
+    assert_eq!(status["kind"], "success", "{status}");
+    let cancelled = typescript_call(
+        &mount,
+        &identity,
+        "session_refresh_cancel",
+        &refresh,
+        None,
+        true,
+    );
+    // A completed refresh keeps its receipt; cancel must never invent a new
+    // operation or turn a completed refresh back into an active one.
+    assert_eq!(cancelled["kind"], "success", "{cancelled}");
+    assert_eq!(
+        cancelled["value"]["outcome"]["value"]["payload"]["operation_id"],
+        begin_payload["operation_id"],
+        "{cancelled}"
+    );
+
+    let first_pid = daemon.id();
+    daemon.kill_and_wait().expect("reap first daemon");
+    let mut daemon = super::spawn_daemon_with_commit_barrier(&home_path, barrier.path());
+    assert_ne!(daemon.id(), first_pid);
+    let mount = http_mount(&home_path);
+    assert_eq!(admitted_project_id(&home_path, &project_path), identity);
+    let search = typescript_call(
+        &mount,
+        &identity,
+        "fact_store_search",
+        &json!({ "query": FACT }),
+        None,
+        true,
+    );
+    assert_eq!(search["kind"], "success", "{search}");
+    assert!(
+        search
+            .to_string()
+            .contains(fact_id.as_str().expect("fact identity")),
+        "{search}"
+    );
+    let loaded = typescript_call(&mount, &identity, "lcm_load_session", &load, None, true);
+    assert_eq!(loaded["kind"], "success", "{loaded}");
+    assert!(loaded.to_string().contains(MESSAGE), "{loaded}");
+    let old_handle = typescript_call(
+        &mount,
+        &identity,
+        "session_refresh_status",
+        &refresh,
+        None,
+        true,
+    );
+    assert_eq!(old_handle["kind"], "success", "{old_handle}");
+    let stale_status = &old_handle["value"]["outcome"]["value"]["payload"];
+    assert_eq!(stale_status["outcome"], "stale", "{old_handle}");
+    assert_eq!(
+        stale_status["error"]["code"], "refresh_handle_stale",
+        "{old_handle}"
+    );
+    assert_eq!(stale_status["scope"], "project", "{old_handle}");
+    assert!(stale_status["progress"].is_null(), "{old_handle}");
+    assert!(stale_status["receipt"].is_null(), "{old_handle}");
+    daemon.kill_and_wait().expect("reap restarted daemon");
 }
