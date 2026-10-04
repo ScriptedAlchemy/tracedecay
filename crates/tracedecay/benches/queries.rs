@@ -107,47 +107,156 @@ impl Query {
             },
         }
     }
-
-    pub(crate) fn effect(
-        label: &'static str,
-        tool: &'static str,
-        args: Value,
-        prime: PrimeFn,
-    ) -> Self {
-        Self {
-            label,
-            tool,
-            args,
-            kind: QueryKind::Effect {
-                prime,
-                cleanup: None,
-            },
-        }
-    }
-
-    pub(crate) fn effect_with_cleanup(
-        label: &'static str,
-        tool: &'static str,
-        args: Value,
-        prime: PrimeFn,
-        cleanup: EffectCleanup,
-    ) -> Self {
-        Self {
-            label,
-            tool,
-            args,
-            kind: QueryKind::Effect {
-                prime,
-                cleanup: Some(cleanup),
-            },
-        }
-    }
 }
+
+// Effect queries are constructed literally at the coverage call sites —
+// constructor sugar lives there (`eq`/`eqc`), since this file is also the
+// standalone `queries` bench root where effect groups never exist.
 
 /// All queries we run for one tool. The harness invariant is `queries.len() == 5`.
 pub struct ToolGroup {
     pub tool: &'static str,
     pub queries: Vec<Query>,
+}
+
+/// Entity state minted during context build; `None`/empty means the producer
+/// failed and the dependent groups are skipped (the reason lands in `skipped`).
+///
+/// Lives here (not in `coverage/`) because `QueryContext` carries it and this
+/// file is compiled as two bench roots: the standalone `queries` bench has no
+/// `coverage` module, so every type it names must resolve in this crate root.
+#[derive(Default)]
+pub struct Seeds {
+    pub project_id: Option<String>,
+    pub repository_id: Option<String>,
+    pub branch: Option<String>,
+    pub head_commit: Option<String>,
+    /// First-parent ancestor of `head_commit` for range-diff coverage.
+    pub parent_commit: Option<String>,
+    /// (fact_id, related_fact_id, search_query, [entities])
+    pub fact_pair: Option<(String, String, String, Vec<String>)>,
+    /// Scalar boolean key toggled during seed (diagnostics.prewarm.v1).
+    pub config_key: Option<String>,
+    /// Latest configuration revision after the seed set/unset pair.
+    pub config_revision: Option<String>,
+    /// The seeded revision (rollback target).
+    pub config_rollback_target: Option<String>,
+    /// Toggled scalar value to set next ({kind:boolean,value}).
+    pub config_scalar: Option<Value>,
+    /// Effective work.topology_policy.v1 value for protected previews.
+    pub topology_policy: Option<Value>,
+    /// Code-query node identities minted via `code_symbol_search` (distinct
+    /// from graph node ids; these tools consume the query-side identity).
+    pub code_node_ids: Vec<String>,
+    /// A graph node whose rename_preview is unblocked (source-edit lane needs
+    /// a symbol the policy can actually rename — most corpus symbols refuse
+    /// with ambiguous/hazard evidence, so seed time probes candidates).
+    pub rename_node: Option<Value>,
+    /// Symbol qualified names whose per-op dry_run completed small enough to
+    /// return `expected_state` inline (big symbols truncate the preview into
+    /// a result handle, which timing must not depend on).
+    pub replace_target: Option<String>,
+    pub insert_target: Option<String>,
+    pub move_target: Option<String>,
+    /// Ingested codex session id for this repo (td-bench-<name>).
+    pub lcm_session: Option<String>,
+    /// Canonical occurrence id minted by lcm_load_session.
+    pub lcm_message_id: Option<String>,
+    /// multi_root scope_set committed via compare_and_swap (id/revision/digest).
+    pub scope_set_id: Option<String>,
+    pub scope_set_revision: Option<i64>,
+    pub scope_set_digest: Option<String>,
+    /// session_refresh_begin handle + its selector arguments.
+    pub refresh_handle: Option<String>,
+    /// Operation id returned alongside the begin handle.
+    pub refresh_operation_id: Option<String>,
+    pub refresh_selectors: Option<Value>,
+    pub automation_run_id: Option<String>,
+    /// git_hunks producer output for `git_preview`/`git_apply`.
+    pub preview_input_id: Option<String>,
+    pub hunk_digests: Vec<String>,
+    /// Repo-relative file left modified for the git working-tree lane.
+    pub dirty_file: Option<String>,
+    /// Skill id minted via profile skill file drop (managed skills surface).
+    pub skill_id: Option<String>,
+    /// First worktree entry id seen in the seeded worktree inventory (cleanup
+    /// lane targets `kind:"worktree"` objects).
+    pub worktree_id: Option<String>,
+    /// Changed path whose run_affected_tests plan maps to covering tests
+    /// (minted a request handle at seed time).
+    pub test_results_path: Option<String>,
+    /// Reversible-truncation handle (`rh_…`) minted by a deliberately fat
+    /// search response at seed time; feeds `tracedecay_retrieve`.
+    pub retrieve_handle: Option<String>,
+    /// Tools whose application authority never mounts under the bench
+    /// composition, discovered by seed-time probes — their groups are
+    /// omitted and named in `skipped`.
+    pub unavailable_tools: std::collections::BTreeSet<String>,
+    /// Tools/families whose seed producer failed — the bench prints these so
+    /// skipped coverage is visible instead of silent.
+    pub skipped: Vec<String>,
+    /// Real repo-relative file paths sampled from `tracedecay_files`.
+    pub sample_files: Vec<String>,
+    /// Work/workflow lifecycle artifacts minted by `seed_work`.
+    pub work: Option<WorkSeeds>,
+    /// A fresh work-executable binding committed this run; route resolution
+    /// reads bindings at composition open, so the caller must reopen the
+    /// harness once (then rebuild context) before the admit lane can pass.
+    pub needs_reopen_for_provider: bool,
+    /// Second bench branch pinned at HEAD~1 (branch_diff base ref; the tool
+    /// resolves branch names, not raw oids).
+    pub base_branch: Option<String>,
+    /// Native-integration journey artifacts minted at seed (inventory →
+    /// stack_snapshot → preflight → approve). Absent = family skipped.
+    pub native: Option<NativeSeeds>,
+}
+
+/// Minted once per run: the stack_snapshot body that seals, plus the live
+/// transaction the status lane reads.
+#[derive(Clone, Default)]
+pub struct NativeSeeds {
+    /// Validated `stack_snapshot` request body — the groups replay it to mint
+    /// fresh per-iteration transactions.
+    pub snapshot_body: Value,
+    /// transaction_id of the seed-minted (approved) transaction.
+    pub transaction_id: String,
+}
+
+/// Artifacts of one real disposable Work lifecycle plus one workflow
+/// definition/run, minted once so the ~45 work_* and workflow_* tools measure
+/// against real graph state. Field absence means that leg failed and only its
+/// dependent groups skip.
+#[derive(Default)]
+pub struct WorkSeeds {
+    pub selection: Value,
+    pub task_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    /// Started-then-cancelled terminal attempt identity {task,run,attempt}.
+    pub attempt_identity: Value,
+    /// Second terminal attempt for duplicate-adjudication reads/effects.
+    pub dup_attempt_identity: Option<Value>,
+    /// verified_graph_version from the first generate_proposal.
+    pub initial_version: Value,
+    /// accepted graph_version integer (base for admit_execution).
+    pub accepted_gv: i64,
+    /// Current verified_version from a post-lifecycle work_views.
+    pub current_version: Value,
+    /// WorkExecutionSnapshot from admit_execution (start_attempt input).
+    pub execution_snapshot: Value,
+    /// Head commit id used by the seed attempts.
+    pub commit: String,
+    /// workflow_definition validated with environment-repaired pins.
+    pub definition: Value,
+    pub definition_id: String,
+    pub actor_id: String,
+    /// worktree_id from the start_run authority (handoff scope component).
+    pub worktree_id: Option<String>,
+    /// A live workflow run (id + current sequence) for run-control effects.
+    pub wf_run_id: Option<String>,
+    /// Projection generation pair for duplicate-adjudication evidence.
+    pub work_generation: Option<Value>,
+    pub topology_generation: Option<Value>,
 }
 
 /// Sampled data drawn from a freshly indexed graph plus seeded entity state.
@@ -160,7 +269,10 @@ pub struct QueryContext {
     pub dir_prefixes: Vec<String>,
     /// Mounted repo root on disk (file URIs, worktree targets).
     pub project_root: PathBuf,
-    pub seeds: crate::coverage::Seeds,
+    /// Coverage-sweep seeds, populated by `coverage::seed_all` when the
+    /// `large_repos` root wires it in; the standalone `queries` bench leaves
+    /// it defaulted.
+    pub seeds: Seeds,
 }
 
 impl QueryContext {
@@ -250,39 +362,7 @@ async fn try_build_context(
         }
     }
 
-    let file_payload = call_json_tool(
-        harness,
-        project_root,
-        "tracedecay_files",
-        json!({ "layout": "flat", "format": "json" }),
-    )
-    .await?;
-    // Large listings come back as a result-handle envelope: the usable
-    // entries live in `preview` (a truncated JSON string). Sampling only
-    // needs paths — recover the complete file objects from the prefix.
-    let files: Vec<Value> = match file_payload.get("files").and_then(Value::as_array) {
-        Some(files) => files.clone(),
-        None => {
-            let preview = file_payload
-                .get("preview")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let re = regex::Regex::new(r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#)
-                .map_err(|e| e.to_string())?;
-            let mut recovered = Vec::new();
-            for m in re.find_iter(preview) {
-                if let Ok(file) = serde_json::from_str::<Value>(m.as_str()) {
-                    recovered.push(file);
-                }
-            }
-            if recovered.is_empty() {
-                return Err(format!(
-                    "tracedecay_files returned no files array: {file_payload}"
-                ));
-            }
-            recovered
-        }
-    };
+    let files: Vec<Value> = list_repo_files(harness, project_root).await?;
 
     // Collect first-segment directory prefixes from the sample files (so
     // `path_prefix` queries are valid for *this* repo regardless of layout).
@@ -304,8 +384,9 @@ async fn try_build_context(
     require_samples("qualified function names", &function_qnames)?;
     require_samples("indexed directory prefixes", &dir_prefixes)?;
 
-    let seeds = crate::coverage::seed_all(harness, project_root, &function_qnames, &files).await;
-
+    // Seed producers live in `coverage/` (not compiled into the standalone
+    // `queries` bench root): the caller wires `coverage::seed_all` when it
+    // wants the sweep ledger.
     Ok(QueryContext {
         function_ids,
         struct_ids,
@@ -313,8 +394,46 @@ async fn try_build_context(
         function_qnames,
         dir_prefixes,
         project_root: project_root.to_path_buf(),
-        seeds,
+        seeds: Seeds::default(),
     })
+}
+
+/// Flat `tracedecay_files` listing as value objects. Large listings come back
+/// as a result-handle envelope whose usable entries live in `preview` (a
+/// truncated JSON string); the complete file objects are recovered from the
+/// prefix so every consumer sees the same shape.
+pub(crate) async fn list_repo_files(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<Vec<Value>, String> {
+    let file_payload = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_files",
+        json!({ "layout": "flat", "format": "json" }),
+    )
+    .await?;
+    match file_payload.get("files").and_then(Value::as_array) {
+        Some(files) => Ok(files.clone()),
+        None => {
+            let preview = file_payload
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let re = regex::Regex::new(r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#)
+                .map_err(|e| e.to_string())?;
+            let recovered: Vec<Value> = re
+                .find_iter(preview)
+                .filter_map(|m| serde_json::from_str::<Value>(m.as_str()).ok())
+                .collect();
+            if recovered.is_empty() {
+                return Err(format!(
+                    "tracedecay_files returned no files array: {file_payload}"
+                ));
+            }
+            Ok(recovered)
+        }
+    }
 }
 
 pub(crate) async fn call_json_tool(
@@ -726,7 +845,6 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         });
     }
 
-    groups.extend(crate::coverage::coverage_groups(ctx));
     groups
 }
 

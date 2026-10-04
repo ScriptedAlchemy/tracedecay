@@ -35,7 +35,9 @@ use tracedecay_domain::{
     WorkRouteExecutionProfileV1, WorkSandboxPolicy,
 };
 
-use crate::queries::{Query, QueryContext, ToolGroup, call_json_tool};
+use crate::queries::{
+    NativeSeeds, Query, QueryContext, Seeds, ToolGroup, WorkSeeds, call_json_tool,
+};
 
 /// Deterministic codex rollout session id seeded per repo before `open`.
 pub(crate) fn bench_session_id(repo_name: &str) -> String {
@@ -93,142 +95,6 @@ pub(crate) fn seed_transcripts(isolation_root: &Path, repos: &[(String, std::pat
             eprintln!("[bench] transcript {}: {e}", path.display());
         }
     }
-}
-
-/// Entity state minted during context build; `None`/empty means the producer
-/// failed and the dependent groups are skipped (the reason lands in `skipped`).
-#[derive(Default)]
-pub struct Seeds {
-    pub project_id: Option<String>,
-    pub repository_id: Option<String>,
-    pub branch: Option<String>,
-    pub head_commit: Option<String>,
-    /// First-parent ancestor of `head_commit` for range-diff coverage.
-    pub parent_commit: Option<String>,
-    /// (fact_id, related_fact_id, search_query, [entities])
-    pub fact_pair: Option<(String, String, String, Vec<String>)>,
-    /// Scalar boolean key toggled during seed (diagnostics.prewarm.v1).
-    pub config_key: Option<String>,
-    /// Latest configuration revision after the seed set/unset pair.
-    pub config_revision: Option<String>,
-    /// The seeded revision (rollback target).
-    pub config_rollback_target: Option<String>,
-    /// Toggled scalar value to set next ({kind:boolean,value}).
-    pub config_scalar: Option<Value>,
-    /// Effective work.topology_policy.v1 value for protected previews.
-    pub topology_policy: Option<Value>,
-    /// Code-query node identities minted via `code_symbol_search` (distinct
-    /// from graph node ids; these tools consume the query-side identity).
-    pub code_node_ids: Vec<String>,
-    /// A graph node whose rename_preview is unblocked (source-edit lane needs
-    /// a symbol the policy can actually rename — most corpus symbols refuse
-    /// with ambiguous/hazard evidence, so seed time probes candidates).
-    pub rename_node: Option<Value>,
-    /// Symbol qualified names whose per-op dry_run completed small enough to
-    /// return `expected_state` inline (big symbols truncate the preview into
-    /// a result handle, which timing must not depend on).
-    pub replace_target: Option<String>,
-    pub insert_target: Option<String>,
-    pub move_target: Option<String>,
-    /// Ingested codex session id for this repo (td-bench-<name>).
-    pub lcm_session: Option<String>,
-    /// Canonical occurrence id minted by lcm_load_session.
-    pub lcm_message_id: Option<String>,
-    /// multi_root scope_set committed via compare_and_swap (id/revision/digest).
-    pub scope_set_id: Option<String>,
-    pub scope_set_revision: Option<i64>,
-    pub scope_set_digest: Option<String>,
-    /// session_refresh_begin handle + its selector arguments.
-    pub refresh_handle: Option<String>,
-    /// Operation id returned alongside the begin handle.
-    pub refresh_operation_id: Option<String>,
-    pub refresh_selectors: Option<Value>,
-    pub automation_run_id: Option<String>,
-    /// git_hunks producer output for `git_preview`/`git_apply`.
-    pub preview_input_id: Option<String>,
-    pub hunk_digests: Vec<String>,
-    /// Repo-relative file left modified for the git working-tree lane.
-    pub dirty_file: Option<String>,
-    /// Skill id minted via profile skill file drop (managed skills surface).
-    pub skill_id: Option<String>,
-    /// First worktree entry id seen in the seeded worktree inventory (cleanup
-    /// lane targets `kind:"worktree"` objects).
-    pub worktree_id: Option<String>,
-    /// Changed path whose run_affected_tests plan maps to covering tests
-    /// (minted a request handle at seed time).
-    pub test_results_path: Option<String>,
-    /// Reversible-truncation handle (`rh_…`) minted by a deliberately fat
-    /// search response at seed time; feeds `tracedecay_retrieve`.
-    pub retrieve_handle: Option<String>,
-    /// Tools whose application authority never mounts under the bench
-    /// composition, discovered by seed-time probes — their groups are
-    /// omitted and named in `skipped`.
-    pub unavailable_tools: std::collections::BTreeSet<String>,
-    /// Tools/families whose seed producer failed — the bench prints these so
-    /// skipped coverage is visible instead of silent.
-    pub skipped: Vec<String>,
-    /// Real repo-relative file paths sampled from `tracedecay_files`.
-    pub sample_files: Vec<String>,
-    /// Work/workflow lifecycle artifacts minted by `seed_work`.
-    pub work: Option<WorkSeeds>,
-    /// A fresh work-executable binding committed this run; route resolution
-    /// reads bindings at composition open, so the caller must reopen the
-    /// harness once (then rebuild context) before the admit lane can pass.
-    pub needs_reopen_for_provider: bool,
-    /// Second bench branch pinned at HEAD~1 (branch_diff base ref; the tool
-    /// resolves branch names, not raw oids).
-    pub base_branch: Option<String>,
-    /// Native-integration journey artifacts minted at seed (inventory →
-    /// stack_snapshot → preflight → approve). Absent = family skipped.
-    pub native: Option<NativeSeeds>,
-}
-
-/// Minted once per run: the stack_snapshot body that seals, plus the live
-/// transaction the status lane reads.
-#[derive(Clone, Default)]
-pub struct NativeSeeds {
-    /// Validated `stack_snapshot` request body — the groups replay it to mint
-    /// fresh per-iteration transactions.
-    pub snapshot_body: Value,
-    /// transaction_id of the seed-minted (approved) transaction.
-    pub transaction_id: String,
-}
-
-/// Artifacts of one real disposable Work lifecycle plus one workflow
-/// definition/run, minted once so the ~45 work_* and workflow_* tools measure
-/// against real graph state. Field absence means that leg failed and only its
-/// dependent groups skip.
-#[derive(Default)]
-pub struct WorkSeeds {
-    pub selection: Value,
-    pub task_id: String,
-    pub run_id: String,
-    pub attempt_id: String,
-    /// Started-then-cancelled terminal attempt identity {task,run,attempt}.
-    pub attempt_identity: Value,
-    /// Second terminal attempt for duplicate-adjudication reads/effects.
-    pub dup_attempt_identity: Option<Value>,
-    /// verified_graph_version from the first generate_proposal.
-    pub initial_version: Value,
-    /// accepted graph_version integer (base for admit_execution).
-    pub accepted_gv: i64,
-    /// Current verified_version from a post-lifecycle work_views.
-    pub current_version: Value,
-    /// WorkExecutionSnapshot from admit_execution (start_attempt input).
-    pub execution_snapshot: Value,
-    /// Head commit id used by the seed attempts.
-    pub commit: String,
-    /// workflow_definition validated with environment-repaired pins.
-    pub definition: Value,
-    pub definition_id: String,
-    pub actor_id: String,
-    /// worktree_id from the start_run authority (handoff scope component).
-    pub worktree_id: Option<String>,
-    /// A live workflow run (id + current sequence) for run-control effects.
-    pub wf_run_id: Option<String>,
-    /// Projection generation pair for duplicate-adjudication evidence.
-    pub work_generation: Option<Value>,
-    pub topology_generation: Option<Value>,
 }
 
 fn opt_err(
@@ -409,9 +275,21 @@ pub(crate) async fn seed_all(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     function_qnames: &[String],
-    files: &[Value],
 ) -> Seeds {
     let mut seeds = Seeds::default();
+    // File probes consume the same flat listing the context builder samples;
+    // fetch it here so this stays self-contained for the caller that owns
+    // `ctx.seeds`.
+    let files: Vec<Value> = match crate::queries::list_repo_files(harness, project_root).await {
+        Ok(files) => files,
+        Err(e) => {
+            seeds
+                .skipped
+                .push(format!("tracedecay_files for seeding: {e}"));
+            Vec::new()
+        }
+    };
+    let files = files.as_slice();
     seeds.sample_files = files
         .iter()
         .filter_map(|f| f.get("path").and_then(Value::as_str))
@@ -2502,7 +2380,15 @@ pub(crate) fn eq(
 ) -> Query {
     let mut args = extra;
     args["format"] = json!("json");
-    Query::effect(label, tool, args, prime)
+    Query {
+        label,
+        tool,
+        args,
+        kind: crate::queries::QueryKind::Effect {
+            prime,
+            cleanup: None,
+        },
+    }
 }
 
 /// Effect query without `format`.
@@ -2512,7 +2398,15 @@ pub(crate) fn eqn(
     args: Value,
     prime: crate::queries::PrimeFn,
 ) -> Query {
-    Query::effect(label, tool, args, prime)
+    Query {
+        label,
+        tool,
+        args,
+        kind: crate::queries::QueryKind::Effect {
+            prime,
+            cleanup: None,
+        },
+    }
 }
 
 /// Current wall-clock micros for `occurred_at`/horizon args.
@@ -2539,7 +2433,15 @@ pub(crate) fn eqc(
 ) -> Query {
     let mut a = args;
     a["format"] = json!("json");
-    Query::effect_with_cleanup(label, tool, a, prime, cleanup)
+    Query {
+        label,
+        tool,
+        args: a,
+        kind: crate::queries::QueryKind::Effect {
+            prime,
+            cleanup: Some(cleanup),
+        },
+    }
 }
 
 /// Sampled real file path (wrap-around like `pick`).

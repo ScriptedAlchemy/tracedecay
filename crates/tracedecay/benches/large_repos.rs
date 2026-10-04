@@ -58,10 +58,14 @@ async fn prepare_repo(
     dir: PathBuf,
     repo: Repo,
 ) -> Result<RepoBench, String> {
-    let ctx = build_context(harness, &dir)
+    let mut ctx = build_context(harness, &dir)
         .await
         .map_err(|error| format!("sample {}: {error}", repo.name))?;
-    let groups = build_queries(&ctx);
+    // Coverage seeds/groups live only under this root — `queries.rs` stays
+    // coverage-free so the standalone `queries` bench still compiles.
+    ctx.seeds = coverage::seed_all(harness, &dir, &ctx.function_qnames).await;
+    let mut groups = build_queries(&ctx);
+    groups.extend(coverage::coverage_groups(&ctx));
     Ok(RepoBench {
         dir,
         name: repo.name,
