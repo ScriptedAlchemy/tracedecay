@@ -132,6 +132,13 @@ debug = 0
 [profile.dev.package.tracedecay-daemon-protocol]
 opt-level = 0
 
+# Same shape as the protocol crate: transport-neutral DTOs whose serde and
+# schemars glue is almost all LLVM time. Measured on a workspace-cold
+# `tracedecay-cli` build: ~205s at opt-level 1 against ~79s at opt-level 0,
+# ~40s off wall time since the crate is on the critical path.
+[profile.dev.package.tracedecay-contracts]
+opt-level = 0
+
 # The first token count pays a one-time BPE model load (embedded-vocabulary
 # base64 decode + BPE regex compile) that costs seconds in unoptimized
 # builds; the dashboard token-count warm task and its tests hit it on every

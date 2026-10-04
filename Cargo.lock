@@ -5395,7 +5395,6 @@ dependencies = [
  "filetime",
  "futures-util",
  "gix",
- "glob",
  "hex",
  "jsonschema",
  "keyring",
