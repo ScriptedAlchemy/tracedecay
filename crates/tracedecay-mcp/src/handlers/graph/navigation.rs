@@ -76,6 +76,7 @@ pub async fn compute_impact(
         complete: impact.complete,
         unavailable_fields: vec!["edge_count".to_owned()],
         nodes,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::Impact(ImpactResultV1::Found(result)),
@@ -150,6 +151,7 @@ pub async fn compute_node(
                     full_file: file_size_bytes / 4,
                 },
                 unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
+                freshness: None,
             };
             Ok(graph_tool_completion(
                 GraphToolResultV1::Node(NodeResultV1::Found(Box::new(details))),

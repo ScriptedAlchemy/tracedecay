@@ -61,6 +61,7 @@ pub(crate) fn node_not_found_result(node_id: &str) -> PrimitiveNotFoundV1 {
         reason_code: "node_not_found".to_owned(),
         node_id: node_id.to_owned(),
         message: format!("Node not found: {node_id}"),
+        freshness: None,
     }
 }
 
