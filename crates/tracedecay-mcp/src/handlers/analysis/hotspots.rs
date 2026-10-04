@@ -70,12 +70,15 @@ pub(super) async fn compute_hotspots(
     symbols.sort_by(|left, right| {
         let left_degree = degree(&left.occurrence);
         let right_degree = degree(&right.occurrence);
-        let rank = |symbol_degree: u64, path: &str| match churn_available {
-            true => churn_weighted_rank(
-                symbol_degree,
-                u64::try_from(churn_by_file.get(path).copied().unwrap_or(0)).unwrap_or(u64::MAX),
-            ),
-            false => symbol_degree,
+        let rank = |symbol_degree: u64, path: &str| {
+            if churn_available {
+                churn_weighted_rank(
+                    symbol_degree,
+                    u64::try_from(churn_by_file.get(path).copied().unwrap_or(0)).unwrap_or(u64::MAX),
+                )
+            } else {
+                symbol_degree
+            }
         };
         rank(right_degree, right.path.as_str())
             .cmp(&rank(left_degree, left.path.as_str()))
