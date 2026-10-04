@@ -218,3 +218,256 @@ opt-level = 3
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
+
+# Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
+# not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`
+# audit on 8 cores found the wall-time critical path is a serial chain of
+# workspace crates whose cost is ~85% LLVM codegen at dev opt-level 1:
+# rusqlite-runtime (96s codegen), tracedecay (69s), daemon-service (49s),
+# mcp (35s), application (142s, off-path but fan-out). Compiling dispatch,
+# DTO, and plumbing crates unoptimized cut a cold build from 461s to 345s
+# wall (-25%) and workspace CPU by ~45% (measured). The perf-pinned kernels
+# (code-index, rusqlite-runtime, store, grafeo-*, ...) keep dev opt-level 1 so
+# local tests keep optimized engine code; the perf mirror pins preserve every
+# crate's previous perf level since `perf` inherits dev overrides.
+
+[profile.dev.package.tracedecay]
+opt-level = 0
+
+[profile.perf.package.tracedecay]
+opt-level = 1
+
+[profile.dev.package.tracedecay-agent-hosts]
+opt-level = 0
+
+[profile.perf.package.tracedecay-agent-hosts]
+opt-level = 1
+
+[profile.dev.package.tracedecay-api]
+opt-level = 0
+
+[profile.perf.package.tracedecay-api]
+opt-level = 1
+
+[profile.dev.package.tracedecay-application]
+opt-level = 0
+
+[profile.perf.package.tracedecay-application]
+opt-level = 1
+
+[profile.dev.package.tracedecay-automation]
+opt-level = 0
+
+[profile.perf.package.tracedecay-automation]
+opt-level = 1
+
+[profile.dev.package.tracedecay-automation-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-automation-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-capture]
+opt-level = 0
+
+[profile.perf.package.tracedecay-capture]
+opt-level = 1
+
+[profile.dev.package.tracedecay-cli]
+opt-level = 0
+
+[profile.perf.package.tracedecay-cli]
+opt-level = 1
+
+[profile.dev.package.tracedecay-code-index-retention]
+opt-level = 0
+
+[profile.perf.package.tracedecay-code-index-retention]
+opt-level = 1
+
+[profile.dev.package.tracedecay-configuration]
+opt-level = 0
+
+[profile.perf.package.tracedecay-configuration]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-control]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-control]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-identity]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-identity]
+opt-level = 1
+
+[profile.dev.package.tracedecay-daemon-service]
+opt-level = 0
+
+[profile.perf.package.tracedecay-daemon-service]
+opt-level = 1
+
+[profile.dev.package.tracedecay-dashboard-api]
+opt-level = 0
+
+[profile.perf.package.tracedecay-dashboard-api]
+opt-level = 1
+
+[profile.dev.package.tracedecay-framing]
+opt-level = 0
+
+[profile.perf.package.tracedecay-framing]
+opt-level = 1
+
+[profile.dev.package.tracedecay-global-db]
+opt-level = 0
+
+[profile.perf.package.tracedecay-global-db]
+opt-level = 1
+
+[profile.dev.package.tracedecay-graph-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-graph-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-hooks]
+opt-level = 0
+
+[profile.perf.package.tracedecay-hooks]
+opt-level = 1
+
+[profile.dev.package.tracedecay-host-admission]
+opt-level = 0
+
+[profile.perf.package.tracedecay-host-admission]
+opt-level = 1
+
+[profile.dev.package.tracedecay-host-integration]
+opt-level = 0
+
+[profile.perf.package.tracedecay-host-integration]
+opt-level = 1
+
+[profile.dev.package.tracedecay-lcm]
+opt-level = 0
+
+[profile.perf.package.tracedecay-lcm]
+opt-level = 1
+
+[profile.dev.package.tracedecay-lsp]
+opt-level = 0
+
+[profile.perf.package.tracedecay-lsp]
+opt-level = 1
+
+[profile.dev.package.tracedecay-maintenance]
+opt-level = 0
+
+[profile.perf.package.tracedecay-maintenance]
+opt-level = 1
+
+[profile.dev.package.tracedecay-mcp]
+opt-level = 0
+
+[profile.perf.package.tracedecay-mcp]
+opt-level = 1
+
+[profile.dev.package.tracedecay-mcp-catalog]
+opt-level = 0
+
+[profile.perf.package.tracedecay-mcp-catalog]
+opt-level = 1
+
+[profile.dev.package.tracedecay-policy]
+opt-level = 0
+
+[profile.perf.package.tracedecay-policy]
+opt-level = 1
+
+[profile.dev.package.tracedecay-privacy]
+opt-level = 0
+
+[profile.perf.package.tracedecay-privacy]
+opt-level = 1
+
+[profile.dev.package.tracedecay-private-fs]
+opt-level = 0
+
+[profile.perf.package.tracedecay-private-fs]
+opt-level = 1
+
+[profile.dev.package.tracedecay-project]
+opt-level = 0
+
+[profile.perf.package.tracedecay-project]
+opt-level = 1
+
+[profile.dev.package.tracedecay-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-sdk]
+opt-level = 0
+
+[profile.perf.package.tracedecay-sdk]
+opt-level = 1
+
+[profile.dev.package.tracedecay-search-eval]
+opt-level = 0
+
+[profile.perf.package.tracedecay-search-eval]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-memory]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-memory]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-session-temporal-store]
+opt-level = 0
+
+[profile.perf.package.tracedecay-session-temporal-store]
+opt-level = 1
+
+[profile.dev.package.tracedecay-sessions]
+opt-level = 0
+
+[profile.perf.package.tracedecay-sessions]
+opt-level = 1
+
+[profile.dev.package.tracedecay-source-edit]
+opt-level = 0
+
+[profile.perf.package.tracedecay-source-edit]
+opt-level = 1
+
+[profile.dev.package.tracedecay-store-runtime]
+opt-level = 0
+
+[profile.perf.package.tracedecay-store-runtime]
+opt-level = 1
+
+[profile.dev.package.tracedecay-temporal-query]
+opt-level = 0
+
+[profile.perf.package.tracedecay-temporal-query]
+opt-level = 1
+
+[profile.dev.package.tracedecay-tool-catalog]
+opt-level = 0
+
+[profile.perf.package.tracedecay-tool-catalog]
+opt-level = 1
+
