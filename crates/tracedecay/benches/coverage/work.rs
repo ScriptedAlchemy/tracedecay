@@ -573,7 +573,7 @@ fn tg(tool: &'static str, queries: Vec<Query>) -> ToolGroup {
 
 /// One static arg shape ×5 — the harness invariant.
 fn fiveq(q: &dyn Fn(usize) -> Query) -> Vec<Query> {
-    five(|i| q(i))
+    five(q)
 }
 
 pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
