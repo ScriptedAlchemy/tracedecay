@@ -736,6 +736,10 @@ impl CodeIndexSchedulerRegistryV1 {
             // generation that serves text without a native graph to one per
             // generation, so a permanently unactivatable seal cannot spin.
             let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
+            // A successor sealed while the previous pass joined its text
+            // projection. The next pass takes it in place of its own source
+            // reconcile, so an edit never queues behind a projection.
+            let mut sealed_successor: Option<CodeIndexReconcileOutcomeV1> = None;
             // A retained revision-7 graph gets one verified-head attempt
             // before ordinary source reconciliation owns any repair. A failed
             // verification falls through to one canonical replay of the same
@@ -899,6 +903,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // another actor and would reset if this loop state were lost
                 // while the slot remained.
                 if publication_authority_is_terminal(&worker_convergence_park) {
+                    sealed_successor = None;
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
                         &worker_wake,
@@ -1417,8 +1422,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 let bind_serving_generation = Arc::clone(&worker_serving_generation);
                 let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
                 let bind_source_freshness = worker_source_freshness.clone();
+                let stashed_successor = sealed_successor.take();
                 let source_result = tracing::Instrument::instrument(
                     tokio::task::spawn_blocking(move || {
+                        if let Some(outcome) = stashed_successor {
+                            return Ok(outcome);
+                        }
                         let mut scheduler =
                             Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
                         // One arrival per attempted pass, before the branch: the
@@ -2678,8 +2687,80 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Join the publication's projection, then process its outcome
                 // at the existing source-proof and serving-swap boundary. Graph
                 // work above overlapped it; nothing seats before text is done.
-                if let Some(projection) = published_text_projection.take() {
-                    published_text_projection_outcome = Some(match projection.await {
+                if let Some(mut projection) = published_text_projection.take() {
+                    // An arrival during the projection seals its successor now
+                    // instead of waiting for this projection and its seat. The
+                    // pending arrival stays for the next pass, which takes the
+                    // sealed outcome. Admission is only tried: this pass holds
+                    // the publication gate, and waiting on admission under it
+                    // inverts the gate order.
+                    let mut preserve_worker_wake = false;
+                    let joined = loop {
+                        if !worker_shutting_down.load(Ordering::Acquire)
+                            && sealed_successor.is_none()
+                            && worker_pending_wake.has_pending_arrival()
+                            && let Some(metadata) =
+                                graph_text.as_ref().map(|text| text.metadata().clone())
+                            && let Ok(admission) =
+                                Arc::clone(&worker_background_reconcile_admission)
+                                    .try_acquire_owned()
+                        {
+                            let scheduler = Arc::clone(&worker_scheduler);
+                            let shutting_down = Arc::clone(&worker_shutting_down);
+                            let retained_text_only = !graph_activation_enabled;
+                            let sealed = tokio::task::spawn_blocking(move || {
+                                let mut scheduler = Self::lock_scheduler_unless_shutting_down(
+                                    &scheduler,
+                                    &shutting_down,
+                                )?;
+                                match scheduler.reconcile_retained_text_generation_with(
+                                    &metadata,
+                                    retained_text_only,
+                                )? {
+                                    Some(outcome) => Ok(Some(outcome)),
+                                    None if retained_text_only => {
+                                        scheduler.reconcile_now().map(Some)
+                                    }
+                                    None => scheduler.activate_or_reconcile().map(Some),
+                                }
+                            })
+                            .await;
+                            drop(admission);
+                            match sealed {
+                                Ok(Ok(Some(
+                                    outcome @ CodeIndexReconcileOutcomeV1::Published(_),
+                                ))) => {
+                                    tracing::info!(
+                                        event =
+                                            "code_index_successor_sealed_during_text_projection",
+                                        "an arrival during text projection sealed its successor"
+                                    );
+                                    sealed_successor = Some(outcome);
+                                }
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => tracing::debug!(
+                                    event = "code_index_successor_seal_during_text_projection_deferred",
+                                    error = %error,
+                                    "the successor seal waits for the next pass"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    event = "code_index_successor_seal_during_text_projection_task_failed",
+                                    error = %error,
+                                    "the successor seal task failed; the next pass reconciles"
+                                ),
+                            }
+                        }
+                        tokio::select! {
+                            outcome = &mut projection => break outcome,
+                            () = worker_wake.notified() => {
+                                preserve_worker_wake = true;
+                            }
+                        }
+                    };
+                    if preserve_worker_wake {
+                        worker_wake.notify_one();
+                    }
+                    published_text_projection_outcome = Some(match joined {
                         Ok(outcome) => outcome,
                         Err(error) => {
                             if let Some(text) = graph_text.as_ref() {
@@ -2755,7 +2836,13 @@ impl CodeIndexSchedulerRegistryV1 {
                             // sealed digests are swept again here: a write that
                             // landed during the projection is observed now,
                             // leaves the seat stale, and wakes its successor.
-                            if let Some(text) = graph_text.as_ref() {
+                            //
+                            // A successor sealed during the projection already
+                            // proved the move; re-reconciling this generation
+                            // would race that seal.
+                            if sealed_successor.is_none()
+                                && let Some(text) = graph_text.as_ref()
+                            {
                                 let proof_unmoved = worker_source_freshness.serves_verified_source(
                                     &text.metadata().snapshot().content_identity,
                                     &worker_project_root,

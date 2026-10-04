@@ -4118,6 +4118,80 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_during_text_projection_seals_its_successor_before_the_projection_finishes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_opened_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let active_pointer = || {
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publication
+            .read_publication_pointer()
+            .expect("read publication pointer")
+            .expect("publication pointer")
+    };
+    let projecting = active_pointer().generation_id;
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n",
+    );
+    registry
+        .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while active_pointer().generation_id == projecting {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the edit must seal its successor while the projection is still running");
+
+    release_projection
+        .send(())
+        .expect("release publication projection");
+    let successor = active_pointer().generation_id;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pointer = active_pointer();
+            let projected = |generation_id: &str| {
+                pointer.generation_index.iter().any(|entry| {
+                    entry.generation_id == generation_id && entry.text_artifact().is_some()
+                })
+            };
+            if projected(&projecting) && projected(&successor) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the superseded projection finishes and its successor projects after it");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
     let store = TempDir::new().expect("store root");
