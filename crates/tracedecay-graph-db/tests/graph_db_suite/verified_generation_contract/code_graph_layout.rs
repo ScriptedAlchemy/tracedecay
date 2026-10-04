@@ -233,6 +233,137 @@ fn second_generation_supersedes_the_head_and_the_first_retires_without_head_reti
     );
 }
 
+/// The mid-publish window: the code index deletes a superseded generation
+/// while its replay is still the projection's verified head — the durable
+/// pointer already names a successor whose graph publication has not
+/// landed. The sweep must answer Retained and leave the shared head
+/// serving; CAS-deleting it here is what left restarts a headless
+/// projection that replayed the whole sealed generation to repair itself.
+/// Once the successor publishes, the same sweep reclaims the superseded
+/// generation through the ordinary non-head path.
+#[test]
+fn sweep_keeps_the_shared_head_while_the_deleted_generation_still_serves() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.serving");
+    let sealed_digest =
+        SealedGraphStateDigest::try_from(format!("sha256:{}", "7".repeat(64))).unwrap();
+    let alpha = CodeGenerationId::new("code-generation.alpha").unwrap();
+    let beta = CodeGenerationId::new("code-generation.beta").unwrap();
+
+    let g1 = manifest(identity.clone(), "serving-g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:serving-g1",
+        None,
+        '1',
+    );
+    let (control, probe) = control_and_probe();
+    let g1_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    bind_sealed_source(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        &g1_record,
+        "publish:serving-g1",
+        None,
+        '1',
+        &alpha,
+        &sealed_digest,
+    );
+
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &alpha,
+            &sealed_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Retained),
+        "the still-serving shared head must survive the superseded-generation sweep",
+    );
+    assert_eq!(
+        authority.heads.get(&g1_record.publication.key.projection),
+        Some(&g1_head),
+        "the shared head keeps serving until a successor publish supersedes it",
+    );
+    assert_eq!(authority.head_retirement_calls, 0);
+
+    let g2 = manifest(identity.clone(), "serving-g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:serving-g2",
+        Some(g1_head.clone()),
+        '2',
+    );
+    let (control, probe) = control_and_probe();
+    let g2_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g2_head = g2_commit.head.clone();
+    drop(g2_commit);
+    bind_sealed_source(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        &g2_record,
+        "publish:serving-g2",
+        Some(g1_head),
+        '2',
+        &beta,
+        &sealed_digest,
+    );
+
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &alpha,
+            &sealed_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Retired(Box::new(
+            tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(sealed_source(
+                &alpha,
+                &sealed_digest,
+            ))
+        ))),
+        "the superseded generation retires once a successor holds the head",
+    );
+    assert_eq!(authority.head_retirement_calls, 0);
+    assert_eq!(
+        authority.heads.get(&g2_record.publication.key.projection),
+        Some(&g2_head),
+        "the successor head still serves after the sweep",
+    );
+}
+
 /// Number of sealed generation artifacts currently on disk under the store.
 fn sealed_generation_count(root: &std::path::Path) -> usize {
     std::fs::read_dir(support::graph_path(root).with_extension("sealed"))
