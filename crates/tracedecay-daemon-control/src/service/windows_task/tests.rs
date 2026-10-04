@@ -8,6 +8,85 @@ use tracedecay_runtime_core::config::ProfileRoot;
 const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
 #[test]
+fn task_names_and_ownership_are_isolated_between_profiles_of_one_user() {
+    let root = tempfile::tempdir().unwrap();
+    let first = spec(
+        root.path().join("tracedecay.exe"),
+        root.path().join("first"),
+    );
+    let second = spec(
+        root.path().join("tracedecay.exe"),
+        root.path().join("second"),
+    );
+    let first_id = TaskIdentity::for_user_sid(TEST_SID)
+        .unwrap()
+        .for_profile(&first.profile)
+        .unwrap();
+    let second_id = TaskIdentity::for_user_sid(TEST_SID)
+        .unwrap()
+        .for_profile(&second.profile)
+        .unwrap();
+    assert_ne!(first_id.task_path, second_id.task_path);
+    let first_xml = render_task_xml_for(&first, &first_id).unwrap();
+    let second_xml = render_task_xml_for(&second, &second_id).unwrap();
+    assert!(
+        task_definition_is_owned(&first_xml, &first_id.sddl, &first_id),
+        "owned={:?}, loaded={:?}, sddl={:?}",
+        first_id.profile_root,
+        profile_root_from_task_xml(&first_xml),
+        first_id.sddl
+    );
+    assert!(task_definition_is_owned(
+        &second_xml,
+        &second_id.sddl,
+        &second_id
+    ));
+    assert!(!task_definition_is_owned(
+        &first_xml,
+        &second_id.sddl,
+        &second_id
+    ));
+    assert!(!task_definition_is_owned(
+        &second_xml,
+        &first_id.sddl,
+        &first_id
+    ));
+}
+
+#[test]
+fn home_default_task_keeps_its_name_but_refuses_a_foreign_home_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let profile = ProfileRoot::from_vars(|name| {
+        (name == tracedecay_runtime_core::config::HOME_ENV).then(|| home.clone().into_os_string())
+    })
+    .unwrap();
+    let identity = TaskIdentity::for_user_sid(TEST_SID)
+        .unwrap()
+        .for_profile(&profile)
+        .unwrap();
+    assert_eq!(
+        identity.task_name,
+        format!("TraceDecay Daemon ({TEST_SID})")
+    );
+    let owned = spec(root.path().join("tracedecay.exe"), profile.data_dir());
+    let foreign = spec(
+        root.path().join("tracedecay.exe"),
+        root.path().join("other-home/.tracedecay"),
+    );
+    assert!(task_definition_is_owned(
+        &render_task_xml_for(&owned, &identity).unwrap(),
+        &identity.sddl,
+        &identity
+    ));
+    assert!(!task_definition_is_owned(
+        &render_task_xml_for(&foreign, &identity).unwrap(),
+        &identity.sddl,
+        &identity
+    ));
+}
+
+#[test]
 fn scoop_packages_have_isolated_runtime_and_task_identities() {
     let local_app_data = Path::new(r"C:\Users\alice\AppData\Local");
     let stable = ServiceRuntimeLayout::below(local_app_data, WindowsPackageId::Stable);

@@ -1,21 +1,24 @@
 use super::*;
 
 #[test]
-fn symlink_aliases_share_one_database_identity() {
+fn filesystem_aliases_share_one_database_identity() {
     let temp = tempfile::tempdir().unwrap();
-    let database = temp.path().join("database.db");
-    let alias = temp.path().join("database-alias.db");
+    let real = temp.path().join("real");
+    let alias_root = temp.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    let database = real.join("database.db");
+    let alias = alias_root.join("database.db");
     std::fs::write(&database, []).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&database, &alias).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&database, &alias).unwrap();
-    #[cfg(not(any(unix, windows)))]
-    std::fs::copy(&database, &alias).unwrap();
+    {
+        std::fs::create_dir(&alias_root).unwrap();
+        std::os::unix::fs::symlink(&database, &alias).unwrap();
+    }
+    #[cfg(not(unix))]
+    crate::test_fs::create_directory_alias(&real, &alias_root).unwrap();
 
     let database = DatabaseIdentity::for_path(&database).unwrap();
     let alias = DatabaseIdentity::for_path(&alias).unwrap();
-    #[cfg(any(unix, windows))]
     assert_eq!(database.database_key, alias.database_key);
 }
 

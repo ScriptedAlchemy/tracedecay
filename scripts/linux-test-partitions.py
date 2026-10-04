@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -431,7 +432,10 @@ def run_linux_group(document: dict[str, Any], metadata: dict[str, Any], name: st
             ]))
             for stage, args in commands:
                 started = time.monotonic()
-                completed = subprocess.run(["hauler", "exec", "--", "cargo", *args], cwd=ROOT)
+                hauler = shutil.which("hauler")
+                if hauler is None:
+                    raise FileNotFoundError("hauler executable not found on PATH")
+                completed = subprocess.run([hauler, "exec", "--", "cargo", *args], cwd=ROOT)
                 result[stage] = {"seconds": round(time.monotonic() - started, 3), "exit_code": completed.returncode}
                 if completed.returncode:
                     failed = True

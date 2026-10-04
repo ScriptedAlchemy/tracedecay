@@ -28,6 +28,66 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
+#[test]
+fn launchd_profiles_have_distinct_labels_and_plists() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    let default = ProfileRoot::under_home(&home);
+    let first = ProfileRoot::new(root.path().join("first")).with_home(&home);
+    let second = ProfileRoot::new(root.path().join("second")).with_home(&home);
+    assert_eq!(
+        super::unit_file::launchd_label(&default),
+        "com.tracedecay.daemon"
+    );
+    assert_ne!(
+        super::unit_file::launchd_label(&first),
+        super::unit_file::launchd_label(&second)
+    );
+    assert_ne!(
+        super::unit_file::launchd_user_service_path(&first).unwrap(),
+        super::unit_file::launchd_user_service_path(&second).unwrap()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn launchd_stop_refuses_a_foreign_loaded_plist_before_mutating_it() {
+    let root = tempfile::Builder::new()
+        .prefix("launchd ownership ")
+        .tempdir()
+        .unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("isolated home"));
+    let foreign = root
+        .path()
+        .join("operator home/Library/LaunchAgents/com.tracedecay.daemon.plist");
+    let log = root.path().join("commands.log");
+    let launchctl = root.path().join("launchctl.cmd");
+    let id = root.path().join("id.cmd");
+    std::fs::write(
+        &launchctl,
+        format!(
+            "@echo off\r\necho %*>>\"{}\"\r\necho path = {}\r\nexit /b 0\r\n",
+            log.display(),
+            foreign.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(&id, "@echo off\r\necho 501\r\n").unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let error = runner.stop(TEST_BUILD_VERSION).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            tracedecay_domain::TraceDecayError::ServiceUnitNotOwned { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap().trim(),
+        "print gui/501/com.tracedecay.daemon"
+    );
+}
+
 #[cfg(target_os = "linux")]
 fn refresh_in_quiesced_window(
     runner: ServiceRunner,
@@ -148,7 +208,9 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: TEST_BUILD_VERSION.to_owned(),
-        runner: ServiceRunner::WindowsTask,
+        runner: ServiceRunner::WindowsTask {
+            profile: ProfileRoot::new(profile.path()),
+        },
         settlement: RestoreSettlement::Owed,
     };
 
@@ -1067,9 +1129,18 @@ fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
 /// enabled and the socket connect decides whether it runs.
 #[cfg(target_os = "macos")]
 fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
-    let launchctl = fake_service_program(bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let launchctl = fake_service_program(
+        bin,
+        "launchctl",
+        "#!/bin/sh\n[ \"$1\" = print ] && printf 'path = %s\\n' \"${0%/bin/launchctl}/home/Library/LaunchAgents/com.tracedecay.daemon.plist\"\nexit 0\n",
+    );
     let id = fake_service_program(bin, "id", "#!/bin/sh\necho 501\n");
-    ServiceRunner::launchd(&launchctl, &id).expect("fixture launchd runner")
+    ServiceRunner::launchd(
+        &launchctl,
+        &id,
+        &fixture_profile(bin.parent().expect("fixture directory")),
+    )
+    .expect("fixture launchd runner")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1594,6 +1665,10 @@ fn launchctl_stderr_not_loaded_matches_known_messages_only() {
 
 #[test]
 fn launchd_disabled_output_matches_only_the_tracedecay_label() {
+    assert!(!super::runner::launchd_disabled_output_contains_label(
+        "disabled services = {\n\t\"com.tracedecay.daemon.another-profile\" => true\n}",
+        "com.tracedecay.daemon"
+    ));
     assert!(super::runner::launchd_disabled_output_contains_label(
         "disabled services = {\n\t\"com.tracedecay.daemon\" => true\n}",
         "com.tracedecay.daemon"
@@ -1655,7 +1730,7 @@ fn explicitly_injected_launchd_programs_reject_non_executable_paths() {
 
     std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o644))
         .expect("launchctl permissions");
-    let launchctl_error = ServiceRunner::launchd(&launchctl, &id)
+    let launchctl_error = ServiceRunner::launchd(&launchctl, &id, &fixture_profile(dir.path()))
         .expect_err("explicit launchctl path must remain strict");
     assert!(launchctl_error.to_string().contains("launchctl candidate"));
     assert!(launchctl_error.to_string().contains("not executable"));
@@ -1663,8 +1738,8 @@ fn explicitly_injected_launchd_programs_reject_non_executable_paths() {
     std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o755))
         .expect("launchctl permissions");
     std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o644)).expect("id permissions");
-    let id_error =
-        ServiceRunner::launchd(&launchctl, &id).expect_err("explicit id path must remain strict");
+    let id_error = ServiceRunner::launchd(&launchctl, &id, &fixture_profile(dir.path()))
+        .expect_err("explicit id path must remain strict");
     assert!(id_error.to_string().contains("id candidate"));
     assert!(id_error.to_string().contains("not executable"));
 }

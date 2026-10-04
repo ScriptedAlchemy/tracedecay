@@ -413,6 +413,7 @@ fn durable_directory_lock_path(parent: &Path, destination_name: &OsStr) -> PathB
     parent.join(lock_name)
 }
 
+#[cfg(unix)]
 fn create_missing_directories_locked(
     path: &Path,
     mut publish: impl FnMut(&Path) -> io::Result<()>,

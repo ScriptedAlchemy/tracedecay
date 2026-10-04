@@ -119,6 +119,8 @@ pub mod store_telemetry;
 pub mod sync;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_executable;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_fs;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;

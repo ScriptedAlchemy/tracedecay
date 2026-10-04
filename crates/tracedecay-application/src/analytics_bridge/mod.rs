@@ -364,10 +364,8 @@ mod tests {
         std::fs::create_dir(&real).expect("real root");
         let alias = root.path().join("link");
         // Directory alias: canonical project identity must follow it on every host.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, &alias).expect("alias root");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&real, &alias).expect("alias root");
+        tracedecay_runtime_core::test_fs::create_directory_alias(&real, &alias)
+            .expect("alias root");
         let canonical = RegisteredGlobalDb::canonical_project_key(&real);
         (root, canonical, alias)
     }

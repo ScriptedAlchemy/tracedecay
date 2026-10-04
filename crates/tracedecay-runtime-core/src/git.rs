@@ -146,7 +146,8 @@ fn resolve_git_program_from(
     .ok_or(GitProgramUnavailable)
 }
 
-pub(crate) fn find_executable_on_path(name: &str) -> Option<PathBuf> {
+/// Locate a runnable executable using PATH and the platform's executable suffixes.
+pub fn find_executable_on_path(name: &str) -> Option<PathBuf> {
     find_in_path(
         name,
         &std::env::var_os("PATH")?,

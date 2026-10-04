@@ -20,6 +20,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 
 use super::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
+use crate::analyzer::launch::resolve_analyzer_launch;
 use tracedecay_domain::errors::Result;
 
 pub struct PyrightDriver;
@@ -41,7 +42,11 @@ impl Driver for PyrightDriver {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
         Box::pin(tracing::Instrument::instrument(
             async move {
-                let mut cmd = tokio::process::Command::new("pyright");
+                let Ok(launch) = resolve_analyzer_launch("pyright", project_root) else {
+                    return Ok(Vec::new());
+                };
+                let mut cmd = tokio::process::Command::new(&launch.program);
+                cmd.envs(launch.env);
                 cmd.arg("--outputjson")
                     .current_dir(project_root)
                     .stdin(Stdio::null())

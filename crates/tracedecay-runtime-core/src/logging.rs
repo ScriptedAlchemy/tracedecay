@@ -358,6 +358,7 @@ mod state_change_gate_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::format_daemon_log_line;
     #[cfg(unix)]
     use std::io::{Read, Seek, SeekFrom, Write};
