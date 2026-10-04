@@ -7,6 +7,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::retrieval::PrimitiveSearchFreshnessV1;
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetrieveSurfaceRequestV1 {
@@ -49,6 +51,9 @@ pub struct RetrievedPageV1 {
     pub created_at: i64,
     pub expires_at: i64,
     pub content: String,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// No record exists under the handle in this project's store.
@@ -64,6 +69,9 @@ pub struct RetrieveHandleMissingV1 {
     pub message: String,
     pub retryable: bool,
     pub retry_instruction: String,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// The record expired and was removed.
@@ -81,4 +89,7 @@ pub struct RetrieveHandleExpiredV1 {
     pub retry_instruction: String,
     pub created_at: i64,
     pub expires_at: i64,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }

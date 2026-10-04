@@ -84,6 +84,7 @@ pub async fn compute_port_order(
             returned: 0,
             levels: Vec::new(),
             cycles: Vec::new(),
+            freshness: None,
         };
         return Ok(graph_tool_completion(
             GraphToolResultV1::PortOrder(result),
@@ -408,6 +409,7 @@ pub async fn compute_port_order(
         returned: emitted,
         levels: result_levels,
         cycles,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::PortOrder(result),

@@ -168,6 +168,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             families,
             coverage,
             next_cursor,
+            freshness: None,
         })
     }
 

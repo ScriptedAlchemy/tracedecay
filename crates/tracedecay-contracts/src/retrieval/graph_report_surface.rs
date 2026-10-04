@@ -9,6 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::ComplexityAnalysisV1;
 
+use crate::retrieval::PrimitiveSearchFreshnessV1;
+
 /// Metric whose distribution the Gini report measures.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +63,9 @@ pub struct GiniResultV1 {
     /// the body; their counters are lower bounds and measure nothing here.
     pub incomplete_complexity_symbols: u64,
     pub outliers: Vec<GiniOutlierV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -164,6 +169,9 @@ pub struct HealthResultV1 {
     pub dimensions: Option<HealthDimensionsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<HealthWeightsV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Shape of the design-structure-matrix report.
@@ -224,6 +232,9 @@ pub struct DsmResultV1 {
     pub clusters: Vec<DsmClusterV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix: Option<DsmMatrixV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -271,6 +282,9 @@ pub struct TestMapResultV1 {
     pub test_files: Vec<String>,
     pub coverage: Vec<TestMapSourceCoverageV1>,
     pub uncovered: Vec<TestMapUncoveredV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -360,6 +374,9 @@ pub struct TestRiskSummaryV1 {
 pub struct TestRiskResultV1 {
     pub risks: Vec<TestRiskEntryV1>,
     pub summary: TestRiskSummaryV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Compiler severity the diagnose report keeps.
@@ -456,4 +473,7 @@ pub struct DiagnoseResultV1 {
     pub truncated: bool,
     pub published: DiagnosePublicationV1,
     pub diagnostics: Vec<DiagnoseItemV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }

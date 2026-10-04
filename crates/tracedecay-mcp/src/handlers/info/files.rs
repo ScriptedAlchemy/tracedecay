@@ -56,6 +56,7 @@ pub async fn compute_files(
             layout: request.layout.unwrap_or_default(),
             files,
             worktree_omitted_sources,
+            freshness: None,
         }),
         Vec::new(),
     ))

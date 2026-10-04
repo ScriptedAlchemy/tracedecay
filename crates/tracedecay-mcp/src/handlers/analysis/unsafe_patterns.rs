@@ -298,6 +298,7 @@ pub(super) async fn compute_unsafe_patterns(
                 CoverageCompleteness::Partial
             },
             omissions,
+            freshness: None,
         }),
         touched,
     ))

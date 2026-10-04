@@ -278,6 +278,7 @@ pub async fn compute_rename_preview(
         reference_count: references.len(),
         references,
         text_only_matches,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::Preview(result)),

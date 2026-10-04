@@ -82,6 +82,7 @@ pub async fn compute_find_exact_symbol(
             name: request.name.clone(),
             count: matches.len() as u64,
             matches,
+            freshness: None,
         }),
         touched_files,
     ))

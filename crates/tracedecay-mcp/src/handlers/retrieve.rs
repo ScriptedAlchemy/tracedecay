@@ -81,6 +81,7 @@ pub async fn compute_retrieve(
             message: "Response handle was not found in this project's local cache.".to_owned(),
             retryable: true,
             retry_instruction: RETRY_INSTRUCTION.to_owned(),
+            freshness: None,
         }),
         ResponseHandleLookup::Expired {
             created_at,
@@ -97,6 +98,7 @@ pub async fn compute_retrieve(
             retry_instruction: RETRY_INSTRUCTION.to_owned(),
             created_at,
             expires_at,
+            freshness: None,
         }),
     };
     Ok(graph_tool_completion(
@@ -141,6 +143,7 @@ fn fitted_page(
             created_at: record.created_at,
             expires_at: record.expires_at,
             content,
+            freshness: None,
         };
         let frame = serialize_response_line(&JsonRpcResponse::success(
             Value::Null,

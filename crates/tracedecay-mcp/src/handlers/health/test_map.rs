@@ -135,6 +135,7 @@ pub async fn compute_test_map(
             test_files,
             coverage,
             uncovered,
+            freshness: None,
         }),
         touched_files,
     ))

@@ -314,6 +314,7 @@ fn grep_result(
             unavailable_sources: omission_counts.unavailable_sources as u64,
         },
         graph_enrichment,
+        freshness: None,
     }
 }
 

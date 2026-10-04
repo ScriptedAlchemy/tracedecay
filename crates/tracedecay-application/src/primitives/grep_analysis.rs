@@ -313,6 +313,7 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                         ideal_depth: count(result.ideal_depth),
                         depth_score: round4(depth_score(result.max_depth, result.ideal_depth)),
                         chains,
+                        freshness: None,
                     },
                     coverage: coverage(count(adjacency.len()), returned, false),
                     continuation: None,
