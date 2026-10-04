@@ -34,7 +34,6 @@ where
     A: WorkProductOwnerAuthorizationPortV1,
     E: WorkProductEventPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(graph: G, owner_authority: A, events: E) -> Self {
         Self {
             graph,
@@ -89,7 +88,11 @@ where
     /// A later submit still performs normal graph-version and revision CAS, so
     /// state that changes between prepare and submit is rejected as stale.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.work.product.prepare_mutation")]
+    #[tracing::instrument(
+        name = "application.work.product.prepare_mutation",
+        level = "trace",
+        skip_all
+    )]
     pub fn prepare_mutation(
         &self,
         context: &RequestContext,
@@ -242,7 +245,7 @@ where
         })
     }
 
-    #[hotpath::measure(label = "application.work.product.create")]
+    #[tracing::instrument(name = "application.work.product.create", level = "trace", skip_all)]
     pub fn create(
         &self,
         context: &RequestContext,
@@ -258,7 +261,11 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.decide_proposal")]
+    #[tracing::instrument(
+        name = "application.work.product.decide_proposal",
+        level = "trace",
+        skip_all
+    )]
     pub fn decide_proposal(
         &self,
         context: &RequestContext,
@@ -286,7 +293,7 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.add_task")]
+    #[tracing::instrument(name = "application.work.product.add_task", level = "trace", skip_all)]
     pub fn add_task(
         &self,
         context: &RequestContext,
@@ -308,7 +315,11 @@ where
     /// graph bootstrap; later tasks use the same version-checked event path
     /// and may reuse byte-identical containers. No daemon-side default
     /// hierarchy or separate bootstrap authority exists.
-    #[hotpath::measure(label = "application.work.product.create_task")]
+    #[tracing::instrument(
+        name = "application.work.product.create_task",
+        level = "trace",
+        skip_all
+    )]
     pub fn create_task(
         &self,
         context: &RequestContext,
@@ -350,7 +361,11 @@ where
         }
     }
 
-    #[hotpath::measure(label = "application.work.product.decide_relation_replan")]
+    #[tracing::instrument(
+        name = "application.work.product.decide_relation_replan",
+        level = "trace",
+        skip_all
+    )]
     pub fn decide_relation_replan(
         &self,
         context: &RequestContext,
@@ -371,7 +386,11 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.apply_relation_replan")]
+    #[tracing::instrument(
+        name = "application.work.product.apply_relation_replan",
+        level = "trace",
+        skip_all
+    )]
     pub fn apply_relation_replan(
         &self,
         context: &RequestContext,
@@ -391,7 +410,11 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.accept_task")]
+    #[tracing::instrument(
+        name = "application.work.product.accept_task",
+        level = "trace",
+        skip_all
+    )]
     pub fn accept_task(
         &self,
         context: &RequestContext,
@@ -412,7 +435,11 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.admit_execution")]
+    #[tracing::instrument(
+        name = "application.work.product.admit_execution",
+        level = "trace",
+        skip_all
+    )]
     pub fn admit_execution(
         &self,
         context: &RequestContext,
@@ -435,7 +462,11 @@ where
 
     /// Links one exact admitted attempt identity. Terminal evidence remains
     /// owned by the attempt and task evidence is linked independently.
-    #[hotpath::measure(label = "application.work.product.link_accepted_attempt")]
+    #[tracing::instrument(
+        name = "application.work.product.link_accepted_attempt",
+        level = "trace",
+        skip_all
+    )]
     pub fn link_accepted_attempt(
         &self,
         context: &RequestContext,
@@ -457,7 +488,11 @@ where
         )
     }
 
-    #[hotpath::measure(label = "application.work.product.record_handoff")]
+    #[tracing::instrument(
+        name = "application.work.product.record_handoff",
+        level = "trace",
+        skip_all
+    )]
     pub fn record_handoff(
         &self,
         context: &RequestContext,

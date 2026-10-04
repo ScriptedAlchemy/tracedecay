@@ -27,7 +27,7 @@ use tracedecay_store::{
 
 const CURRENT_FACTS_BATCH_SIZE: usize = 400;
 
-#[hotpath::measure(label = "runtime_core.memory.query_current")]
+#[tracing::instrument(name = "runtime_core.memory.query_current", level = "trace", skip_all)]
 pub(in crate::fact_store) async fn query_current_facts_tx(
     snapshot: &Transaction<'_>,
     query: &CurrentFactsQuery,
@@ -137,7 +137,6 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
         })?;
         facts.push(fact);
     }
-    hotpath::gauge!("runtime_core.memory.query_rows").inc(facts.len() as f64);
     Ok(facts)
 }
 
@@ -970,7 +969,6 @@ pub(in crate::fact_store) async fn get_retrieval_anchor_tx(
 }
 
 impl DatabaseFactStore<'_> {
-    #[hotpath::skip]
     pub(in crate::fact_store) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,
@@ -981,7 +979,8 @@ impl DatabaseFactStore<'_> {
         let write_control = write_control.clone();
         // The task owns every commit input so caller-future cancellation cannot
         // interrupt SQLite after the control admits the commit-start transition.
-        let outcome = tokio::spawn(async move {
+
+        tokio::spawn(async move {
             if write_control.interrupted() {
                 return Err(storage_message(
                     COMMIT_OPERATION,
@@ -1050,10 +1049,6 @@ impl DatabaseFactStore<'_> {
             Ok(outcome)
         })
         .await
-        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        if outcome.is_err() {
-            hotpath::gauge!("runtime_core.memory.commit_failures").inc(1.0);
-        }
-        outcome
+        .map_err(|error| storage_error(COMMIT_OPERATION, error))?
     }
 }

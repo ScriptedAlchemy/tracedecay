@@ -47,7 +47,7 @@ impl DeterministicDedupe {
     /// Identify byte-identical source occurrence/evidence pairs before
     /// fusion. Their occurrence row collapses in the fused candidate while
     /// every retriever contribution remains attributable.
-    #[hotpath::measure(label = "query.dedupe.collapse")]
+    #[tracing::instrument(name = "query.dedupe.collapse", level = "trace", skip_all)]
     pub fn collapse_compact_candidates(
         &self,
         mut candidates: Vec<CompactCandidate>,
@@ -102,7 +102,6 @@ impl DeterministicDedupe {
             }
             index = end;
         }
-        hotpath::gauge!("query.dedupe.candidates").set(candidates.len());
         Ok((candidates, decisions))
     }
 
@@ -112,7 +111,7 @@ impl DeterministicDedupe {
     /// simply its first member and the survivors keep that order without
     /// another sort. Collapsed copies move into the decision that excluded
     /// them, keeping the comparator provenance they already carry.
-    #[hotpath::measure(label = "query.dedupe.select")]
+    #[tracing::instrument(name = "query.dedupe.select", level = "trace", skip_all)]
     pub(super) fn select_representatives_with_decisions(
         &self,
         candidates: OrderedFusedCandidates,
@@ -193,7 +192,6 @@ impl DeterministicDedupe {
                 None => survivors.push(candidate),
             }
         }
-        hotpath::gauge!("query.dedupe.candidates").set(survivors.len());
         Ok((survivors, decisions))
     }
 }

@@ -48,7 +48,6 @@ pub fn defer_graph_replay_pool_busy(
     project_root: &Path,
 ) -> super::CodeGenerationRetentionOutcomeV1 {
     observations.record_graph_replay_release_unhealthy(project_root);
-    hotpath::gauge!("daemon.git.maintenance.replay_pool_busy_total").inc(1_u64);
     log_code_generation_retention_degraded(observations, "graph_replay_pool_busy");
     super::CodeGenerationRetentionOutcomeV1::Failed
 }
@@ -98,7 +97,11 @@ fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbErro
 /// it under a checked, budget-capped wait so a publisher that wins the
 /// probe-to-execute window defers with `GraphReplayPoolBusy` instead of
 /// pinning the daemon writer gate.
-#[hotpath::measure(label = "daemon.git.maintenance.replay_pool_probe")]
+#[tracing::instrument(
+    name = "daemon.git.maintenance.replay_pool_probe",
+    level = "trace",
+    skip_all
+)]
 pub fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     if !replay_pool_root.is_dir() {
         return false;
@@ -115,7 +118,11 @@ pub fn replay_pool_is_held(replay_pool_root: &Path) -> bool {
     }
 }
 
-#[hotpath::measure(label = "daemon.git.maintenance.graph_replay_release", future = true)]
+#[tracing::instrument(
+    name = "daemon.git.maintenance.graph_replay_release",
+    level = "trace",
+    skip_all
+)]
 pub async fn reconcile_graph_replay_releases(
     lease: &ProjectStoreMaintenanceLeaseV1,
     store_root: &Path,
@@ -143,10 +150,8 @@ pub async fn reconcile_graph_replay_releases(
     // A runtime that answered its last attempts with deadline or
     // unavailability failures is skipped for the bounded backoff window
     // instead of being polled, and timed out against, on every tick. The
-    // arming failure was already reported; skips stay quiet on the log and
-    // visible on the gauge.
+    // arming failure was already reported, so skips stay quiet on the log.
     if !observations.graph_replay_release_attempt_admitted(project_root) {
-        hotpath::gauge!("daemon.git.maintenance.replay_release_deferred_total").inc(1_u64);
         return ReconcileOutcome::Deferred;
     }
     let staging_cursor = observations.graph_staging_release_cursor(project_root);

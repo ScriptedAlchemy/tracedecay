@@ -71,15 +71,15 @@ fn host_admission_facade<'a>(
     let authority = match scope {
         HostAdmissionScope::Project => match (authorities.project, authorities.profile_identity) {
             (Some(registered), Some(identity)) => {
-                let project_id = project_observation_id(
-                    cg.ok_or_else(|| config_error("project admission requires a project"))?,
-                )?;
+                let project =
+                    cg.ok_or_else(|| config_error("project admission requires a project"))?;
                 HostAdmissionAuthorities::for_project(
                     identity.brain_id().clone(),
                     identity.profile_id().clone(),
-                    project_id,
+                    project_observation_id(project)?,
                     registered,
                 )
+                .with_project_root(project.project_root().to_path_buf())
             }
             (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
@@ -194,7 +194,7 @@ async fn drain_host_observation_projections(
     Ok(stats.transcript.messages_upserted)
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
+#[tracing::instrument(name = "mcp.hook_runtime.compact", level = "trace", skip_all)]
 pub(super) async fn codex_compact(
     cg: &TraceDecay,
     event_json: &str,
@@ -222,9 +222,9 @@ pub(super) async fn codex_compact(
     // rollout must land in the owning store through the canonical ingest
     // route before pressure evidence is evaluated; compacting an unfilled
     // store would report an empty success.
-    let ingested = hotpath::future!(
+    let ingested = tracing::Instrument::instrument(
         admit_codex_rollouts_for_compaction(cg, session_authorities),
-        label = "mcp.hook_runtime.compact_ingest"
+        tracing::trace_span!("mcp.hook_runtime.compact_ingest"),
     )
     .await?;
     let current_tokens = parsed
@@ -233,7 +233,7 @@ pub(super) async fn codex_compact(
     let context_length = parsed
         .as_ref()
         .and_then(|event| event_i64(event, &["context_window_size", "context_length"]));
-    let Some(response) = hotpath::future!(
+    let Some(response) = tracing::Instrument::instrument(
         authority.execute(pressure_only_command(
             "codex",
             &session_id,
@@ -244,10 +244,10 @@ pub(super) async fn codex_compact(
             LcmHostProtocol::CodexContextCompacted {
                 protocol_revision: "codex.context-compacted.v1".to_owned(),
                 event_digest: tracedecay_domain::canonical_sha256(&event_json)
-                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?
-            }
+                    .map_err(|error| config_error(format!("digest Codex event failed: {error}")))?,
+            },
         )),
-        label = "mcp.hook_runtime.compact_execute"
+        tracing::trace_span!("mcp.hook_runtime.compact_execute"),
     )
     .await
     else {
@@ -377,7 +377,7 @@ pub(super) fn claude_compact(event_json: &str) -> Result<HookCompactionResultV1>
     })
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.compact")]
+#[tracing::instrument(name = "mcp.hook_runtime.compact", level = "trace", skip_all)]
 pub(super) async fn cursor_compact(
     event_json: &str,
     session_authorities: SessionAuthorities<'_>,
@@ -402,7 +402,7 @@ pub(super) async fn cursor_compact(
         .map(|(count, compact)| count.saturating_sub(compact));
     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
-    let Some(response) = hotpath::future!(
+    let Some(response) = tracing::Instrument::instrument(
         authority.execute(pressure_only_command(
             "cursor",
             session_id,
@@ -413,11 +413,11 @@ pub(super) async fn cursor_compact(
             LcmHostProtocol::CursorPreCompact {
                 protocol_revision: "cursor.precompact.v1".to_owned(),
                 event_digest: tracedecay_domain::canonical_sha256(&event_json).map_err(
-                    |error| config_error(format!("digest Cursor event failed: {error}"))
-                )?
-            }
+                    |error| config_error(format!("digest Cursor event failed: {error}")),
+                )?,
+            },
         )),
-        label = "mcp.hook_runtime.compact_execute"
+        tracing::trace_span!("mcp.hook_runtime.compact_execute"),
     )
     .await
     else {
@@ -530,13 +530,10 @@ fn pressure_only_command(
     }))
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.ingest")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Transcript ingest is one write through the capture authority."
-    )
+#[tracing::instrument(name = "mcp.hook_runtime.ingest", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Transcript ingest is one write through the capture authority."
 )]
 pub(super) async fn ingest_transcript(
     cg: Option<&TraceDecay>,
@@ -576,7 +573,7 @@ pub(super) async fn ingest_transcript(
                 "transcript provider is unsupported",
             )
         })?;
-    let capture = hotpath::future!(
+    let capture = tracing::Instrument::instrument(
         kernel.capture(TranscriptCaptureContext {
             cg,
             request,
@@ -586,9 +583,9 @@ pub(super) async fn ingest_transcript(
             session_authorities: session_authorities.clone(),
             facade: &facade,
             max_new_bytes,
-            cancellation
+            cancellation,
         }),
-        label = "mcp.hook_runtime.capture"
+        tracing::trace_span!("mcp.hook_runtime.capture"),
     )
     .await?;
     let TranscriptCaptureOutcome {
@@ -679,16 +676,13 @@ pub(super) async fn ingest_transcript(
                 "operation": "hook_import_sources",
                 "detail": error.to_string(),
             }),
-            Some(Ok(sources)) => hotpath::future!(
-                tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
+            Some(Ok(sources)) => tracing::Instrument::instrument(tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
                     global_db,
                     session_authorities.project.map(std::convert::AsRef::as_ref),
                     sources,
                     cg.project_root(),
                     tracedecay_runtime_core::tracedecay::current_timestamp()
-                ),
-                label = "mcp.hook_runtime.hint_settle"
-            )
+                ), tracing::trace_span!("mcp.hook_runtime.hint_settle"))
             .await
             .as_json(),
         });

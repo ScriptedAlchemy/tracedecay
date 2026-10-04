@@ -12,7 +12,8 @@ use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::CodeGraphInteractiveReader,
     production::{
-        CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
+        CodeIndexPublishedGenerationV1,
     },
 };
 use tracedecay_domain::{
@@ -200,7 +201,7 @@ fn typescript() -> BTreeMap<&'static str, &'static str> {
 }
 
 /// Every file under `root`, path-sorted, as `(root-relative path, source)`.
-fn fixture_files(root: &Path) -> Vec<(String, String)> {
+pub(crate) fn fixture_files(root: &Path) -> Vec<(String, String)> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         let mut entries = std::fs::read_dir(dir)
             .expect("fixture directory")
@@ -246,25 +247,56 @@ fn language_for(path: &str) -> &'static str {
 /// Publish one generation of every file under `root` through the production
 /// owner, with identities derived from `tag`.
 pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPublishedGenerationV1> {
+    let files = fixture_files(root);
+    let changed = files.iter().map(|(path, _)| path.clone()).collect();
+    cold_generation(
+        &CodeIndexProductionOwnerV1::new(
+            config(),
+            SharedPublicationStore::default(),
+            ApplyingProjectionSink,
+        )
+        .expect("production owner")
+        .build_and_publish(
+            fixture_tree_request(tag, 1, &files, &changed),
+            &ActiveControl,
+        )
+        .expect("fixture generation publishes"),
+    )
+}
+
+/// A build request for `files` in `round`, with identities derived from `tag`
+/// and each file's position. A file in `changed` past round 1 gets a fresh
+/// occurrence, as an edit does.
+pub(crate) fn fixture_tree_request(
+    tag: &str,
+    round: u32,
+    files: &[(String, String)],
+    changed: &BTreeSet<String>,
+) -> CodeIndexBuildRequestV1 {
     let mut request = request_with_source(
         &format!("file.{tag}.seed"),
-        1_700_000,
-        &format!("commit.{tag}.1"),
-        &format!("tree.{tag}.1"),
+        1_600_000 + i64::from(round) * 100_000,
+        &format!("commit.{tag}.{round}"),
+        &format!("tree.{tag}.{round}"),
         "",
     );
     request.snapshot.files.clear();
     request.snapshot.sanitization_receipts.clear();
     request.captured_files.clear();
-    request.changed_files.clear();
+    request.changed_files.clone_from(changed);
     let mut identity = Vec::new();
-    for (ordinal, (path, source)) in fixture_files(root).into_iter().enumerate() {
-        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.{tag}.{ordinal:02}"));
+    for (ordinal, (path, source)) in files.iter().enumerate() {
+        let suffix = if round > 1 && changed.contains(path) {
+            format!("{ordinal:02}.{round}")
+        } else {
+            format!("{ordinal:02}")
+        };
+        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.{tag}.{suffix}"));
         let bytes = source.as_bytes();
         request.snapshot.files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
             logical_path: path.clone(),
-            language: Some(id::<LanguageId>(language_for(&path))),
+            language: Some(id::<LanguageId>(language_for(path))),
             content_digest: content_digest(bytes),
             disposition: SnapshotFileDispositionV1::Present,
         });
@@ -272,14 +304,13 @@ pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPubli
             .snapshot
             .sanitization_receipts
             .push(id::<SanitizationReceiptId>(&format!(
-                "receipt.{tag}.{ordinal:02}"
+                "receipt.{tag}.{suffix}"
             )));
         request.captured_files.push(CodeIndexCapturedFileV1 {
             file_occurrence_id,
             sanitized_bytes: Arc::from(bytes),
             sensitivity_level: SensitivityLevelV1::Public,
         });
-        request.changed_files.insert(path.clone());
         identity.extend_from_slice(path.as_bytes());
         identity.push(0);
         identity.extend_from_slice(bytes);
@@ -293,16 +324,7 @@ pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPubli
         .snapshot
         .validate()
         .expect("fixture snapshot is canonical");
-    cold_generation(
-        &CodeIndexProductionOwnerV1::new(
-            config(),
-            SharedPublicationStore::default(),
-            ApplyingProjectionSink,
-        )
-        .expect("production owner")
-        .build_and_publish(request, &ActiveControl)
-        .expect("fixture generation publishes"),
-    )
+    request
 }
 
 fn published(language: &str) -> Arc<CodeIndexPublishedGenerationV1> {

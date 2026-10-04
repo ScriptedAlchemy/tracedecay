@@ -4,8 +4,8 @@ use axum::body::to_bytes;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
-    FactStoreAddResultV1, FactStoreRemoveResultV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1,
+    FactCommitOwnerV1, FactPayloadAccessV1, FactProjectionV1, FactStatusV1, FactStoreAddResultV1,
+    FactStoreRemoveResultV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorityReceipt, CancellationSignal,
@@ -15,7 +15,8 @@ use tracedecay_contracts::{
     SafeDiagnostic,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, ComponentVersion, FactId, ManifestDigest, ProjectId, RepositoryId, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -23,6 +24,20 @@ use super::super::registered_http::RegisteredHttpOperation;
 use tracedecay_api::WorkOperation;
 
 use tracedecay_domain::test_fixtures::digest;
+
+fn remove_payload() -> RetainedSurfaceResultV1 {
+    RetainedSurfaceResultV1::FactStoreRemove(FactStoreRemoveResultV1::AlreadyRemoved {
+        fact: FactProjectionV1::Unavailable {
+            status: FactStatusV1 {
+                owner: FactCommitOwnerV1::Profile,
+                fact_id: FactId::new("fact.retained.fixture").expect("fact id"),
+                payload_access: FactPayloadAccessV1::Deleted,
+                projected_as_of: UtcMicros(10),
+            },
+        },
+        remaining_fact_count: 0,
+    })
+}
 
 fn retained_scope(seed: &str) -> ResolvedScope {
     ResolvedScope::new(
@@ -414,11 +429,6 @@ async fn registered_http_rejects_successes_with_the_wrong_payload_receipt_or_sco
     let operation = RetainedSurfaceOperation::FactStoreRemove;
     let request_id = RequestId::new("request.retained.http.effect-binding").expect("request id");
     let scope = retained_scope("effect-binding");
-    let remove_payload = || {
-        RetainedSurfaceResultV1::FactStoreRemove(FactStoreRemoveResultV1::NotFound {
-            remaining_fact_count: 0,
-        })
-    };
     let wrong_payload = retained_effect_outcome(
         operation,
         &request_id,
@@ -487,14 +497,7 @@ async fn registered_http_serializes_an_exactly_bound_effect() {
     let operation = RetainedSurfaceOperation::FactStoreRemove;
     let request_id = RequestId::new("request.retained.http.effect-valid").expect("request id");
     let scope = retained_scope("effect-valid");
-    let outcome = retained_effect_outcome(
-        operation,
-        &request_id,
-        scope.clone(),
-        RetainedSurfaceResultV1::FactStoreRemove(FactStoreRemoveResultV1::NotFound {
-            remaining_fact_count: 0,
-        }),
-    );
+    let outcome = retained_effect_outcome(operation, &request_id, scope.clone(), remove_payload());
     let response = tracedecay_daemon_protocol::DaemonInvocationResponse::with_outcome(
         request_id.as_str().to_owned(),
         tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication { scope, outcome },

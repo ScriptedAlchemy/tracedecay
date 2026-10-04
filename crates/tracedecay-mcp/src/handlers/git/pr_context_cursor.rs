@@ -250,7 +250,7 @@ pub(super) struct PrContextCursorPosition {
 /// minted here can only be verified by the same store, that is what keeps a
 /// foreign store's cursor from continuing this pagination. Attached means
 /// admitted; an absent lease is the typed denied state.
-#[hotpath::measure(label = "mcp.git.cursor.authority")]
+#[tracing::instrument(name = "mcp.git.cursor.authority", level = "trace", skip_all)]
 pub(super) async fn pr_context_cursor_authority(
     ctx: &McpToolContext<'_>,
     binding: &PrContextCursorBinding<'_>,
@@ -265,9 +265,9 @@ pub(super) async fn pr_context_cursor_authority(
     };
     let session_db: &RegisteredGlobalDb = session_db;
     let session_temporal = SessionTemporalAccess::new(session_db);
-    let authenticator = hotpath::future!(
+    let authenticator = tracing::Instrument::instrument(
         session_temporal.load_preprovisioned_session_cursor_key_provider_result(),
-        label = "mcp.git.cursor.key_provider"
+        tracing::trace_span!("mcp.git.cursor.key_provider"),
     )
     .await
     .map_err(|error| {
@@ -298,10 +298,10 @@ fn pr_context_cursor_snapshot(
     key: tracedecay_domain::SignedCursorKeyRefV1,
     authorization: ValidatedAuthorization,
 ) -> Result<TemporalExecutionSnapshot> {
-    let (identity_digest, digest) = hotpath::measure_block!(
-        "mcp.git.cursor.binding_digest",
+    let (identity_digest, digest) = {
+        let _span = tracing::trace_span!("mcp.git.cursor.binding_digest").entered();
         (binding.identity_digest()?, binding.request_digest()?)
-    );
+    };
     let graph_digest = canonical_sha256(&(
         "tracedecay.pr-context.graph-generation.v1",
         binding.graph_generation,
@@ -358,7 +358,7 @@ fn pr_context_cursor_snapshot(
     })
 }
 
-#[hotpath::measure(label = "mcp.git.cursor.decode")]
+#[tracing::instrument(name = "mcp.git.cursor.decode", level = "trace", skip_all)]
 pub(super) fn decode_pr_context_cursor(
     encoded: &str,
     snapshot: &TemporalExecutionSnapshot,
@@ -383,7 +383,7 @@ pub(super) fn decode_pr_context_cursor(
     })
 }
 
-#[hotpath::measure(label = "mcp.git.cursor.encode")]
+#[tracing::instrument(name = "mcp.git.cursor.encode", level = "trace", skip_all)]
 pub(super) fn encode_pr_context_cursor(
     after: &SymbolOccurrenceId,
     impact_nodes_admitted: usize,

@@ -59,7 +59,7 @@ impl AgentIntegration for AntigravityIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mAntigravity integration\x1b[0m");
+        dc.section("Antigravity integration");
         doctor_check_registration(
             dc,
             &mcp_config_path(&ctx.home),
@@ -119,7 +119,7 @@ impl AgentIntegration for AntigravityIntegration {
         vec![mcp_config_path(home), cli_plugin_path(home)]
     }
 
-    #[hotpath::measure(label = "antigravity_mcp_install")]
+    #[tracing::instrument(name = "antigravity_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[HostComponentV1],

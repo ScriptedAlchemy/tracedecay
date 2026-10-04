@@ -32,19 +32,21 @@ pub struct GlobalDbNativeIntegrationStore<'db> {
 }
 
 impl<'db> GlobalDbNativeIntegrationStore<'db> {
-    #[hotpath::skip]
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitMutationDatabase::Registered(db),
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.preview")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.preview",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
-        crate::hotpath_observe::record_transaction_rows(1);
         preview.validate().map_err(invalid_domain)?;
         let transaction = self.begin_write().await?;
         let outcome = insert_preview_if_absent(&transaction, &preview).await;
@@ -56,7 +58,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
@@ -66,7 +67,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_preview_from_transaction(&snapshot, preview_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_preview_by_digest(
         &self,
         preview_digest: &tracedecay_domain::ManifestDigest,
@@ -82,7 +82,11 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// approval under the same identity or digest is a conflict, never an
     /// overwrite. Consumption is not recorded here: an approval is consumed
     /// exactly when a transaction row binds its unique `approval_id`.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.approval")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.approval",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
@@ -98,7 +102,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -109,12 +112,15 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     }
 
     /// Atomically consumes the approval and inserts the `Prepared` record.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.begin")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.begin",
+        level = "trace",
+        skip_all
+    )]
     pub async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         record.validate().map_err(invalid_domain)?;
         if record.terminal_receipt.is_some()
             || record.status.terminal_outcome.is_some()
@@ -189,7 +195,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -199,7 +204,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_status_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -209,7 +213,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_record_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
@@ -219,7 +222,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_from_transaction(&snapshot, transaction_id).await
     }
 
-    #[hotpath::skip]
     pub async fn read_receipt_by_digest(
         &self,
         receipt_digest: &tracedecay_domain::ManifestDigest,
@@ -229,14 +231,17 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_by_digest_from_transaction(&snapshot, receipt_digest).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.cas")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.cas",
+        level = "trace",
+        skip_all
+    )]
     pub async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         replacement.validate().map_err(invalid_domain)?;
         // Terminal states are only reachable through `write_terminal`, which
@@ -271,14 +276,17 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     /// Publishes the terminal status transition and its receipt in one
     /// immediate database transaction, so restart recovery never observes a
     /// terminal phase without its immutable receipt or quarantine fence.
-    #[hotpath::measure(future = true, label = "global_db.native_integration.persist.terminal")]
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.terminal",
+        level = "trace",
+        skip_all
+    )]
     pub async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
-        crate::hotpath_observe::record_transaction_rows(1);
         transaction_id.validate().map_err(invalid_domain)?;
         receipt.validate().map_err(invalid_domain)?;
         let Some(outcome_code) = receipt.status.terminal_outcome.map(terminal_outcome_code) else {
@@ -342,7 +350,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
 
     /// Every transaction that has not reached its terminal receipt, oldest
     /// first. Restart recovery replays these through the coordinator.
-    #[hotpath::skip]
     pub async fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
@@ -372,7 +379,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
 
     /// Returns the exact analysis generations whose durable native preview or
     /// unfinished transaction is still live at `observed_at`.
-    #[hotpath::skip]
     pub async fn live_candidate_generation_bindings(
         &self,
         repository_id: &RepositoryId,
@@ -413,7 +419,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         Ok(generations)
     }
 
-    #[hotpath::skip]
     pub async fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
@@ -423,9 +428,10 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         approval_consumed_in_transaction(&snapshot, approval_id).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.native_integration.persist.quarantine"
+    #[tracing::instrument(
+        name = "global_db.native_integration.persist.quarantine",
+        level = "trace",
+        skip_all
     )]
     pub async fn quarantine_repository(
         &self,
@@ -465,14 +471,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub(super) async fn begin_write(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
-    #[hotpath::skip]
     pub(super) async fn read_snapshot(
         &self,
     ) -> NativeIntegrationStoreResult<GitMutationReadSnapshot> {

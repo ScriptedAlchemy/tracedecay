@@ -250,7 +250,7 @@ fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Patter
 ///   scanned.
 /// * `max_results`, hard cap; one extra match past the cap is collected so
 ///   truncation can be reported honestly.
-#[hotpath::measure(label = "code_index.search.ast_grep")]
+#[tracing::instrument(name = "code_index.search.ast_grep", level = "trace", skip_all)]
 pub fn search_tree(
     project_root: &Path,
     pattern: &str,
@@ -272,7 +272,7 @@ pub fn search_tree(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "code_index.search.ast_grep_cancel")]
+#[tracing::instrument(name = "code_index.search.ast_grep_cancel", level = "trace", skip_all)]
 pub fn search_tree_scoped_with_cancel<F>(
     project_root: &Path,
     pattern: &str,
@@ -381,9 +381,9 @@ where
             continue;
         };
 
-        let stop = if crate::hotpath_observe::sample_hot_loop() {
-            hotpath::measure_block!(
-                "code_index_ast_grep_file",
+        let stop = if crate::observe::sample_hot_loop() {
+            {
+                let _span = tracing::trace_span!("code_index_ast_grep_file").entered();
                 examine_ast_grep_file(
                     &source,
                     td_lang,
@@ -396,7 +396,7 @@ where
                     max_results,
                     &is_cancelled,
                 )
-            )
+            }
         } else {
             examine_ast_grep_file(
                 &source,

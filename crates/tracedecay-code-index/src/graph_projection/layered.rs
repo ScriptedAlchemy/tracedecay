@@ -66,7 +66,11 @@ pub struct CodeGraphLayeredBuildV1 {
 /// A decline when the base carries no resolution inputs this projector can
 /// read, or the refresh changed too much of it to stay a delta; a cold build
 /// answers both.
-#[hotpath::measure(label = "code_index.graph.build_layered_rows")]
+#[tracing::instrument(
+    name = "code_index.graph.build_layered_rows",
+    level = "trace",
+    skip_all
+)]
 pub fn build_layered_code_graph_rows(
     projection_identity: GraphProjectionIdentity,
     source: &SealedGenerationFileWindowsV1,
@@ -119,8 +123,8 @@ pub fn build_layered_code_graph_rows(
         base.pages(),
         projection_identity.namespace.as_str().len(),
     ))?;
-    let report = hotpath::measure_block!(
-        "code_index.graph.build_layered_rows.emit",
+    let report = {
+        let _span = tracing::trace_span!("code_index.graph.build_layered_rows.emit").entered();
         emit_page_delta(
             &projection_identity,
             &generation,
@@ -130,23 +134,18 @@ pub fn build_layered_code_graph_rows(
             &mut spill,
             check,
         )
-    )?;
+    }?;
     let identity =
         code_graph_manifest_identity(projection_identity, &generation, projector_revision)?;
-    let generation = hotpath::measure_block!(
-        "code_index.graph.build_layered_rows.finish",
+    let generation = {
+        let _span = tracing::trace_span!("code_index.graph.build_layered_rows.finish").entered();
         spill.finish(identity, check)
-    )?;
+    }?;
     let report = CodeGraphLayeredReportV1 {
         delta_rows: generation.delta_row_counts(),
         ..report
     };
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index.graph.layered.delta_entities").inc(report.delta_rows.0 as u64);
-        hotpath::gauge!("code_index.graph.layered.delta_relations").inc(report.delta_rows.1 as u64);
-        hotpath::gauge!("code_index.graph.layered.files_reused").inc(report.reused_files as u64);
-    }
+
     Ok(Ok(CodeGraphLayeredBuildV1 { generation, report }))
 }
 

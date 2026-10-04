@@ -393,7 +393,11 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 /// Resolves one native-integration status read over the catalog-bound
 /// dashboard surface, answering the same application result CLI and MCP
 /// project.
-#[hotpath::measure(future = true, label = "mcp.dashboard.native_integration.status")]
+#[tracing::instrument(
+    name = "mcp.dashboard.native_integration.status",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn dashboard_native_integration_status(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     control: &tracedecay_dashboard_api::DashboardHttpRequestControlV1,
@@ -753,17 +757,14 @@ async fn project_sessions_once_published(
     }
 }
 
-#[hotpath::measure(label = "mcp.dashboard.open.total")]
+#[tracing::instrument(name = "mcp.dashboard.open.total", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Dashboard mounting composes independently optional provider authorities; their absence must remain explicit"
 )]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Dashboard handling is one action match onto the composed dashboard readers."
-    )
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dashboard handling is one action match onto the composed dashboard readers."
 )]
 pub(super) async fn compute_dashboard(
     cg: &TraceDecay,
@@ -820,9 +821,9 @@ pub(super) async fn compute_dashboard(
             let Some(previous_url) = previous_url else {
                 return Ok(DashboardResultV1::NotRunning);
             };
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 shutdown_dashboard_for(&project_root),
-                label = "mcp.dashboard.open.stop"
+                tracing::trace_span!("mcp.dashboard.open.stop"),
             )
             .await?;
             Ok(DashboardResultV1::Stopped { previous_url })

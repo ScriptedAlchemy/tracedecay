@@ -59,7 +59,7 @@ pub struct HostIo {
 }
 
 impl HostIo {
-    #[hotpath::measure(label = "automation.host_io.export_agents")]
+    #[tracing::instrument(name = "automation.host_io.export_agents", level = "trace", skip_all)]
     pub fn export_managed_skills_to_agents(
         &self,
         home: &Path,
@@ -68,7 +68,7 @@ impl HostIo {
         (self.export_to_agents)(home, profile_root)
     }
 
-    #[hotpath::measure(label = "automation.host_io.export_hosts")]
+    #[tracing::instrument(name = "automation.host_io.export_hosts", level = "trace", skip_all)]
     pub fn export_managed_skills_to_agent_hosts(
         &self,
         home: &Path,

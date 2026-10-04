@@ -28,7 +28,7 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
-#[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
+#[tracing::instrument(name = "mcp.search.ast_grep.total", level = "trace", skip_all)]
 pub async fn compute_ast_grep_search(
     project_root: &Path,
     path_policy: &IndexPathPolicyV1,
@@ -50,7 +50,7 @@ pub async fn compute_ast_grep_search(
     let query = request.pattern.clone();
     let scope_prefix = scope_prefix.map(str::to_owned);
     let path_policy = path_policy.clone();
-    let search: AstGrepSearchResult = hotpath::future!(
+    let search: AstGrepSearchResult = tracing::Instrument::instrument(
         run_bounded_search(
             "tracedecay_ast_grep_search",
             request.pattern,
@@ -74,7 +74,7 @@ pub async fn compute_ast_grep_search(
                 )
             },
         ),
-        label = "mcp.search.ast_grep.scan"
+        tracing::trace_span!("mcp.search.ast_grep.scan"),
     )
     .await?;
 
@@ -108,14 +108,15 @@ fn non_blank(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Renders a structural-search result as its tool text.
+/// Renders a structural-search result as its tool text, with `value` as its
+/// JSON body.
 pub fn render_ast_grep_search(
     response_handle_root: Option<&Path>,
     args: &Value,
+    value: &Value,
     result: &AstGrepSearchResultV1,
 ) -> Result<ToolResult> {
-    let value = serde_json::to_value(result)?;
-    let text = render::finalize(response_handle_root, args, &value, || render_md(result));
+    let text = render::finalize(response_handle_root, args, value, || render_md(result));
     Ok(text_tool_result(&text, Vec::new()))
 }
 

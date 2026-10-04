@@ -87,7 +87,7 @@ enum AutomaticFactApplySettlement {
     ApplicationError(TraceDecayError),
 }
 
-#[hotpath::measure(label = "automation.automatic_facts.record", future = true)]
+#[tracing::instrument(name = "automation.automatic_facts.record", level = "trace", skip_all)]
 pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     run_control: &AutomationRunControl,

@@ -40,7 +40,7 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mHermes integration\x1b[0m");
+        dc.section("Hermes integration");
         doctor_check_plugin(dc, &ctx.home);
     }
 
@@ -236,7 +236,7 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
-#[hotpath::measure(label = "hermes_plugin_activate")]
+#[tracing::instrument(name = "hermes_plugin_activate", level = "trace", skip_all)]
 pub(super) fn activate_deployed_plugin_profile(
     deployed_plugin_dir: &Path,
     plugin_dir: &Path,

@@ -14,7 +14,7 @@ on:
       max_snapshots:
         description: Maximum PR snapshots admitted per lane
         type: number
-        default: 2
+        default: 6
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_run:
@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Publish pending lane checks
-        uses: ScriptedAlchemy/cargo-hauler@34d512901e8b47ca4741befa2b40f533ba2b541b
+        uses: ScriptedAlchemy/cargo-hauler@3146cc68bf6dd067aa302d30f3216e6dc2e01819
         with:
           mode: enqueue
           pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
@@ -78,7 +78,7 @@ jobs:
           persist-credentials: false
       - name: Select lanes with eligible work
         id: plan
-        uses: ScriptedAlchemy/cargo-hauler@34d512901e8b47ca4741befa2b40f533ba2b541b
+        uses: ScriptedAlchemy/cargo-hauler@3146cc68bf6dd067aa302d30f3216e6dc2e01819
         with:
           mode: plan
           token: ${{ github.token }}
@@ -121,7 +121,7 @@ jobs:
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@34d512901e8b47ca4741befa2b40f533ba2b541b
+        uses: ScriptedAlchemy/cargo-hauler@3146cc68bf6dd067aa302d30f3216e6dc2e01819
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
@@ -130,7 +130,7 @@ jobs:
           lane: ${{ matrix.lane }}
           pull-requests: ${{ inputs.pull_requests || '' }}
           max-minutes: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_minutes) || '300' }}
-          max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '2' }}
+          max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '6' }}
       - name: Preserve timing and bounded test reports
         if: always() && steps.hauler.outputs.evidence != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

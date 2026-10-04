@@ -9,12 +9,6 @@ description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = [
     "lite",
     "medium",
@@ -75,7 +69,6 @@ ast-grep-core = "0.44"
 flate2 = "1"
 base64 = "0.22"
 hex = "0.4"
-hotpath.workspace = true
 ignore = "0.4"
 rayon = "1"
 regex = "1"
@@ -89,6 +82,7 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-f
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracing = "0.1"
 tree-sitter = "0.26"
 
 [dev-dependencies]
@@ -104,29 +98,20 @@ tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 
-# Profiling benches: built only under the opt-in `hotpath` feature so a
-# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
-# instrumentation. Run with `cargo bench -p tracedecay-code-index
-# --features hotpath --bench <name>`. A `--no-default-features` retained-parse
-# reproduction must keep `hotpath` selected (for example
-# `--features lite,hotpath`) or Cargo cannot select the target.
 [[bench]]
 name = "code_index_chunks"
 harness = false
 test = false
-required-features = ["hotpath"]
 
 [[bench]]
 name = "retained_parse"
 harness = false
 test = false
-required-features = ["hotpath"]
 
 [[bench]]
 name = "partitioned_codec"
 harness = false
 test = false
-required-features = ["hotpath"]
 
 [[bench]]
 name = "sealed_storage"
@@ -137,7 +122,6 @@ test = false
 name = "restore_generation"
 harness = false
 test = false
-required-features = ["hotpath"]
 
 [[bench]]
 name = "source_search"

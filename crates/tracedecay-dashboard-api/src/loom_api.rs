@@ -494,7 +494,7 @@ pub async fn temporal(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<LoomTemporalParamsV1>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
             let offset = params.offset.unwrap_or(0).max(0);
@@ -563,7 +563,7 @@ pub async fn temporal(
             }
             Json(envelope).into_response()
         },
-        label = "dashboard_api.loom.temporal"
+        tracing::trace_span!("dashboard_api.loom.temporal"),
     )
     .await
 }
@@ -1447,12 +1447,12 @@ async fn query_rows(
     sql: &str,
     params: impl IntoParams,
 ) -> Result<Vec<Value>, LoomReadFailureV1> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let rows = conn.query(sql, params).await?;
             Ok(collect_rows(rows).await?)
         },
-        label = "dashboard_api.loom.query_rows"
+        tracing::trace_span!("dashboard_api.loom.query_rows"),
     )
     .await
 }

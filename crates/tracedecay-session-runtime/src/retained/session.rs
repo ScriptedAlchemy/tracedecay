@@ -85,7 +85,6 @@ pub struct DirectRetainedSessionPortV1<'a> {
 }
 
 impl<'a> DirectRetainedSessionPortV1<'a> {
-    #[hotpath::skip]
     pub fn profile(
         session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
@@ -173,14 +172,17 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     pub const fn project(authorities: ProjectRetainedSessionAuthoritiesV1) -> Self {
         Self {
             authorities: RetainedSessionAuthority::Project(authorities),
         }
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.message_search")]
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.message_search",
+        level = "trace",
+        skip_all
+    )]
     async fn execute_message_search(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -201,7 +203,11 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         )
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.refresh")]
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.refresh",
+        level = "trace",
+        skip_all
+    )]
     async fn execute_session_refresh(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -243,7 +249,11 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         }
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.sessions_for")]
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.sessions_for",
+        level = "trace",
+        skip_all
+    )]
     async fn execute_sessions_for(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -271,7 +281,11 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         )
     }
 
-    #[hotpath::measure(label = "daemon.store_runtime.session.workflows")]
+    #[tracing::instrument(
+        name = "daemon.store_runtime.session.workflows",
+        level = "trace",
+        skip_all
+    )]
     async fn execute_workflows(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -312,7 +326,6 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn bounded<T, F>(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -344,9 +357,9 @@ async fn execute_admitted_session_refresh(
         &mounted,
     )?;
     if operation == RetainedSurfaceOperation::SessionRefreshStatus {
-        let execute = hotpath::future!(
+        let execute = tracing::Instrument::instrument(
             mounted.refresh.execute(command),
-            label = "daemon.store_runtime.session.refresh.status"
+            tracing::trace_span!("daemon.store_runtime.session.refresh.status"),
         );
         let handled = tokio::select! {
             () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead)),
@@ -364,9 +377,9 @@ async fn execute_admitted_session_refresh(
             tracedecay_contracts::CancellationStage::BeforeEffect,
         ));
     }
-    let handled = hotpath::future!(
+    let handled = tracing::Instrument::instrument(
         mounted.refresh.execute(command),
-        label = "daemon.store_runtime.session.refresh.execute"
+        tracing::trace_span!("daemon.store_runtime.session.refresh.execute"),
     )
     .await;
     let projected = match operation {
@@ -862,7 +875,11 @@ fn time_filter(
     Ok(Some(value))
 }
 
-#[hotpath::measure(label = "daemon.store_runtime.session.retrieve")]
+#[tracing::instrument(
+    name = "daemon.store_runtime.session.retrieve",
+    level = "trace",
+    skip_all
+)]
 async fn retrieve_bounded(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     service: &dyn SessionApplicationRetrievalPortV1,
@@ -894,13 +911,13 @@ async fn retrieve_bounded(
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::BeforeRead,
         ))?;
-    let retrieval = hotpath::future!(
+    let retrieval = tracing::Instrument::instrument(
         service.retrieve_admitted_with_cancellation(
             context.request_context,
             context.cancellation_signal,
             query,
         ),
-        label = "daemon.store_runtime.session.retrieve.wait"
+        tracing::trace_span!("daemon.store_runtime.session.retrieve.wait"),
     );
     tokio::select! {
         () = context.cancellation_signal.cancelled() => {

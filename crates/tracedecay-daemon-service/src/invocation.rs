@@ -498,7 +498,6 @@ impl DaemonInvocationService {
 
     /// The one status broadcast shared by the native-integration invocation
     /// handler and every LSP session factory registered for `project_root`.
-    #[hotpath::skip]
     pub async fn native_integration_status_broadcast(
         &self,
         project_root: &Path,
@@ -521,7 +520,6 @@ impl DaemonInvocationService {
     /// owner object; that route aliases the incumbent instead of being refused,
     /// while a foreign scope is refused with a typed error rather than
     /// replacing the incumbent.
-    #[hotpath::skip]
     pub async fn register_source_edit_owner(
         &self,
         project_root: PathBuf,
@@ -545,7 +543,11 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.service.invocation.retained_context", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.invocation.retained_context",
+        level = "trace",
+        skip_all
+    )]
     pub async fn registered_retained_request_context(
         &self,
         project_root: &Path,
@@ -596,9 +598,10 @@ impl DaemonInvocationService {
 
     /// Installs every durable worktree-cleanup recovery fence before project
     /// open publishes holder-capable Work and LSP runtimes.
-    #[hotpath::measure(
-        label = "daemon.service.invocation.install_cleanup_fences",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.service.invocation.install_cleanup_fences",
+        level = "trace",
+        skip_all
     )]
     pub async fn install_worktree_cleanup_recovery_fences(
         &self,
@@ -614,7 +617,6 @@ impl DaemonInvocationService {
 
     /// Retains canonical profile/user session stores whose active rows remain
     /// cleanup holders even when no project-store mirror exists.
-    #[hotpath::skip]
     pub async fn mount_session_holder_databases(
         &self,
         databases: impl IntoIterator<Item = tracedecay_global_db::RegisteredGlobalDbLeaseV1>,

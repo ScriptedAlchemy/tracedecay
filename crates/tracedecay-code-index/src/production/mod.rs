@@ -59,6 +59,7 @@ use super::{
 mod canonical_json;
 mod clone_rows;
 mod file_evidence_rows;
+mod go_satisfaction;
 mod helpers;
 mod module_resolution;
 mod projection_rows;
@@ -192,7 +193,6 @@ pub enum CodeIndexGenerationIncompatibilityV1 {
 }
 
 impl CodeIndexGenerationIncompatibilityV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",
@@ -641,18 +641,15 @@ where
     T: Sync,
     R: Send,
     E: From<crate::parallelism::CodeIndexParallelismErrorV1> + Send,
-    F: Fn(&T, &crate::hotpath_observe::WorkerBusyGuard) -> Result<R, E> + Sync,
+    F: Fn(&T) -> Result<R, E> + Sync,
 {
-    let queue = crate::hotpath_observe::PendingWorkQueue::new(items.len());
-    crate::hotpath_observe::record_files(items.len());
     // Always enter the indexing pool, even when the width is 1. File-level
     // leaves are the pool actors. Chunk sweeps stay on the calling leaf so
     // they do not become a second admission class.
     crate::parallelism::install(|| {
         let run = |(index, item): (usize, &T)| -> Result<R, E> {
             crate::parallelism::with_background_cpu_permit(|| {
-                let worker = queue.start_worker();
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item, &worker)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(item)))
                     .unwrap_or_else(|payload| {
                         Err(E::from(
                             crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
@@ -723,20 +720,16 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
         extractor_revision: &ExtractorRevision,
-        worker: &crate::hotpath_observe::WorkerBusyGuard,
     ) -> Option<Arc<FileGenerationArtifactsV1>> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
-            let artifact = {
-                let _coordination = worker.pool_coordination();
-                upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
-            }?;
+        crate::observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
+            let artifact =
+                upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())?;
             let rebound = Arc::new(
                 artifact
                     .rematerialize_for_file(file, extractor_revision)
                     .ok()?,
             );
             {
-                let _coordination = worker.pool_coordination();
                 let mut state = self
                     .state
                     .lock()
@@ -751,7 +744,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     /// The pool retains only a weak index entry, so indexing a cold generation
     /// never deep-clones or pins the parsed/chunked payload.
     fn insert(&self, key: ManifestDigest, artifact: &Arc<FileGenerationArtifactsV1>) {
-        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.insert", {
+        crate::observe::measure_hot_loop!("code_index.artifact_pool.insert", {
             let mut state = self
                 .state
                 .lock()
@@ -862,7 +855,7 @@ impl FileGenerationArtifactsV1 {
         file: &ReceiptBoundCodeFileV1,
         extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.rematerialize", {
+        crate::observe::measure_hot_loop!("code_index.artifact_pool.rematerialize", {
             let target = file.validated_file();
             if &self.extraction.extractor_revision != extractor_revision {
                 return Err(ChunkingFailureV1::GenerationMismatch);
@@ -916,7 +909,9 @@ pub struct CodeIndexPublishedGenerationV1 {
     lineage: Vec<SymbolLineageCandidateV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
-    /// Canonical unresolved-call limitations derived while sealing.
+    /// Canonical unresolved-reference limitations derived while sealing:
+    /// `Calls` rows are call sites without an edge, `Implements` rows are Go
+    /// interfaces whose implementors the seal could not decide.
     unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
@@ -1146,7 +1141,11 @@ impl CodeIndexPublishedGenerationV1 {
 
     /// Compare every owner-controlled generation input against this immutable
     /// seal and return one canonical compatibility witness.
-    #[hotpath::measure(label = "code_index.generation.compatibility")]
+    #[tracing::instrument(
+        name = "code_index.generation.compatibility",
+        level = "trace",
+        skip_all
+    )]
     pub fn compatibility_with(
         &self,
         config: &CodeIndexProductionConfigV1,
@@ -1589,9 +1588,9 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|candidate| (&candidate.file_occurrence_id, candidate))
             .collect::<HashMap<_, _>>();
-        hotpath::measure_block!(
-            "code_index.collect.validate_files",
-            collect_bounded_ordered(&files, |file, _worker| {
+        {
+            let _span = tracing::trace_span!("code_index.collect.validate_files").entered();
+            collect_bounded_ordered(&files, |file| {
                 if reread {
                     file.artifacts
                         .validate()
@@ -1633,76 +1632,79 @@ impl CodeIndexPublishedGenerationV1 {
                     .map_err(CodeIndexProductionErrorV1::Chunk)?;
                 Ok(())
             })
-        )?;
-        hotpath::measure_block!("code_index.collect.validate_aggregates", {
-            let file_refs = files.iter().map(Arc::as_ref).collect::<Vec<_>>();
-            validate_import_evidence(&file_refs, &self.imports)?;
-            let mut file_chunk_count = 0usize;
-            let mut file_symbol_count = 0usize;
-            for file in &files {
-                file_chunk_count += file.artifacts.chunks.chunks.len();
-                file_symbol_count += file.artifacts.symbols.len();
-            }
-            if file_chunk_count != self.chunks.chunks().len()
-                || file_symbol_count != self.symbols.symbols.len()
+        }?;
+        {
+            let _span = tracing::trace_span!("code_index.collect.validate_aggregates").entered();
             {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "published generation does not match file artifacts".to_owned(),
-                ));
-            }
-            let chunk_ptrs = self
-                .chunks
-                .chunks()
-                .iter()
-                .map(Arc::as_ptr)
-                .collect::<HashSet<_>>();
-            for file in &files {
-                for chunk in &file.artifacts.chunks.chunks {
-                    if !chunk_ptrs.contains(&Arc::as_ptr(chunk)) {
-                        return Err(CodeIndexProductionErrorV1::Contract(
-                            "published generation does not match file artifacts".to_owned(),
-                        ));
-                    }
+                let file_refs = files.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                validate_import_evidence(&file_refs, &self.imports)?;
+                let mut file_chunk_count = 0usize;
+                let mut file_symbol_count = 0usize;
+                for file in &files {
+                    file_chunk_count += file.artifacts.chunks.chunks.len();
+                    file_symbol_count += file.artifacts.symbols.len();
                 }
-            }
-            let symbol_ptrs = self
-                .symbols
-                .symbols
-                .iter()
-                .map(Arc::as_ptr)
-                .collect::<HashSet<_>>();
-            for file in &files {
-                for symbol in &file.artifacts.symbols {
-                    if !symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
-                        return Err(CodeIndexProductionErrorV1::Contract(
-                            "published generation does not match file artifacts".to_owned(),
-                        ));
-                    }
+                if file_chunk_count != self.chunks.chunks().len()
+                    || file_symbol_count != self.symbols.symbols.len()
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "published generation does not match file artifacts".to_owned(),
+                    ));
                 }
-            }
-            // Edges are never persisted: every generation, restored or freshly
-            // built, owns the vector `collect_edge_evidence` just derived from
-            // these same immutable files. Re-deriving it here would compare a
-            // deterministic function against itself at the price of a second
-            // 1.7M-reference resolution, so the persisted per-file abstentions
-            // are what this check can actually falsify.
-            let mut edge_abstentions = files
-                .iter()
-                .flat_map(|file| file.artifacts.edge_abstentions.iter())
-                .collect::<Vec<_>>();
-            edge_abstentions.sort();
-            let abstentions_match = edge_abstentions.len() == self.edge_abstentions.len()
-                && edge_abstentions
+                let chunk_ptrs = self
+                    .chunks
+                    .chunks()
                     .iter()
-                    .zip(&self.edge_abstentions)
-                    .all(|(left, right)| *left == right);
-            if !abstentions_match {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "published graph evidence does not match file artifacts".to_owned(),
-                ));
+                    .map(Arc::as_ptr)
+                    .collect::<HashSet<_>>();
+                for file in &files {
+                    for chunk in &file.artifacts.chunks.chunks {
+                        if !chunk_ptrs.contains(&Arc::as_ptr(chunk)) {
+                            return Err(CodeIndexProductionErrorV1::Contract(
+                                "published generation does not match file artifacts".to_owned(),
+                            ));
+                        }
+                    }
+                }
+                let symbol_ptrs = self
+                    .symbols
+                    .symbols
+                    .iter()
+                    .map(Arc::as_ptr)
+                    .collect::<HashSet<_>>();
+                for file in &files {
+                    for symbol in &file.artifacts.symbols {
+                        if !symbol_ptrs.contains(&Arc::as_ptr(symbol)) {
+                            return Err(CodeIndexProductionErrorV1::Contract(
+                                "published generation does not match file artifacts".to_owned(),
+                            ));
+                        }
+                    }
+                }
+                // Edges are never persisted: every generation, restored or freshly
+                // built, owns the vector `collect_edge_evidence` just derived from
+                // these same immutable files. Re-deriving it here would compare a
+                // deterministic function against itself at the price of a second
+                // 1.7M-reference resolution, so the persisted per-file abstentions
+                // are what this check can actually falsify.
+                let mut edge_abstentions = files
+                    .iter()
+                    .flat_map(|file| file.artifacts.edge_abstentions.iter())
+                    .collect::<Vec<_>>();
+                edge_abstentions.sort();
+                let abstentions_match = edge_abstentions.len() == self.edge_abstentions.len()
+                    && edge_abstentions
+                        .iter()
+                        .zip(&self.edge_abstentions)
+                        .all(|(left, right)| *left == right);
+                if !abstentions_match {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "published graph evidence does not match file artifacts".to_owned(),
+                    ));
+                }
+                Ok::<_, CodeIndexProductionErrorV1>(())
             }
-            Ok::<_, CodeIndexProductionErrorV1>(())
-        })
+        }
     }
 }
 
@@ -1873,7 +1875,7 @@ where
             .map(|parent| parent.sealed().clone()))
     }
 
-    #[hotpath::measure(label = "code_index.build.active_generation")]
+    #[tracing::instrument(name = "code_index.build.active_generation", level = "trace", skip_all)]
     fn lookup_active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -1938,15 +1940,14 @@ where
     /// from the files the edit changed and never decodes it; a generation
     /// without one, or an edit that needs every file's resolution, is built
     /// whole.
-    #[hotpath::measure(label = "code_index.build.and_publish")]
+    #[tracing::instrument(name = "code_index.build.and_publish", level = "trace", skip_all)]
     pub fn build_and_publish(
         &mut self,
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
-        let started = crate::hotpath_observe::start_build_to_queryable();
-        crate::hotpath_observe::record_generation_state("building");
-        crate::hotpath_observe::record_rebuild_state("unknown");
+        crate::observe::record_generation_state("building");
+        crate::observe::record_rebuild_state("unknown");
         lexical_page_source::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
@@ -1964,16 +1965,7 @@ where
             .map_err(CodeIndexProductionErrorV1::Intake)?;
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
-        #[cfg(feature = "hotpath")]
-        {
-            crate::hotpath_observe::record_files(captured_files.len());
-            crate::hotpath_observe::record_source_bytes(
-                captured_files
-                    .values()
-                    .map(|file| file.sanitized_bytes.len() as u64)
-                    .fold(0_u64, u64::saturating_add),
-            );
-        }
+
         lexical_page_source::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
@@ -2037,7 +2029,7 @@ where
             self.config.policy_revision.clone(),
             self.config.chunker_revision.clone(),
         );
-        crate::hotpath_observe::record_generation_state(if parent.is_some() {
+        crate::observe::record_generation_state(if parent.is_some() {
             "resume"
         } else {
             "initial"
@@ -2067,12 +2059,11 @@ where
                 )?;
                 match sparse {
                     Ok(sparse) => {
-                        crate::hotpath_observe::record_rebuild_state("increment");
+                        crate::observe::record_rebuild_state("increment");
                         return self.publish(
                             &scope,
                             lookup.cas_incumbent.as_ref(),
                             CodeIndexSealedPublicationV1::Sparse(Arc::new(sparse)),
-                            started,
                         );
                     }
                     Err(reason) => reason,
@@ -2080,7 +2071,7 @@ where
             }
             _ => CodeIndexColdBuildReasonV1::NoParent,
         };
-        crate::hotpath_observe::record_rebuild_state("full");
+        crate::observe::record_rebuild_state("full");
         lexical_page_source::checkpoint(control)?;
         let staged = self.materialize_full(
             &intake,
@@ -2103,18 +2094,11 @@ where
             staged,
             control,
         )?;
-        #[cfg(feature = "hotpath")]
-        if let Ok(statistics) = candidate.generation_statistics() {
-            crate::hotpath_observe::record_source_bytes(statistics.source_total_bytes);
-            crate::hotpath_observe::record_symbols(statistics.symbol_count);
-            crate::hotpath_observe::record_relations(statistics.edge_count);
-            crate::hotpath_observe::record_files(candidate.files.len());
-        }
+
         self.publish(
             &scope,
             lookup.cas_incumbent.as_ref(),
             CodeIndexSealedPublicationV1::Cold(Arc::new(candidate), cold_reason),
-            started,
         )
     }
 
@@ -2131,84 +2115,100 @@ where
         staged: StagedGenerationV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
-        hotpath::measure_block!("code_index.build.assemble", {
-            let coverage = coverage_summary(&snapshot, &staged.files);
-            let changes = plan_chunk_increment(None, &staged.chunks)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-            manifest.source_commitments = Some(
-                CodeGenerationSourceCommitmentsV1::from_changed_chunks(None, &changes)
-                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
-            );
-            manifest.seal.expected_digest = expected_seal_digest(&manifest)
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            let capability = hotpath::measure_block!("code_index.build.assemble.capability", {
-                BaseCapabilityEmitter::new(
-                    registry_for_snapshot(&snapshot)?,
-                    coverage,
-                    snapshot.sanitization_receipts.clone(),
+        {
+            let _span = tracing::trace_span!("code_index.build.assemble").entered();
+            {
+                let coverage = coverage_summary(&snapshot, &staged.files);
+                let changes = plan_chunk_increment(None, &staged.chunks)
+                    .map_err(CodeIndexProductionErrorV1::Increment)?;
+                manifest.source_commitments = Some(
+                    CodeGenerationSourceCommitmentsV1::from_changed_chunks(None, &changes)
+                        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+                );
+                manifest.seal.expected_digest = expected_seal_digest(&manifest)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                let capability = {
+                    let _span =
+                        tracing::trace_span!("code_index.build.assemble.capability").entered();
+                    {
+                        BaseCapabilityEmitter::new(
+                            registry_for_snapshot(&snapshot)?,
+                            coverage,
+                            snapshot.sanitization_receipts.clone(),
+                        )
+                        .emit(&manifest)
+                        .map_err(CodeIndexProductionErrorV1::Capability)
+                    }
+                }?;
+                let projection = project_for_publication(
+                    &mut self.projection,
+                    projection_request(None, target_projection_key, changes)?,
                 )
-                .emit(&manifest)
-                .map_err(CodeIndexProductionErrorV1::Capability)
-            })?;
-            let projection = project_for_publication(
-                &mut self.projection,
-                projection_request(None, target_projection_key, changes)?,
-            )
-            .map_err(CodeIndexProductionErrorV1::Projection)?;
-            lexical_page_source::checkpoint(control)?;
-            let imports = hotpath::measure_block!(
-                "code_index.build.assemble.import_evidence",
-                derive_import_evidence(&staged.files)
-            );
-            let (edges, edge_abstentions, unresolved_calls) =
-                hotpath::measure_block!("code_index.build.assemble.graph_outputs", {
-                    let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
-                    let unresolved = resolution_outputs::unresolved_calls_for_edges(
-                        &staged.files,
-                        &edges,
-                        &|| Ok(()),
-                    )?;
-                    Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))
-                })?;
-            let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
-                &staged.files,
-                staged.symbols.symbols.len(),
-                edges.len(),
-            )?;
-            let candidate = CodeIndexPublishedGenerationV1 {
-                manifest,
-                snapshot,
-                repository_parse_identity,
-                ignored_source_roster,
-                files: staged.files,
-                content: None,
-                chunks: staged.chunks,
-                symbols: staged.symbols,
-                lineage: Vec::new(),
-                imports,
-                edges,
-                unresolved_calls,
-                edge_abstentions,
-                statistics,
-                clone_payloads_reused: staged.clone_payloads_reused,
-                clone_payloads_computed: staged.clone_payloads_computed,
-                clone_stale_invalidations: staged.clone_stale_invalidations,
-                coverage,
-                capability,
-                projection,
-                validated: OnceLock::new(),
-                admitted: OnceLock::new(),
-                attribution: OnceLock::new(),
-                chunk_policy: OnceLock::new(),
-                retained_bytes: OnceLock::new(),
-                decode_peak_growth_bytes: None,
-            };
-            hotpath::measure_block!(
-                "code_index.build.assemble.validate",
-                candidate.validate_fresh_built()
-            )?;
-            Ok(candidate)
-        })
+                .map_err(CodeIndexProductionErrorV1::Projection)?;
+                lexical_page_source::checkpoint(control)?;
+                let imports = {
+                    let _span =
+                        tracing::trace_span!("code_index.build.assemble.import_evidence").entered();
+                    derive_import_evidence(&staged.files)
+                };
+                let (edges, edge_abstentions, unresolved_calls) = {
+                    let _span =
+                        tracing::trace_span!("code_index.build.assemble.graph_outputs").entered();
+                    {
+                        let (edges, abstentions, implementor_gaps) =
+                            collect_edge_evidence(&staged.files)?;
+                        let mut unresolved = resolution_outputs::unresolved_calls_for_edges(
+                            &staged.files,
+                            &edges,
+                            &|| Ok(()),
+                        )?;
+                        unresolved.extend(implementor_gaps);
+                        unresolved.sort();
+                        unresolved.dedup();
+                        Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))
+                    }
+                }?;
+                let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
+                    &staged.files,
+                    staged.symbols.symbols.len(),
+                    edges.len(),
+                )?;
+                let candidate = CodeIndexPublishedGenerationV1 {
+                    manifest,
+                    snapshot,
+                    repository_parse_identity,
+                    ignored_source_roster,
+                    files: staged.files,
+                    content: None,
+                    chunks: staged.chunks,
+                    symbols: staged.symbols,
+                    lineage: Vec::new(),
+                    imports,
+                    edges,
+                    unresolved_calls,
+                    edge_abstentions,
+                    statistics,
+                    clone_payloads_reused: staged.clone_payloads_reused,
+                    clone_payloads_computed: staged.clone_payloads_computed,
+                    clone_stale_invalidations: staged.clone_stale_invalidations,
+                    coverage,
+                    capability,
+                    projection,
+                    validated: OnceLock::new(),
+                    admitted: OnceLock::new(),
+                    attribution: OnceLock::new(),
+                    chunk_policy: OnceLock::new(),
+                    retained_bytes: OnceLock::new(),
+                    decode_peak_growth_bytes: None,
+                };
+                {
+                    let _span =
+                        tracing::trace_span!("code_index.build.assemble.validate").entered();
+                    candidate.validate_fresh_built()
+                }?;
+                Ok(candidate)
+            }
+        }
     }
 
     /// Seal `publication` through the publication authority and describe
@@ -2218,15 +2218,14 @@ where
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
         publication: CodeIndexSealedPublicationV1,
-        started: crate::hotpath_observe::BuildToQueryableStart,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
-        let manifest_bytes = hotpath::measure_block!("code_index.build.publish", {
+        let manifest_bytes = {
+            let _span = tracing::trace_span!("code_index.build.publish").entered();
             self.publication
                 .publish_atomically(scope, expected, &publication)
-        })?;
+        }?;
         let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes)?;
-        crate::hotpath_observe::record_generation_state("queryable");
-        crate::hotpath_observe::record_build_to_queryable(started);
+        crate::observe::record_generation_state("queryable");
         Ok(published)
     }
 
@@ -2247,7 +2246,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "code_index.build.materialize_full")]
+    #[tracing::instrument(name = "code_index.build.materialize_full", level = "trace", skip_all)]
     fn materialize_full(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
@@ -2268,9 +2267,9 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
-        let extracted = hotpath::measure_block!(
-            "code_index.collect.materialize_full",
-            collect_bounded_ordered(&present_files, |file, worker| {
+        let extracted = {
+            let _span = tracing::trace_span!("code_index.collect.materialize_full").entered();
+            collect_bounded_ordered(&present_files, |file| {
                 extract_file(
                     config,
                     physical_artifacts,
@@ -2286,10 +2285,9 @@ where
                     None,
                     captured_files,
                     control,
-                    worker,
                 )
             })
-        )?;
+        }?;
         // Parallel completion order is intentionally not cache authority.
         // Record artifacts in canonical snapshot order so bounded eviction and
         // subsequent physical reuse remain deterministic.
@@ -2332,7 +2330,6 @@ fn extract_file(
     prior_clone_bodies: Option<&[CodeIndexCloneBodyV1]>,
     captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
     control: &dyn CodeIndexExecutionControlV1,
-    worker: &crate::hotpath_observe::WorkerBusyGuard,
 ) -> Result<
     (
         ManifestDigest,
@@ -2341,7 +2338,7 @@ fn extract_file(
     ),
     CodeIndexProductionErrorV1,
 > {
-    crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
+    crate::observe::measure_hot_loop!("code_index.materialize.file", {
         lexical_page_source::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
@@ -2374,9 +2371,7 @@ fn extract_file(
             &physical_reuse_key,
             &receipt_bound,
             &descriptor.extractor_revision,
-            worker,
         ) {
-            crate::hotpath_observe::add_reused_parses(1);
             physical_artifacts.record_clone_payloads(
                 u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                 0,
@@ -2488,7 +2483,7 @@ fn physical_reuse_key(
     descriptor: &tracedecay_domain::LanguageDescriptorV1,
     sensitivity_level: SensitivityLevelV1,
 ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
-    crate::hotpath_observe::measure_hot_loop!("code_index.materialize.reuse_key", {
+    crate::observe::measure_hot_loop!("code_index.materialize.reuse_key", {
         canonical_sha256(&(
             PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
             &config.project_id,

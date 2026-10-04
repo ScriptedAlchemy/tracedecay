@@ -114,13 +114,49 @@ async fn record_pending_effect_journal(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.txn.apply_relation")]
+#[tracing::instrument(
+    name = "session_temporal.txn.apply_relation",
+    level = "trace",
+    skip_all
+)]
 pub async fn apply_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     projection: &SessionRelationProjection,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
-    let (expected, was_pending) = {
+    let applied = write_relation_projection(database, projection, cancellation).await?;
+    let transaction = {
+        use tracing::Instrument as _;
+        {
+            database
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(RECEIPT_OPERATION, error))?
+        }
+    };
+    acknowledge_relation_receipt(&transaction, projection).await?;
+    {
+        use tracing::Instrument as _;
+        {
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(RECEIPT_OPERATION, error))?
+        }
+    };
+    Ok(applied)
+}
+
+/// Replaces the native relation graph with `projection` and leaves its
+/// receipt pending; [`acknowledge_relation_receipt`] settles it.
+pub(crate) async fn write_relation_projection(
+    database: &impl SessionTemporalRegisteredDb,
+    projection: &SessionRelationProjection,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
+    let (expected, _) = {
         let snapshot = database
             .read_snapshot()
             .await
@@ -162,12 +198,23 @@ pub async fn apply_relation_projection(
             context: "native relation graph watermark",
         });
     }
-    let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-        database
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
+    Ok(applied)
+}
+
+/// Marks the receipt applied once the native graph holds `projection`.
+///
+/// The receipt state is read under the writer lock, so a peer applier that
+/// settled the receipt first leaves no journal row to remove.
+pub(crate) async fn acknowledge_relation_receipt(
+    transaction: &impl SessionTemporalExec,
+    projection: &SessionRelationProjection,
+) -> SessionStoreResult<()> {
+    let generation = SessionProjectionGenerationV1::new(projection.generation)
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let (_, was_pending) =
+        expected_receipt(transaction, &projection.session_id, generation).await?;
+    let applied =
+        projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     let changed = transaction
         .execute(
             "UPDATE session_relation_receipts
@@ -209,13 +256,7 @@ pub async fn apply_relation_projection(
             "relation effect journal changed during native graph acknowledgement",
         ));
     }
-    hotpath::measure_block!("session_temporal.txn.commit", {
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?
-    });
-    Ok(applied)
+    Ok(())
 }
 
 /// Reports whether a peer applier already settled this generation's receipt.

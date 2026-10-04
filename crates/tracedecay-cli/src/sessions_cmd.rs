@@ -32,6 +32,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
         branch,
         worktree,
         commit,
+        json: _,
     } = args;
     let mut arguments = Map::from_iter([
         ("query".to_string(), Value::String(query)),
@@ -56,7 +57,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
-#[hotpath::measure(label = "cli.sessions.dispatch", future = true)]
+#[tracing::instrument(name = "cli.sessions.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_sessions_action(
     profile: &ProfileRoot,
     action: SessionsAction,
@@ -73,8 +74,9 @@ pub(crate) async fn handle_sessions_action(
             idempotency_key,
             project_id,
             project_path,
+            json,
         } => {
-            run_sync_status(profile, project_id, project_path, idempotency_key).await?;
+            run_sync_status(profile, project_id, project_path, idempotency_key, json).await?;
         }
         SessionsAction::Search(args) => {
             handle_sessions_search(profile, *args).await?;
@@ -88,16 +90,16 @@ pub(crate) async fn handle_sessions_action(
             since,
             limit_sessions,
         } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 run_git_sync(
                     profile,
                     project_id,
                     project_path,
                     since,
                     limit_sessions,
-                    dry_run
+                    dry_run,
                 ),
-                label = "cli.sessions.git_sync"
+                tracing::trace_span!("cli.sessions.git_sync"),
             )
             .await?;
         }
@@ -113,7 +115,7 @@ pub(crate) async fn handle_sessions_action(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.sessions.import", future = true)]
+#[tracing::instrument(name = "cli.sessions.import", level = "trace", skip_all)]
 async fn handle_sessions_import(
     profile: &ProfileRoot,
     project_id: Option<String>,
@@ -126,16 +128,23 @@ async fn handle_sessions_import(
         AdminCliSurfaceRequestV1::SessionsImport {},
     )
     .await?;
-    await_session_sync_completion(profile, &project_path, "session import", outcome).await
+    await_session_sync_completion(
+        profile,
+        &project_path,
+        session_sync::SessionSyncSurface::Import,
+        outcome,
+    )
+    .await
 }
 
-#[hotpath::measure(label = "cli.sessions.search", future = true)]
+#[tracing::instrument(name = "cli.sessions.search", level = "trace", skip_all)]
 async fn handle_sessions_search(
     profile: &ProfileRoot,
     args: SessionsSearchArgs,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
+    let json = args.json;
     let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let payload = call_daemon_tool(
         profile,
@@ -146,13 +155,21 @@ async fn handle_sessions_search(
     .await?;
     let result: MessageSearchResultV1 =
         crate::commands::retained_tool_payload("tracedecay_message_search", payload)?;
-    print!("{}", SessionsSearchReport::render(&result));
-    if let Some(error) = &result.error {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("sessions search failed: {}: {}", error.code, error.message),
-        });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print!("{}", SessionsSearchReport::render(&result));
     }
-    Ok(())
+    // A refusal already printed its own JSON document, so it ends as
+    // `ToolRefused`, which the `--json` boundary does not print again.
+    match result.error {
+        Some(error) => Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+            "tracedecay_message_search",
+            Some(error.code),
+            Some(error.message),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// One line per hit, or an explicit empty/refusal report. A search that
@@ -207,7 +224,7 @@ impl SessionsSearchReport {
     }
 }
 
-#[hotpath::measure(label = "cli.sessions.unfinished", future = true)]
+#[tracing::instrument(name = "cli.sessions.unfinished", level = "trace", skip_all)]
 async fn handle_sessions_unfinished(
     profile: &ProfileRoot,
     limit: usize,
@@ -370,6 +387,7 @@ mod tests {
             branch: None,
             worktree: None,
             commit: None,
+            json: false,
         });
 
         assert_eq!(
@@ -400,6 +418,7 @@ mod tests {
             branch: Some("master".to_string()),
             worktree: Some("/repos/worktree".to_string()),
             commit: Some("abc123".to_string()),
+            json: false,
         });
 
         assert_eq!(

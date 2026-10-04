@@ -30,7 +30,7 @@ pub(super) async fn cancel_retained_session_history(store_administration: &Store
 /// One bounded, idempotent project-server teardown. Servers whose shutdown
 /// timed out are retained on the administration so a retry re-drives exactly
 /// those owners; typed failures are replayed into every subsequent receipt.
-#[hotpath::measure(label = "daemon.project.lifecycle.shutdown", future = true)]
+#[tracing::instrument(name = "daemon.project.lifecycle.shutdown", level = "trace", skip_all)]
 pub(super) async fn shutdown_project_servers(
     deadline: tokio::time::Instant,
     store_administration: &StoreAdministration,
@@ -126,7 +126,7 @@ fn apply_project_shutdown_attempts(
     });
 }
 
-#[hotpath::measure(label = "daemon.project.lifecycle.detach", future = true)]
+#[tracing::instrument(name = "daemon.project.lifecycle.detach", level = "trace", skip_all)]
 pub(super) async fn detach_project_servers(
     store_administration: &StoreAdministration,
 ) -> Vec<Arc<crate::mcp::McpServer>> {
@@ -150,7 +150,11 @@ pub(super) async fn detach_project_servers(
     servers
 }
 
-#[hotpath::measure(label = "daemon.project.lifecycle.shutdown_detached", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.shutdown_detached",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn shutdown_detached_project_servers(
     deadline: tokio::time::Instant,
     servers: Vec<Arc<crate::mcp::McpServer>>,
@@ -190,7 +194,7 @@ async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpSe
     }
 }
 
-#[hotpath::measure(label = "daemon.project.lifecycle.retire", future = true)]
+#[tracing::instrument(name = "daemon.project.lifecycle.retire", level = "trace", skip_all)]
 pub(in crate::daemon) async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
@@ -237,7 +241,11 @@ pub(super) async fn retire_project_servers_now(servers: Vec<Arc<crate::mcp::McpS
     retire_project_servers(servers, None).await;
 }
 
-#[hotpath::measure(label = "daemon.project.lifecycle.schedule_retire", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.schedule_retire",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn schedule_project_server_retirement(
     store_administration: &StoreAdministration,
     owner: StoreOwnerKey,
@@ -253,7 +261,11 @@ pub(super) async fn schedule_project_server_retirement(
 /// Owner eviction / failed-open retirement. The displaced server is drained
 /// through the same tracked admission as an upgrade, but the owner is gone, so
 /// the temporal scheduler must be released with it.
-#[hotpath::measure(label = "daemon.project.lifecycle.retire_evicted", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.retire_evicted",
+    level = "trace",
+    skip_all
+)]
 pub(in crate::daemon) async fn retire_evicted_project_owner(
     store_administration: &StoreAdministration,
     owner: StoreOwnerKey,
@@ -269,9 +281,10 @@ pub(in crate::daemon) async fn retire_evicted_project_owner(
 }
 
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
-#[hotpath::measure(
-    label = "daemon.project.lifecycle.host_admission_ensure",
-    future = true
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.host_admission_ensure",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
@@ -301,9 +314,10 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
 /// Kick cold profile-session/spool setup outside the connection's admission
 /// permit. Concurrent requests for one profile share a single bootstrap, while
 /// the retained replay worker still coalesces subsequent passes.
-#[hotpath::measure(
-    label = "daemon.project.lifecycle.host_admission_schedule",
-    future = true
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.host_admission_schedule",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
@@ -342,7 +356,11 @@ pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
 
 const PROFILE_HOST_ADMISSION_REPLAY_READ_GRACE: Duration = Duration::from_secs(5);
 
-#[hotpath::measure(label = "daemon.project.lifecycle.host_admission_await", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.lifecycle.host_admission_await",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn await_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,

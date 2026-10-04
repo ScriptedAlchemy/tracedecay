@@ -28,6 +28,7 @@ use super::ports::{
 mod projection;
 mod routes;
 
+pub(crate) use self::projection::exact_field_for_kind;
 pub use self::projection::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
     CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
@@ -122,11 +123,6 @@ pub(crate) fn admit_candidate_sources<S>(
         admitted_documents = next;
         admitted.push(source);
     }
-    hotpath::gauge!("query.lane.lexical.candidate_sources_total").inc(total as u64);
-    hotpath::gauge!("query.lane.lexical.candidate_sources_pruned")
-        .inc((total - admitted.len()) as u64);
-    hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
-        .set(admitted_documents as u64);
     admitted
 }
 
@@ -308,6 +304,9 @@ pub struct LexicalLaneRequest<'a> {
     pub phrases: Cow<'a, [String]>,
     pub proximities: Cow<'a, [LexicalProximityV1]>,
     pub field_filters: Cow<'a, [LexicalFieldFilterV1]>,
+    /// Applied before the candidate cap, so out-of-scope matches cannot
+    /// crowd in-scope ones out of a bounded selection.
+    pub path_prefix: Option<&'a str>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
     /// normalization versions.
     pub fuzzy_budget: u32,
@@ -660,7 +659,7 @@ impl<P> LexicalLaneRetriever for LexicalLane<P>
 where
     P: LexicalPostingReadPort,
 {
-    #[hotpath::measure(label = "query.lane.lexical")]
+    #[tracing::instrument(name = "query.lane.lexical", level = "trace", skip_all)]
     fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -688,13 +687,7 @@ where
             },
             outcome => outcome,
         };
-        crate::hotpath_metrics::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }

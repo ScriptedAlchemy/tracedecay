@@ -440,7 +440,7 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
     ))
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.dispatch")]
+#[tracing::instrument(name = "hosts.hooks.dispatch", level = "trace", skip_all)]
 pub(crate) async fn dispatch(
     runtime: &HookRuntimeV1,
     host: NativeHostIdentityV1,
@@ -569,7 +569,11 @@ async fn dispatch_profile_scoped(
     }
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_tool_after")]
+#[tracing::instrument(
+    name = "hosts.hooks.opencode.dispatch_tool_after",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn dispatch_opencode_tool_after(
     runtime: &HookRuntimeV1,
     event_json: &str,
@@ -670,7 +674,7 @@ fn prepare_bound_hook(
     })
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.dispatch_decoded")]
+#[tracing::instrument(name = "hosts.hooks.dispatch_decoded", level = "trace", skip_all)]
 async fn dispatch_decoded(
     runtime: &HookRuntimeV1,
     prepared: PreparedBoundHook,

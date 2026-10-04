@@ -67,7 +67,11 @@ impl PreparedBranchAdminMutation {
     }
 
     /// CAS-publishes the exact prepared branch metadata.
-    #[hotpath::measure(label = "runtime_core.branch.commit_admin_mutation")]
+    #[tracing::instrument(
+        name = "runtime_core.branch.commit_admin_mutation",
+        level = "trace",
+        skip_all
+    )]
     pub fn commit(self) -> tracedecay_domain::errors::Result<BranchAdminReport> {
         if self.report.outcome != BranchAdminOutcome::Removed {
             return Ok(self.report);
@@ -112,7 +116,11 @@ impl PreparedBranchAdminMutation {
 
 /// Selects a branch metadata mutation while holding the same lock used by
 /// branch add. This function does not mutate metadata.
-#[hotpath::measure(label = "runtime_core.branch.prepare_admin_mutation")]
+#[tracing::instrument(
+    name = "runtime_core.branch.prepare_admin_mutation",
+    level = "trace",
+    skip_all
+)]
 pub fn prepare_branch_admin_mutation(
     project_root: &Path,
     tracedecay_dir: &Path,

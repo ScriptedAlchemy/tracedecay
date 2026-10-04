@@ -623,7 +623,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
 // The single funnel every reflector entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
-#[hotpath::measure(future = true, label = "automation.run.session_reflector")]
+#[tracing::instrument(name = "automation.run.session_reflector", level = "trace", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
     dashboard_root: PathBuf,

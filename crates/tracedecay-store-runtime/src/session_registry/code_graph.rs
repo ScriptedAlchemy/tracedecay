@@ -128,7 +128,6 @@ enum CodeGraphPublicationConflictStageV1 {
 }
 
 impl CodeGraphPublicationConflictStageV1 {
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::ActiveReplayPublish => "active_replay_publish",
@@ -153,8 +152,8 @@ fn observe_code_graph_publication<T>(
                 reason,
                 "code graph publication reached a conflicting durable authority"
             );
-            #[cfg(feature = "hotpath")]
-            hotpath::val!("code_graph.publication.conflict_reason").set(&reason);
+
+            tracing::trace!(name: "code_graph.publication.conflict_reason", value = ?reason);
         }
         error
     })
@@ -168,7 +167,7 @@ const fn sealed_projection_deadline() -> Duration {
     // progressing projection only re-runs the same work into the same wall,
     // turning slow into never. The registration API wants an `Instant`, so
     // "no deadline" is expressed as a far-future one. Projection latency
-    // itself is the number to fix (see the code_graph hotpath spans), not a
+    // itself is the number to fix (see the code_graph spans), not a
     // policy to tune.
     GRAPH_BACKGROUND_OPERATION_BUDGET
 }
@@ -481,12 +480,14 @@ impl CodeGraphPublicationFlightV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         while in_flight.contains(key) {
             interruption()?;
-            let (guard, _timed_out) = hotpath::measure_block!(
-                "daemon.session_registry.publish_snapshot.peer_wait",
+            let (guard, _timed_out) = {
+                let _span =
+                    tracing::trace_span!("daemon.session_registry.publish_snapshot.peer_wait")
+                        .entered();
                 self.settled
                     .wait_timeout(in_flight, PUBLICATION_FLIGHT_INTERRUPTION_POLL)
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-            );
+            };
             in_flight = guard;
         }
         interruption()?;
@@ -559,10 +560,13 @@ impl CodeGraphShardPublicationLocksV1 {
                 // The only failure is "held by a peer"; tokio's mutex has no
                 // poisoned state to unwrap.
                 Err(_held) => {
-                    hotpath::measure_block!(
-                        "daemon.session_registry.publish_snapshot.build_wait",
+                    {
+                        let _span = tracing::trace_span!(
+                            "daemon.session_registry.publish_snapshot.build_wait"
+                        )
+                        .entered();
                         std::thread::sleep(PUBLICATION_BUILD_INTERRUPTION_POLL)
-                    );
+                    };
                 }
             }
         }
@@ -814,7 +818,11 @@ impl RetainedVerifiedGraphRuntimeV1 {
         })
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.publish_manifest")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.publish_manifest",
+        level = "trace",
+        skip_all
+    )]
     pub fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -1267,7 +1275,11 @@ impl RetainedCodeGraphRuntimeV1 {
     /// publication has not landed yet; a retry or a twin publisher of an
     /// already-published generation recovers the head without reading a
     /// segment.
-    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.publish_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
@@ -1448,7 +1460,11 @@ impl RetainedCodeGraphRuntimeV1 {
     /// mismatch fails before the returned snapshot becomes observable; callers
     /// may then keep graph coverage pending while the scheduler replays the
     /// canonical segments in the background.
-    #[hotpath::measure(label = "daemon.session_registry.recover_snapshot_from_head")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.recover_snapshot_from_head",
+        level = "trace",
+        skip_all
+    )]
     pub fn recover_verified_snapshot_from_head(
         &self,
         request_cancelled: Arc<AtomicBool>,
@@ -1627,7 +1643,11 @@ impl RetainedCodeGraphRuntimeV1 {
     /// refusal from the compare-and-swap-shaped discard means the journal
     /// moved since the diagnosis, the caller re-reads and proceeds, so a
     /// completed or re-journaled publication is never swept (issue #765).
-    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.discard_interrupted")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.publish_snapshot.discard_interrupted",
+        level = "trace",
+        skip_all
+    )]
     fn discard_interrupted_publication_row(
         &self,
         storage: &mut dyn GraphPublicationStoreV1,
@@ -1676,13 +1696,14 @@ impl RetainedCodeGraphRuntimeV1 {
     /// to attribute gate contention; with the corpus-sized prepare running
     /// gateless, both must stay milliseconds-scale.
     fn hold_publication_gate(&self) -> std::sync::MutexGuard<'_, ()> {
-        hotpath::measure_block!(
-            "daemon.session_registry.publish_snapshot.gate_wait",
+        {
+            let _span = tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_wait")
+                .entered();
             self.publication_locks
                 .gate
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-        )
+        }
     }
 
     /// Releases redundant staging rows without delaying the serving seat.
@@ -1798,7 +1819,11 @@ impl RetainedCodeGraphRuntimeV1 {
     /// replay and verified head to decide
     /// the publication arm. No journal write and no corpus-sized work happens
     /// here.
-    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.classify")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.publish_snapshot.classify",
+        level = "trace",
+        skip_all
+    )]
     fn classify_sealed_publication(
         &self,
         prepared: &PreparedSealedPublicationV1,
@@ -1918,7 +1943,11 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.execute")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.publish_snapshot.execute",
+        level = "trace",
+        skip_all
+    )]
     fn publish_prepared_sealed_generation(
         &self,
         prepared: &PreparedSealedPublicationV1,
@@ -1964,15 +1993,17 @@ impl RetainedCodeGraphRuntimeV1 {
                 &self.sealed_state_digest,
                 &check,
             )?;
-            hotpath::measure_block!(
-                "daemon.session_registry.publish_snapshot.verify_source",
+            {
+                let _span =
+                    tracing::trace_span!("daemon.session_registry.publish_snapshot.verify_source")
+                        .entered();
                 super::code_graph_manifest::verify_sealed_generation_source_from_roots(
                     &self.generations_root,
                     &self.replay_root,
                     &self.sealed_state_digest,
                     &check,
                 )
-            )?;
+            }?;
             revalidate_stable_sealed_source(&proof, &self.replay_root, &check)
         };
         // The generation's graph rows, built from its sealed segments the
@@ -2121,14 +2152,16 @@ impl RetainedCodeGraphRuntimeV1 {
             };
             let completion = publish_registration();
             let _gate = self.hold_publication_gate();
-            hotpath::measure_block!(
-                "code_index.seal.seat",
-                hotpath::measure_block!(
-                    "daemon.session_registry.publish_snapshot.gate_hold",
+            {
+                let _span = tracing::trace_span!("code_index.seal.seat").entered();
+                {
+                    let _span =
+                        tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
+                            .entered();
                     self.graph_registry
-                        .complete_verified_publication(completion, storage, &context, *proven,)
-                )
-            )
+                        .complete_verified_publication(completion, storage, &context, *proven)
+                }
+            }
         };
         // Classification slice: the manifest-provider bind (a shared-map
         // write the gate orders before the publish/recover reads that resolve
@@ -2137,10 +2170,12 @@ impl RetainedCodeGraphRuntimeV1 {
         // sealed-store build, runs after the gate is released.
         let classification = {
             let _gate = self.hold_publication_gate();
-            hotpath::measure_block!(
-                "daemon.session_registry.publish_snapshot.gate_hold",
+            {
+                let _span =
+                    tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
+                        .entered();
                 self.classify_sealed_publication(prepared, probe, &mut storage, context)
-            )
+            }
         }?;
         match classification {
             SealedPublicationClassificationV1::RecoverPublished => {
@@ -2333,8 +2368,10 @@ impl RetainedCodeGraphRuntimeV1 {
             // while blocked never touches the journal.
             let outcome = {
                 let _gate = self.hold_publication_gate();
-                hotpath::measure_block!(
-                    "daemon.session_registry.publish_snapshot.gate_hold",
+                {
+                    let _span =
+                        tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
+                            .entered();
                     match probe.interruption() {
                         Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
                         Some(RuntimeInterruptionV1::DeadlineExceeded) => {
@@ -2344,7 +2381,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             .append_replay(&replay, &journal_context)
                             .map_err(GraphDbError::from),
                     }
-                )
+                }
             }?;
             match outcome {
                 GraphReplayAppendOutcomeV1::Appended(_)
@@ -2456,9 +2493,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// to a concurrent attacher (or any other failure here) is swallowed:
     /// the ordinary lease path still runs and surfaces its own, more precise
     /// error if the shard is genuinely unavailable.
-    #[hotpath::measure(
-        label = "daemon.session_registry.ensure_graph_shard_attached",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.session_registry.ensure_graph_shard_attached",
+        level = "trace",
+        skip_all
     )]
     async fn ensure_code_graph_shard_attached(&self, project_shard: &StoreShardIdV1) {
         match self.graph_registry.shard_is_registered(project_shard) {
@@ -2523,9 +2561,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(
-        label = "daemon.session_registry.retain_code_graph_runtime",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.session_registry.retain_code_graph_runtime",
+        level = "trace",
+        skip_all
     )]
     pub(crate) async fn retain_code_graph_runtime(
         &self,
@@ -2742,9 +2781,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         })?
     }
 
-    #[hotpath::measure(
-        label = "daemon.session_registry.reconcile_graph_replays",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.session_registry.reconcile_graph_replays",
+        level = "trace",
+        skip_all
     )]
     pub async fn reconcile_deleted_code_generation_graph_replays(
         &self,

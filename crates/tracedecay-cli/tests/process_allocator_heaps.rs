@@ -7,7 +7,7 @@
 //! nothing here reads the process's RSS, so it runs on every platform the
 //! owner heaps ship on.
 
-#![cfg(all(not(feature = "alloc-jemalloc"), not(feature = "hotpath-alloc")))]
+#![cfg(not(feature = "alloc-jemalloc"))]
 
 // This binary never routes a C library's allocator, so the routing calls
 // below stay unused here; the binaries that own their process use them.

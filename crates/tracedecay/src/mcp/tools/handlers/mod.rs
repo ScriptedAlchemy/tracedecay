@@ -7,10 +7,10 @@
 mod application_surface;
 pub(crate) use application_surface::graph_tool_error_problem;
 pub use application_surface::{
-    GraphToolOutcome, RetainedSurfaceExecution, execute_graph_tool_surface,
-    execute_retained_surface_tool, handle_application_surface, render_application_surface_result,
-    render_retained_execution, render_settled_route_refusal, retained_tool_target,
-    run_retained_surface_tool,
+    GraphToolOutcome, RetainedSurfaceExecution, command_refusal_document,
+    execute_graph_tool_surface, execute_retained_surface_tool, handle_application_surface,
+    render_application_surface_result, render_retained_execution, render_settled_route_refusal,
+    retained_tool_target, run_retained_surface_tool, tool_refusal_response,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
 pub use support::{registered_project_not_found, registered_project_selector_id};
@@ -439,11 +439,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
     args: Value,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    #[cfg(feature = "hotpath")]
-    let hotpath_tool_name = mcp_tool_hotpath_identity(tool_name);
     let dispatch = async move {
-        #[cfg(feature = "hotpath")]
-        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+        tracing::trace!(name: "mcp.tool.name", value = ?mcp_tool_bounded_identity(tool_name));
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
@@ -549,7 +546,10 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // every other name has returned through its typed owner above.
         Err(unknown_tool_error(tool_name))
     };
-    Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
+    Box::pin(tracing::Instrument::instrument(
+        dispatch,
+        tracing::trace_span!("mcp.tool_call"),
+    ))
 }
 
 /// Runs one Work tool through the canonical Work owner on `executor`: the
@@ -648,8 +648,7 @@ async fn invoke_admitted_workflow_operation(
     })
 }
 
-#[cfg(any(feature = "hotpath", test))]
-fn mcp_tool_hotpath_identity(tool_name: &str) -> &str {
+fn mcp_tool_bounded_identity(tool_name: &str) -> &str {
     if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
         || classify_mcp_tool_dispatch_group(tool_name).is_some()
     {

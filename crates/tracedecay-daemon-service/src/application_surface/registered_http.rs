@@ -34,7 +34,11 @@ pub(crate) trait RegisteredHttpOperation: Copy {
     >;
 }
 
-#[hotpath::measure(label = "application_surface.registered.validate_outcome")]
+#[tracing::instrument(
+    name = "application_surface.registered.validate_outcome",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn validated_daemon_outcome<O>(
     operation: O,
     request_id: &RequestId,
@@ -280,7 +284,11 @@ where
     CanonicalInvocationResult::<T>::new(binding_id.clone(), Err(problem)).into_http_response()
 }
 
-#[hotpath::measure(label = "application_surface.registered.invoke")]
+#[tracing::instrument(
+    name = "application_surface.registered.invoke",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn invoke_registered_http<T, O>(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation: O,
@@ -356,15 +364,15 @@ where
     } else {
         InvocationCancellationPolicy::AuthoritativeEffect
     };
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         executor.invoke_controlled(invocation, controls.deadline, controls.cancellation, policy),
-        label = "application_surface.registered.dispatch"
+        tracing::trace_span!("application_surface.registered.dispatch"),
     )
     .await;
-    let outcome = hotpath::measure_block!(
-        "application_surface.registered.assemble",
+    let outcome = {
+        let _span = tracing::trace_span!("application_surface.registered.assemble").entered();
         validated_daemon_outcome(operation, &request_id, response)
-    );
+    };
     let owning_layer = match &outcome {
         Ok(
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { .. }

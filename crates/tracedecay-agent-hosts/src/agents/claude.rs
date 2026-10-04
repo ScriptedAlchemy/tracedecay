@@ -47,7 +47,7 @@ impl AgentIntegration for ClaudeIntegration {
     // deferral arms in `host_component_registration::preflight` and block the
     // very lifecycle this integration can complete on its own.
 
-    #[hotpath::measure(label = "hosts.agent.claude.project_install")]
+    #[tracing::instrument(name = "hosts.agent.claude.project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -121,7 +121,7 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
+        dc.section("Claude Code integration");
         doctor_check_plugin(dc, &ctx.home);
         doctor_check_permissions_json(dc, &ctx.home);
         super::doctor_check_managed_skill_prompt_indexes(
@@ -602,7 +602,7 @@ fn require_claude_cli() -> Result<PathBuf> {
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "hosts.agent.claude.plugin_activate")]
+#[tracing::instrument(name = "hosts.agent.claude.plugin_activate", level = "trace", skip_all)]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
     if claude_plugin_needs_reinstall(home)? {
         run_claude_plugin_step(
@@ -627,7 +627,11 @@ fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
 /// The plugin is addressed by its selection name (`tracedecay`) while the
 /// install side addresses `<plugin>@<marketplace>`; that asymmetry is Claude
 /// Code's own CLI contract, not a TraceDecay convention.
-#[hotpath::measure(label = "hosts.agent.claude.plugin_deactivate")]
+#[tracing::instrument(
+    name = "hosts.agent.claude.plugin_deactivate",
+    level = "trace",
+    skip_all
+)]
 fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
     run_claude_plugin_step(
         claude,
@@ -1192,7 +1196,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
 
 /// Report local project config without rewriting host-owned files.
 fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
-    eprintln!("\n\x1b[1mLocal config\x1b[0m");
+    dc.section("Local config");
     let mcp_json_path = project_path.join(".mcp.json");
     let local_settings_path = project_path.join(".claude").join("settings.local.json");
     let local_paths = [mcp_json_path, local_settings_path];

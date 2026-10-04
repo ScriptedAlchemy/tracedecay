@@ -49,7 +49,7 @@ fn adoption_family(capability_id: &str) -> Option<&'static str> {
 
 /// Enumerates the complete composed catalog into per-family eligibility
 /// observations. Only families with a non-zero eligible population appear.
-#[hotpath::measure(label = "daemon.adoption.census")]
+#[tracing::instrument(name = "daemon.adoption.census", level = "trace", skip_all)]
 pub fn adoption_eligibility_census()
 -> Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError> {
     let contributions = application_catalog_contributions()?;
@@ -84,12 +84,11 @@ pub fn adoption_eligibility_census()
 /// Records the project-open adoption-eligibility census through the
 /// project-bound observation authority. Telemetry only: every failure is
 /// logged and discarded so project open never blocks or fails on it.
-#[hotpath::measure(label = "daemon.adoption.record", future = true)]
+#[tracing::instrument(name = "daemon.adoption.record", level = "trace", skip_all)]
 pub async fn record_project_open_adoption_census(db: &RegisteredGlobalDb, project_root: &Path) {
     let observations = match adoption_eligibility_census() {
         Ok(observations) => observations,
         Err(error) => {
-            hotpath::gauge!("daemon.adoption.census_unavailable_total").inc(1_u64);
             log_daemon_event(
                 "adoption_observation",
                 &[
@@ -105,22 +104,18 @@ pub async fn record_project_open_adoption_census(db: &RegisteredGlobalDb, projec
         let family = observation.capability.clone();
         // The census enumerated the whole composed catalog, so each family
         // observation is a complete count of its eligible population.
-        match record_adoption_eligibility(db, CoverageStateV1::Known, observation).await {
-            Ok(_) => {
-                hotpath::gauge!("daemon.adoption.recorded_total").inc(1_u64);
-            }
-            Err(error) => {
-                hotpath::gauge!("daemon.adoption.record_failed_total").inc(1_u64);
-                log_daemon_event(
-                    "adoption_observation",
-                    &[
-                        ("project", project_root.display().to_string()),
-                        ("family", family),
-                        ("outcome", "failed".to_owned()),
-                        ("reason", format!("{error:?}")),
-                    ],
-                );
-            }
+        if let Err(error) =
+            record_adoption_eligibility(db, CoverageStateV1::Known, observation).await
+        {
+            log_daemon_event(
+                "adoption_observation",
+                &[
+                    ("project", project_root.display().to_string()),
+                    ("family", family),
+                    ("outcome", "failed".to_owned()),
+                    ("reason", format!("{error:?}")),
+                ],
+            );
         }
     }
 }
@@ -280,7 +275,6 @@ mod tests {
                     "capability.application.native-integration.worktree-inventory",
                     "available",
                 ),
-                ("capability.git.commit-index", "eligible"),
                 ("capability.git.stage-hunks", "eligible"),
                 ("capability.git.unstage-hunks", "eligible"),
             ],

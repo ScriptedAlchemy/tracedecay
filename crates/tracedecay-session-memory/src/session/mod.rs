@@ -1,4 +1,3 @@
-mod hotpath_observe;
 pub mod lcm;
 mod refresh;
 mod refresh_service;

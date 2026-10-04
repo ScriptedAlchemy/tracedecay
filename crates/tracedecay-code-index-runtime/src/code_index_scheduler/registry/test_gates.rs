@@ -17,9 +17,9 @@ use super::{
     ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
     QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
-    cold_mount_open_controls, cold_mount_post_check_controls, graph_decode_gate,
-    published_text_projection_gate, query_admission_controls, serving_swap_gate, test_gate_root,
-    unique_mounted_for_scope, wait_notified_if_unset,
+    cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
+    graph_decode_gate, published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    test_gate_root, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -89,6 +89,39 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&test_gate_root(project_root));
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next complete-seat probe for `project_root` right after its
+    /// read missed. The first receiver resolves once the probe waits there;
+    /// sending on the returned sender releases it.
+    #[cfg(test)]
+    pub fn pause_next_complete_seat_probe_miss(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let replaced = complete_seat_probe_miss_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, WorkerStepGateV1 { entered, release });
+        assert!(
+            replaced.is_none(),
+            "one complete-seat probe gate per worktree"
+        );
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_complete_seat_probe_miss_gate(project_root: &Path) {
+        let gate = complete_seat_probe_miss_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -702,6 +735,22 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.serving_generation_changed.send_replace(());
             }
         }
+    }
+
+    /// Drop only the decoded seat, as a deferred serving decode does once a
+    /// published graph head serves from the text owner.
+    #[cfg(test)]
+    pub async fn release_serving_seat_for_test(&self, project_root: &Path) {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted worktree");
+        Self::release_superseded_serving_seat(
+            &worktree.serving_generation,
+            &worktree.serving_generation_epoch,
+            &worktree.serving_source_witness,
+            &self.serving_seats,
+            &worktree.serving_generation_changed,
+        );
     }
 
     /// Retires the serving generation only when this operation's metadata

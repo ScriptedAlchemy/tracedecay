@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
@@ -311,14 +312,6 @@ impl AdmissionFlightOwnerV1 {
         if result.is_err() {
             self.flight.owner_abandoned();
         }
-        match &result {
-            Ok(_) => {
-                hotpath::gauge!("daemon.code_index.ignored_dependency.admitted_total").inc(1_u64);
-            }
-            Err(_) => {
-                hotpath::gauge!("daemon.code_index.ignored_dependency.refused_total").inc(1_u64);
-            }
-        }
         self.flight.finish(&result);
         self.remove_flight();
         self.finished = true;
@@ -342,12 +335,10 @@ impl AdmissionFlightOwnerV1 {
 impl Drop for AdmissionFlightOwnerV1 {
     fn drop(&mut self) {
         // The owner is the RAII holder of the in-flight admission slot, so the
-        // gauge cannot leak on cancellation, panic, or shutdown.
-        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").dec(1_u64);
+        // slot cannot leak on cancellation, panic, or shutdown.
         if self.finished {
             return;
         }
-        hotpath::gauge!("daemon.code_index.ignored_dependency.cancelled_total").inc(1_u64);
         self.bridge.cancel();
         self.flight.owner_abandoned();
         let cancellation = Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
@@ -473,11 +464,9 @@ impl CodeIndexSchedulerRegistryV1 {
         };
 
         if !owns_flight {
-            hotpath::gauge!("daemon.code_index.ignored_dependency.coalesced_total").inc(1_u64);
             return await_flight(flight, control.as_ref()).await;
         }
         let bridge = Arc::new(AdmissionControlBridgeV1::new());
-        hotpath::gauge!("daemon.code_index.ignored_dependency.in_flight").inc(1_u64);
         let owner = AdmissionFlightOwnerV1 {
             key: flight_key,
             flight: Arc::clone(&flight),
@@ -566,9 +555,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// The owning flight's full admission lifetime: gate waits, the blocking
     /// build/publication, graph activation, and the serving CAS. Followers
     /// coalesce onto this flight and are counted, not spanned.
-    #[hotpath::measure(
-        label = "daemon.code_index.ignored_dependency.admission",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.ignored_dependency.admission",
+        level = "trace",
+        skip_all
     )]
     async fn run_ignored_dependency_admission(
         &self,
@@ -699,6 +689,7 @@ impl CodeIndexSchedulerRegistryV1 {
             &repository_id,
             &worktree_id,
             build.latest.clone(),
+            serving.interactive_graph_store().ok(),
             replay_binding,
         )
         .await;
@@ -875,6 +866,7 @@ async fn activate_committed_generation(
     repository_id: &tracedecay_domain::RepositoryId,
     worktree_id: &tracedecay_domain::WorktreeId,
     latest: LatestCompleteCodeIndexV1,
+    predecessor: Option<Arc<CodeGraphProjectionStore>>,
     replay_binding: CodeGraphReplayBindingV1,
 ) -> Result<(), CodeIndexSchedulerErrorV1> {
     graph_activation
@@ -883,6 +875,7 @@ async fn activate_committed_generation(
             repository_id,
             worktree_id,
             latest,
+            predecessor,
             replay_binding,
             Arc::new(AtomicBool::new(false)),
         )

@@ -70,7 +70,7 @@ fn adapter_error(error: ApplicationSurfaceAdapterError) -> TraceDecayError {
 pub type SourceEditOutcome = std::result::Result<SourceEditSurfaceResultV1, ApplicationRefusal>;
 
 /// Run one source-edit tool on `surface` and render its tool result.
-#[hotpath::measure(label = "mcp.edit.total", future = true)]
+#[tracing::instrument(name = "mcp.edit.total", level = "trace", skip_all)]
 pub async fn source_edit_tool(
     response_handle_root: Option<&Path>,
     surface: BindingSurface,
@@ -120,9 +120,9 @@ pub async fn run_source_edit(
     .map_err(adapter_error)?;
     dispatched.invocation.invocation.scope = target;
     let binding_id = dispatched.invocation.binding_id.clone();
-    let result = hotpath::future!(
+    let result = tracing::Instrument::instrument(
         execute_application_surface(operation, dispatched, Some(executor)),
-        label = "mcp.edit.execute"
+        tracing::trace_span!("mcp.edit.execute"),
     )
     .await
     .map_err(adapter_error)?;

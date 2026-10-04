@@ -232,8 +232,14 @@ async fn tracedecay_lcm_describe_reports_shape_without_bodies() {
             "{label} must not confirm the target exists: {denied}"
         );
     }
-    assert_eq!(missing_provider, missing_provider_error());
-    assert_eq!(unknown_kind, unknown_kind_error());
+    assert_eq!(
+        crate::support::route_refusal(&missing_provider),
+        missing_provider_error()
+    );
+    assert_eq!(
+        crate::support::route_refusal(&unknown_kind),
+        unknown_kind_error()
+    );
 
     server.shutdown().await;
 }
@@ -534,11 +540,7 @@ fn denied_document() -> Value {
 }
 
 fn describe_argument_error(detail: &str) -> Value {
-    json!({
-        "error": application_invalid_request_error("tracedecay_lcm_describe", detail),
-        "id": 1,
-        "jsonrpc": "2.0"
-    })
+    application_invalid_request_error(detail)
 }
 
 fn missing_provider_error() -> Value {

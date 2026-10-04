@@ -37,10 +37,6 @@ use crate::code_index_scheduler::{
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 mod branch_publication_tests;
 mod cancellation_tests;
 mod deferred_mount_tests;
@@ -725,7 +721,10 @@ fn install_verified_graph_store_on_text(
             .expect("verified graph"),
     );
     graph_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
         .expect("warm graph catalog");
     let graph_reader = graph_store
         .evidence_reader_with_cancellation(

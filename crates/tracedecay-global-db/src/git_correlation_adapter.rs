@@ -12,18 +12,18 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
-use tracedecay_sessions::runtime::git_correlation::{
-    AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BoundedBackfillOutcome, BoundedGitControl,
-    CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
-    GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn, GitEvidenceBatch,
-    GitEvidencePassOutcome, GitEvidenceWriter, GitReflogSource, GitScopeFilter,
-    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    converge_git_evidence_pass, open_git_evidence_view, read_meta_value,
-    run_bounded_history_index_page,
-};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::git_correlation::{
     AnalyticsSessionTimestampSource, BackfillStats, run_backfill,
+};
+use tracedecay_sessions::runtime::git_correlation::{
+    BackfillOptions, BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter,
+    CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
+    GIT_HISTORY_SEQUENCE_FRONTIER_KEY, GitCorrelationError, GitCorrelationSessionStore,
+    GitCorrelationWriteTxn, GitEvidenceBatch, GitEvidencePassOutcome, GitEvidenceWriter,
+    GitReflogSource, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery,
+    SpanObservation, converge_git_evidence_pass, open_git_evidence_view, read_meta_value,
+    run_bounded_history_index_page,
 };
 
 /// Git evidence recorded for a bounded set of sessions, bound to the
@@ -55,8 +55,9 @@ impl RegisteredGlobalDb {
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
+        project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
-        converge_git_evidence_pass(self, git).await
+        converge_git_evidence_pass(self, git, project_root).await
     }
 }
 
@@ -90,7 +91,11 @@ where
         require_project_sessions(self.db())
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.read_snapshot", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.read_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub async fn read_snapshot(&self) -> Result<DatabaseEngineReadSnapshot, GitCorrelationError> {
         self.db()
             .read_snapshot()
@@ -98,7 +103,11 @@ where
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.write_txn", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.write_txn",
+        level = "trace",
+        skip_all
+    )]
     pub async fn open_write_transaction(
         &self,
     ) -> Result<RegisteredGlobalDbWriteTransaction<'_>, GitCorrelationError> {
@@ -109,7 +118,11 @@ where
     }
 
     /// Records one hook-route observation into its session's span rows.
-    #[hotpath::measure(label = "global_db.git_correlation.record_span", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.record_span",
+        level = "trace",
+        skip_all
+    )]
     pub async fn record_span_observation(
         &self,
         observation: &SpanObservation,
@@ -134,7 +147,11 @@ where
 
     /// The generation and every span and commit attribution recorded for
     /// `session_ids`. `Ok(None)` means no evidence was ever recorded.
-    #[hotpath::measure(label = "global_db.git_correlation.session_evidence", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.session_evidence",
+        level = "trace",
+        skip_all
+    )]
     pub async fn git_evidence_for_sessions(
         &self,
         session_ids: &BTreeSet<String>,
@@ -153,7 +170,7 @@ where
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::measure(label = "global_db.git_correlation.backfill", future = true)]
+    #[tracing::instrument(name = "global_db.git_correlation.backfill", level = "trace", skip_all)]
     pub async fn run_backfill<E, G>(
         &self,
         analytics_events: &[E],
@@ -170,15 +187,20 @@ where
     /// Derives evidence for every retained session past the history frontier
     /// and appends it, with the commit attribution it enables, in one
     /// transaction.
-    #[hotpath::measure(label = "global_db.git_correlation.converge", future = true)]
+    #[tracing::instrument(name = "global_db.git_correlation.converge", level = "trace", skip_all)]
     pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
+        project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
-        converge_git_evidence_pass(self, git).await
+        converge_git_evidence_pass(self, git, project_root).await
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.bounded_history", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.bounded_history",
+        level = "trace",
+        skip_all
+    )]
     pub async fn run_bounded_history_index_page(
         &self,
         opts: &BackfillOptions,
@@ -187,13 +209,14 @@ where
         run_bounded_history_index_page(self, opts, control).await
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.health", future = true)]
+    #[tracing::instrument(name = "global_db.git_correlation.health", level = "trace", skip_all)]
     pub async fn correlation_index_health(
         &self,
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
         self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
-        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        let backfill_watermark =
+            read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
         Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => view.health(backfill_watermark),
             // Never recorded: truthfully report the projection as absent
@@ -211,9 +234,10 @@ where
 
     /// Executes the query and derives presence from the same snapshot, so
     /// both answers describe one generation.
-    #[hotpath::measure(
-        label = "global_db.git_correlation.sessions_for_with_presence",
-        future = true
+    #[tracing::instrument(
+        name = "global_db.git_correlation.sessions_for_with_presence",
+        level = "trace",
+        skip_all
     )]
     pub async fn sessions_for_with_relation_and_presence(
         &self,
@@ -223,7 +247,8 @@ where
     {
         self.require_project_sessions_authority()?;
         let snapshot = self.read_snapshot().await?;
-        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        let backfill_watermark =
+            read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
         Ok(match open_git_evidence_view(&snapshot).await? {
             Some(view) => {
                 let results = view.sessions_for(query, relation).await?;
@@ -246,7 +271,11 @@ where
     /// The sessions a Git scope selects. A store that never recorded
     /// evidence cannot prove that no durable session matches, so it answers
     /// typed unavailable rather than an empty set.
-    #[hotpath::measure(label = "global_db.git_correlation.scope_session_ids", future = true)]
+    #[tracing::instrument(
+        name = "global_db.git_correlation.scope_session_ids",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_ids_for_scope(
         &self,
         filter: &GitScopeFilter,
@@ -284,12 +313,10 @@ where
         GlobalDbGitCorrelationStore::require_project_sessions_authority(self)
     }
 
-    #[hotpath::skip]
     async fn read_snapshot(&self) -> Result<Self::ReadSnapshot, GitCorrelationError> {
         GlobalDbGitCorrelationStore::read_snapshot(self).await
     }
 
-    #[hotpath::skip]
     async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
@@ -307,14 +334,12 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
         require_project_sessions(self)
     }
 
-    #[hotpath::skip]
     async fn read_snapshot(&self) -> Result<Self::ReadSnapshot, GitCorrelationError> {
         RegisteredGlobalDb::read_snapshot(self)
             .await
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
     }
 
-    #[hotpath::skip]
     async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         RegisteredGlobalDb::begin_write_transaction(self)
             .await
@@ -470,7 +495,7 @@ mod tests {
         let store = GlobalDbGitCorrelationStore::new(harness.registered.clone());
 
         assert!(matches!(
-            store.converge_session_git_evidence(&SystemGit).await,
+            store.converge_session_git_evidence(&SystemGit, None).await,
             Err(GitCorrelationError::Db(message))
                 if message.contains("ProjectSessions")
         ));

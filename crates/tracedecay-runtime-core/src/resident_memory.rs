@@ -13,8 +13,6 @@ use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
-use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
-
 mod owners;
 
 pub use owners::{
@@ -150,14 +148,6 @@ fn cgroup_v2_memory_ceiling_v1(
     })
 }
 
-fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>) -> u64 {
-    match cgroup_limit {
-        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
-        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
-        None => total_memory_bytes,
-    }
-}
-
 struct ResidentMemoryAuthorityV1 {
     limit_bytes: NonZeroU64,
     /// `memory.high` when it sits strictly below the hard admission ceiling.
@@ -238,25 +228,11 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
     let total_memory_bytes = physical_memory_bytes_v1().unwrap_or(0);
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
-    let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
-    let service_ceiling = cgroup.and_then(cgroup_service_ceiling_bytes);
-    let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, service_ceiling);
-    let authority = resident_memory_authority_v1(
+    resident_memory_authority_v1(
         total_memory_bytes,
-        cgroup,
+        cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root),
         process_resident_memory_limit_override_v1(),
-    );
-    hotpath::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
-    hotpath::gauge!("resident_memory.effective_total_bytes").set(effective_memory_bytes as f64);
-    if let Some(high_bytes) = cgroup.and_then(|ceiling| ceiling.high_bytes) {
-        hotpath::gauge!("resident_memory.cgroup_high_bytes").set(high_bytes as f64);
-    }
-    if let Some(service_ceiling) = service_ceiling {
-        hotpath::gauge!("resident_memory.cgroup_limit_bytes").set(service_ceiling as f64);
-    }
-    hotpath::gauge!("resident_memory.admission_limit_bytes")
-        .set(authority.limit_bytes.get() as f64);
-    authority
+    )
 }
 
 /// Fraction of the configured limit, in permille, at or above which *measured*
@@ -571,14 +547,12 @@ pub enum ResidentMemoryPressureStateV1 {
 
 impl ResidentMemoryPressureStateV1 {
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_over_budget(self) -> bool {
         matches!(self, Self::OverBudget { .. })
     }
 
     /// The last measured RSS, or `None` when nothing has been sampled.
     #[must_use]
-    #[hotpath::skip]
     pub const fn observed_bytes(self) -> Option<u64> {
         match self {
             Self::Unobserved => None,
@@ -617,9 +591,8 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 
 /// The measured side of the memory accounting loop.
 ///
-/// One dedicated reader samples the process (`/proc/self/status` on Linux),
-/// publishes the `daemon.process.resident_bytes` gauge, and feeds this cell
-/// the unreclaimable bytes. Admission re-measures through the same sampler;
+/// One dedicated reader samples the process (`/proc/self/status` on Linux)
+/// and feeds this cell the unreclaimable bytes. Admission re-measures through the same sampler;
 /// there is no second parser or publisher.
 ///
 /// Every request refused for memory, by any authority on this cell, waits on
@@ -635,9 +608,9 @@ pub struct ResidentMemoryPressureV1 {
     over_budget: AtomicBool,
     headroom: watch::Sender<u64>,
     /// Authorities holding a refused request, settled on every observation.
-    waiting: ProfiledMutex<Vec<Weak<ProcessResidentMemoryV1>>>,
+    waiting: std::sync::Mutex<Vec<Weak<ProcessResidentMemoryV1>>>,
     any_waiting: AtomicBool,
-    state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
+    state: std::sync::Mutex<ResidentMemoryPressureReclaimerStateV1>,
     sampler: Arc<ProcessResidentSamplerV1>,
     checkpoint_epoch: Instant,
     /// Microseconds after `checkpoint_epoch` before which a checkpoint keeps
@@ -708,15 +681,9 @@ impl ResidentMemoryPressureV1 {
             observed: AtomicBool::new(false),
             over_budget: AtomicBool::new(false),
             headroom: watch::Sender::new(0),
-            waiting: hotpath::mutex!(
-                Mutex::new(Vec::new()),
-                label = "runtime_core.resident.pressure_waiting"
-            ),
+            waiting: Mutex::new(Vec::new()),
             any_waiting: AtomicBool::new(false),
-            state: hotpath::mutex!(
-                Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
-                label = "runtime_core.resident.pressure"
-            ),
+            state: Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
             sampler,
             checkpoint_epoch: Instant::now(),
             next_checkpoint_sample_micros: AtomicU64::new(0),
@@ -759,7 +726,6 @@ impl ResidentMemoryPressureV1 {
             return self.state();
         }
         let sample = (self.sampler)();
-        hotpath::gauge!("daemon.memory.checkpoint_samples_total").inc(1_u64);
         let interval = u64::try_from(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros())
             .unwrap_or(u64::MAX);
         self.next_checkpoint_sample_micros.store(
@@ -768,7 +734,6 @@ impl ResidentMemoryPressureV1 {
         );
         if let Some(sample) = sample {
             self.publish_observation(sample.admission_bytes());
-            self.publish_over_budget_gauge();
         }
         self.state()
     }
@@ -777,7 +742,6 @@ impl ResidentMemoryPressureV1 {
     fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
         let sample = (self.sampler)()?;
         self.publish_observation(sample.admission_bytes());
-        self.publish_over_budget_gauge();
         Some(self.state())
     }
 
@@ -796,19 +760,16 @@ impl ResidentMemoryPressureV1 {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn limit_bytes(&self) -> u64 {
         self.limit_bytes.get()
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn high_watermark_bytes(&self) -> u64 {
         self.high_watermark_bytes
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn low_watermark_bytes(&self) -> u64 {
         self.low_watermark_bytes
     }
@@ -829,14 +790,12 @@ impl ResidentMemoryPressureV1 {
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
-        self.publish_over_budget_gauge();
         self.state()
     }
 
     fn publish_observation(&self, observed_bytes: u64) {
         self.observed_bytes.store(observed_bytes, Ordering::Release);
         self.observed.store(true, Ordering::Release);
-        hotpath::gauge!("daemon.memory.observed_resident_bytes").set(observed_bytes as f64);
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
         } else if observed_bytes <= self.low_watermark_bytes
@@ -891,12 +850,6 @@ impl ResidentMemoryPressureV1 {
         if settled {
             self.note_headroom();
         }
-    }
-
-    fn publish_over_budget_gauge(&self) {
-        hotpath::gauge!("daemon.memory.over_budget").set(f64::from(u8::from(
-            self.over_budget.load(Ordering::Acquire),
-        )));
     }
 
     #[must_use]
@@ -959,11 +912,10 @@ impl ResidentMemoryPressureV1 {
         for reclaimer in reclaimers {
             released_bytes = released_bytes.saturating_add(reclaimer(request));
         }
-        hotpath::gauge!("daemon.memory.pressure_released_bytes").set(released_bytes as f64);
         released_bytes
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryPressureReclaimerStateV1> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryPressureReclaimerStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1077,13 +1029,12 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
         None => glibc_trim(),
     };
     let after_bytes = sampled_process_resident_bytes_v1();
-    let trim = ProcessAllocatorTrimV1 {
+
+    ProcessAllocatorTrimV1 {
         trimmed,
         before_bytes,
         after_bytes,
-    };
-    hotpath::gauge!("daemon.memory.allocator_trim_released_bytes").set(trim.released_bytes());
-    trim
+    }
 }
 
 fn glibc_trim() -> bool {
@@ -1237,7 +1188,6 @@ impl ResidentMemoryComponentIdV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -1289,7 +1239,6 @@ pub enum ResidentMemoryAdmissionFailureV1 {
 
 impl ResidentMemoryAdmissionFailureV1 {
     #[must_use]
-    #[hotpath::skip]
     pub const fn requested_bytes(&self) -> u64 {
         match self {
             Self::ReservationCeiling {
@@ -1302,7 +1251,6 @@ impl ResidentMemoryAdmissionFailureV1 {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn limit_bytes(&self) -> u64 {
         match self {
             Self::ReservationCeiling { limit_bytes, .. }
@@ -1314,7 +1262,6 @@ impl ResidentMemoryAdmissionFailureV1 {
     /// ceiling. Over-budget refusals clear as pressure falls, so callers retry
     /// them instead of treating the input as permanently unservable.
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_observed_over_budget(&self) -> bool {
         matches!(self, Self::ObservedOverBudget { .. })
     }
@@ -1416,7 +1363,7 @@ struct ResidentMemoryStateV1 {
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
-    state: ProfiledMutex<ResidentMemoryStateV1>,
+    state: std::sync::Mutex<ResidentMemoryStateV1>,
     /// Measured RSS this admission consults before trusting its own model.
     pressure: Arc<ResidentMemoryPressureV1>,
 }
@@ -1449,10 +1396,7 @@ impl ProcessResidentMemoryV1 {
     pub fn with_pressure(limit_bytes: NonZeroU64, pressure: Arc<ResidentMemoryPressureV1>) -> Self {
         Self {
             limit_bytes,
-            state: hotpath::mutex!(
-                Mutex::new(ResidentMemoryStateV1::default()),
-                label = "runtime_core.resident.state"
-            ),
+            state: Mutex::new(ResidentMemoryStateV1::default()),
             pressure,
         }
     }
@@ -1501,7 +1445,7 @@ impl ProcessResidentMemoryV1 {
     }
 
     /// Settle waiters after the ledger gave bytes back.
-    fn ledger_released(&self, mut state: ProfiledMutexGuard<'_, ResidentMemoryStateV1>) {
+    fn ledger_released(&self, mut state: std::sync::MutexGuard<'_, ResidentMemoryStateV1>) {
         let settled = self.settle_waiter(&mut state);
         drop(state);
         if settled {
@@ -1509,7 +1453,7 @@ impl ProcessResidentMemoryV1 {
         }
     }
 
-    #[hotpath::measure(label = "runtime_core.resident.reserve")]
+    #[tracing::instrument(name = "runtime_core.resident.reserve", level = "trace", skip_all)]
     pub fn reserve(
         self: &Arc<Self>,
         key: ResidentMemoryKeyV1,
@@ -1538,7 +1482,11 @@ impl ProcessResidentMemoryV1 {
     /// Reserves one process-shared component without fabricating a project,
     /// worktree, or code-generation owner. These reservations use the same
     /// process ceiling and RAII release authority as project generations.
-    #[hotpath::measure(label = "runtime_core.resident.reserve_shared")]
+    #[tracing::instrument(
+        name = "runtime_core.resident.reserve_shared",
+        level = "trace",
+        skip_all
+    )]
     pub fn reserve_process_shared(
         self: &Arc<Self>,
         component: ResidentMemoryComponentIdV1,
@@ -1553,15 +1501,12 @@ impl ProcessResidentMemoryV1 {
             .checked_add(requested_bytes.get())
             .filter(|next_used| *next_used <= self.limit_bytes.get());
         let Some(next_used) = next_used else {
-            hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
             let failure = self.admission_failure_from_used(state.used_bytes, requested_bytes);
             drop(state);
             return Err(self.refused(failure));
         };
         state.used_bytes = next_used;
         *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
-        hotpath::gauge!("runtime_core.resident.reservations").inc(1.0);
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         Ok(ProcessSharedMemoryReservationV1 {
             authority: Arc::clone(self),
             component,
@@ -1646,7 +1591,7 @@ impl ProcessResidentMemoryV1 {
             .min(self.limit_bytes.get())
     }
 
-    fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ResidentMemoryStateV1> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1664,8 +1609,6 @@ impl ProcessResidentMemoryV1 {
         }
         state.used_bytes = next_used;
         *state.charges.entry(key.clone()).or_default() += requested_bytes.get();
-        hotpath::gauge!("runtime_core.resident.reservations").inc(1.0);
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         Some(ResidentMemoryReservationV1 {
             authority: Arc::clone(self),
             key: key.clone(),
@@ -1722,8 +1665,6 @@ impl ProcessResidentMemoryV1 {
         {
             return None;
         }
-        hotpath::gauge!("daemon.memory.admission_refused").inc(1.0);
-        hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
         Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
             observed_bytes,
             limit_bytes: self.pressure.limit_bytes(),
@@ -1734,7 +1675,6 @@ impl ProcessResidentMemoryV1 {
     }
 
     fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
-        hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
         self.admission_failure_from_used(self.lock_state().used_bytes, requested_bytes)
     }
 
@@ -1768,7 +1708,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= released_bytes;
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= released_bytes;
             if *charge == 0 {
@@ -1821,7 +1760,6 @@ impl ProcessResidentMemoryV1 {
         }
         let released_bytes = reserved_bytes - measured_bytes;
         state.used_bytes -= released_bytes;
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if measured_bytes > 0 {
             let mut to = from.clone();
             to.component = to_component;
@@ -1837,8 +1775,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= reserved_bytes;
-        hotpath::gauge!("runtime_core.resident.reservations").dec(1.0);
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= reserved_bytes;
             if *charge == 0 {
@@ -1872,7 +1808,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         self.ledger_released(state);
         Ok(())
     }
@@ -1889,8 +1824,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-        hotpath::gauge!("runtime_core.resident.reservations").dec(1.0);
-        hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         self.ledger_released(state);
     }
 }
@@ -1916,7 +1849,6 @@ impl ResidentMemoryReservationV1 {
         &self.key
     }
 
-    #[hotpath::skip]
     pub const fn reserved_bytes(&self) -> u64 {
         self.reserved_bytes
     }
@@ -1978,7 +1910,6 @@ pub struct ProcessSharedMemoryReservationV1 {
 }
 
 impl ProcessSharedMemoryReservationV1 {
-    #[hotpath::skip]
     pub const fn reserved_bytes(&self) -> u64 {
         self.reserved_bytes
     }

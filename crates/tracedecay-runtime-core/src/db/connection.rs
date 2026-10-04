@@ -84,7 +84,6 @@ pub enum DatabaseAccessMode {
 }
 
 impl DatabaseAccessMode {
-    #[hotpath::skip]
     const fn is_writable(&self) -> bool {
         matches!(self, Self::ReadWrite)
     }

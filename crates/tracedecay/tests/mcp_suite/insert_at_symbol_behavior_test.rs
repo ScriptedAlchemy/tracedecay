@@ -235,17 +235,12 @@ fn assert_pre_effect_refusal(response: &JsonRpcResponse, detail: &str) {
     );
 }
 
-fn assert_rpc_error(response: &JsonRpcResponse, code: i32, message: impl AsRef<str>, data: Value) {
-    assert_eq!(response.jsonrpc, "2.0");
-    assert_eq!(response.id, json!(1));
-    assert!(response.result.is_none(), "{response:?}");
-    let error = response
-        .error
-        .as_ref()
-        .expect("tracedecay_insert_at_symbol error");
-    assert_eq!(error.code, code);
-    assert_eq!(error.message, message.as_ref());
-    assert_eq!(error.data.as_ref(), Some(&data));
+fn assert_route_refusal(response: &JsonRpcResponse, detail: &str) {
+    assert_eq!(
+        crate::support::route_refusal(&serde_json::to_value(response).expect("response")),
+        crate::support::application_surface_refusal_error(detail),
+        "{response:?}"
+    );
 }
 
 fn take_state(payload: &mut Value) -> String {
@@ -529,21 +524,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         }),
     )
     .await;
-    assert_rpc_error(
-        &missing_content,
-        -32602,
-        format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {MISSING_CONTENT}"
-        ),
-        json!({
-            "tool": "tracedecay_insert_at_symbol",
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": MISSING_CONTENT,
-        }),
-    );
+    assert_route_refusal(&missing_content, MISSING_CONTENT);
 
     let bad_position = call_insert(
         &fixture,
@@ -567,21 +548,7 @@ async fn insert_at_symbol_refuses_missing_ambiguous_invalid_and_stale_targets() 
         }),
     )
     .await;
-    assert_rpc_error(
-        &unpreviewed,
-        -32602,
-        format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {MISSING_PREVIEW}"
-        ),
-        json!({
-            "tool": "tracedecay_insert_at_symbol",
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": MISSING_PREVIEW,
-        }),
-    );
+    assert_route_refusal(&unpreviewed, MISSING_PREVIEW);
 
     let ambiguous = call_insert(
         &fixture,

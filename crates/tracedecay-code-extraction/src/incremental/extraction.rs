@@ -22,12 +22,9 @@ impl RetainedParseDocument {
         report: &ParseReport,
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
-        crate::hotpath_observe::measure_extract_file(
-            extractor.language_name(),
-            self.source.len(),
-            || self.extract_canonical_artifact_unmeasured(extractor, report, previous),
-            crate::hotpath_observe::ExtractOutputCounts::from_extract_result,
-        )
+        crate::observe::measure_extract_file(|| {
+            self.extract_canonical_artifact_unmeasured(extractor, report, previous)
+        })
     }
 
     fn extract_canonical_artifact_unmeasured(
@@ -37,9 +34,6 @@ impl RetainedParseDocument {
         previous: Option<&ExtractionArtifactV1>,
     ) -> Result<ParsedExtractionArtifactV1, ParseError> {
         if report.state_epoch != self.state_epoch {
-            crate::hotpath_observe::record_retained_parse_abstention(
-                crate::hotpath_observe::RetainedParseAbstention::StaleReport,
-            );
             return Err(ParseError::StaleReport);
         }
 
@@ -144,7 +138,6 @@ impl RetainedParseDocument {
         let extracted = self.complete_composite_reset(extractor, extracted);
         match reason {
             Some(reason) => {
-                crate::hotpath_observe::record_extraction_reset(reason);
                 ParsedExtractionArtifactV1::reset(extracted.artifact, reason, self.source.len())
             }
             None => extracted,
@@ -163,7 +156,7 @@ impl RetainedParseDocument {
                 // Markdown is the sole composite-grammar producer and uses
                 // the default artifact shape. Build it directly so this
                 // fallback does not re-enter the full traversal span.
-                crate::hotpath_observe::measure_markdown_composite_fallback(|| {
+                crate::observe::measure_markdown_composite_fallback(|| {
                     ExtractionArtifactV1::from_result(
                         extractor
                             .extract_artifact(self.identity.logical_path(), &self.source)
@@ -191,7 +184,7 @@ fn merge_changed_artifact(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractionArtifactV1> {
-    crate::hotpath_observe::measure_emit(|| {
+    crate::observe::measure_emit(|| {
         merge_changed_artifact_unmeasured(previous, delta, edit, old_end_row)
     })
 }
@@ -245,12 +238,20 @@ fn merge_changed_artifact_unmeasured(
         .cloned()
         .collect::<Vec<_>>();
     callable_arities.extend(delta.callable_arities);
+    let mut go_method_sets = previous
+        .go_method_sets
+        .iter()
+        .filter(|row| !superseded.contains(row.node_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    go_method_sets.extend(delta.go_method_sets);
     let mut artifact = ExtractionArtifactV1 {
         result,
         imports,
         clone_bodies,
         schema_evidence: None,
         callable_arities,
+        go_method_sets,
     };
     artifact.canonicalize_order();
     Some(artifact)

@@ -34,7 +34,6 @@ pub enum WorkflowStatus {
 }
 
 impl WorkflowStatus {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -149,7 +148,6 @@ pub enum WorkflowIndexState {
 }
 
 impl WorkflowIndexState {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "authority_not_retained",
@@ -157,12 +155,10 @@ impl WorkflowIndexState {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_retryable(self) -> bool {
         matches!(self, Self::IndexNotBuilt)
     }
 
-    #[hotpath::skip]
     pub const fn message(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "registered project session database is unavailable",

@@ -148,12 +148,7 @@ pub fn bound_path_list(
     let files_considered = u64::try_from(out.len())
         .unwrap_or(u64::MAX)
         .saturating_add(skipped_oversized_entries);
-    #[cfg(feature = "hotpath")]
-    crate::runtime::pipeline_metrics::record_discovery_files(
-        files_considered,
-        u64::try_from(out.len()).unwrap_or(u64::MAX),
-        bytes_charged,
-    );
+
     FileDiscoveryReport {
         paths: out,
         truncated,
@@ -165,7 +160,7 @@ pub fn bound_path_list(
 
 /// Recursively collect files with `ext` under `dir`, enforcing discovery bounds
 /// before retaining each path. Directory symlinks are not followed.
-#[hotpath::measure(label = "sessions.source.discover_files")]
+#[tracing::instrument(name = "sessions.source.discover_files", level = "trace", skip_all)]
 pub fn collect_files_with_ext_bounded(
     dir: &Path,
     ext: &str,
@@ -183,13 +178,7 @@ pub fn collect_files_with_ext_bounded(
         files_considered: 0,
     };
     state.walk(dir, 0);
-    #[cfg(feature = "hotpath")]
-    crate::runtime::pipeline_metrics::record_discovery_files(
-        state.files_considered,
-        u64::try_from(state.paths.len()).unwrap_or(u64::MAX),
-        state.bytes_charged,
-    );
-    crate::runtime::pipeline_metrics::record_sweep_outcome(state.truncated.is_none());
+
     FileDiscoveryReport {
         paths: state.paths,
         truncated: state.truncated,
@@ -218,7 +207,6 @@ impl WalkState<'_> {
         if depth > self.max_depth {
             return;
         }
-        crate::runtime::pipeline_metrics::record_dir_enumerated();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };

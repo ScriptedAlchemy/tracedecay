@@ -252,12 +252,12 @@ macro_rules! digest {
             pub struct $name([u8; 32]);
 
             impl $name {
-    #[hotpath::skip]
+
                 pub const fn new(bytes: [u8; 32]) -> Self {
                     Self(bytes)
                 }
 
-    #[hotpath::skip]
+
                 pub const fn as_bytes(&self) -> &[u8; 32] {
                     &self.0
                 }
@@ -332,17 +332,14 @@ impl RequestBudgets {
         })
     }
 
-    #[hotpath::skip]
     pub const fn max_results(self) -> u64 {
         self.max_results
     }
 
-    #[hotpath::skip]
     pub const fn max_bytes(self) -> u64 {
         self.max_bytes
     }
 
-    #[hotpath::skip]
     pub const fn max_work_units(self) -> u64 {
         self.max_work_units
     }
@@ -358,7 +355,7 @@ pub enum RequestInterruption {
 /// digest. Unlike the compatibility composition, this binds request budgets
 /// and the live cancellation token identity so a supplemental session binding
 /// cannot widen either after admission.
-#[hotpath::measure(label = "usecases.context.session_grant")]
+#[tracing::instrument(name = "usecases.context.session_grant", level = "trace", skip_all)]
 pub fn session_application_grant_digest(
     capability: CapabilityDigest,
     policy: PolicyDigest,
@@ -412,7 +409,7 @@ pub fn application_request_interruption(
 
 /// Runs one awaitable application step against the exact immutable deadline
 /// and the live cancellation token owned by the transport/runtime boundary.
-#[hotpath::measure(label = "usecases.context.interruptible", future = true)]
+#[tracing::instrument(name = "usecases.context.interruptible", level = "trace", skip_all)]
 pub async fn run_application_request_interruptible<T, F>(
     context: &tracedecay_contracts::RequestContext,
     cancellation: &CancellationToken,

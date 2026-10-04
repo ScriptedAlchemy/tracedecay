@@ -532,9 +532,10 @@ fn index_envelope(
 /// Records one adoption-eligibility census. `coverage` is required because only
 /// the caller knows whether it enumerated the whole eligible population; an
 /// incomplete census must not reach the rollup as `Known`.
-#[hotpath::measure(
-    label = "usecases.observability.record_adoption_eligibility",
-    future = true
+#[tracing::instrument(
+    name = "usecases.observability.record_adoption_eligibility",
+    level = "trace",
+    skip_all
 )]
 pub async fn record_adoption_eligibility(
     db: &RegisteredGlobalDb,
@@ -551,9 +552,10 @@ pub async fn record_adoption_eligibility(
 /// Records one linked adoption-outcome funnel. Unresolved outcomes weaken both
 /// the terminal result and coverage in addition to being carried as explicit
 /// `censored` / `unknown` denominators.
-#[hotpath::measure(
-    label = "usecases.observability.record_adoption_outcome",
-    future = true
+#[tracing::instrument(
+    name = "usecases.observability.record_adoption_outcome",
+    level = "trace",
+    skip_all
 )]
 pub async fn record_adoption_outcome(
     db: &RegisteredGlobalDb,
@@ -568,7 +570,11 @@ pub async fn record_adoption_outcome(
 }
 
 /// Records one storage size, budget, or latency observation.
-#[hotpath::measure(label = "usecases.observability.record_storage", future = true)]
+#[tracing::instrument(
+    name = "usecases.observability.record_storage",
+    level = "trace",
+    skip_all
+)]
 pub async fn record_storage(
     db: &RegisteredGlobalDb,
     observation: StorageObservedV1,
@@ -581,7 +587,7 @@ pub async fn record_storage(
 
 /// Offers one code-index generation lifecycle observation to the mounted
 /// bounded producer without waiting for project-store persistence.
-#[hotpath::measure(label = "usecases.observability.emit_index")]
+#[tracing::instrument(name = "usecases.observability.emit_index", level = "trace", skip_all)]
 pub fn emit_index(
     producer: &BoundedObservabilityProducerV1,
     observation: IndexObservedV1,

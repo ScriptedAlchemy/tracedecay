@@ -55,9 +55,10 @@ pub async fn resolve_expand_target(
     }
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.query.direct_canonical_occurrence"
+#[tracing::instrument(
+    name = "session_temporal.query.direct_canonical_occurrence",
+    level = "trace",
+    skip_all
 )]
 async fn resolve_canonical_occurrence_anchor(
     read: &TemporalSqlRead<'_>,
@@ -111,7 +112,11 @@ async fn resolve_canonical_occurrence_anchor(
 /// (`ObservationSourceIdentityV1` omits `provider` when it is `claude`), so no
 /// direct read re-parses `observation_json` per row, exactly as the candidate,
 /// hydration, and derived-evidence queries do.
-#[hotpath::measure(future = true, label = "session_temporal.query.direct_occurrence")]
+#[tracing::instrument(
+    name = "session_temporal.query.direct_occurrence",
+    level = "trace",
+    skip_all
+)]
 async fn resolve_occurrence_anchor(
     read: &TemporalSqlRead<'_>,
     provider: &str,
@@ -166,7 +171,11 @@ async fn resolve_occurrence_anchor(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.query.direct_summary")]
+#[tracing::instrument(
+    name = "session_temporal.query.direct_summary",
+    level = "trace",
+    skip_all
+)]
 async fn resolve_summary_anchor(
     read: &TemporalSqlRead<'_>,
     provider: &str,
@@ -209,7 +218,11 @@ async fn resolve_summary_anchor(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.query.direct_external")]
+#[tracing::instrument(
+    name = "session_temporal.query.direct_external",
+    level = "trace",
+    skip_all
+)]
 async fn resolve_external_anchor(
     read: &TemporalSqlRead<'_>,
     provider: &str,

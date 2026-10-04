@@ -28,7 +28,6 @@ mod discovery_queue;
 mod git_correlation_adapter;
 mod git_index_transactions;
 mod git_topology_anchor;
-mod hotpath_observe;
 mod managed_test_runs;
 mod native_integration;
 mod observability_rollup;

@@ -4,8 +4,8 @@ use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ByQualifiedNameResultV1, ByQualifiedNameSurfaceRequestV1, DeriveAnnotationV1,
-    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, ImpactNodeV1, ImpactResultV1,
-    NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
+    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, ImpactNodeV1, ImpactRadiusV1,
+    ImpactResultV1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
     NodeSurfaceRequestV1, SignatureResultV1, SymbolSelectorSurfaceRequestV1, SymbolSignatureV1,
 };
 use tracedecay_domain::errors::Result;
@@ -21,7 +21,7 @@ use super::{
     required_graph_metadata, user_line,
 };
 
-#[hotpath::measure(label = "mcp.graph.impact.total")]
+#[tracing::instrument(name = "mcp.graph.impact.total", level = "trace", skip_all)]
 pub async fn compute_impact(
     graph: &VerifiedGraphQuery,
     args: Value,
@@ -31,8 +31,16 @@ pub async fn compute_impact(
     require_positive_depth(max_depth)?;
 
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let impact = hotpath::measure_block!(
-        "mcp.graph.impact.graph",
+    if graph.symbol_summary(&occurrence)?.is_none() {
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::Impact(ImpactResultV1::NotFound(node_not_found_result(
+                &request.node_id,
+            ))),
+            Vec::new(),
+        ));
+    }
+    let impact = {
+        let _span = tracing::trace_span!("mcp.graph.impact.graph").entered();
         graph.impact(
             std::slice::from_ref(&occurrence),
             &[],
@@ -40,7 +48,7 @@ pub async fn compute_impact(
             50_000,
             GRAPH_RELATION_READ_LIMIT,
         )?
-    );
+    };
     let summaries = impact
         .impacted
         .iter()
@@ -63,26 +71,30 @@ pub async fn compute_impact(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let result = ImpactResultV1 {
+    let result = ImpactRadiusV1 {
         node_count: nodes.len(),
         complete: impact.complete,
         unavailable_fields: vec!["edge_count".to_owned()],
         nodes,
+        freshness: None,
     };
     Ok(graph_tool_completion(
-        GraphToolResultV1::Impact(result),
+        GraphToolResultV1::Impact(ImpactResultV1::Found(result)),
         touched_files,
     ))
 }
 
-#[hotpath::measure(label = "mcp.graph.node.total")]
+#[tracing::instrument(name = "mcp.graph.node.total", level = "trace", skip_all)]
 pub async fn compute_node(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
     let occurrence = graph_occurrence_id(&request.node_id)?;
-    let node = hotpath::measure_block!("mcp.graph.node.graph", graph.symbol_summary(&occurrence)?);
+    let node = {
+        let _span = tracing::trace_span!("mcp.graph.node.graph").entered();
+        graph.symbol_summary(&occurrence)?
+    };
 
     match node {
         Some(n) => {
@@ -142,6 +154,7 @@ pub async fn compute_node(
                     full_file: file_size_bytes / 4,
                 },
                 unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
+                freshness: None,
             };
             Ok(graph_tool_completion(
                 GraphToolResultV1::Node(NodeResultV1::Found(Box::new(details))),
@@ -158,17 +171,17 @@ pub async fn compute_node(
 }
 
 /// Cross-run node lookup by name.
-#[hotpath::measure(label = "mcp.graph.by_qualified_name.total")]
+#[tracing::instrument(name = "mcp.graph.by_qualified_name.total", level = "trace", skip_all)]
 pub async fn compute_by_qualified_name(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: ByQualifiedNameSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_by_qualified_name")?;
-    let nodes = hotpath::measure_block!(
-        "mcp.graph.by_qualified_name.graph",
+    let nodes = {
+        let _span = tracing::trace_span!("mcp.graph.by_qualified_name.graph").entered();
         graph.resolve_qualified_name(&request.qualified_name, None, 1_000)?
-    );
+    };
     let touched_files = graph_symbol_paths(&nodes)?;
     let items = nodes
         .iter()
@@ -183,17 +196,17 @@ pub async fn compute_by_qualified_name(
 /// Signature-only lookup (no body) by qualified name or node ID. Returns
 /// the public-API surface of a symbol so callers can avoid reading the
 /// source file just to inspect the signature.
-#[hotpath::measure(label = "mcp.graph.signature.total")]
+#[tracing::instrument(name = "mcp.graph.signature.total", level = "trace", skip_all)]
 pub async fn compute_signature(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: SymbolSelectorSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_signature")?;
-    let nodes = hotpath::measure_block!(
-        "mcp.graph.signature.graph",
+    let nodes = {
+        let _span = tracing::trace_span!("mcp.graph.signature.graph").entered();
         nodes_addressed_by_selector(graph, &request)?
-    );
+    };
     let touched_files = graph_symbol_paths(&nodes)?;
 
     let mut items = Vec::with_capacity(nodes.len());
@@ -226,17 +239,17 @@ pub async fn compute_signature(
 
 /// Derive annotations attached to a symbol. Accepts `node_id` or
 /// `qualified_name`. Macro expansion is outside the retained syntax evidence.
-#[hotpath::measure(label = "mcp.graph.derives.total")]
+#[tracing::instrument(name = "mcp.graph.derives.total", level = "trace", skip_all)]
 pub async fn compute_derives(
     graph: &VerifiedGraphQuery,
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: SymbolSelectorSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_derives")?;
-    let nodes = hotpath::measure_block!(
-        "mcp.graph.derives.graph",
+    let nodes = {
+        let _span = tracing::trace_span!("mcp.graph.derives.graph").entered();
         nodes_addressed_by_selector(graph, &request)?
-    );
+    };
     let touched_files = graph_symbol_paths(&nodes)?;
     let mut items = Vec::with_capacity(nodes.len());
     for node in &nodes {

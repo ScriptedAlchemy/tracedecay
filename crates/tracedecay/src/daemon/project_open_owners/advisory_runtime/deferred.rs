@@ -147,7 +147,7 @@ pub(super) fn spawn(
         ));
         return false;
     }
-    owner.spawn_background_task(hotpath::future!(
+    owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             // Project-open schedules this owner before code-index activation,
             // and sealing announces durable source before its text owner is
@@ -190,7 +190,7 @@ pub(super) fn spawn(
             };
             publisher.publish(settled);
         },
-        label = "daemon.project.owners.advisory_deferred"
+        tracing::trace_span!("daemon.project.owners.advisory_deferred"),
     ))
 }
 
@@ -218,13 +218,14 @@ enum Attempt {
     RetryPartialPublication,
 }
 
-#[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Deferred advisory mount is one generation-ready attach of the feedback and LSP owners."
-    )
+#[tracing::instrument(
+    name = "daemon.project.owners.advisory_retry",
+    level = "trace",
+    skip_all
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred advisory mount is one generation-ready attach of the feedback and LSP owners."
 )]
 async fn try_mount(
     invocation: &DaemonInvocationState,

@@ -9,7 +9,7 @@ const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
 const SETTLEMENT_JOINED: u8 = 2;
 
-type RetainedDispatchStateMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+type RetainedDispatchStateMutex<T> = tokio::sync::Mutex<T>;
 
 fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -60,7 +60,6 @@ impl DispatchSettlement {
     /// client's cancellation or deadline is the whole truth. Once the worker is
     /// settling or has joined without handing back its canonical result, the
     /// effect state is unknown and no client-side terminal may claim otherwise.
-    #[hotpath::skip]
     const fn effect_may_have_committed(self) -> bool {
         match self {
             Self::NotStarted => false,
@@ -117,39 +116,6 @@ struct ActiveDispatch {
     cancellation: tracedecay_contracts::CancellationSignal,
     live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
-    _gauge: ActiveDispatchGaugeGuard,
-}
-
-struct ActiveDispatchGaugeGuard;
-
-impl ActiveDispatchGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("mcp.server.dispatch.active").inc(1_u64);
-        hotpath::gauge!("mcp.server.dispatch.admitted_total").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for ActiveDispatchGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.dispatch.active").dec(1_u64);
-        hotpath::gauge!("mcp.server.dispatch.settled_total").inc(1_u64);
-    }
-}
-
-struct DispatchAdmissionWaitGuard;
-
-impl DispatchAdmissionWaitGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("mcp.server.dispatch.admission_waiters").inc(1_u64);
-        Self
-    }
-}
-
-impl Drop for DispatchAdmissionWaitGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.dispatch.admission_waiters").dec(1_u64);
-    }
 }
 
 struct DispatchCapacityLease {
@@ -192,13 +158,10 @@ impl RetainedDispatchRegistry {
             accepting: AtomicBool::new(true),
             capacity,
             active_slots: Arc::new(AtomicUsize::new(0)),
-            state: hotpath::mutex!(
-                tokio::sync::Mutex::new(RetainedDispatchState {
-                    tasks: tokio::task::JoinSet::new(),
-                    active: HashMap::new(),
-                }),
-                label = "mcp.server.dispatch.registry"
-            ),
+            state: tokio::sync::Mutex::new(RetainedDispatchState {
+                tasks: tokio::task::JoinSet::new(),
+                active: HashMap::new(),
+            }),
             #[cfg(any(test, feature = "test-transport"))]
             retained_spawn_count: AtomicUsize::new(0),
         }
@@ -209,16 +172,14 @@ impl RetainedDispatchRegistry {
         Self::new_with_capacity(capacity)
     }
 
-    #[hotpath::measure(label = "mcp.server.dispatch.admission")]
+    #[tracing::instrument(name = "mcp.server.dispatch.admission", level = "trace", skip_all)]
     fn acquire_capacity(&self) -> Result<DispatchCapacityLease> {
         loop {
             if !self.accepting.load(Ordering::Acquire) {
-                hotpath::gauge!("mcp.server.dispatch.refused_shutdown_total").inc(1_u64);
                 return Err(dispatch_shutdown_error());
             }
             let active = self.active_slots.load(Ordering::Acquire);
             if active >= self.capacity {
-                hotpath::gauge!("mcp.server.dispatch.refused_saturated_total").inc(1_u64);
                 return Err(dispatch_saturated_error());
             }
             if self
@@ -233,7 +194,6 @@ impl RetainedDispatchRegistry {
                     return Ok(lease);
                 }
                 drop(lease);
-                hotpath::gauge!("mcp.server.dispatch.refused_shutdown_total").inc(1_u64);
                 return Err(dispatch_shutdown_error());
             }
         }
@@ -253,14 +213,9 @@ impl RetainedDispatchRegistry {
         F: Future<Output = Result<T>> + Send + 'static,
     {
         let capacity_lease = self.acquire_capacity()?;
-        let admission_wait = DispatchAdmissionWaitGuard::enter();
         let mut state = self.state.lock().await;
-        drop(admission_wait);
         Self::reap_finished(&mut state);
         if !self.accepting.load(Ordering::Acquire) {
-            // Admission refusals are the signal a saturation diagnosis needs;
-            // count them alongside the admitted/settled lifecycle gauges.
-            hotpath::gauge!("mcp.server.dispatch.refused_shutdown_total").inc(1_u64);
             return Err(dispatch_shutdown_error());
         }
 
@@ -283,14 +238,12 @@ impl RetainedDispatchRegistry {
                 cancellation,
                 live_cancellable,
                 settlement: Arc::clone(&settlement),
-                _gauge: ActiveDispatchGaugeGuard::enter(),
             },
         );
         Ok((receiver, settlement))
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     async fn active_count_for_test(&self) -> usize {
         self.state.lock().await.active.len()
     }
@@ -323,7 +276,6 @@ impl RetainedDispatchRegistry {
         }
     }
 
-    #[hotpath::skip]
     async fn shutdown(&self) {
         let mut state = self.state.lock().await;
         self.accepting.store(false, Ordering::Release);
@@ -397,7 +349,6 @@ impl<S> RetainedDispatchAuthority<S> {
         self.server.clone()
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) {
         let requested_at = tracedecay_contracts::clock::now_micros();
         for cancellation in recover_lock(&self.cancellations).values() {
@@ -592,7 +543,7 @@ impl DispatchControl {
         self.cancellation.clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.dispatch.settlement", future = true)]
+    #[tracing::instrument(name = "mcp.server.dispatch.settlement", level = "trace", skip_all)]
     pub async fn run_retained<T, F>(
         &self,
         registry: &RetainedDispatchRegistry,
@@ -713,7 +664,7 @@ fn received_result<T>(
     }
 }
 
-#[hotpath::measure(label = "mcp.server.dispatch.canonical_wait", future = true)]
+#[tracing::instrument(name = "mcp.server.dispatch.canonical_wait", level = "trace", skip_all)]
 async fn receive_canonical_result<T>(
     result: &mut tokio::sync::oneshot::Receiver<Result<T>>,
 ) -> std::result::Result<T, DispatchFailure> {
@@ -732,7 +683,6 @@ fn effect_unknown_error(
     settlement: DispatchSettlement,
     cause: &str,
 ) -> TraceDecayError {
-    hotpath::gauge!("mcp.server.dispatch.effect_unknown_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_effect_unknown",
         false,
@@ -750,7 +700,6 @@ pub fn dispatch_cancelled_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "cancellation");
     }
-    hotpath::gauge!("mcp.server.dispatch.cancelled_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_cancelled",
         true,
@@ -768,7 +717,6 @@ fn dispatch_deadline_error(
     if settlement.effect_may_have_committed() && carries_effect {
         return effect_unknown_error(tool_name, settlement, "its absolute deadline");
     }
-    hotpath::gauge!("mcp.server.dispatch.deadline_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,

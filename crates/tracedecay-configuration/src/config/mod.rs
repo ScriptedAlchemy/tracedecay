@@ -247,7 +247,7 @@ pub fn lcm_summarizer_executables_for_database(
 /// Converts a complete typed snapshot into the runtime settings every
 /// configuration consumer shares. There are no defaults, file reads, or
 /// environment reads: an absent or mistyped required setting is an error.
-#[hotpath::measure(label = "configuration.runtime.materialize")]
+#[tracing::instrument(name = "configuration.runtime.materialize", level = "trace", skip_all)]
 fn runtime_config_from_snapshot(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<RuntimeTraceDecayConfig> {

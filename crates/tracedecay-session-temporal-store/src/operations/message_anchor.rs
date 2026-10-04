@@ -58,7 +58,11 @@ struct MaterializedOccurrence {
 /// before any message matched (missing or undecodable observation authority)
 /// names the first still-unresolved message in source order, which is the
 /// message whose single-message scan met it before.
-#[hotpath::measure(future = true, label = "session_temporal.publication.resolve_anchors")]
+#[tracing::instrument(
+    name = "session_temporal.publication.resolve_anchors",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn resolve_message_anchors(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,

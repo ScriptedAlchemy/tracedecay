@@ -51,8 +51,8 @@ const DISPATCH_AGENT_KEYS: &[&str] = &[
 
 /// Bytes and records consumed by one parent-dispatch lookup.
 ///
-/// Production callers feed these into Hotpath gauges. Tests assert scan
-/// bounds from the same receipt, there is no test-only production port.
+/// Tests and benches assert scan bounds from this receipt, there is no
+/// test-only production port.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DispatchScanReceipt {
     pub bytes_parsed: u64,
@@ -197,7 +197,7 @@ impl ParentDispatchIndex {
                 }
             };
         // Prefix-validation bytes are hot-path reads, so they are charged to
-        // the same receipt the gauges and the bound tests read, a repeat
+        // the same receipt the bound tests read, a repeat
         // lookup that reports none is the proof that the revision fast path
         // served without touching the file.
         let mut receipt = DispatchScanReceipt {
@@ -501,7 +501,7 @@ pub fn parent_dispatch_model_for_subagent(
 }
 
 /// Same two-candidate lookup as [`parent_dispatch_model_for_subagent`],
-/// plus the scan receipt for gauges and bound tests.
+/// plus the scan receipt for bound tests and benches.
 pub fn parent_dispatch_model_for_subagent_with_receipt(
     path: &Path,
     parent_session_id: &str,
@@ -528,33 +528,16 @@ pub fn parent_dispatch_model_for_subagent_with_receipt(
     (None, receipt)
 }
 
-pub(super) fn record_dispatch_scan_gauges(receipt: DispatchScanReceipt) {
-    if receipt.bytes_parsed > 0 {
-        hotpath::gauge!("sessions.hosts.cursor.dispatch_model_bytes_parsed")
-            .inc(receipt.bytes_parsed);
-    }
-    if receipt.prefix_digest_bytes > 0 {
-        hotpath::gauge!("sessions.hosts.cursor.dispatch_model_prefix_digest_bytes")
-            .inc(receipt.prefix_digest_bytes);
-    }
-    if receipt.records_parsed > 0 {
-        hotpath::gauge!("sessions.hosts.cursor.dispatch_model_records_parsed")
-            .inc(receipt.records_parsed);
-    }
-    if receipt.rescanned_from_zero {
-        hotpath::gauge!("sessions.hosts.cursor.dispatch_model_rescan_from_zero").inc(1u64);
-    }
-}
-
 fn scan_parent_delta(
     file: File,
     start: u64,
     resume_digest: ResumeDigest,
     requested_agent: &str,
 ) -> std::io::Result<ScanDelta> {
-    hotpath::measure_block!("sessions.hosts.cursor.dispatch_model_scan", {
+    {
+        let _span = tracing::trace_span!("sessions.hosts.cursor.dispatch_model_scan").entered();
         scan_parent_delta_inner(file, start, resume_digest, requested_agent)
-    })
+    }
 }
 
 fn scan_parent_delta_inner(

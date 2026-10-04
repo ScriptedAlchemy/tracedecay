@@ -8,7 +8,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tree_sitter::{Node, Parser};
 
-#[hotpath::measure(future = true, label = "mcp.analysis.constructors.total")]
+#[tracing::instrument(name = "mcp.analysis.constructors.total", level = "trace", skip_all)]
 pub(super) async fn compute_constructors(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -19,27 +19,30 @@ pub(super) async fn compute_constructors(
     let struct_name = request.struct_name.as_str();
     let limit = request.limit.map_or(100, |v| v.clamp(1, 1000) as usize);
 
-    let struct_nodes = hotpath::measure_block!("mcp.analysis.constructors.resolve", {
-        let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
-        candidates
-            .into_iter()
-            .map(|symbol| {
-                let metadata = symbol.metadata.as_ref().ok_or_else(|| {
-                    TraceDecayError::project_route(
-                        "code-graph-corrupt",
-                        false,
-                        "constructor candidate is missing extraction-attested metadata",
-                    )
-                })?;
-                let is_container =
-                    matches!(metadata.kind.as_str(), "struct" | "class" | "case_class");
-                Ok(is_container.then_some(symbol))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-    });
+    let struct_nodes = {
+        let _span = tracing::trace_span!("mcp.analysis.constructors.resolve").entered();
+        {
+            let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
+            candidates
+                .into_iter()
+                .map(|symbol| {
+                    let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+                        TraceDecayError::project_route(
+                            "code-graph-corrupt",
+                            false,
+                            "constructor candidate is missing extraction-attested metadata",
+                        )
+                    })?;
+                    let is_container =
+                        matches!(metadata.kind.as_str(), "struct" | "class" | "case_class");
+                    Ok(is_container.then_some(symbol))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        }
+    };
 
     if struct_nodes.is_empty() {
         return Ok(graph_tool_completion(
@@ -60,32 +63,35 @@ pub(super) async fn compute_constructors(
     let candidate_count = struct_nodes.len();
     let ambiguous_definition = candidate_count != 1;
 
-    let (expected_fields, files) = hotpath::measure_block!("mcp.analysis.constructors.graph", {
-        let mut expected_fields: HashSet<String> = HashSet::new();
-        let seeds = struct_nodes
-            .iter()
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<Vec<_>>();
-        for children in graph.callees(&seeds, &[RelationEdgeKindV1::Contains], 10_000)? {
-            for child in children {
-                let metadata = child.neighbor.metadata.ok_or_else(|| {
-                    TraceDecayError::project_route(
-                        "code-graph-corrupt",
-                        false,
-                        "constructor field relation is missing extraction-attested metadata",
-                    )
-                })?;
-                if matches!(metadata.kind.as_str(), "field" | "val_field" | "var_field") {
-                    expected_fields.insert(metadata.simple_name);
+    let (expected_fields, files) = {
+        let _span = tracing::trace_span!("mcp.analysis.constructors.graph").entered();
+        {
+            let mut expected_fields: HashSet<String> = HashSet::new();
+            let seeds = struct_nodes
+                .iter()
+                .map(|symbol| symbol.occurrence.clone())
+                .collect::<Vec<_>>();
+            for children in graph.callees(&seeds, &[RelationEdgeKindV1::Contains], 10_000)? {
+                for child in children {
+                    let metadata = child.neighbor.metadata.ok_or_else(|| {
+                        TraceDecayError::project_route(
+                            "code-graph-corrupt",
+                            false,
+                            "constructor field relation is missing extraction-attested metadata",
+                        )
+                    })?;
+                    if matches!(metadata.kind.as_str(), "field" | "val_field" | "var_field") {
+                        expected_fields.insert(metadata.simple_name);
+                    }
                 }
             }
+            let files = verified_analysis_symbols(graph, scope_prefix)?
+                .into_iter()
+                .map(|symbol| symbol.path)
+                .collect::<HashSet<_>>();
+            (expected_fields, files)
         }
-        let files = verified_analysis_symbols(graph, scope_prefix)?
-            .into_iter()
-            .map(|symbol| symbol.path)
-            .collect::<HashSet<_>>();
-        (expected_fields, files)
-    });
+    };
     let project_root = graph.project_root()?;
     let mut reported_expected_fields = expected_fields.iter().cloned().collect::<Vec<_>>();
     reported_expected_fields.sort();
@@ -102,7 +108,7 @@ pub(super) async fn compute_constructors(
     let scan_fields = expected_fields.clone();
     let scan_ambiguous_definition = ambiguous_definition;
 
-    let (sites, touched) = hotpath::future!(
+    let (sites, touched) = tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut sites: Vec<ConstructorSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
@@ -170,7 +176,7 @@ pub(super) async fn compute_constructors(
 
             Ok((sites, touched))
         }),
-        label = "mcp.analysis.constructors.scan"
+        tracing::trace_span!("mcp.analysis.constructors.scan"),
     )
     .await
     .map_err(|e| TraceDecayError::Config {

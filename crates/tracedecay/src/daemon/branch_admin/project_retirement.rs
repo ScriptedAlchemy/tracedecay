@@ -29,7 +29,6 @@ pub(crate) struct ProjectServerCapacityRetirementCompletion {
 }
 
 impl ProjectServerCapacityRetirementCompletion {
-    #[hotpath::skip]
     pub(crate) async fn wait(self) -> tracedecay_domain::errors::Result<()> {
         match wait_for_project_server_retirement(self.completion).await {
             ProjectServerRetirementStatus::Clean => Ok(()),
@@ -133,7 +132,6 @@ where
 {
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-    hotpath::gauge!("retirement_pending").inc(1.0);
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,
@@ -162,30 +160,18 @@ struct ProjectServerRetirementFinalizer {
 
 impl ProjectServerRetirementFinalizer {
     fn complete(mut self, status: ProjectServerRetirementStatus) {
-        match &status {
-            ProjectServerRetirementStatus::Clean => {
-                hotpath::gauge!("daemon.branch_admin.retirement.clean_total").inc(1_u64);
-            }
-            ProjectServerRetirementStatus::Failed(_) => {
-                hotpath::gauge!("daemon.branch_admin.retirement.failed_total").inc(1_u64);
-            }
-            ProjectServerRetirementStatus::Pending => {}
-        }
         self.completion.send_replace(status);
         self.terminal = true;
-        hotpath::gauge!("retirement_pending").inc(-1.0);
     }
 }
 
 impl Drop for ProjectServerRetirementFinalizer {
     fn drop(&mut self) {
         if !self.terminal {
-            hotpath::gauge!("daemon.branch_admin.retirement.abandoned_total").inc(1_u64);
             self.completion
                 .send_replace(ProjectServerRetirementStatus::Failed(
                     "retirement tracking task ended without a terminal receipt".to_owned(),
                 ));
-            hotpath::gauge!("retirement_pending").inc(-1.0);
         }
     }
 }
@@ -227,7 +213,6 @@ fn track_project_server_retirement_after_admission(
     });
     let (task_completion, completion) =
         tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
-    hotpath::gauge!("retirement_pending").inc(1.0);
     let finalizer = ProjectServerRetirementFinalizer {
         completion: task_completion,
         terminal: false,
@@ -339,7 +324,6 @@ impl StoreAdministration {
     /// The caller must take this before the owner registry whenever it may
     /// evict or replace a live server, then call
     /// [`ProjectServerRetirementAdmission::spawn_and_track`] without awaiting.
-    #[hotpath::skip]
     pub(crate) async fn acquire_project_server_retirement_admission(
         &self,
     ) -> ProjectServerRetirementAdmission<'_> {
@@ -351,7 +335,6 @@ impl StoreAdministration {
     // pub(crate): daemon bootstrap tests register retirements from outside
     // branch_admin to exercise the shutdown join path.
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn track_project_server_retirement(
         &self,
         owner: StoreOwnerKey,
@@ -363,7 +346,6 @@ impl StoreAdministration {
     // pub(crate): the test-transport production harness joins retirements from
     // outside branch_admin during its shutdown sequence.
     #[cfg(any(test, feature = "test-transport"))]
-    #[hotpath::skip]
     pub(crate) async fn join_project_server_retirements(&self) {
         let completions = self
             .project_server_retirements
@@ -389,7 +371,6 @@ impl StoreAdministration {
     /// Bounded retirement join for daemon shutdown: every tracked retirement
     /// is awaited up to `deadline` and reported under its owner's identity, so
     /// a hung retirement surfaces as a typed timeout instead of a silent hang.
-    #[hotpath::skip]
     pub(crate) async fn join_project_server_retirements_until(
         &self,
         deadline: tokio::time::Instant,

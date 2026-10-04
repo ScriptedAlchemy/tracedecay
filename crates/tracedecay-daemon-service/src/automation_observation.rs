@@ -26,7 +26,11 @@ pub fn record_project_run(
     record_run_with_producer(Some(producer), project_path, record, surface);
 }
 
-#[hotpath::measure(label = "daemon.automation.observation.record")]
+#[tracing::instrument(
+    name = "daemon.automation.observation.record",
+    level = "trace",
+    skip_all
+)]
 pub fn record_run_with_producer(
     producer: Option<&BoundedObservabilityProducerV1>,
     project_path: &Path,

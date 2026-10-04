@@ -11,7 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 constant_time_eq = "0.5.0"
 futures-util = { version = "0.3", features = ["sink"] }
 globset = "0.4"
-hotpath.workspace = true
 jsonc-parser = { version = "0.33.2", features = ["serde"] }
 lsp-types = "0.97.0"
 serde = { version = "1", features = ["derive"] }
@@ -25,6 +24,7 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracing = "0.1"
 url = "2"
 walkdir = "2"
 

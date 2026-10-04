@@ -13,7 +13,6 @@ impl DaemonLspOwnerRegistrar {
         }
     }
 
-    #[hotpath::skip]
     pub async fn register_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -23,7 +22,6 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn register_factory_for_project(
         &self,
         project_root: PathBuf,
@@ -44,7 +42,11 @@ impl DaemonLspOwnerRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.service.lsp.build_and_register", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.lsp.build_and_register",
+        level = "trace",
+        skip_all
+    )]
     pub async fn build_and_register(
         &self,
         project_root: PathBuf,

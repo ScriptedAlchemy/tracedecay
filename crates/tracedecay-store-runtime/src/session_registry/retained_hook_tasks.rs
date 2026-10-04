@@ -97,7 +97,6 @@ impl RetainedHookTasks {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn retire(&self, provider: &str, session_id: &str) -> Result<(), String> {
         let key = format!("{provider}\0{session_id}");
         {
@@ -117,7 +116,6 @@ impl RetainedHookTasks {
         self.join_retiring(Some(&key)).await
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> Result<(), String> {
         self.begin_shutdown();
         {

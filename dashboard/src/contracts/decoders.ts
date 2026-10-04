@@ -4072,7 +4072,7 @@ export const DuplicateEffortKindV1Schema: z.ZodEnum<["censored", "duplicate_effe
 
 Git index writes remain separate classes so policy cannot accidentally
 substitute one index mutation for another. */
-export const EffectClassSchema: z.ZodType<"administrative" | "configuration_write" | "git_index_commit" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence", z.ZodTypeDef, unknown> = z.union([z.enum(["administrative", "configuration_write", "git_index_commit", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work"), z.literal("maintains_owner_state"), z.literal("maintains_profile_state"), z.literal("records_host_evidence")]);
+export const EffectClassSchema: z.ZodType<"administrative" | "configuration_write" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence", z.ZodTypeDef, unknown> = z.union([z.enum(["administrative", "configuration_write", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work"), z.literal("maintains_owner_state"), z.literal("maintains_profile_state"), z.literal("records_host_evidence")]);
 
 /** Durable effect proof. It records identities and receipts, never credentials
 or arbitrary command text. */

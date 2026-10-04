@@ -27,7 +27,7 @@ pub use context_scout_registry::{
 };
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.primitive.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.primitive.execute", level = "trace", skip_all)]
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
@@ -160,7 +160,11 @@ pub(super) async fn execute_primitive(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.callable_code.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.callable_code.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
@@ -471,7 +475,11 @@ fn callable_code_response<T: Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.context_scout.execute", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.context_scout.execute",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn execute_context_scout(
     service: &DaemonInvocationService,
     wire_request_id: String,
@@ -1001,7 +1009,11 @@ fn public_context_scout_explanation(explanation: ContextScoutExplanationV1) -> s
     })
 }
 
-#[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.context_scout.transition",
+    level = "trace",
+    skip_all
+)]
 async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
@@ -1120,7 +1132,11 @@ enum ContextScoutActivationReconciliationError {
     AddressActivationRejected,
 }
 
-#[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.context_scout.reconcile",
+    level = "trace",
+    skip_all
+)]
 async fn reconcile_context_scout_configuration(
     runtime: &Arc<ProjectConfigurationRuntime>,
     owner: &Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
@@ -1199,7 +1215,6 @@ impl DaemonPrimitiveRuntimeRegistrar {
 
     /// Retains the already-opened project runtime as its teardown owner.
     /// Scope/access were bound by the concrete project-open factory.
-    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -1224,7 +1239,6 @@ impl DaemonPrimitiveRuntimeRegistrar {
         Ok(dispatch)
     }
 
-    #[hotpath::skip]
     pub async fn open_and_register(
         &self,
         project_root: PathBuf,

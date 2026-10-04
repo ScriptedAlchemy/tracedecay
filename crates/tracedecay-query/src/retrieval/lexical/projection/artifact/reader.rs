@@ -22,8 +22,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use roaring::RoaringBitmap;
-#[cfg(any(test, feature = "hotpath"))]
-use rusqlite::StatementStatus;
+
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::clones::{
@@ -33,9 +32,9 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
-    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
+    CompactCandidate, ExactFieldV1, LanguageDescriptorRevision, ManifestDigest, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
+    SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
@@ -78,11 +77,12 @@ use crate::retrieval::ports::{
 };
 
 use super::super::{
-    ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
-    LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
-    bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
-    lexical_lane_binding, lexical_lane_candidate, normalize_lexical, proximity_count_tokens,
-    proximity_tokens, row_field_texts, score_lexical_row, substring_count,
+    ExactMatchRowViewV1, ExactOccurrenceOwnersV1, ExactRowMatchV1, FuzzyExpansionsV1,
+    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalIndexedRow, LexicalRowScoreV1,
+    LiteralProofCacheV1, PreparedLexicalQueryV1, bm25_score_micros, exact_matches,
+    field_weight_millis, fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate,
+    normalize_lexical, proximity_count_tokens, proximity_tokens, row_field_texts,
+    score_lexical_row, substring_count,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -355,11 +355,14 @@ fn verify_reader_sqlite_integrity(
     ) {
         return Ok(());
     }
-    let integrity: String = hotpath::measure_block!("query.artifact.open.quick_check", {
-        connection
-            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-            .map_err(sqlite_corrupt)
-    })?;
+    let integrity: String = {
+        let _span = tracing::trace_span!("query.artifact.open.quick_check").entered();
+        {
+            connection
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .map_err(sqlite_corrupt)
+        }
+    }?;
     if integrity != "ok" {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(integrity));
     }
@@ -395,7 +398,11 @@ impl CodeLexicalArtifactReaderV1 {
     /// Explicit corpus-wide verification for diagnostics, repair, and
     /// publication checks. Unlike the bounded cold-restore path, this streams
     /// the whole file twice around SQLite's receipt and section verification.
-    #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify")]
+    #[tracing::instrument(
+        name = "query.artifact.open_content_addressed_full_verify",
+        level = "trace",
+        skip_all
+    )]
     pub fn open_content_addressed_fully_verified(
         path: impl AsRef<Path>,
         expected_file_digest: &ManifestDigest,
@@ -419,7 +426,11 @@ impl CodeLexicalArtifactReaderV1 {
     /// Perform the explicit full verification and capture the restore witness
     /// from the same retained file handle around its final digest. No witness
     /// is captured when `rewrite_witness` cannot vouch for that file state.
-    #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify_with_witness")]
+    #[tracing::instrument(
+        name = "query.artifact.open_content_addressed_full_verify_with_witness",
+        level = "trace",
+        skip_all
+    )]
     pub fn open_content_addressed_fully_verified_with_witness(
         path: impl AsRef<Path>,
         expected_file_digest: &ManifestDigest,
@@ -500,7 +511,11 @@ impl CodeLexicalArtifactReaderV1 {
     /// that digest, and the standard receipt-bound verification then runs
     /// unchanged. This is the reopen path for a durable text head that
     /// survived a daemon restart.
-    #[hotpath::measure(label = "query.artifact.open_content_addressed")]
+    #[tracing::instrument(
+        name = "query.artifact.open_content_addressed",
+        level = "trace",
+        skip_all
+    )]
     pub fn open_content_addressed(
         path: impl AsRef<Path>,
         expected_file_digest: &ManifestDigest,
@@ -523,7 +538,11 @@ impl CodeLexicalArtifactReaderV1 {
     /// authentication progress under the query cache budget. The six checks
     /// are fixed-cost with respect to corpus size; no artifact bytes or
     /// section rows are streamed.
-    #[hotpath::measure(label = "query.artifact.open_content_addressed_bounded")]
+    #[tracing::instrument(
+        name = "query.artifact.open_content_addressed_bounded",
+        level = "trace",
+        skip_all
+    )]
     pub fn restore_content_addressed_with_progress(
         path: impl AsRef<Path>,
         expected_file_digest: &ManifestDigest,
@@ -568,43 +587,52 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
         progress(2, TOTAL_RESTORE_CHECKS);
-        let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
-            Connection::open_with_flags(
-                sqlite_open_path(path)?,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|error| map_reader_open_error(path, error))
-        })?;
+        let connection = {
+            let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
+            {
+                Connection::open_with_flags(
+                    sqlite_open_path(path)?,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(|error| map_reader_open_error(path, error))
+            }
+        }?;
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
-        hotpath::measure_block!("query.artifact.open.head_schema_verify", {
-            configure_reader_window(
-                &connection,
-                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-                0,
-                expected_file_size_bytes,
-            )?;
-            connection
-                .pragma_update(None, "query_only", true)
-                .map_err(sqlite_error)?;
-            verify_artifact_state_revision(&connection, control)?;
-            verify_artifact_table_layout(&connection)
-        })?;
+        {
+            let _span = tracing::trace_span!("query.artifact.open.head_schema_verify").entered();
+            {
+                configure_reader_window(
+                    &connection,
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                    0,
+                    expected_file_size_bytes,
+                )?;
+                connection
+                    .pragma_update(None, "query_only", true)
+                    .map_err(sqlite_error)?;
+                verify_artifact_state_revision(&connection, control)?;
+                verify_artifact_table_layout(&connection)
+            }
+        }?;
         progress(3, TOTAL_RESTORE_CHECKS);
-        let receipt = hotpath::measure_block!("query.artifact.open.head_receipt_restore", {
-            let receipt_bytes: Vec<u8> = connection
-                .query_row(
-                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(sqlite_corrupt)?;
-            decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Corrupt(
-                    "content-addressed lexical artifact has no finalized receipt".to_owned(),
-                )
-            })
-        })?;
+        let receipt = {
+            let _span = tracing::trace_span!("query.artifact.open.head_receipt_restore").entered();
+            {
+                let receipt_bytes: Vec<u8> = connection
+                    .query_row(
+                        "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(sqlite_corrupt)?;
+                decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "content-addressed lexical artifact has no finalized receipt".to_owned(),
+                    )
+                })
+            }
+        }?;
         if receipt.file_size_bytes() != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "embedded receipt disagrees with the durable head file size".to_owned(),
@@ -619,8 +647,8 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         progress(4, TOTAL_RESTORE_CHECKS);
-        let reader = hotpath::measure_block!(
-            "query.artifact.open.reader_restore",
+        let reader = {
+            let _span = tracing::trace_span!("query.artifact.open.reader_restore").entered();
             Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
                 artifact_path: path,
@@ -631,18 +659,16 @@ impl CodeLexicalArtifactReaderV1 {
                 control,
                 integrity_authority: ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
             })
-        )?;
+        }?;
         progress(5, TOTAL_RESTORE_CHECKS);
         verify_stable_artifact_file_state(&file, &opened_state)?;
         verify_named_path_identity(path, &file)?;
         progress(6, TOTAL_RESTORE_CHECKS);
-        crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
-        hotpath::gauge!("query.artifact.bytes").set(expected_file_size_bytes);
-        hotpath::gauge!("query.artifact.pages").set(reader.receipt.page_count());
+        crate::observe::Residency::Cold.record("query.artifact.residency");
         Ok(reader)
     }
 
-    #[hotpath::measure(label = "query.artifact.open")]
+    #[tracing::instrument(name = "query.artifact.open", level = "trace", skip_all)]
     pub fn open_with_control(
         path: impl AsRef<Path>,
         expected: &VerifiedCodeLexicalArtifactV1,
@@ -668,15 +694,18 @@ impl CodeLexicalArtifactReaderV1 {
                 expected.file_size_bytes()
             )));
         }
-        let connection = hotpath::measure_block!("query.artifact.open.sqlite_connect", {
-            Connection::open_with_flags(
-                sqlite_open_path(path)?,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|error| map_reader_open_error(path, error))
-        })?;
-        let reader = hotpath::measure_block!(
-            "query.artifact.open.reader_restore",
+        let connection = {
+            let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
+            {
+                Connection::open_with_flags(
+                    sqlite_open_path(path)?,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(|error| map_reader_open_error(path, error))
+            }
+        }?;
+        let reader = {
+            let _span = tracing::trace_span!("query.artifact.open.reader_restore").entered();
             Self::open_connection_with_control(OpenLexicalArtifactConnection {
                 connection,
                 artifact_path: path,
@@ -687,12 +716,10 @@ impl CodeLexicalArtifactReaderV1 {
                 control,
                 integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
             })
-        )?;
+        }?;
         verify_stable_artifact_file_state(&file, &file_state)?;
         verify_named_path_identity(path, &file)?;
-        crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
-        hotpath::gauge!("query.artifact.bytes").set(expected.file_size_bytes());
-        hotpath::gauge!("query.artifact.pages").set(expected.page_count());
+        crate::observe::Residency::Warm.record("query.artifact.residency");
         Ok(reader)
     }
 
@@ -713,18 +740,21 @@ impl CodeLexicalArtifactReaderV1 {
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         let sealed_file_size_bytes = expected.file_size_bytes();
-        hotpath::measure_block!("query.artifact.open.schema_verify", {
-            connection
-                .pragma_update(None, "query_only", true)
-                .map_err(sqlite_error)?;
-            verify_artifact_state_revision(&connection, control)?;
-            verify_artifact_table_layout(&connection)
-        })?;
+        {
+            let _span = tracing::trace_span!("query.artifact.open.schema_verify").entered();
+            {
+                connection
+                    .pragma_update(None, "query_only", true)
+                    .map_err(sqlite_error)?;
+                verify_artifact_state_revision(&connection, control)?;
+                verify_artifact_table_layout(&connection)
+            }
+        }?;
         // Read the BLOB length first so the page cache can be configured
         // before metadata is materialized. The retained metadata copy plus
         // SQLite's cache therefore cannot exceed the caller's reservation.
-        let (page_cache_bytes, stored_metadata_bytes, stored_metadata_digest, metadata) = hotpath::measure_block!(
-            "query.artifact.open.metadata_restore",
+        let (page_cache_bytes, stored_metadata_bytes, stored_metadata_digest, metadata) = {
+            let _span = tracing::trace_span!("query.artifact.open.metadata_restore").entered();
             {
                 let stored_metadata_len: i64 = connection
                     .query_row(
@@ -784,7 +814,7 @@ impl CodeLexicalArtifactReaderV1 {
                     metadata,
                 ))
             }
-        )?;
+        }?;
         // Content-addressed reopen has stronger authority than `quick_check`:
         // the builder ran SQLite integrity verification before publication,
         // and this reader hashes the exact immutable file both before and
@@ -792,20 +822,23 @@ impl CodeLexicalArtifactReaderV1 {
         // seconds without authenticating any bytes the two hashes did not.
         verify_reader_sqlite_integrity(&connection, integrity_authority)?;
         checkpoint(control)?;
-        let stored = hotpath::measure_block!("query.artifact.open.receipt_restore", {
-            let receipt_bytes: Vec<u8> = connection
-                .query_row(
-                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact has no finalized receipt".to_owned(),
-                )
-            })
-        })?;
+        let stored = {
+            let _span = tracing::trace_span!("query.artifact.open.receipt_restore").entered();
+            {
+                let receipt_bytes: Vec<u8> = connection
+                    .query_row(
+                        "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                decode_padded_receipt_with_control(&receipt_bytes, control)?.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact has no finalized receipt".to_owned(),
+                    )
+                })
+            }
+        }?;
         if stored != *expected {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact receipt does not match its verified seat".to_owned(),
@@ -826,10 +859,11 @@ impl CodeLexicalArtifactReaderV1 {
         ) {
             stored.section_digests().to_vec()
         } else {
-            let sections = hotpath::measure_block!(
-                "query.artifact.open.section_digest_verify",
+            let sections = {
+                let _span =
+                    tracing::trace_span!("query.artifact.open.section_digest_verify").entered();
                 compute_section_digests(&connection, control)
-            )?;
+            }?;
             if sections != stored.section_digests() {
                 return Err(CodeLexicalArtifactErrorV1::Corrupt(
                     "lexical artifact section digests do not verify".to_owned(),
@@ -837,10 +871,11 @@ impl CodeLexicalArtifactReaderV1 {
             }
             sections
         };
-        let digest = hotpath::measure_block!(
-            "query.artifact.open.artifact_digest_verify",
+        let digest = {
+            let _span =
+                tracing::trace_span!("query.artifact.open.artifact_digest_verify").entered();
             receipt_artifact_digest(&stored, &sections)
-        )?;
+        }?;
         if &digest != stored.artifact_digest() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact content digest does not verify".to_owned(),
@@ -884,17 +919,14 @@ impl CodeLexicalArtifactReaderV1 {
         })
     }
 
-    #[hotpath::skip]
     pub fn metadata(&self) -> &super::super::CodeLexicalProjectionMetadataV1 {
         &self.metadata
     }
 
-    #[hotpath::skip]
     pub fn verified_artifact(&self) -> &VerifiedCodeLexicalArtifactV1 {
         &self.receipt
     }
 
-    #[hotpath::skip]
     pub fn retained_owned_bytes(&self) -> usize {
         self.retained_owned_bytes
     }
@@ -1320,67 +1352,70 @@ impl CodeLexicalArtifactReaderV1 {
         &self,
         check: Option<&dyn Fn() -> Result<(), CodeLexicalArtifactErrorV1>>,
     ) -> Result<ArtifactReadGuard<'_>, CodeLexicalArtifactErrorV1> {
-        hotpath::measure_block!("query.artifact.reader.lock_wait", {
-            let poisoned = || {
-                CodeLexicalArtifactErrorV1::Io(
-                    "lexical artifact reader lock is poisoned".to_owned(),
-                )
-            };
-            let readers = self.connections.as_ref();
-            let mut queue = readers.queue.lock().map_err(|_| poisoned())?;
-            loop {
-                for (index, connection) in readers.connections.iter().enumerate() {
-                    let connection = match connection.try_lock() {
-                        Ok(connection) => connection,
-                        Err(TryLockError::WouldBlock) => continue,
-                        Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
-                    };
-                    let scratch_reservation = if index == 0 {
-                        None
-                    } else {
-                        let Some(reservation) = &self.resident_memory else {
-                            break;
-                        };
-                        let bytes = NonZeroU64::new(
-                            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64,
-                        )
-                        .ok_or_else(|| {
-                            CodeLexicalArtifactErrorV1::Contract(
-                                "reader reservation must be nonzero".to_owned(),
-                            )
-                        })?;
-                        match reservation.reserve_additional(bytes) {
-                            Ok(reservation) => Some(reservation),
-                            Err(reason) => {
-                                tracing::debug!(%reason, "concurrent artifact read queues within its existing reservation");
-                                break;
-                            }
-                        }
-                    };
-                    return Ok(ArtifactReadGuard {
-                        connection,
-                        _scratch_reservation: scratch_reservation,
-                        _wakeup: ArtifactReaderWakeup(readers),
-                    });
-                }
-                queue = if let Some(check) = check {
-                    check()?;
-                    // The read-control trait exposes a checkpoint, not a wake
-                    // signal. The condvar handles release; timed waits bound
-                    // cancellation/deadline observation while all handles run.
-                    readers
-                        .available
-                        .wait_timeout(queue, Duration::from_millis(10))
-                        .map_err(|_| poisoned())?
-                        .0
-                } else {
-                    readers.available.wait(queue).map_err(|_| poisoned())?
+        {
+            let _span = tracing::trace_span!("query.artifact.reader.lock_wait").entered();
+            {
+                let poisoned = || {
+                    CodeLexicalArtifactErrorV1::Io(
+                        "lexical artifact reader lock is poisoned".to_owned(),
+                    )
                 };
-                if let Some(check) = check {
-                    check()?;
+                let readers = self.connections.as_ref();
+                let mut queue = readers.queue.lock().map_err(|_| poisoned())?;
+                loop {
+                    for (index, connection) in readers.connections.iter().enumerate() {
+                        let connection = match connection.try_lock() {
+                            Ok(connection) => connection,
+                            Err(TryLockError::WouldBlock) => continue,
+                            Err(TryLockError::Poisoned(_)) => return Err(poisoned()),
+                        };
+                        let scratch_reservation = if index == 0 {
+                            None
+                        } else {
+                            let Some(reservation) = &self.resident_memory else {
+                                break;
+                            };
+                            let bytes = NonZeroU64::new(
+                                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 as u64,
+                            )
+                            .ok_or_else(|| {
+                                CodeLexicalArtifactErrorV1::Contract(
+                                    "reader reservation must be nonzero".to_owned(),
+                                )
+                            })?;
+                            match reservation.reserve_additional(bytes) {
+                                Ok(reservation) => Some(reservation),
+                                Err(reason) => {
+                                    tracing::debug!(%reason, "concurrent artifact read queues within its existing reservation");
+                                    break;
+                                }
+                            }
+                        };
+                        return Ok(ArtifactReadGuard {
+                            connection,
+                            _scratch_reservation: scratch_reservation,
+                            _wakeup: ArtifactReaderWakeup(readers),
+                        });
+                    }
+                    queue = if let Some(check) = check {
+                        check()?;
+                        // The read-control trait exposes a checkpoint, not a wake
+                        // signal. The condvar handles release; timed waits bound
+                        // cancellation/deadline observation while all handles run.
+                        readers
+                            .available
+                            .wait_timeout(queue, Duration::from_millis(10))
+                            .map_err(|_| poisoned())?
+                            .0
+                    } else {
+                        readers.available.wait(queue).map_err(|_| poisoned())?
+                    };
+                    if let Some(check) = check {
+                        check()?;
+                    }
                 }
             }
-        })
+        }
     }
 
     fn validate_generation(&self, generation: &CodeGenerationId) -> Result<(), RetrievalPortError> {
@@ -1406,22 +1441,24 @@ impl CodeLexicalArtifactReaderV1 {
         if let Some(cached) = slot.as_ref() {
             return Ok(Arc::clone(cached));
         }
-        let loaded = Arc::new(hotpath::measure_block!("query.artifact.preface.load", {
-            load_scoring_preface_index(connection, self.preface_ceiling_bytes, || {
-                retrieval_checkpoint(control).map_err(|_| {
-                    CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+        let loaded = Arc::new({
+            let _span = tracing::trace_span!("query.artifact.preface.load").entered();
+            {
+                load_scoring_preface_index(connection, self.preface_ceiling_bytes, || {
+                    retrieval_checkpoint(control).map_err(|_| {
+                        CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+                    })
                 })
-            })
-        })?);
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.preface.bytes").set(loaded.retained_bytes());
+            }
+        }?);
+
         *slot = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
 }
 
 impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
-    #[hotpath::measure(label = "query.lane.lexical.read")]
+    #[tracing::instrument(name = "query.lane.lexical.read", level = "trace", skip_all)]
     fn read_lexical_postings(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1430,7 +1467,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
         if self.metadata.freshness.compatibility
             != tracedecay_domain::FreshnessCompatibilityV1::Current
         {
-            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
+            crate::observe::Residency::Rebuilding.record("query.lane.lexical.residency");
             return Ok(RetrieverOutcome::Stale(self.metadata.freshness.clone()));
         }
         let connection = self
@@ -1455,13 +1492,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             prefaces.as_ref(),
         )?
         .lexical_batch(request)?;
-        crate::hotpath_metrics::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }
@@ -1476,7 +1507,7 @@ impl<A> ExactTermPostingReadPort for CodeExactLexicalArtifactReaderV1<A>
 where
     A: ExactAdmissionAuthority,
 {
-    #[hotpath::measure(label = "query.lane.exact.read")]
+    #[tracing::instrument(name = "query.lane.exact.read", level = "trace", skip_all)]
     fn read_exact_postings(
         &self,
         request: &ExactLaneRequest,
@@ -1485,7 +1516,7 @@ where
         if self.reader.metadata.freshness.compatibility
             != tracedecay_domain::FreshnessCompatibilityV1::Current
         {
-            crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.exact.residency");
+            crate::observe::Residency::Rebuilding.record("query.lane.exact.residency");
             return Ok(RetrieverOutcome::Stale(
                 self.reader.metadata.freshness.clone(),
             ));
@@ -1510,13 +1541,7 @@ where
             ScoringPrefaceIndexV1::empty(),
         )?
         .exact_batch(request, &self.authority)?;
-        crate::hotpath_metrics::record_lane(
-            "query.lane.exact.candidates",
-            "query.lane.exact.examined",
-            "query.lane.exact.results",
-            "query.lane.exact.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.exact.residency", &outcome);
         Ok(outcome)
     }
 }
@@ -1550,33 +1575,21 @@ impl ArtifactQueryMetricsV1 {
     fn probe(&self) {
         #[cfg(test)]
         self.probes.set(self.probes.get().saturating_add(1));
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.sql.probes_total").inc(1u64);
-    }
-
-    #[inline(always)]
-    fn rows(&self, rows: u64) {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.sql.rows_total").inc(rows);
-        #[cfg(not(feature = "hotpath"))]
-        let _ = rows;
     }
 
     #[inline(always)]
     fn observe_statement(
         &self,
-        statement: &rusqlite::Statement<'_>,
+        #[cfg_attr(not(test), expect(unused_variables))] statement: &rusqlite::Statement<'_>,
     ) -> Result<(), RetrievalPortError> {
-        #[cfg(any(test, feature = "hotpath"))]
-        let steps = u64::try_from(statement.get_status(StatementStatus::FullscanStep))
-            .map_err(contract_error)?;
         #[cfg(test)]
-        self.fullscan_steps
-            .set(self.fullscan_steps.get().saturating_add(steps));
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.sql.observed_fullscan_steps_total").inc(steps);
-        #[cfg(not(any(test, feature = "hotpath")))]
-        let _ = statement;
+        {
+            let steps =
+                u64::try_from(statement.get_status(rusqlite::StatementStatus::FullscanStep))
+                    .map_err(contract_error)?;
+            self.fullscan_steps
+                .set(self.fullscan_steps.get().saturating_add(steps));
+        }
         Ok(())
     }
 
@@ -1611,17 +1624,19 @@ fn visit_document_ids(
     control: &dyn RetrievalExecutionControl,
     mut visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
 ) -> Result<(), RetrievalPortError> {
-    hotpath::measure_block!("query.stream.visit_documents", {
-        for (visited, document) in documents.iter().enumerate() {
-            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
-                retrieval_checkpoint(control)?;
+    {
+        let _span = tracing::trace_span!("query.stream.visit_documents").entered();
+        {
+            for (visited, document) in documents.iter().enumerate() {
+                if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    retrieval_checkpoint(control)?;
+                }
+                visitor(document)?;
             }
-            visitor(document)?;
+            retrieval_checkpoint(control)?;
+            Ok(())
         }
-        retrieval_checkpoint(control)?;
-        hotpath::gauge!("query.stream.rows_total").inc(documents.len());
-        Ok(())
-    })
+    }
 }
 
 /// Stream each candidate row with every request-term frequency it carries.
@@ -1642,41 +1657,43 @@ fn visit_lexical_rows(
         LexicalTermFrequenciesV1,
     ) -> Result<(), RetrievalPortError>,
 ) -> Result<(), RetrievalPortError> {
-    hotpath::measure_block!("query.stream.visit_lexical_rows", {
-        let mut cursors = postings.cursors().map_err(map_query_artifact_error)?;
-        metrics.probe();
-        let mut visited = 0u64;
-        for document in documents {
-            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE as u64) {
-                retrieval_checkpoint(control)?;
-            }
-            let stored = rows.row(document).map_err(map_query_artifact_error)?;
-            let mut entries = Vec::new();
-            for cursor in &mut cursors {
-                if let Some(frequency) = cursor
-                    .frequency_at(document)
-                    .map_err(map_query_artifact_error)?
-                {
-                    entries.push((
-                        cursor.field,
-                        cursor.term.to_owned(),
-                        usize::try_from(frequency).map_err(contract_error)?,
-                    ));
+    {
+        let _span = tracing::trace_span!("query.stream.visit_lexical_rows").entered();
+        {
+            let mut cursors = postings.cursors().map_err(map_query_artifact_error)?;
+            metrics.probe();
+            let mut visited = 0u64;
+            for document in documents {
+                if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE as u64) {
+                    retrieval_checkpoint(control)?;
                 }
+                let stored = rows.row(document).map_err(map_query_artifact_error)?;
+                let mut entries = Vec::new();
+                for cursor in &mut cursors {
+                    if let Some(frequency) = cursor
+                        .frequency_at(document)
+                        .map_err(map_query_artifact_error)?
+                    {
+                        entries.push((
+                            cursor.field,
+                            cursor.term.to_owned(),
+                            usize::try_from(frequency).map_err(contract_error)?,
+                        ));
+                    }
+                }
+                visitor(document, stored, LexicalTermFrequenciesV1(entries))?;
+                visited = visited.saturating_add(1);
             }
-            visitor(document, stored, LexicalTermFrequenciesV1(entries))?;
-            visited = visited.saturating_add(1);
+            retrieval_checkpoint(control)?;
+            if !documents.is_empty() {
+                let statement = connection
+                    .prepare_cached(ROW_BLOCK_BY_DOCUMENT_SQL)
+                    .map_err(map_query_sql_error)?;
+                metrics.observe_statement(&statement)?;
+            }
+            Ok(())
         }
-        retrieval_checkpoint(control)?;
-        if !documents.is_empty() {
-            let statement = connection
-                .prepare_cached(ROW_BLOCK_BY_DOCUMENT_SQL)
-                .map_err(map_query_sql_error)?;
-            metrics.observe_statement(&statement)?;
-        }
-        metrics.rows(visited);
-        Ok(())
-    })
+    }
 }
 
 /// Every sealed `(term, field)` posting list of one request's terms, read
@@ -1838,19 +1855,21 @@ fn ngram_document_query(
     bytes: &[u8],
     metrics: &ArtifactQueryMetricsV1,
 ) -> Result<RoaringBitmap, RetrievalPortError> {
-    hotpath::measure_block!("query.artifact.ngram.bitmap_query", {
-        let ngrams = query_ngrams(bytes)
-            .into_iter()
-            .map(|ngram| (kind, ngram))
-            .collect::<Vec<_>>();
-        if ngrams.is_empty() {
-            return Ok(RoaringBitmap::new());
+    {
+        let _span = tracing::trace_span!("query.artifact.ngram.bitmap_query").entered();
+        {
+            let ngrams = query_ngrams(bytes)
+                .into_iter()
+                .map(|ngram| (kind, ngram))
+                .collect::<Vec<_>>();
+            if ngrams.is_empty() {
+                return Ok(RoaringBitmap::new());
+            }
+            let candidates = ngram_bitmap_candidates(connection, &ngrams, metrics)?;
+
+            Ok(candidates)
         }
-        let candidates = ngram_bitmap_candidates(connection, &ngrams, metrics)?;
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.ngram.query_candidates_total").inc(candidates.len());
-        Ok(candidates)
-    })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1861,43 +1880,15 @@ struct NgramSelectivityV1 {
 }
 
 /// One query's n-gram budget: the encoded-byte allowance every intersection
-/// charges against, plus (under `hotpath`) the totals it consumed.
+/// charges against.
 struct NgramListBudgetV1 {
     remaining_encoded_bytes: usize,
-    #[cfg(feature = "hotpath")]
-    observed_lists: u64,
-    #[cfg(feature = "hotpath")]
-    observed_bytes: u64,
 }
 
 impl NgramListBudgetV1 {
     fn for_query() -> Self {
         Self {
             remaining_encoded_bytes: ARTIFACT_NGRAM_QUERY_ENCODED_BYTES_V1,
-            #[cfg(feature = "hotpath")]
-            observed_lists: 0,
-            #[cfg(feature = "hotpath")]
-            observed_bytes: 0,
-        }
-    }
-
-    #[inline(always)]
-    fn observe_list(&mut self, encoded_bytes: usize) {
-        #[cfg(feature = "hotpath")]
-        {
-            self.observed_lists = self.observed_lists.saturating_add(1);
-            self.observed_bytes = self.observed_bytes.saturating_add(encoded_bytes as u64);
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = encoded_bytes;
-    }
-
-    #[inline(always)]
-    fn report(&self) {
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("query.artifact.ngram.query_lists_total").inc(self.observed_lists);
-            hotpath::gauge!("query.artifact.ngram.query_bytes_total").inc(self.observed_bytes);
         }
     }
 }
@@ -1969,14 +1960,12 @@ fn ngram_bitmap_candidates(
             _metrics.observe_ngram_list();
             _metrics.observe_ngram_candidates(list.len());
         }
-        budget.observe_list(encoded.len());
         let exhausted = list.is_empty();
         candidates = Some(list);
         if exhausted {
             break;
         }
     }
-    budget.report();
     Ok(candidates.unwrap_or_default())
 }
 
@@ -2103,6 +2092,7 @@ impl<'a> ArtifactQueryV1<'a> {
             &phrase_frequencies,
             &stats,
             &request.field_filters,
+            request.path_prefix,
             cap,
             control,
         )?;
@@ -2198,24 +2188,43 @@ impl<'a> ArtifactQueryV1<'a> {
         // Central admission runs BEFORE heap eligibility: a document whose
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
-        // fail the batch. Retained state stays bounded: at most `cap`
-        // ranking keys with matched-literal ordinals; proofs are admitted at
+        // fail the batch. Ownership needs every matched row before any row
+        // answers, so matched rows are held until the visit ends; the heap
+        // retains at most `cap` ranking keys, and proofs are admitted at
         // most once per request literal and cloned only for winners.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
+        let mut owners = ExactOccurrenceOwnersV1::default();
+        let mut matched_rows = Vec::new();
+        self.visit_documents(&documents, request.control, |document| {
+            let row = self.row(document)?;
+            let matches = exact_matches_artifact(&row, request);
+            if !matches.is_empty() {
+                owners.offer(&row.anchor, document, &matches);
+                matched_rows.push((
+                    document,
+                    row.id.as_str().to_owned(),
+                    row.anchor.file_occurrence_id,
+                    matches,
+                ));
+            }
+            Ok(())
+        })?;
         let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        self.visit_documents(&documents, request.control, |document| {
-            let row = self.row(document)?;
-            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
+        for (visited, (document, row_id, file, matches)) in matched_rows.into_iter().enumerate() {
+            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
+            let (matched_literals, matched_kinds) = owners.owned(&file, document, &matches);
             if matched_literals.is_empty() {
-                return Ok(());
+                continue;
             }
             let Some((admitted_ordinal, _)) =
                 proofs.first_admitted(&matched_literals, request, authority)?
             else {
-                return Ok(());
+                continue;
             };
             eligible += 1;
             excluded = excluded.saturating_sub(1);
@@ -2223,16 +2232,11 @@ impl<'a> ArtifactQueryV1<'a> {
                 &mut ranked,
                 cap,
                 Keyed {
-                    key: (
-                        Reverse(matched_literals.len()),
-                        row.id.as_str().to_owned(),
-                        document,
-                    ),
+                    key: (Reverse(matched_literals.len()), row_id, document),
                     value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
-            Ok(())
-        })?;
+        }
         retrieval_checkpoint(request.control)?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
@@ -2328,153 +2332,169 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         filters: &[LexicalFieldFilterV1],
+        path_prefix: Option<&str>,
         cap: usize,
         control: &dyn RetrievalExecutionControl,
     ) -> Result<(Vec<SelectedLexicalV1>, u64, u64), RetrievalPortError> {
-        hotpath::measure_block!("query.stream.score_from_preface", {
-            let mut cursors = stats.postings.cursors().map_err(map_query_artifact_error)?;
-            let mut ranked = LexicalWinnerHeap::new();
-            let mut excluded = self.document_count as u64;
-            let mut eligible = 0u64;
-            for (ordinal, document) in documents.iter().enumerate() {
-                if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
-                    retrieval_checkpoint(control)?;
-                }
-                let preface = self
-                    .row_blocks
-                    .scoring_preface(document)
-                    .map_err(map_query_artifact_error)?;
-                let mut entries = Vec::new();
-                for cursor in &mut cursors {
-                    if let Some(frequency) = cursor
-                        .frequency_at(document)
-                        .map_err(map_query_artifact_error)?
-                    {
-                        entries.push((
-                            cursor.field,
-                            cursor.term.to_owned(),
-                            usize::try_from(frequency).map_err(contract_error)?,
-                        ));
+        {
+            let _span = tracing::trace_span!("query.stream.score_from_preface").entered();
+            {
+                let mut cursors = stats.postings.cursors().map_err(map_query_artifact_error)?;
+                let mut ranked = LexicalWinnerHeap::new();
+                let mut excluded = self.document_count as u64;
+                let mut eligible = 0u64;
+                for (ordinal, document) in documents.iter().enumerate() {
+                    if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                        retrieval_checkpoint(control)?;
                     }
-                }
-                let mut phrase_tfs = Vec::new();
-                let mut proximity_tfs = Vec::new();
-                if text_documents.contains(document) {
-                    let stored = self
+                    let preface = self
                         .row_blocks
-                        .row(document)
+                        .scoring_preface(document)
                         .map_err(map_query_artifact_error)?;
-                    let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
-                    if preface.chunk_id != row.id.as_str()
-                        || preface.field_lengths != row.field_lengths
-                        || preface.trimmed_normalized_len != row.normalized_text.trim().len()
-                    {
-                        return Err(RetrievalPortError::Contract(
-                            "lexical scoring preface does not match its row".to_owned(),
-                        ));
+                    let mut entries = Vec::new();
+                    for cursor in &mut cursors {
+                        if let Some(frequency) = cursor
+                            .frequency_at(document)
+                            .map_err(map_query_artifact_error)?
+                        {
+                            entries.push((
+                                cursor.field,
+                                cursor.term.to_owned(),
+                                usize::try_from(frequency).map_err(contract_error)?,
+                            ));
+                        }
                     }
-                    let field_texts = row_field_texts(&row);
-                    let field_tokens: Vec<(LexicalFieldV1, Vec<String>)> =
-                        if prepared.proximities.is_empty() {
-                            Vec::new()
-                        } else {
-                            field_texts
-                                .iter()
-                                .map(|(field, text)| (*field, proximity_tokens(text)))
-                                .collect()
-                        };
-                    for (index, (_, normalized)) in prepared.phrases.iter().enumerate() {
-                        for (field, text) in &field_texts {
-                            let count = substring_count(text, normalized);
-                            if count > 0 {
-                                phrase_tfs.push((*field, index, count));
+                    let mut phrase_tfs = Vec::new();
+                    let mut proximity_tfs = Vec::new();
+                    if text_documents.contains(document) {
+                        let stored = self
+                            .row_blocks
+                            .row(document)
+                            .map_err(map_query_artifact_error)?;
+                        let row = self.decode_row(&stored).map_err(map_query_artifact_error)?;
+                        if preface.chunk_id != row.id.as_str()
+                            || preface.field_lengths != row.field_lengths
+                            || preface.trimmed_normalized_len != row.normalized_text.trim().len()
+                        {
+                            return Err(RetrievalPortError::Contract(
+                                "lexical scoring preface does not match its row".to_owned(),
+                            ));
+                        }
+                        let field_texts = row_field_texts(&row);
+                        let field_tokens: Vec<(LexicalFieldV1, Vec<String>)> =
+                            if prepared.proximities.is_empty() {
+                                Vec::new()
+                            } else {
+                                field_texts
+                                    .iter()
+                                    .map(|(field, text)| (*field, proximity_tokens(text)))
+                                    .collect()
+                            };
+                        for (index, (_, normalized)) in prepared.phrases.iter().enumerate() {
+                            for (field, text) in &field_texts {
+                                let count = substring_count(text, normalized);
+                                if count > 0 {
+                                    phrase_tfs.push((*field, index, count));
+                                }
+                            }
+                        }
+                        for (index, proximity) in prepared.proximities.iter().enumerate() {
+                            for (field, tokens) in &field_tokens {
+                                let count = proximity_count_tokens(
+                                    tokens,
+                                    &proximity.terms,
+                                    proximity.original.maximum_gap,
+                                );
+                                if count > 0 {
+                                    proximity_tfs.push((*field, index, count));
+                                }
                             }
                         }
                     }
-                    for (index, proximity) in prepared.proximities.iter().enumerate() {
-                        for (field, tokens) in &field_tokens {
-                            let count = proximity_count_tokens(
-                                tokens,
-                                &proximity.terms,
-                                proximity.original.maximum_gap,
-                            );
-                            if count > 0 {
-                                proximity_tfs.push((*field, index, count));
-                            }
-                        }
-                    }
-                }
-                let draft = LexicalDraftV1 {
-                    chunk_id: preface.chunk_id,
-                    field_lengths: preface.field_lengths,
-                    frequencies: LexicalTermFrequenciesV1(entries),
-                    phrase_tfs,
-                    proximity_tfs,
-                    trimmed_normalized_len: preface.trimmed_normalized_len,
-                };
-                let score =
-                    self.score_draft(&draft, prepared, fuzzy, phrase_frequencies, stats, false);
-                let Some(upper) = admitted_score_micros(&score, filters)? else {
-                    continue;
-                };
-                eligible += 1;
-                excluded = excluded.saturating_sub(1);
-                if cap == 0 {
-                    continue;
-                }
-                // Echo only lowers the score. A candidate whose upper bound
-                // loses to the current worst winner never needs text hydration.
-                let best_key = (Reverse(upper), draft.chunk_id.clone(), document);
-                if ranked.len() == cap && ranked.peek().is_some_and(|worst| best_key >= worst.key) {
-                    continue;
-                }
-                let echo_possible = !prepared.echo_query.is_empty()
-                    && draft.trimmed_normalized_len == prepared.echo_query.len();
-                let rank = if echo_possible {
-                    retrieval_checkpoint(control)?;
-                    let row = self.row(document)?;
-                    self.preface_matches_row(&draft, &row)?;
-                    let score = self.score_row(
-                        &row,
-                        prepared,
-                        fuzzy,
-                        phrase_frequencies,
-                        stats,
-                        &draft.frequencies,
-                    );
-                    admitted_score_micros(&score, filters)?.ok_or_else(|| {
-                        RetrievalPortError::Contract(
-                            "lexical echo confirmation lost an admitted score".to_owned(),
+                    let draft = LexicalDraftV1 {
+                        chunk_id: preface.chunk_id,
+                        field_lengths: preface.field_lengths,
+                        frequencies: LexicalTermFrequenciesV1(entries),
+                        phrase_tfs,
+                        proximity_tfs,
+                        trimmed_normalized_len: preface.trimmed_normalized_len,
+                    };
+                    let score =
+                        self.score_draft(&draft, prepared, fuzzy, phrase_frequencies, stats, false);
+                    let Some(upper) = admitted_score_micros(&score, filters)? else {
+                        continue;
+                    };
+                    // ponytail: the preface has no path, so a scoped read inflates
+                    // every admitted row; store the path in the preface if scoped
+                    // queries over large trees get slow.
+                    if path_prefix.is_some()
+                        && !tracedecay_domain::path_matches_scope(
+                            &self.row(document)?.logical_path,
+                            path_prefix,
                         )
-                    })?
-                } else {
-                    upper
-                };
-                retain_bounded(
-                    &mut ranked,
-                    cap,
-                    Keyed {
-                        key: (Reverse(rank), draft.chunk_id.clone(), document),
-                        value: SelectedLexicalV1 {
-                            draft,
-                            document,
-                            rank,
+                    {
+                        continue;
+                    }
+                    eligible += 1;
+                    excluded = excluded.saturating_sub(1);
+                    if cap == 0 {
+                        continue;
+                    }
+                    // Echo only lowers the score. A candidate whose upper bound
+                    // loses to the current worst winner never needs text hydration.
+                    let best_key = (Reverse(upper), draft.chunk_id.clone(), document);
+                    if ranked.len() == cap
+                        && ranked.peek().is_some_and(|worst| best_key >= worst.key)
+                    {
+                        continue;
+                    }
+                    let echo_possible = !prepared.echo_query.is_empty()
+                        && draft.trimmed_normalized_len == prepared.echo_query.len();
+                    let rank = if echo_possible {
+                        retrieval_checkpoint(control)?;
+                        let row = self.row(document)?;
+                        self.preface_matches_row(&draft, &row)?;
+                        let score = self.score_row(
+                            &row,
+                            prepared,
+                            fuzzy,
+                            phrase_frequencies,
+                            stats,
+                            &draft.frequencies,
+                        );
+                        admitted_score_micros(&score, filters)?.ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "lexical echo confirmation lost an admitted score".to_owned(),
+                            )
+                        })?
+                    } else {
+                        upper
+                    };
+                    retain_bounded(
+                        &mut ranked,
+                        cap,
+                        Keyed {
+                            key: (Reverse(rank), draft.chunk_id.clone(), document),
+                            value: SelectedLexicalV1 {
+                                draft,
+                                document,
+                                rank,
+                            },
                         },
-                    },
-                );
+                    );
+                }
+                retrieval_checkpoint(control)?;
+                Ok((
+                    ranked
+                        .into_sorted_vec()
+                        .into_iter()
+                        .map(|entry| entry.value)
+                        .collect(),
+                    eligible,
+                    excluded,
+                ))
             }
-            retrieval_checkpoint(control)?;
-            self.metrics.rows(documents.len());
-            Ok((
-                ranked
-                    .into_sorted_vec()
-                    .into_iter()
-                    .map(|entry| entry.value)
-                    .collect(),
-                eligible,
-                excluded,
-            ))
-        })
+        }
     }
 
     fn score_draft(
@@ -2692,7 +2712,7 @@ impl<'a> ArtifactQueryV1<'a> {
         visit_document_ids(documents, control, visitor)
     }
 
-    #[hotpath::measure(label = "query.lane.fuzzy.expand")]
+    #[tracing::instrument(name = "query.lane.fuzzy.expand", level = "trace", skip_all)]
     fn fuzzy_expansions(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -2767,7 +2787,6 @@ impl<'a> ArtifactQueryV1<'a> {
             }
         }
         let mut by_query = BTreeMap::<String, BTreeSet<String>>::new();
-        let expansion_count = selected.len();
         for (group_index, term) in selected {
             for query in &groups[group_index].queries {
                 by_query
@@ -2776,11 +2795,10 @@ impl<'a> ArtifactQueryV1<'a> {
                     .insert(term.clone());
             }
         }
-        hotpath::gauge!("query.lane.fuzzy.expansions_total").inc(expansion_count);
         Ok(FuzzyExpansionsV1 { by_query })
     }
 
-    #[hotpath::measure(label = "query.artifact.vocabulary.load")]
+    #[tracing::instrument(name = "query.artifact.vocabulary.load", level = "trace", skip_all)]
     fn load_vocabulary(&self) -> Result<Arc<FuzzyVocabularyV1>, RetrievalPortError> {
         if let Some(cached) = self.fuzzy_vocabulary.get() {
             return Ok(Arc::clone(cached));
@@ -2806,9 +2824,6 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-        self.metrics
-            .rows(u64::try_from(vocabulary.len()).map_err(contract_error)?);
-        hotpath::gauge!("query.lane.fuzzy.vocabulary_terms").set(vocabulary.len());
         Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
 
@@ -2818,7 +2833,7 @@ impl<'a> ArtifactQueryV1<'a> {
     /// only on the artifact corpus and the query terms, so one upfront read
     /// replaces the two SQL probes each scored document would otherwise
     /// repeat per term.
-    #[hotpath::measure(label = "query.artifact.stats.read")]
+    #[tracing::instrument(name = "query.artifact.stats.read", level = "trace", skip_all)]
     fn lexical_stats(
         &self,
         terms: &BTreeSet<String>,
@@ -2844,8 +2859,6 @@ impl<'a> ArtifactQueryV1<'a> {
         }
         drop(rows);
         self.metrics.observe_statement(&statement)?;
-        self.metrics
-            .rows(u64::try_from(field_totals.len()).map_err(contract_error)?);
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut postings = RequestTermPostingsV1::default();
         if !terms.is_empty() {
@@ -2865,7 +2878,6 @@ impl<'a> ArtifactQueryV1<'a> {
             let mut rows = statement
                 .query(params_from_iter(terms.iter()))
                 .map_err(map_query_sql_error)?;
-            let mut observed_rows = 0u64;
             let mut remaining_bytes = ARTIFACT_TERM_POSTING_QUERY_BYTES_V1;
             while let Some(row) = rows.next().map_err(map_query_sql_error)? {
                 let term: String = row.get(0).map_err(map_query_sql_error)?;
@@ -2893,12 +2905,10 @@ impl<'a> ArtifactQueryV1<'a> {
                         field,
                         postings: list.to_vec(),
                     });
-                    observed_rows = observed_rows.saturating_add(1);
                 }
             }
             drop(rows);
             self.metrics.observe_statement(&statement)?;
-            self.metrics.rows(observed_rows);
         }
         Ok(LexicalStatsCacheV1 {
             field_totals,
@@ -2916,7 +2926,7 @@ impl<'a> ArtifactQueryV1<'a> {
         stats: &LexicalStatsCacheV1,
         frequencies: &LexicalTermFrequenciesV1,
     ) -> LexicalRowScoreV1 {
-        crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
+        crate::observe::measure_frequent("query.lane.lexical.score_row", || {
             // Phrase and proximity scoring asks one (field, term) count at a
             // time; normalize each field's text and tokens once per row so a
             // query with T terms across F fields scans F texts, not T * F * F.
@@ -3185,13 +3195,10 @@ fn capped_batch<E>(
     }
 }
 
-/// Matched literal ordinals into `request.literals` plus matched term kinds.
-fn exact_matches_artifact(
-    row: &ArtifactRowV1,
-    request: &ExactLaneRequest,
-) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
+fn exact_matches_artifact(row: &ArtifactRowV1, request: &ExactLaneRequest) -> Vec<ExactRowMatchV1> {
     exact_matches(
         ExactMatchRowViewV1 {
+            anchor: &row.anchor,
             sanitized_text: row.sanitized_text.as_str(),
             logical_path: &row.logical_path,
             exact_terms: &row.exact_terms,
@@ -3322,28 +3329,32 @@ const ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1: usize = 4 * 1024 * 1024;
 /// checked once per buffer, so interruption latency is bounded by one
 /// [`ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1`] read-and-hash step. The read and
 /// hash phases carry separate spans so a profile can attribute a slow pass
-/// to I/O wait or to SHA-256 work.
+/// to I/O wait or to SHA-256 work. `record_bytes` sees each buffer read.
 #[inline]
-fn hash_artifact_file(
+pub(super) fn hash_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
-    mut record_bytes: impl FnMut(u64),
+    mut record_bytes: impl FnMut(&[u8]) -> Result<(), CodeLexicalArtifactErrorV1>,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; ARTIFACT_DIGEST_READ_BUFFER_BYTES_V1];
     loop {
         checkpoint(control)?;
-        let read = hotpath::measure_block!("query.artifact.digest.file_read", {
-            file.read(&mut buffer)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
-        })?;
+        let read = {
+            let _span = tracing::trace_span!("query.artifact.digest.file_read").entered();
+            {
+                file.read(&mut buffer)
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
+            }
+        }?;
         if read == 0 {
             break;
         }
-        record_bytes(read as u64);
-        hotpath::measure_block!("query.artifact.digest.sha256_update", {
+        record_bytes(&buffer[..read])?;
+        {
+            let _span = tracing::trace_span!("query.artifact.digest.sha256_update").entered();
             hasher.update(&buffer[..read]);
-        });
+        }
     }
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
@@ -3353,27 +3364,16 @@ fn digest_content_addressed_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    hotpath::measure_block!("query.artifact.digest.content_address_preopen", {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.digest.content_address_preopen.passes_total").inc(1u64);
-        hash_artifact_file(file, control, |bytes| {
-            hotpath::gauge!("query.artifact.digest.content_address_preopen.bytes_total").inc(bytes);
-        })
-    })
+    let _span = tracing::trace_span!("query.artifact.digest.content_address_preopen").entered();
+    hash_artifact_file(file, control, |_| Ok(()))
 }
 
 fn digest_retained_artifact_file(
     file: &mut File,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
-    hotpath::measure_block!("query.artifact.digest.retained_post_validation", {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.artifact.digest.retained_post_validation.passes_total").inc(1u64);
-        hash_artifact_file(file, control, |bytes| {
-            hotpath::gauge!("query.artifact.digest.retained_post_validation.bytes_total")
-                .inc(bytes);
-        })
-    })
+    let _span = tracing::trace_span!("query.artifact.digest.retained_post_validation").entered();
+    hash_artifact_file(file, control, |_| Ok(()))
 }
 
 fn stable_artifact_file_state(
@@ -3598,11 +3598,7 @@ fn configure_reader_window(
     connection
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("query.artifact.mmap_bytes").set(sealed_file_size_bytes);
-        hotpath::gauge!("query.artifact.page_cache_bytes").set(page_cache_bytes);
-    }
+
     Ok(page_cache_bytes)
 }
 

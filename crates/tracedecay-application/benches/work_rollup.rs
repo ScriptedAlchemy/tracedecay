@@ -7,9 +7,6 @@ use std::time::Duration;
 #[path = "../tests/application_suite/observability_runtime_contract.rs"]
 mod observability_runtime_contract;
 
-#[path = "hotpath_coverage.rs"]
-mod hotpath_coverage;
-
 use observability_runtime_contract::work_rollup_harness::{
     READ_TRIPWIRE, SOURCE_COUNT, TRIPWIRE, WORK_ROLLUP_BENCHMARK_ARTIFACT_SCHEMA_VERSION,
     WorkRollupBenchmarkArtifactV1, WorkRollupFixtureV1, WorkRollupFreshStoreMeasurementV1,
@@ -93,16 +90,7 @@ fn validate_completion(report: &WorkRollupReport) {
     assert!(report.raw_rollup_equal, "{report:#?}");
 }
 
-/// Label already stamped on `execution_topology_rollup_metrics`, the read
-/// the measured `run_work_rollup_case` / settled journey actually performs.
-/// Coverage must not synthesize a different read just to produce a label.
-const EXPECTED_HOTPATH_LABELS: &[&str] = &["application.topology.rollup.read"];
-const _: () = assert!(!EXPECTED_HOTPATH_LABELS.is_empty());
-
 fn main() {
-    // First statement on purpose: may set Hotpath environment for the guard,
-    // which is sound only before the runtime or any other thread exists.
-    let coverage = hotpath_coverage::init("tracedecay-work-rollup");
     let artifact_path = explicit_artifact_path();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -265,5 +253,4 @@ fn main() {
     };
     write_jsonl_artifact(&artifact_path, &artifact).expect("write Work rollup JSONL artifact");
     println!("work_rollup artifact={}", artifact_path.display());
-    hotpath_coverage::finish(coverage, EXPECTED_HOTPATH_LABELS);
 }

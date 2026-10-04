@@ -184,7 +184,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         self
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.resolve_seeds", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.resolve_seeds",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_seeds(
         &self,
         request: &GitHubReviewReadRequestV1,
@@ -245,7 +249,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         Some(resolved)
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.resolve_stored_seed", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.resolve_stored_seed",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_stored_seed(
         &self,
         request: &GitHubReviewReadRequestV1,
@@ -272,7 +280,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         self.persist_body(&body).await.then_some(anchors)
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.resolve_new_seed", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.resolve_new_seed",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_new_seed(
         &self,
         request: &GitHubReviewReadRequestV1,
@@ -312,7 +324,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         self.persist(&stored, &body).await.then_some(anchors)
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.remap_original", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.remap_original",
+        level = "trace",
+        skip_all
+    )]
     async fn remap_original(
         &self,
         context: &RequestContext,
@@ -330,7 +346,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.remap_seed", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.remap_seed",
+        level = "trace",
+        skip_all
+    )]
     async fn remap_seed(
         &self,
         context: &RequestContext,
@@ -393,7 +413,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         )
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.load_anchor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.load_anchor",
+        level = "trace",
+        skip_all
+    )]
     async fn load(&self, anchor_id: &RetrievalAnchorId) -> Option<Option<StoredGitHubAnchorV1>> {
         let key = anchor_key(anchor_id);
         match self.database.get_metadata(&key).await.ok()? {
@@ -402,7 +426,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.persist_anchor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.persist_anchor",
+        level = "trace",
+        skip_all
+    )]
     async fn persist(
         &self,
         candidate: &StoredGitHubAnchorV1,
@@ -482,7 +510,11 @@ impl ProjectGitHubAnchorAuthorityV1 {
         transaction.commit().await.is_ok()
     }
 
-    #[hotpath::measure(label = "usecases.advisory.github.persist_body", future = true)]
+    #[tracing::instrument(
+        name = "usecases.advisory.github.persist_body",
+        level = "trace",
+        skip_all
+    )]
     async fn persist_body(&self, body: &StoredGitHubReviewBodyV1) -> bool {
         let key = body_key(&body.body_anchor);
         let Ok(encoded) = serde_json::to_string(body) else {
@@ -533,7 +565,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
     where
         A: GitHubSourceAccessAuthorityV1 + Sync + ?Sized,
     {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.validate().is_err()
                     || request.scope != self.scope
@@ -601,7 +633,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
                     retained_body: body.retained_body,
                 }))
             },
-            label = "usecases.advisory.github.read_body"
+            tracing::trace_span!("usecases.advisory.github.read_body"),
         ))
     }
 }

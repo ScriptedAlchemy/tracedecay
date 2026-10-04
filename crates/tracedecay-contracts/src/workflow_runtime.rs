@@ -212,7 +212,11 @@ impl Display for WorkflowFanOutRuntimeError {
 
 impl std::error::Error for WorkflowFanOutRuntimeError {}
 
-#[hotpath::measure(label = "application.workflow.fan_out.prepare")]
+#[tracing::instrument(
+    name = "application.workflow.fan_out.prepare",
+    level = "trace",
+    skip_all
+)]
 pub fn prepare_workflow_fan_out(
     request: &WorkflowFanOutRequest,
 ) -> Result<WorkflowFanOutPlan, WorkflowFanOutRuntimeError> {
@@ -346,10 +350,6 @@ pub fn prepare_workflow_fan_out(
             input,
         });
     }
-    // Planned fan-out width beside the plan span: per-child digesting makes
-    // this function's cost linear in width, and the width itself is the
-    // denominator for every downstream census reading.
-    hotpath::gauge!("application.workflow.fan_out.children").set(children.len() as u64);
     Ok(WorkflowFanOutPlan {
         identity,
         operation: step.operation.clone(),
@@ -361,7 +361,7 @@ pub fn prepare_workflow_fan_out(
     })
 }
 
-#[hotpath::measure(label = "application.workflow.fan_out.plan")]
+#[tracing::instrument(name = "application.workflow.fan_out.plan", level = "trace", skip_all)]
 pub fn durable_workflow_fan_out_plan(
     plan: &WorkflowFanOutPlan,
     provider: &WorkflowProviderAdmission,

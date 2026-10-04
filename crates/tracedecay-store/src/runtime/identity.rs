@@ -309,7 +309,6 @@ impl StoreIncarnationV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -348,7 +347,6 @@ impl StoreAuthorityEpochV1 {
         Ok(Self(value))
     }
 
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }

@@ -389,10 +389,10 @@ async fn open_state_source(
 > {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let (generation, file_identity, resume_fingerprint) = hotpath::measure_block!(
-        "sessions.hosts.hermes.incarnation_blocking",
+    let (generation, file_identity, resume_fingerprint) = {
+        let _span = tracing::trace_span!("sessions.hosts.hermes.incarnation_blocking").entered();
         run_blocking_transcript_section(|| sqlite_incarnation(state_db))
-    )?;
+    }?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
     validate_required_columns(
@@ -451,10 +451,10 @@ where
             return Ok(stats);
         }
         let bounded = &new.items[..bounded_count];
-        let route = hotpath::measure_block!(
-            "sessions.hosts.hermes.route_page_blocking",
+        let route = {
+            let _span = tracing::trace_span!("sessions.hosts.hermes.route_page_blocking").entered();
             run_blocking_transcript_section(|| route_page(bounded))
-        );
+        };
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
             bounded,
@@ -540,15 +540,16 @@ pub(super) async fn try_ingest_state_db_for_projects(
             project_id: destination.project_id.clone(),
         })
         .collect::<Vec<_>>();
-    let destination_matchers = hotpath::measure_block!(
-        "sessions.hosts.hermes.destination_matchers_blocking",
+    let destination_matchers = {
+        let _span =
+            tracing::trace_span!("sessions.hosts.hermes.destination_matchers_blocking").entered();
         run_blocking_transcript_section(|| {
             destinations
                 .par_iter()
                 .map(|destination| ProjectRootMatcher::new(destination.project_root))
                 .collect::<Vec<_>>()
         })
-    );
+    };
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
@@ -568,8 +569,9 @@ pub(super) async fn try_ingest_state_db_for_projects(
         let bounded = &new.items[..bounded_count];
         // Per-page route cache: avoid unbounded growth across many SQLite pages.
         let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-        let locations = hotpath::measure_block!(
-            "sessions.hosts.hermes.destination_routes_blocking",
+        let locations = {
+            let _span =
+                tracing::trace_span!("sessions.hosts.hermes.destination_routes_blocking").entered();
             run_blocking_transcript_section(|| {
                 turn_project_locations_for_destinations(
                     bounded,
@@ -577,7 +579,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
                     &mut destination_routes,
                 )
             })
-        )
+        }
         .map_err(|_| {
             format!(
                 "could not classify Hermes rows from '{}' because project membership is unknown",
@@ -709,7 +711,11 @@ struct AdmittedHermesRow {
 /// One byte-budgeted page over Hermes state rows. A scalar-only admission scan
 /// establishes exact row order, frontier state, and cumulative byte admission;
 /// payload columns are then fetched in bounded batches only for admitted ids.
-#[hotpath::measure(label = "sessions.hosts.hermes.read_new_rows_strict")]
+#[tracing::instrument(
+    name = "sessions.hosts.hermes.read_new_rows_strict",
+    level = "trace",
+    skip_all
+)]
 fn read_new_rows_strict_sync(
     conn: &rusqlite::Connection,
     select_sql: &HermesReadSql,

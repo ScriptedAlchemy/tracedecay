@@ -22,7 +22,7 @@ fn cli_error(message: impl std::fmt::Display) -> tracedecay_domain::errors::Trac
     }
 }
 
-#[hotpath::measure(label = "analytics.messages")]
+#[tracing::instrument(name = "analytics.messages", level = "trace", skip_all)]
 async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
@@ -41,7 +41,7 @@ async fn registered_diagnostics_message_count(
     Ok(total)
 }
 
-#[hotpath::measure(label = "analytics.diagnostics")]
+#[tracing::instrument(name = "analytics.diagnostics", level = "trace", skip_all)]
 pub async fn analytics_diagnostics_with_db(
     gdb: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -64,8 +64,8 @@ pub async fn analytics_diagnostics_with_db(
     } else {
         project_root.map(RegisteredGlobalDb::canonical_project_key)
     };
-    let events = hotpath::measure_block!(
-        "analytics.events",
+    let events = {
+        use tracing::Instrument as _;
         gdb.query_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
             provider: None,
             project_id: project_filter.clone(),
@@ -76,14 +76,20 @@ pub async fn analytics_diagnostics_with_db(
             before_id: None,
             limit: EVENT_SAMPLE_LIMIT,
         })
+        .instrument(tracing::trace_span!("analytics.events"))
         .await
         .map_err(cli_error)?
-    );
-    let observatory = hotpath::measure_block!("analytics.observatory", {
-        let observatory =
-            crate::observability::observatory_read_model(gdb, project_filter.as_deref(), 0).await;
-        serde_json::to_value(&observatory).map_err(cli_error)?
-    });
+    };
+    let observatory = {
+        use tracing::Instrument as _;
+        {
+            let observatory =
+                crate::observability::observatory_read_model(gdb, project_filter.as_deref(), 0)
+                    .instrument(tracing::trace_span!("analytics.observatory"))
+                    .await;
+            serde_json::to_value(&observatory).map_err(cli_error)?
+        }
+    };
     let provider_scope = if all_projects {
         None
     } else {
@@ -97,17 +103,21 @@ pub async fn analytics_diagnostics_with_db(
         })
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = hotpath::measure_block!("analytics.costs", {
-        let costs = crate::observability::costs_read_model(
-            gdb,
-            provider_usage_db,
-            provider_scope.as_ref(),
-            project_filter.as_deref(),
-            0,
-        )
-        .await;
-        serde_json::to_value(&costs).map_err(cli_error)?
-    });
+    let costs = {
+        use tracing::Instrument as _;
+        {
+            let costs = crate::observability::costs_read_model(
+                gdb,
+                provider_usage_db,
+                provider_scope.as_ref(),
+                project_filter.as_deref(),
+                0,
+            )
+            .instrument(tracing::trace_span!("analytics.costs"))
+            .await;
+            serde_json::to_value(&costs).map_err(cli_error)?
+        }
+    };
     let event_rows: Vec<Value> = events.iter().map(durable_analytics_event_row).collect();
 
     let store_root = project_root
@@ -115,10 +125,10 @@ pub async fn analytics_diagnostics_with_db(
         .transpose()?
         .map(|layout| layout.data_root);
     let hook_filter_root = if all_projects { None } else { project_root };
-    let hook_analytics = hotpath::measure_block!(
-        "analytics.hooks",
+    let hook_analytics = {
+        let _span = tracing::trace_span!("analytics.hooks").entered();
         read_hook_analytics_rows_at(profile_root, store_root.as_deref(), hook_filter_root)
-    );
+    };
 
     let message_count =
         registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await?;
@@ -128,10 +138,10 @@ pub async fn analytics_diagnostics_with_db(
     } else {
         Some(event_rows.as_slice())
     };
-    let mut summary = hotpath::measure_block!(
-        "analytics.assemble",
+    let mut summary = {
+        let _span = tracing::trace_span!("analytics.assemble").entered();
         diagnostics_summary_from_parts(message_count, &hook_analytics, durable)
-    );
+    };
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(
             "project_id".to_string(),

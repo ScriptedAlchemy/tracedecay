@@ -13,7 +13,6 @@ pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_c
 #[doc(hidden)]
 pub mod exact_sql;
 pub mod handoff;
-mod hotpath_observe;
 mod ledger;
 /// Canonical schema for the runtime writer ledger installed in registered
 /// SQLite stores.

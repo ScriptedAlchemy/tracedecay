@@ -8,10 +8,10 @@
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    GitIndexCommitIntentV1, GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, ManifestDigest, RepositoryId, RepositoryStateSnapshotV1,
-    RetrievalAnchorId, UtcMicros, canonical_sha256,
+    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, RepositoryId, RepositoryStateSnapshotV1, RetrievalAnchorId, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, UseCaseId};
 
@@ -69,9 +69,6 @@ pub(crate) const fn git_index_operation_ids(
         GitIndexTransactionOperationV1::UnstageHunks => {
             ("capability.git.unstage-hunks", "use-case.git.unstage-hunks")
         }
-        GitIndexTransactionOperationV1::CommitIndex => {
-            ("capability.git.commit-index", "use-case.git.commit-index")
-        }
     }
 }
 
@@ -80,7 +77,6 @@ pub const fn git_index_effect_class(operation: GitIndexTransactionOperationV1) -
     match operation {
         GitIndexTransactionOperationV1::StageHunks => EffectClass::GitIndexStage,
         GitIndexTransactionOperationV1::UnstageHunks => EffectClass::GitIndexUnstage,
-        GitIndexTransactionOperationV1::CommitIndex => EffectClass::GitIndexCommit,
     }
 }
 
@@ -135,7 +131,6 @@ pub struct GitIndexPreviewRequestV1 {
     /// A native adapter must re-mint and revalidate these exact references
     /// while constructing its immutable preview; it cannot relocate a hunk.
     pub selected_hunks: Vec<tracedecay_domain::HunkRefV1>,
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
     pub observed_at: UtcMicros,
 }
 
@@ -167,8 +162,6 @@ impl GitIndexPreviewRequestV1 {
                 self.context.scope().reference.as_ref(),
                 &self.repository_snapshot,
             )
-            || (self.binding.operation == GitIndexTransactionOperationV1::CommitIndex
-                && self.context.scope().reference.is_none())
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "git index preview repository scope",
@@ -176,7 +169,7 @@ impl GitIndexPreviewRequestV1 {
         }
         for hunk in &self.selected_hunks {
             hunk.validate()?;
-            if self.binding.operation.hunk_direction() != Some(hunk.direction)
+            if self.binding.operation.hunk_direction() != hunk.direction
                 || hunk.preview_id != self.preview_id.as_str()
                 || hunk.snapshot_digest != snapshot_digest
             {
@@ -185,28 +178,10 @@ impl GitIndexPreviewRequestV1 {
                 });
             }
         }
-        match self.binding.operation {
-            GitIndexTransactionOperationV1::CommitIndex => {
-                if !self.selected_hunks.is_empty() {
-                    return Err(ApplicationContractError::Inconsistent {
-                        field: "git index commit preview hunk selection",
-                    });
-                }
-                self.commit_intent
-                    .as_ref()
-                    .ok_or(ApplicationContractError::Inconsistent {
-                        field: "git index commit preview intent",
-                    })?
-                    .validate()?;
-            }
-            GitIndexTransactionOperationV1::StageHunks
-            | GitIndexTransactionOperationV1::UnstageHunks => {
-                if self.selected_hunks.is_empty() || self.commit_intent.is_some() {
-                    return Err(ApplicationContractError::Inconsistent {
-                        field: "git index hunk preview input",
-                    });
-                }
-            }
+        if self.selected_hunks.is_empty() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "git index hunk preview input",
+            });
         }
         Ok(())
     }
@@ -315,16 +290,6 @@ impl GitIndexPreviewPortResultV1 {
         if self.preview.repository_snapshot != request.repository_snapshot {
             return Err(ApplicationContractError::Inconsistent {
                 field: "git index preview repository snapshot binding",
-            });
-        }
-        let requested_commit_intent_digest = request
-            .commit_intent
-            .as_ref()
-            .map(GitIndexCommitIntentV1::compute_digest)
-            .transpose()?;
-        if self.preview.commit_intent_digest != requested_commit_intent_digest {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "git index preview commit intent binding",
             });
         }
         if self.preview.disposition.is_applicable() {
@@ -458,7 +423,7 @@ where
         Self { port }
     }
 
-    #[hotpath::measure(label = "application.git.index.preview")]
+    #[tracing::instrument(name = "application.git.index.preview", level = "trace", skip_all)]
     pub fn preview(
         &self,
         request: GitIndexPreviewRequestV1,
@@ -478,7 +443,7 @@ where
         )?)
     }
 
-    #[hotpath::measure(label = "application.git.index.apply")]
+    #[tracing::instrument(name = "application.git.index.apply", level = "trace", skip_all)]
     pub fn apply(
         &self,
         request: GitIndexApplyRequestV1,
@@ -526,7 +491,7 @@ where
         )?)
     }
 
-    #[hotpath::measure(label = "application.git.index.recover")]
+    #[tracing::instrument(name = "application.git.index.recover", level = "trace", skip_all)]
     pub fn recover(
         &self,
         request: GitIndexRecoveryRequestV1,

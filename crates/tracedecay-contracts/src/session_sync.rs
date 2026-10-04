@@ -42,7 +42,6 @@ impl SessionSyncScopeV1 {
 pub struct SessionTranscriptImportV1;
 
 impl SessionTranscriptImportV1 {
-    #[hotpath::skip]
     pub const fn all_hosts() -> Self {
         Self
     }
@@ -79,17 +78,14 @@ impl SessionGitSyncV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn since_unix(self) -> i64 {
         self.since_unix
     }
 
-    #[hotpath::skip]
     pub const fn max_sessions(self) -> usize {
         self.max_sessions
     }
 
-    #[hotpath::skip]
     pub const fn dry_run(self) -> bool {
         self.dry_run
     }
@@ -100,6 +96,26 @@ impl SessionGitSyncV1 {
 pub enum SessionSyncCommandV1 {
     ImportTranscripts(SessionTranscriptImportV1),
     SynchronizeGit(SessionGitSyncV1),
+}
+
+impl SessionSyncCommandV1 {
+    pub const fn source(self) -> SessionSyncSourceV1 {
+        match self {
+            Self::ImportTranscripts(_) => SessionSyncSourceV1::ImportTranscripts,
+            Self::SynchronizeGit(_) => SessionSyncSourceV1::SynchronizeGit,
+        }
+    }
+}
+
+/// The command that started a session sync, without its options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSyncSourceV1 {
+    /// Hands its remaining historical catch-up to the background refresh
+    /// workers.
+    ImportTranscripts,
+    /// A bounded foreground pass; nothing resumes its unfinished coverage.
+    SynchronizeGit,
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +167,6 @@ impl SessionSyncRequestV1 {
         &self.cancellation
     }
 
-    #[hotpath::skip]
     pub const fn command(&self) -> SessionSyncCommandV1 {
         self.command
     }
@@ -206,12 +221,10 @@ pub enum SessionSyncCoverageV1 {
 }
 
 impl SessionSyncCoverageV1 {
-    #[hotpath::skip]
     pub const fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
     }
 
-    #[hotpath::skip]
     pub const fn remaining_work(&self) -> u64 {
         match self {
             Self::Complete => 0,
@@ -252,11 +265,16 @@ pub struct SessionSyncCompletionReceiptV1 {
 pub enum SessionSyncOutcomeV1 {
     Accepted(SessionSyncAdmissionReceiptV1),
     Joined(SessionSyncAdmissionReceiptV1),
-    Complete(SessionSyncCompletionReceiptV1),
+    Complete {
+        source: SessionSyncSourceV1,
+        receipt: SessionSyncCompletionReceiptV1,
+    },
     Cancelled,
     DeadlineExceeded,
     WrongScope,
-    Unavailable { reason_code: &'static str },
+    Unavailable {
+        reason_code: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,7 +368,10 @@ impl SessionSyncJournalV1 {
                         reason_code: "session_sync_terminal_coverage_unavailable",
                     }
                 } else {
-                    SessionSyncOutcomeV1::Complete(receipt.clone())
+                    SessionSyncOutcomeV1::Complete {
+                        source: self.source.source(),
+                        receipt: receipt.clone(),
+                    }
                 }
             }
             (SessionSyncJournalStatusV1::Complete, None) => SessionSyncOutcomeV1::Unavailable {
@@ -516,7 +537,7 @@ mod tests {
         assert_eq!(restored.coalesced_primary, Some(primary.clone()));
         assert!(matches!(
             restored.outcome(),
-            SessionSyncOutcomeV1::Complete(receipt)
+            SessionSyncOutcomeV1::Complete { receipt, .. }
                 if receipt.admission.idempotency_key.as_str() == "session-sync.alias"
                     && receipt.coalesced_primary == Some(primary)
         ));

@@ -834,7 +834,11 @@ pub enum PrCleanupError {
     Remaining(Vec<PrCleanupArtifact>),
 }
 
-#[hotpath::measure(label = "application.pr_tracking.cleanup_worktree")]
+#[tracing::instrument(
+    name = "application.pr_tracking.cleanup_worktree",
+    level = "trace",
+    skip_all
+)]
 pub fn cleanup_pr_worktree(
     repo_root: &Path,
     data_root: &Path,

@@ -216,7 +216,11 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
 /// serving: the same partitioned encoding, verified page source, builder, and
 /// reader the daemon runs, over an in-memory segment store and a private
 /// temporary directory.
-#[hotpath::measure(label = "search_eval.corpus.lexical_artifact")]
+#[tracing::instrument(
+    name = "search_eval.corpus.lexical_artifact",
+    level = "trace",
+    skip_all
+)]
 fn seal_lexical_artifact(
     generation: &CodeIndexPublishedGenerationV1,
     metadata: &CodeLexicalProjectionMetadataV1,
@@ -386,14 +390,15 @@ impl PublishedCorpusCache {
     ) -> Result<(), CandidateOutputError> {
         if let Entry::Vacant(entry) = self.by_scale.entry(copies) {
             let published = match copies {
-                1 => hotpath::measure_block!(
-                    "search_eval.corpus.publish.current",
+                1 => {
+                    let _span =
+                        tracing::trace_span!("search_eval.corpus.publish.current").entered();
                     publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
-                ),
-                10 => hotpath::measure_block!(
-                    "search_eval.corpus.publish.10x",
+                }
+                10 => {
+                    let _span = tracing::trace_span!("search_eval.corpus.publish.10x").entered();
                     publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)
-                ),
+                }
                 _ => publish_corpus_with_scale(repo_root, workload, copies, admitted_scope),
             }?;
             entry.insert(published);
@@ -417,9 +422,15 @@ impl PublishedCorpusCache {
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    hotpath::measure_block!("search_eval.generate_candidates", {
-        generate_candidate_outputs_sharing_corpora(options, &mut PublishedCorpusCache::default())
-    })
+    {
+        let _span = tracing::trace_span!("search_eval.generate_candidates").entered();
+        {
+            generate_candidate_outputs_sharing_corpora(
+                options,
+                &mut PublishedCorpusCache::default(),
+            )
+        }
+    }
 }
 
 fn generate_candidate_outputs_sharing_corpora(
@@ -826,6 +837,7 @@ fn production_lanes(
         query_view: &query_view,
         generation: generation_id.clone(),
         literals: authority.parse_literals(&query_view, &request),
+        path_prefix: None,
         budget,
     };
     let exact_outcome = exact_lane
@@ -849,6 +861,7 @@ fn production_lanes(
                 phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                 proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
                 field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                path_prefix: None,
                 fuzzy_budget: 8,
                 lexical_profile_revision: id(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
@@ -1244,10 +1257,10 @@ fn publish_corpus_with_scale(
         }
         scopes.insert(
             scope_key,
-            Some(hotpath::measure_block!(
-                "search_eval.corpus.scope_retrieval",
+            Some({
+                let _span = tracing::trace_span!("search_eval.corpus.scope_retrieval").entered();
                 scoped_retrieval(generation)
-            )?),
+            }?),
         );
     }
     Ok(PublishedCorpus {

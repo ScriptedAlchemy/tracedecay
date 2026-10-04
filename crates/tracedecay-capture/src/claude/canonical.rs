@@ -56,18 +56,11 @@ pub fn normalize_spawned(
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Claude records order by file bytes, so the range length is the source
-    // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.claude.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_record(native, session_id, parent, stable_record_id, range);
-    if envelope.is_err() {
-        hotpath::gauge!("capture.claude.normalize_failures").inc(1u64);
-    }
-    envelope
+    normalize_record(native, session_id, parent, stable_record_id, range)
 }
 
 /// One source-record canonicalization, not a per-block walk.
-#[hotpath::measure(label = "capture.claude.normalize")]
+#[tracing::instrument(name = "capture.claude.normalize", level = "trace", skip_all)]
 fn normalize_record(
     native: &Value,
     session_id: &str,
@@ -112,6 +105,14 @@ fn normalize_record(
         );
         append_assistant_attribution_fact(&mut facts, native, record_kind);
         append_tool_use_result_facts(&mut facts, native, record_kind);
+        // The branch rides only on message records so it never renders as a
+        // row of its own.
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        {
+            append_git_branch_fact(&mut facts, native);
+        }
         // Preserve Claude's native compact-summary flags as typed compaction
         // metadata without introducing a cross-provider trust contract.
         if record_kind == "user"
@@ -130,6 +131,17 @@ fn normalize_record(
                 })),
                 input_tokens: None,
                 output_tokens: None,
+            });
+        }
+        if let Some(branch) = native
+            .get("gitBranch")
+            .and_then(Value::as_str)
+            .filter(|branch| !branch.is_empty())
+        {
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+                reference: Some(branch.to_owned()),
+                content: None,
             });
         }
     } else {
@@ -270,6 +282,20 @@ fn append_session_location_fact(facts: &mut Vec<CanonicalObservationFactV1>, nat
         profile: None,
         location_provenance: Some("transcript_record".to_owned()),
     });
+}
+
+fn append_git_branch_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
+    if let Some(branch) = native
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+            reference: Some(branch.to_owned()),
+            content: None,
+        });
+    }
 }
 
 fn append_assistant_attribution_fact(

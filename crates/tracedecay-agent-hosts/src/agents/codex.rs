@@ -69,7 +69,7 @@ impl AgentIntegration for CodexIntegration {
         true
     }
 
-    #[hotpath::measure(label = "hosts.agent.codex.project_install")]
+    #[tracing::instrument(name = "hosts.agent.codex.project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -171,7 +171,7 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
+        dc.section("Codex CLI integration");
         let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
         if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
             doctor_check_plugin_dir(
@@ -333,7 +333,7 @@ impl AgentIntegration for CodexIntegration {
         paths
     }
 
-    #[hotpath::measure(label = "hosts.agent.codex.plugin_activate")]
+    #[tracing::instrument(name = "hosts.agent.codex.plugin_activate", level = "trace", skip_all)]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         // `~/.codex/agents` is registration surface, not deployed component
         // assets: `host_component_registration_paths` declares every generated
@@ -584,7 +584,11 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-#[hotpath::measure(label = "hosts.agent.codex.repo_plugin_install")]
+#[tracing::instrument(
+    name = "hosts.agent.codex.repo_plugin_install",
+    level = "trace",
+    skip_all
+)]
 fn install_codex_repo_plugin(
     profile_root: &Path,
     project_path: &Path,
@@ -760,7 +764,11 @@ pub fn export_codex_plugin_artifact(
     )
 }
 
-#[hotpath::measure(label = "hosts.agent.codex.plugin_bundle_write")]
+#[tracing::instrument(
+    name = "hosts.agent.codex.plugin_bundle_write",
+    level = "trace",
+    skip_all
+)]
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,

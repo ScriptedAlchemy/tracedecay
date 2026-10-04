@@ -56,7 +56,11 @@ pub struct ObservabilityRetentionReceiptV1 {
 
 impl RegisteredGlobalDb {
     /// Read an existing exact owner claim without allocating a new delivery.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.claim")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.claim",
+        level = "trace",
+        skip_all
+    )]
     pub async fn observability_emission_claim(
         &self,
         project_id: &str,
@@ -116,7 +120,11 @@ impl RegisteredGlobalDb {
         }))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
@@ -164,9 +172,10 @@ impl RegisteredGlobalDb {
     /// The registered writer serializes the lookup and insert; the partial
     /// unique index remains the cross-process backstop. Reusing a key with
     /// changed canonical input is an explicit conflict.
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.analytics.append_observability"
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_observability",
+        level = "trace",
+        skip_all
     )]
     pub async fn append_observability_event(
         &self,
@@ -182,9 +191,10 @@ impl RegisteredGlobalDb {
         }
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.analytics.append_observability_batch"
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_observability_batch",
+        level = "trace",
+        skip_all
     )]
     pub async fn append_observability_events(
         &self,
@@ -202,9 +212,6 @@ impl RegisteredGlobalDb {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        crate::hotpath_observe::record_transaction_rows(
-            u64::try_from(events.len()).unwrap_or(u64::MAX),
-        );
         let transaction = self
             .begin_write_transaction()
             .await
@@ -232,9 +239,10 @@ impl RegisteredGlobalDb {
         Ok(ids)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.registered.analytics.read_observability"
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.read_observability",
+        level = "trace",
+        skip_all
     )]
     pub async fn read_observability_event(
         &self,
@@ -272,7 +280,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Claim one stable owner fact without replacing a prior delivery.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.claim",
+        level = "trace",
+        skip_all
+    )]
     pub async fn claim_observability_emission(
         &self,
         project_id: &str,
@@ -335,7 +347,11 @@ impl RegisteredGlobalDb {
     }
 
     /// CAS a pending delivery to its delayed-coverage representation.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.persist.delay")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.persist.delay",
+        level = "trace",
+        skip_all
+    )]
     pub async fn delay_observability_emission(
         &self,
         project_id: &str,
@@ -406,7 +422,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Append the exact delivery and settle its outbox row in one transaction.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.settle")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.settle",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_observability_emission(
         &self,
         project_id: &str,
@@ -479,7 +499,11 @@ impl RegisteredGlobalDb {
     /// storage failures roll the whole transaction back. Each step reads or
     /// writes the whole run in one statement, so the writer round trips stay
     /// constant per run rather than growing with the facts in it.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.claim_settle")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.claim_settle",
+        level = "trace",
+        skip_all
+    )]
     pub async fn claim_and_settle_observability_emissions<F>(
         &self,
         emissions: &[ObservabilityOwnerEmissionWriteV1],
@@ -511,7 +535,11 @@ impl RegisteredGlobalDb {
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
     /// carriers. This table is not a generic delivery outbox: recovery decodes
     /// every pending row through that exact envelope before settlement.
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.pending")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.pending",
+        level = "trace",
+        skip_all
+    )]
     pub async fn pending_observability_emissions(
         &self,
         project_id: &str,
@@ -564,7 +592,11 @@ impl RegisteredGlobalDb {
 
     /// Expires only optional observability detail and rollup rows through the
     /// registered writer. Product receipts retain their owning lifecycle.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.prune")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.prune",
+        level = "trace",
+        skip_all
+    )]
     pub async fn prune_observability_events(
         &self,
         now_seconds: i64,
@@ -606,7 +638,11 @@ impl RegisteredGlobalDb {
         })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_batch")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_batch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_events(
         &self,
         events: &[AnalyticsEventInsert],
@@ -622,7 +658,11 @@ impl RegisteredGlobalDb {
     /// is the durable cursor the caller read before parsing: the append is
     /// refused when another importer has already advanced it, so two concurrent
     /// importers can never both claim the same byte range.
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.append_cursor")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.append_cursor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_analytics_events_with_cursor(
         &self,
         events: &[AnalyticsEventInsert],
@@ -648,7 +688,11 @@ impl RegisteredGlobalDb {
         Ok(ids)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.analytics.query")]
+    #[tracing::instrument(
+        name = "global_db.registered.analytics.query",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
@@ -724,7 +768,11 @@ impl RegisteredGlobalDb {
         Ok(events)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.count")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.count",
+        level = "trace",
+        skip_all
+    )]
     pub async fn count_analytics_events(
         &self,
         project_id: Option<&str>,
@@ -755,7 +803,11 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode analytics event count: {error}"))
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.tools")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.tools",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_tool_counts(
         &self,
         project_id: Option<&str>,
@@ -804,7 +856,11 @@ impl RegisteredGlobalDb {
         Ok(counts)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registry.analytics.query.hints")]
+    #[tracing::instrument(
+        name = "global_db.registry.analytics.query.hints",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_analytics_hint_counts(
         &self,
         project_id: Option<&str>,
@@ -1157,9 +1213,6 @@ async fn settle_prepared_owner_facts(
             Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
     }
     insert_settled_outbox_rows(transaction, &rows).await?;
-    if !rows.is_empty() {
-        crate::hotpath_observe::record_transaction_rows(rows.len() as u64);
-    }
     Ok(())
 }
 

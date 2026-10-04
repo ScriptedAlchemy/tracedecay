@@ -2075,7 +2075,7 @@ export type DuplicateEffectOutcomeV1 = "committed" | "not_applicable" | "prevent
 
 export type DuplicateEffortKindV1 = "censored" | "duplicate_effect" | "exact_duplicate" | "not_duplicate" | "repeated_investigation" | "superseded_overlap" | "unknown";
 
-export type EffectClass = "administrative" | "configuration_write" | "git_index_commit" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence";
+export type EffectClass = "administrative" | "configuration_write" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence";
 
 export type EffectReceipt = {
   actor: ActorId;

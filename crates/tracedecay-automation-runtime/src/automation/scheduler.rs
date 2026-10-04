@@ -73,7 +73,11 @@ impl SessionActivity {
 /// ingest writers only ever move the value forward. A failed read is logged and
 /// reported as no activity: a store the scheduler cannot read has no observable
 /// new activity, so automation stays idle instead of running against it.
-#[hotpath::measure(label = "automation.run.load_session_activity", future = true)]
+#[tracing::instrument(
+    name = "automation.run.load_session_activity",
+    level = "trace",
+    skip_all
+)]
 pub async fn load_session_activity(sessions_db: &RegisteredGlobalDb) -> SessionActivity {
     let last_activity_secs = match sessions_db.latest_session_activity_secs().await {
         Ok(latest) => latest,
@@ -182,7 +186,7 @@ pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(SCHEDULER_CONTROL_FILENAME)
 }
 
-#[hotpath::measure(label = "automation.scheduler.load_control", future = true)]
+#[tracing::instrument(name = "automation.scheduler.load_control", level = "trace", skip_all)]
 pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationSchedulerControl> {
     let path = scheduler_control_path(dashboard_root);
     match tokio::fs::read(&path).await {
@@ -204,7 +208,7 @@ pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationS
     }
 }
 
-#[hotpath::measure(label = "automation.scheduler.save_control", future = true)]
+#[tracing::instrument(name = "automation.scheduler.save_control", level = "trace", skip_all)]
 pub async fn save_scheduler_control(
     dashboard_root: &Path,
     control: &AutomationSchedulerControl,
@@ -246,11 +250,7 @@ impl AutomationTaskLock {
     /// Acquires a lock under an arbitrary key. User-defined jobs lock per
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
-    #[hotpath::measure(
-        label = "automation.scheduler.task_lock",
-        impl_type = "AutomationTaskLock",
-        future = true
-    )]
+    #[tracing::instrument(name = "automation.scheduler.task_lock", level = "trace", skip_all)]
     pub async fn try_acquire_keyed(
         dashboard_root: &Path,
         key: &str,
@@ -360,7 +360,7 @@ where
     }
 }
 
-#[hotpath::measure(label = "automation.scheduler.decision")]
+#[tracing::instrument(name = "automation.scheduler.decision", level = "trace", skip_all)]
 /// Decides whether `task` is due under `config`, given the ledger `records`
 /// and the executable the backend now in force would spawn
 /// (`AgentTaskBackend::executable`); the latter is part of the backend

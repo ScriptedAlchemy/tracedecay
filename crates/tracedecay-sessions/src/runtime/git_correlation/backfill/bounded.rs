@@ -114,7 +114,7 @@ impl GraphPageBudget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GitHistoryIndexFrontier {
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub source_rowid: i64,
 }
 
@@ -150,20 +150,7 @@ where
 {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
-    let stored_activity = super::super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
-        .await?
-        .unwrap_or_else(|| opts.since.saturating_sub(1));
-    let stored_rowid = super::super::read_meta_value(&snapshot, GIT_HISTORY_ROWID_FRONTIER_KEY)
-        .await?
-        .unwrap_or(0);
-    let mut frontier = GitHistoryIndexFrontier {
-        activity_timestamp: stored_activity.max(opts.since.saturating_sub(1)),
-        source_rowid: if stored_activity >= opts.since.saturating_sub(1) {
-            stored_rowid
-        } else {
-            0
-        },
-    };
+    let mut frontier = super::super::read_history_frontier(&snapshot).await?;
     if let Err(interruption) = control.check() {
         drop(snapshot);
         return Ok(interrupted_outcome(
@@ -185,14 +172,9 @@ where
         );
     }
     let requested = opts.limit_sessions.saturating_add(1);
-    let mut rows = session_activity_page_after(
-        &snapshot,
-        frontier.activity_timestamp,
-        frontier.source_rowid,
-        requested,
-    )
-    .await
-    .map_err(GitCorrelationError::Db)?;
+    let mut rows = session_activity_page_after(&snapshot, frontier.change_sequence, requested)
+        .await
+        .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
     if let Err(interruption) = control.check() {
         return Ok(interrupted_outcome(
@@ -218,7 +200,7 @@ where
         }
         stats.sessions_scanned = stats.sessions_scanned.saturating_add(1);
         let candidate_frontier = GitHistoryIndexFrontier {
-            activity_timestamp: row.activity_timestamp,
+            change_sequence: row.change_sequence,
             source_rowid: row.source_rowid,
         };
         let mut frontier_pending = false;
@@ -440,13 +422,13 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
             BackfillSkipReason::NoActivityWindow,
         ));
     }
-    if row.project_path.trim().is_empty() {
+    let Some(project_path) = row.folder(opts.project_root.as_deref()) else {
         return Ok(StreamGitEvidenceOutcome::Skip(
             BackfillSkipReason::NotAWorktree,
         ));
-    }
+    };
+    let project_path = project_path.to_path_buf();
     control.check()?;
-    let project_path = std::path::PathBuf::from(row.project_path.trim());
     if opts.dry_run {
         dry_run_native_history(
             &project_path,
@@ -528,7 +510,7 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
         };
         let progress = progress_from_cursor(
             key,
-            candidate_frontier.activity_timestamp,
+            candidate_frontier.change_sequence,
             row,
             window_start,
             window_end,
@@ -665,7 +647,11 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
     }
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.backfill.dry_run", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.backfill.dry_run",
+    level = "trace",
+    skip_all
+)]
 async fn dry_run_native_history(
     project_path: &std::path::Path,
     window_start: i64,

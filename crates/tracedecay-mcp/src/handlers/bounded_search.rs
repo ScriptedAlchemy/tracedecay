@@ -55,7 +55,7 @@ where
     .await
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.bounded")]
+#[tracing::instrument(name = "mcp.search.bounded", level = "trace", skip_all)]
 async fn run_bounded_search_with_capacity<T, E, F>(
     capacity: Arc<Semaphore>,
     budget: Duration,

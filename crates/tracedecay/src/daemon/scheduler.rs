@@ -143,7 +143,11 @@ fn scheduler_run_observer(
     })
 }
 
-#[hotpath::measure(label = "daemon.scheduler.settle_retained_automation", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.settle_retained_automation",
+    level = "trace",
+    skip_all
+)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Settlement composes the retained run, effect guard, cancellation and project observer without transferring their authorities."
@@ -291,7 +295,6 @@ pub(super) struct AutomationSchedulerRetirement {
 }
 
 impl AutomationSchedulerRetirement {
-    #[hotpath::skip]
     pub(super) async fn wait(self) {
         self.termination.wait().await;
     }
@@ -316,7 +319,6 @@ impl AutomationSchedulerExitBarrier {
         Self { state }
     }
 
-    #[hotpath::skip]
     async fn pause_after_disabled_read(&self) {
         self.state.send_modify(|state| *state |= Self::REACHED);
         self.wait_for(|state| state & Self::RELEASED != 0).await;
@@ -328,7 +330,6 @@ impl AutomationSchedulerExitBarrier {
             .send_modify(|state| *state = (*state & !Self::DECISION_MASK) | decision);
     }
 
-    #[hotpath::skip]
     pub(super) async fn wait_until_reached(&self) {
         self.wait_for(|state| state & Self::REACHED != 0).await;
     }
@@ -337,14 +338,12 @@ impl AutomationSchedulerExitBarrier {
         self.state.send_modify(|state| *state |= Self::RELEASED);
     }
 
-    #[hotpath::skip]
     pub(super) async fn wait_for_decision(&self) -> u8 {
         self.wait_for(|state| state & Self::DECISION_MASK != Self::UNDECIDED)
             .await
             & Self::DECISION_MASK
     }
 
-    #[hotpath::skip]
     async fn wait_for(&self, ready: impl Fn(u8) -> bool) -> u8 {
         let mut state = self.state.subscribe();
         loop {
@@ -393,7 +392,6 @@ mod automation_scheduler_exit_barrier_tests {
 }
 
 impl DaemonEngine {
-    #[hotpath::skip]
     pub(super) async fn activate_automation_scheduler_for_open_project(
         &self,
         key: ProjectServerKey,
@@ -477,7 +475,6 @@ impl DaemonEngine {
             .await;
     }
 
-    #[hotpath::skip]
     pub(super) async fn ensure_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -495,7 +492,6 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "Locked scheduler reconcile is one compare-and-swap of the live automation handle."
@@ -675,13 +671,10 @@ impl DaemonEngine {
         })
     }
 
-    #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
-        )
+    #[tracing::instrument(name = "daemon.scheduler.start_automation", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
     )]
     pub(super) async fn start_automation_scheduler(
         &self,
@@ -777,9 +770,9 @@ impl DaemonEngine {
                         || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
                 });
         };
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             scheduler_loop,
-            label = "daemon.scheduler.loop"
+            tracing::trace_span!("daemon.scheduler.loop"),
         ));
         {
             let mut signals = self
@@ -811,7 +804,7 @@ impl DaemonEngine {
         AutomationSchedulerReconcileOutcome::Started
     }
 
-    #[hotpath::measure(label = "daemon.scheduler.commit_exit", future = true)]
+    #[tracing::instrument(name = "daemon.scheduler.commit_exit", level = "trace", skip_all)]
     async fn commit_automation_scheduler_exit(
         &self,
         key: &ProjectServerKey,
@@ -882,7 +875,6 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     pub(super) async fn retire_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
@@ -891,7 +883,6 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::skip]
     async fn retire_exact_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
@@ -936,7 +927,6 @@ impl DaemonEngine {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown_automation_schedulers(&self) {
         // Draining is latched before this runs, and every registration path
         // rechecks that latch. Do not queue shutdown behind unrelated
@@ -972,7 +962,7 @@ impl DaemonEngine {
     }
 }
 
-#[hotpath::measure(label = "daemon.scheduler.retire_scheduler", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.retire_scheduler", level = "trace", skip_all)]
 async fn retire_matching_automation_scheduler(
     store_administration: &StoreAdministration,
     key: &ProjectServerKey,
@@ -1078,7 +1068,11 @@ fn observed_scheduler_lifecycle(
     }
 }
 
-#[hotpath::measure(label = "daemon.scheduler.retained_project_graph", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.retained_project_graph",
+    level = "trace",
+    skip_all
+)]
 async fn retained_project_graph(
     engine: &DaemonEngine,
     key: &ProjectServerKey,
@@ -1088,39 +1082,6 @@ async fn retained_project_graph(
         servers.get(key).cloned()
     }?;
     Some(server.cg().await)
-}
-
-struct BackgroundJobGaugeGuard {
-    #[cfg(test)]
-    test_counter: Option<Arc<std::sync::atomic::AtomicI64>>,
-}
-
-impl BackgroundJobGaugeGuard {
-    fn enter() -> Self {
-        hotpath::gauge!("background_jobs").inc(1.0);
-        Self {
-            #[cfg(test)]
-            test_counter: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn enter_for_test(counter: Arc<std::sync::atomic::AtomicI64>) -> Self {
-        let mut guard = Self::enter();
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        guard.test_counter = Some(counter);
-        guard
-    }
-}
-
-impl Drop for BackgroundJobGaugeGuard {
-    fn drop(&mut self) {
-        hotpath::gauge!("background_jobs").inc(-1.0);
-        #[cfg(test)]
-        if let Some(counter) = self.test_counter.as_ref() {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1301,11 +1262,9 @@ async fn run_automation_scheduler_loop(
                 ("outcome", "start".to_string()),
             ],
         );
-        let tick_result = {
-            let _background_job = BackgroundJobGaugeGuard::enter();
+        let tick_result =
             boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
-                .await
-        };
+                .await;
         if let Err(e) = tick_result {
             log_daemon_event(
                 "scheduler_tick",
@@ -1568,7 +1527,7 @@ fn global_table_retention_config(
 /// Applies the configured retention windows to the global telemetry tables,
 /// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
 /// housekeeping, so failures are logged and never abort a scheduler tick.
-#[hotpath::measure(label = "daemon.scheduler.global_retention", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.global_retention", level = "trace", skip_all)]
 async fn maybe_run_global_retention(
     administration: &super::branch_admin::StoreAdministration,
     database: &tracedecay_global_db::RegisteredGlobalDb,
@@ -1955,7 +1914,11 @@ struct PinnedAutomationConfiguration {
     codex_executable: tracedecay_domain::configuration::LcmSummarizerExecutableV1,
 }
 
-#[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.read_automation_config",
+    level = "trace",
+    skip_all
+)]
 async fn effective_automation_config_for_project(
     cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
@@ -2019,7 +1982,11 @@ pub(super) fn automation_scheduler_configured(
 
 /// True when the scheduler loop has anything to do for this project: a
 /// scheduled fixed task or a schedulable user-defined job.
-#[hotpath::measure(label = "daemon.scheduler.probe_scheduler_work", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.probe_scheduler_work",
+    level = "trace",
+    skip_all
+)]
 async fn automation_scheduler_has_work(
     cg: &tracedecay_project::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
@@ -2045,17 +2012,14 @@ async fn automation_scheduler_has_work(
 
 /// Ticks every schedulable user-defined job with the same lock/cooldown
 /// discipline as the fixed tasks (enforced inside the job runner).
-#[hotpath::measure(label = "daemon.scheduler.user_jobs_pass", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.user_jobs_pass", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
 )]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
-    )
+#[expect(
+    clippy::too_many_lines,
+    reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
 )]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,
@@ -2238,7 +2202,11 @@ async fn run_user_jobs_scheduler_pass(
 /// Deriving a fresher anchor at append time can bound the scan below an
 /// already-appended row and silently write a byte-different duplicate.
 /// `None` means this snapshot held no scheduler-effectful terminal at all.
-#[hotpath::measure(label = "daemon.scheduler.mint_user_job_run_id", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.mint_user_job_run_id",
+    level = "trace",
+    skip_all
+)]
 async fn scheduled_user_job_run_id(
     dashboard_root: &Path,
     job: &tracedecay_automation_runtime::automation::jobs::AutomationJob,
@@ -2274,34 +2242,4 @@ async fn scheduled_user_job_run_id(
         ),
         latest_scheduler_terminal.map(|record| record.run_id),
     ))
-}
-
-#[cfg(test)]
-mod background_job_gauge_tests {
-    use super::BackgroundJobGaugeGuard;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, Ordering};
-
-    #[tokio::test]
-    async fn background_job_gauge_is_released_when_the_tick_is_aborted() {
-        let active = Arc::new(AtomicI64::new(0));
-        let observed = Arc::clone(&active);
-        let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _gauge = BackgroundJobGaugeGuard::enter_for_test(observed);
-            entered.send(()).expect("report gauge entry");
-            std::future::pending::<()>().await;
-        });
-
-        entered_rx.await.expect("tick reached gauge scope");
-        assert_eq!(active.load(Ordering::SeqCst), 1);
-        task.abort();
-        assert!(task.await.expect_err("tick was aborted").is_cancelled());
-
-        assert_eq!(
-            active.load(Ordering::SeqCst),
-            0,
-            "aborting a scheduler tick must not strand the background-job gauge"
-        );
-    }
 }

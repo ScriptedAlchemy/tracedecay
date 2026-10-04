@@ -9,8 +9,8 @@ use tracedecay_domain::{
     ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
     FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId,
     ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
-    SourceFreshness, SourceOccurrenceId, WorktreeId, exact_search_canonical, split_subtokens,
-    technical_tokens, validate_code_logical_path,
+    SourceFreshness, SourceOccurrenceId, SourceSpan, WorktreeId, exact_search_canonical,
+    split_subtokens, technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -367,50 +367,138 @@ struct LexicalRowScoreV1 {
 /// The borrowed subset of a projected chunk that exact-literal matching
 /// reads, so artifact rows never deep-clone chunk text per visited document.
 struct ExactMatchRowViewV1<'a> {
+    anchor: &'a CodeSearchChunkAnchorV1,
     sanitized_text: &'a str,
     logical_path: &'a str,
     exact_terms: &'a [ExactTechnicalTermV1],
 }
 
-/// Match one row against every request literal, returning matched literal
-/// ordinals into `request.literals`. Ordinals defer the literal clones to
-/// the cap-bounded winners instead of paying them per visited document.
-fn exact_matches(
-    row: ExactMatchRowViewV1<'_>,
-    request: &ExactLaneRequest,
-) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
-    let mut matched_literals = Vec::new();
-    let mut matched_kinds = BTreeSet::new();
+/// One request literal matched in one row. `occurrence` is the matched
+/// source span; a path literal matches the whole file and has none.
+struct ExactRowMatchV1 {
+    literal: usize,
+    kind: Option<ExactTechnicalTermKindV1>,
+    occurrence: Option<SourceSpan>,
+}
+
+/// Match one row against every request literal. Literal ordinals into
+/// `request.literals` defer the literal clones to the cap-bounded winners
+/// instead of paying them per visited document.
+///
+/// A signature lies inside its own body, so it never answers; the body
+/// carries the same occurrences. A path names the whole file and answers
+/// from top-level chunks only.
+fn exact_matches(row: ExactMatchRowViewV1<'_>, request: &ExactLaneRequest) -> Vec<ExactRowMatchV1> {
+    if row.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature
+        || !tracedecay_domain::path_matches_scope(row.logical_path, request.path_prefix)
+    {
+        return Vec::new();
+    }
+    let text = row.sanitized_text.as_bytes();
+    let text_start = row.anchor.source_span.start_byte;
+    let mut matches = Vec::new();
     for (ordinal, literal) in request.literals.iter().enumerate() {
-        let mut matched = false;
-        if matches!(
-            literal.field,
-            ExactFieldV1::QuotedPhrase
-                | ExactFieldV1::DiagnosticText
-                | ExactFieldV1::CompilerOrRuntimeError
-        ) {
-            matched = contains_bytes(row.sanitized_text.as_bytes(), &literal.original_bytes);
+        let needle = literal.original_bytes.as_slice();
+        if !needle.is_empty()
+            && matches!(
+                literal.field,
+                ExactFieldV1::QuotedPhrase
+                    | ExactFieldV1::DiagnosticText
+                    | ExactFieldV1::CompilerOrRuntimeError
+            )
+        {
+            for (offset, _) in text
+                .windows(needle.len())
+                .enumerate()
+                .filter(|(_, window)| *window == needle)
+            {
+                let start_byte = text_start + offset as u64;
+                matches.push(ExactRowMatchV1 {
+                    literal: ordinal,
+                    kind: None,
+                    occurrence: Some(SourceSpan {
+                        start_byte,
+                        end_byte: start_byte + needle.len() as u64,
+                    }),
+                });
+            }
         }
-        if literal.field == ExactFieldV1::Path
+        if row.anchor.parent_chunk_id.is_none()
+            && literal.field == ExactFieldV1::Path
             && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
         {
-            matched = true;
-            matched_kinds.insert(ExactTechnicalTermKindV1::Path);
+            matches.push(ExactRowMatchV1 {
+                literal: ordinal,
+                kind: Some(ExactTechnicalTermKindV1::Path),
+                occurrence: None,
+            });
         }
         for term in row.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
             {
-                matched = true;
-                matched_kinds.insert(term.kind());
+                matches.push(ExactRowMatchV1 {
+                    literal: ordinal,
+                    kind: Some(term.kind()),
+                    occurrence: Some(term.span()),
+                });
             }
         }
-        if matched {
-            matched_literals.push(ordinal);
+    }
+    matches
+}
+
+/// The innermost matched row containing each occurrence. Chunks nest (a
+/// member inside its parent's body), so one occurrence lies in every
+/// enclosing row and answers only from the smallest of them.
+#[derive(Default)]
+struct ExactOccurrenceOwnersV1 {
+    owners: BTreeMap<(FileOccurrenceId, u64, u64), (u64, u32)>,
+}
+
+impl ExactOccurrenceOwnersV1 {
+    fn offer(
+        &mut self,
+        anchor: &CodeSearchChunkAnchorV1,
+        document: u32,
+        matches: &[ExactRowMatchV1],
+    ) {
+        let size = anchor.source_span.end_byte - anchor.source_span.start_byte;
+        for span in matches.iter().filter_map(|matched| matched.occurrence) {
+            self.owners
+                .entry((
+                    anchor.file_occurrence_id.clone(),
+                    span.start_byte,
+                    span.end_byte,
+                ))
+                .and_modify(|owner| *owner = (*owner).min((size, document)))
+                .or_insert((size, document));
         }
     }
-    (matched_literals, matched_kinds.into_iter().collect())
+
+    /// The literal ordinals and term kinds `document` owns, both ascending.
+    fn owned(
+        &self,
+        file: &FileOccurrenceId,
+        document: u32,
+        matches: &[ExactRowMatchV1],
+    ) -> (Vec<usize>, Vec<ExactTechnicalTermKindV1>) {
+        let mut literals = BTreeSet::new();
+        let mut kinds = BTreeSet::new();
+        for matched in matches {
+            let owns = matched.occurrence.is_none_or(|span| {
+                self.owners
+                    .get(&(file.clone(), span.start_byte, span.end_byte))
+                    .is_some_and(|(_, owner)| *owner == document)
+            });
+            if owns {
+                literals.insert(matched.literal);
+                kinds.extend(matched.kind);
+            }
+        }
+        (literals.into_iter().collect(), kinds.into_iter().collect())
+    }
 }
 
 /// Per-request lazily admitted proofs, one slot per request literal.
@@ -539,7 +627,7 @@ impl<'request> PreparedLexicalQueryV1<'request> {
     }
 }
 
-fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
+pub(crate) fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
     match kind {
         ExactTechnicalTermKindV1::WholeSymbol => ExactFieldV1::Identifier,
         ExactTechnicalTermKindV1::QualifiedName => ExactFieldV1::QualifiedName,
@@ -853,13 +941,6 @@ fn substring_count(haystack: &str, needle: &str) -> usize {
         return 0;
     }
     haystack.match_indices(needle).count()
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
 }
 
 fn pack_byte_ngram(bytes: &[u8]) -> u32 {

@@ -212,7 +212,7 @@ pub enum NativeHookDecodeError {
 /// Per-payload decode fan-out. Every native hook byte stream a host receives
 /// passes through here once, so this is the boundary that reflects decode
 /// cost across all provider shapes without measuring each `decode_*` helper.
-#[hotpath::measure(label = "hooks.native.decode_event")]
+#[tracing::instrument(name = "hooks.native.decode_event", level = "trace", skip_all)]
 pub fn decode_native_hook_event(
     host: NativeHostIdentityV1,
     payload: &[u8],
@@ -242,7 +242,7 @@ pub fn decode_native_hook_event(
 /// OpenCode plugin callbacks enter here directly instead of through
 /// [`decode_native_hook_event`], so this surface needs its own decode
 /// boundary to stay visible.
-#[hotpath::measure(label = "hooks.native.decode_plugin_event")]
+#[tracing::instrument(name = "hooks.native.decode_plugin_event", level = "trace", skip_all)]
 pub fn decode_opencode_plugin_event(
     surface: OpenCodePluginSurfaceV1,
     payload: &[u8],

@@ -54,7 +54,11 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
     Arc::strong_count(server) > 1 || project_server_response_lifecycle_has_in_flight(&lifecycle)
 }
 
-#[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.compose.release_idle",
+    level = "trace",
+    skip_all
+)]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -117,7 +121,6 @@ async fn release_one_idle_project_server_before_open(
         .into_iter()
         .map(|(_, server)| server)
         .collect::<Vec<_>>();
-    let retired_server_count = retired_servers.len();
     let stores = CapacityRetirementStores {
         administration: store_administration.clone(),
         invocation: invocation.clone(),
@@ -152,7 +155,6 @@ async fn release_one_idle_project_server_before_open(
             drop(capacity_admission);
             released
         });
-    hotpath::gauge!("project_servers").inc(-(retired_server_count as f64));
     drop(retirement_admission);
     completion
         .wait()
@@ -179,7 +181,11 @@ struct CapacityRetirementStores {
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
 }
 
-#[hotpath::measure(label = "daemon.project.compose.release_retired_stores", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.compose.release_retired_stores",
+    level = "trace",
+    skip_all
+)]
 async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Result<()> {
     let CapacityRetirementStores {
         administration,
@@ -291,11 +297,11 @@ struct ProjectOpenInputs<'a> {
 ///
 /// Each phase is its own future that owns its temporaries, so this state
 /// machine carries only the compact phase results across awaits. The phases
-/// are boxed at these call sites: under `--features hotpath` every measured
+/// are boxed at these call sites: with instrumentation every measured
 /// async fn embeds its body by value, and boxing here keeps the measured
 /// wrapper (and every instrumented caller) a few words wide instead of
 /// inlining the whole open.
-#[hotpath::measure(label = "daemon.project.compose.server", future = true)]
+#[tracing::instrument(name = "daemon.project.compose.server", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "This composition entry binds route admission, store lifetime, invocation and HTTP owners before publishing a server."
@@ -648,7 +654,7 @@ impl ProjectOpenInputs<'_> {
     /// Route admission: registry enrollment, the published-server cache, the
     /// route's single-flight gate, the foreground-open marker, and one graph
     /// admission slot (releasing an idle server when the daemon is at capacity).
-    #[hotpath::measure(label = "daemon.project.compose.admit_route", future = true)]
+    #[tracing::instrument(name = "daemon.project.compose.admit_route", level = "trace", skip_all)]
     async fn admit_route(&self) -> Result<RouteAdmission> {
         project_open_cancellation_checkpoint(self.cancellation)?;
         self.invocation
@@ -722,7 +728,7 @@ impl ProjectOpenInputs<'_> {
     /// Open the project graph behind the admitted route, re-check the deletion
     /// fence and the owner registry, and resolve the route-wide configuration
     /// choices every later phase reads.
-    #[hotpath::measure(label = "daemon.project.compose.open_graph", future = true)]
+    #[tracing::instrument(name = "daemon.project.compose.open_graph", level = "trace", skip_all)]
     async fn open_graph(&self, route: &ProjectRouteKey) -> Result<GraphOpen> {
         #[cfg(test)]
         if let Some(attempts) = self.project_open_attempts {
@@ -802,13 +808,10 @@ impl ProjectOpenInputs<'_> {
 
     /// Build every route-owned port and construct the core (graph, search,
     /// diagnostics) server candidate. Nothing is published yet.
-    #[hotpath::measure(label = "daemon.project.compose.core", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Core server composition wires one project's ports into a single McpServer."
-        )
+    #[tracing::instrument(name = "daemon.project.compose.core", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Core server composition wires one project's ports into a single McpServer."
     )]
     async fn compose_core_server(
         &self,
@@ -1013,7 +1016,7 @@ impl ProjectOpenInputs<'_> {
 
     /// Bind the route to the core candidate inside the bounded owner registry,
     /// retiring whatever the bounded eviction displaced.
-    #[hotpath::measure(label = "daemon.project.compose.bind_route", future = true)]
+    #[tracing::instrument(name = "daemon.project.compose.bind_route", level = "trace", skip_all)]
     async fn bind_core_route(
         &self,
         route: ProjectRouteKey,
@@ -1058,22 +1061,22 @@ impl ProjectOpenInputs<'_> {
                 owner,
                 super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
             );
-            hotpath::gauge!("project_servers").inc(-1.0);
         }
         // The owner registry guard was dropped before the synchronous
         // retirement handoff. Release admission before the remaining
         // project-open awaits.
         drop(retirement_admission);
-        if inserted {
-            hotpath::gauge!("project_servers").inc(1.0);
-        }
         Ok(CoreRouteBinding { resolved, inserted })
     }
 
     /// Publish the inserted core: register the code-index activation, install
     /// the preview-only source-edit lane, begin the runtime publication, and
     /// mark the route ready.
-    #[hotpath::measure(label = "daemon.project.compose.publish_core", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.compose.publish_core",
+        level = "trace",
+        skip_all
+    )]
     async fn activate_core_route(
         &self,
         opened: &OpenedProjectGraph,
@@ -1160,7 +1163,11 @@ impl ProjectOpenInputs<'_> {
 
     /// Admit the project and profile session databases together, settle the
     /// project session graph for serving, and bind the graph runtime.
-    #[hotpath::measure(label = "daemon.project.compose.admit_sessions", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.compose.admit_sessions",
+        level = "trace",
+        skip_all
+    )]
     async fn admit_session_databases(
         &self,
         cg: &Arc<tracedecay_project::project::TraceDecay>,
@@ -1218,13 +1225,14 @@ impl ProjectOpenInputs<'_> {
     /// caller's funnel owns retiring the owner. Retired relational graph repair
     /// is deliberately absent; the bounded code-index activation owns
     /// background indexing.
-    #[hotpath::measure(label = "daemon.project.compose.construct_full", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Full server construction is one owner-and-port assembly for a published project route."
-        )
+    #[tracing::instrument(
+        name = "daemon.project.compose.construct_full",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Full server construction is one owner-and-port assembly for a published project route."
     )]
     async fn construct_full_server(
         &self,
@@ -1465,7 +1473,7 @@ impl ProjectOpenInputs<'_> {
     /// are the largest leaves of the open (each ~20 KB, ~80 KB when
     /// instrumented), so its caller boxes this phase rather than doubling it
     /// into its own state.
-    #[hotpath::measure(label = "daemon.project.compose.full_owners", future = true)]
+    #[tracing::instrument(name = "daemon.project.compose.full_owners", level = "trace", skip_all)]
     async fn mount_full_server_owners(
         &self,
         opened: &OpenedProjectGraph,
@@ -1544,7 +1552,11 @@ impl ProjectOpenInputs<'_> {
     /// The full server is live in the registry: mount its dependent owners,
     /// commit the runtime publication, drain and retire the displaced core,
     /// and start code indexing.
-    #[hotpath::measure(label = "daemon.project.compose.publish_full", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.compose.publish_full",
+        level = "trace",
+        skip_all
+    )]
     async fn finish_full_server(
         &self,
         opened: &OpenedProjectGraph,
@@ -1757,7 +1769,11 @@ impl ProjectOpenInputs<'_> {
     /// (logging the failure and retiring the full server if it had gone live)
     /// or, when the core cannot be reclaimed, retires every server this
     /// attempt published and fails the open.
-    #[hotpath::measure(label = "daemon.project.compose.settle_failed_upgrade", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.compose.settle_failed_upgrade",
+        level = "trace",
+        skip_all
+    )]
     async fn settle_failed_full_upgrade(
         &self,
         opened: &OpenedProjectGraph,
@@ -2189,7 +2205,11 @@ async fn reclaim_core_after_failed_upgrade(
 
 /// Retire every server this failed open attempt published, including the core
 /// itself when session capabilities had already gone live.
-#[hotpath::measure(label = "daemon.project.compose.retire_failed", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.compose.retire_failed",
+    level = "trace",
+    skip_all
+)]
 async fn retire_failed_project_open_owner(
     store_administration: &StoreAdministration,
     failed_key: &ProjectServerKey,

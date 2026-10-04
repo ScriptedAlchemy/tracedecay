@@ -244,9 +244,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.begin_pass();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let history_outcome = if history_requested {
-                let (outcome, release) = hotpath::future!(
+                let (outcome, release) = tracing::Instrument::instrument(
                     session_history_refresh(&history, &history_admission),
-                    label = "daemon.scheduler.session_temporal.history"
+                    tracing::trace_span!("daemon.scheduler.session_temporal.history"),
                 )
                 .await;
                 history_release = release;
@@ -293,24 +293,23 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 Some(SessionHistoricalIngestOutcome::Complete)
             ) || history_outcome
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
-            let report =
-                if projection_requested || state.has_requests() || history_requires_projection {
-                    let pass = hotpath::future!(
-                        session_projection_refresh(&database, &state, projector.as_ref(), policy),
-                        label = "daemon.scheduler.session_temporal.projection"
-                    );
-                    tokio::pin!(pass);
-                    tokio::select! {
-                        biased;
-                        () = hotpath::future!(
-                            state.wait_for_cancellation(),
-                            label = "daemon.scheduler.session_temporal.projection_cancel"
-                        ) => return,
-                        report = &mut pass => report,
-                    }
-                } else {
-                    SessionTemporalRefreshPassReport::default()
-                };
+            let report = if projection_requested
+                || state.has_requests()
+                || history_requires_projection
+            {
+                let pass = tracing::Instrument::instrument(
+                    session_projection_refresh(&database, &state, projector.as_ref(), policy),
+                    tracing::trace_span!("daemon.scheduler.session_temporal.projection"),
+                );
+                tokio::pin!(pass);
+                tokio::select! {
+                    biased;
+                    () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.projection_cancel")) => return,
+                    report = &mut pass => report,
+                }
+            } else {
+                SessionTemporalRefreshPassReport::default()
+            };
             if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -355,10 +354,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     tokio::pin!(admission);
                     let registered = tokio::select! {
                         biased;
-                        () = hotpath::future!(
-                            state.wait_for_cancellation(),
-                            label = "daemon.scheduler.lcm_summary.admission_cancel"
-                        ) => return,
+                        () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.admission_cancel")) => return,
                         permit = &mut admission => Some(permit),
                         () = tokio::task::yield_now() => None,
                     };
@@ -369,16 +365,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // semaphore's FIFO queue. Only then advertise idle so an
                         // observer cannot release permits before this worker is
                         // registered to receive one.
-                        hotpath::gauge!("session_temporal_refresh_history_admission_deferrals")
-                            .inc(1.0);
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
                         let permit = tokio::select! {
                             biased;
-                            () = hotpath::future!(
-                                state.wait_for_cancellation(),
-                                label = "daemon.scheduler.lcm_summary.admission_cancel"
-                            ) => return,
+                            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.admission_cancel")) => return,
                             permit = &mut admission => permit,
                         };
                         state.mark_worker_busy();
@@ -412,10 +403,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         tokio::pin!(page);
                         let result = tokio::select! {
                             biased;
-                            () = hotpath::future!(
-                                state.wait_for_cancellation(),
-                                label = "daemon.scheduler.lcm_summary.cancel"
-                            ) => return,
+                            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.cancel")) => return,
                             result = &mut page => result,
                         };
                         drop(permit);
@@ -473,10 +461,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.cancelled > 0
                 || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
                 || summary_convergence_made_progress;
-            observe_pass_report(
-                &report,
-                !made_progress && (report.retry_class.is_some() || history_needs_another_pass),
-            );
             if let Some(backlog) = report.backlog {
                 state.record_pass(
                     backlog.saturating_add(usize::from(history_needs_another_pass)),
@@ -491,23 +475,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     error = report.last_error.as_deref(),
                     "session temporal refresh pass will retry"
                 );
-                observe_retry(class, retry_attempt);
                 state.mark_recovering(class.into(), class);
                 state.requeue_projection();
                 let retry_delay = session_refresh_retry_delay(class, retry_attempt);
                 tokio::select! {
-                    () = hotpath::future!(
-                        state.wait_for_cancellation(),
-                        label = "daemon.scheduler.session_temporal.retry_cancel"
-                    ) => return,
-                    () = hotpath::future!(
-                        state.wake.notified(),
-                        label = "daemon.scheduler.session_temporal.wake_wait"
-                    ) => {}
-                    () = hotpath::future!(
-                        tokio::time::sleep(retry_delay),
-                        label = "daemon.scheduler.session_temporal.retry_wait"
-                    ) => {}
+                    () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.retry_cancel")) => return,
+                    () = tracing::Instrument::instrument(state.wake.notified(), tracing::trace_span!("daemon.scheduler.session_temporal.wake_wait")) => {}
+                    () = tracing::Instrument::instrument(tokio::time::sleep(retry_delay), tracing::trace_span!("daemon.scheduler.session_temporal.retry_wait")) => {}
                 }
             } else if history_needs_another_pass {
                 state.mark_running();
@@ -557,18 +531,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 } else if let Some(delay) = summary_retry_delay {
                     state.requeue_projection();
                     tokio::select! {
-                        () = hotpath::future!(
-                            state.wait_for_cancellation(),
-                            label = "daemon.scheduler.lcm_summary.retry_cancel"
-                        ) => return,
-                        () = hotpath::future!(
-                            state.wake.notified(),
-                            label = "daemon.scheduler.lcm_summary.retry_wake"
-                        ) => {}
-                        () = hotpath::future!(
-                            tokio::time::sleep(delay),
-                            label = "daemon.scheduler.lcm_summary.retry_wait"
-                        ) => {}
+                        () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_cancel")) => return,
+                        () = tracing::Instrument::instrument(state.wake.notified(), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_wake")) => {}
+                        () = tracing::Instrument::instrument(tokio::time::sleep(delay), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_wait")) => {}
                     }
                 }
             }
@@ -576,9 +541,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         state.observe_quiescence();
         state.mark_worker_idle();
         state.idle.notify_waiters();
-        let wake = hotpath::future!(
+        let wake = tracing::Instrument::instrument(
             state.wake.notified(),
-            label = "daemon.scheduler.session_temporal.wake_wait"
+            tracing::trace_span!("daemon.scheduler.session_temporal.wake_wait"),
         );
         if state.has_pending_work() {
             continue;
@@ -592,25 +557,16 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
         };
         tokio::select! {
-            () = hotpath::future!(
-                state.wait_for_cancellation(),
-                label = "daemon.scheduler.session_temporal.idle_cancel"
-            ) => return,
+            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
             () = wake => {}
-            () = hotpath::future!(
-                release,
-                label = "daemon.scheduler.session_temporal.history_release_wait"
-            ) => {
+            () = tracing::Instrument::instrument(release, tracing::trace_span!("daemon.scheduler.session_temporal.history_release_wait")) => {
                 state.update_history_retry_state(false);
                 state.wake_history();
             }
             // Discovery of new sources, and the retry of a refusal nothing
             // signals (a still-mounting authority, an undecidable source),
             // share this cadence. Unchanged sources cost it no reads.
-            () = hotpath::future!(
-                tokio::time::sleep(HISTORY_IDLE_RECHECK_INTERVAL),
-                label = "daemon.scheduler.session_temporal.history_idle_wait"
-            ) => {
+            () = tracing::Instrument::instrument(tokio::time::sleep(HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
                 state.update_history_retry_state(false);
                 if history
                     .read()
@@ -630,7 +586,6 @@ struct SessionTemporalRefreshWorkerInstrumentation<'a> {
 
 impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
     fn new(state: &'a SessionTemporalRefreshWakeState) -> Self {
-        hotpath::gauge!("session_temporal_refresh_workers_active").inc(1.0);
         Self { state }
     }
 }
@@ -638,65 +593,11 @@ impl<'a> SessionTemporalRefreshWorkerInstrumentation<'a> {
 impl Drop for SessionTemporalRefreshWorkerInstrumentation<'_> {
     fn drop(&mut self) {
         stop_worker(self.state);
-        hotpath::gauge!("session_temporal_refresh_workers_active").inc(-1.0);
     }
 }
 
 fn stop_worker(state: &SessionTemporalRefreshWakeState) {
     state.clear_worker_activity_instrumentation();
-}
-
-macro_rules! increment_outcome {
-    ($key:literal, $count:expr) => {{
-        let count = $count;
-        if count > 0 {
-            hotpath::gauge!($key).inc(count.min(u32::MAX as usize) as f64);
-        }
-    }};
-}
-
-fn observe_pass_report(report: &SessionTemporalRefreshPassReport, no_progress_retry: bool) {
-    hotpath::gauge!("session_temporal_refresh_passes").inc(1.0);
-    if no_progress_retry {
-        hotpath::gauge!("session_temporal_refresh_no_progress_passes").inc(1.0);
-    }
-    increment_outcome!("session_temporal_refresh_begun", report.begun);
-    increment_outcome!("session_temporal_refresh_joined", report.joined);
-    increment_outcome!(
-        "session_temporal_refresh_projected_batches",
-        report.projected_batches
-    );
-    increment_outcome!("session_temporal_refresh_completed", report.completed);
-    increment_outcome!("session_temporal_refresh_failed", report.failed);
-    increment_outcome!("session_temporal_refresh_cancelled", report.cancelled);
-    increment_outcome!("session_temporal_refresh_deferred", report.deferred);
-    increment_outcome!(
-        "session_temporal_refresh_retryable_errors",
-        report.retryable_errors
-    );
-    increment_outcome!(
-        "session_temporal_refresh_terminal_errors",
-        report.terminal_errors
-    );
-    increment_outcome!(
-        "session_temporal_refresh_deadline_errors",
-        report.deadline_errors
-    );
-}
-
-fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
-    match class {
-        SessionTemporalRefreshRetryClass::Storage => {
-            hotpath::gauge!("session_temporal_refresh_storage_retries").inc(1.0);
-        }
-        SessionTemporalRefreshRetryClass::Projector => {
-            hotpath::gauge!("session_temporal_refresh_projector_retries").inc(1.0);
-        }
-        SessionTemporalRefreshRetryClass::Deadline => {
-            hotpath::gauge!("session_temporal_refresh_deadline_retries").inc(1.0);
-        }
-    }
-    hotpath::gauge!("session_temporal_refresh_last_retry_attempt").set(attempt);
 }
 
 /// Runs one historical ingest pass under the daemon-wide bounded admission.
@@ -719,7 +620,6 @@ async fn session_history_refresh(
     match history {
         Some(history) => {
             let Ok(_permit) = admission.try_acquire() else {
-                hotpath::gauge!("session_temporal_refresh_history_admission_deferrals").inc(1.0);
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
                         reason_code: HISTORY_ADMISSION_SATURATED_REASON,
@@ -824,9 +724,10 @@ pub async fn process_refresh_begin_requests(
     report.saturated |= state.has_requests();
 }
 
-#[hotpath::measure(
-    label = "daemon.scheduler.session_temporal.begin_admitted",
-    future = true
+#[tracing::instrument(
+    name = "daemon.scheduler.session_temporal.begin_admitted",
+    level = "trace",
+    skip_all
 )]
 pub async fn begin_admitted_session_refreshes(
     database: &RegisteredGlobalDb,
@@ -1096,22 +997,19 @@ async fn project_running_refresh(
     report: &mut SessionTemporalRefreshPassReport,
 ) {
     let deadline_at = tokio::time::Instant::now() + policy.operation_deadline;
-    let projection = hotpath::future!(
+    let projection = tracing::Instrument::instrument(
         projector.project(database, recovery.clone()),
-        label = "daemon.scheduler.session_temporal.projector"
+        tracing::trace_span!("daemon.scheduler.session_temporal.projector"),
     );
     tokio::pin!(projection);
-    let deadline = hotpath::future!(
+    let deadline = tracing::Instrument::instrument(
         tokio::time::sleep_until(deadline_at),
-        label = "daemon.scheduler.session_temporal.projector_deadline"
+        tracing::trace_span!("daemon.scheduler.session_temporal.projector_deadline"),
     );
     tokio::pin!(deadline);
     let effect = tokio::select! {
         biased;
-        () = hotpath::future!(
-            state.wait_for_cancellation(),
-            label = "daemon.scheduler.session_temporal.projector_cancel"
-        ) => return,
+        () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.projector_cancel")) => return,
         () = &mut deadline => {
             report.last_error = Some("projector_deadline_exceeded".to_string());
             report.deadline_errors += 1;
@@ -1144,10 +1042,7 @@ async fn project_running_refresh(
     // pass never recorded progress because the batch itself had not committed.
     tokio::select! {
         biased;
-        () = hotpath::future!(
-            state.wait_for_cancellation(),
-            label = "daemon.scheduler.session_temporal.effect_apply_cancel"
-        ) => {}
+        () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.effect_apply_cancel")) => {}
         () = apply_refresh_effect(store, state, recovery, effect, report) => {}
     }
 }

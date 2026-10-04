@@ -129,17 +129,13 @@ fn conflict_problem() -> Value {
 }
 
 fn schema_refusal_message(response: &Value) -> Value {
-    assert!(
-        response.get("result").is_none(),
-        "schema refusals are JSON-RPC errors, not tool results: {response}"
-    );
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], json!(1), "{response}");
-    response["error"].clone()
+    crate::support::route_refusal(response)
 }
 
 fn schema_refusal(detail: &str) -> Value {
-    application_invalid_request_error("tracedecay_fact_feedback", detail)
+    application_invalid_request_error(detail)
 }
 
 fn assert_stored_identity(fact: &Value, fact_id: &Value, project_id: &Value, trust: u64) {

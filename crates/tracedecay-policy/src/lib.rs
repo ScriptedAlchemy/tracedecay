@@ -7,8 +7,6 @@
 
 #![forbid(unsafe_code)]
 
-mod hotpath_observe;
-
 pub mod analyzer;
 pub mod configuration;
 pub mod curation;

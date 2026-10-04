@@ -26,7 +26,6 @@ members = [
     "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
-    "crates/tracedecay-hotpath-guard",
     "crates/tracedecay-lcm",
     "crates/tracedecay-lsp",
     "crates/tracedecay-maintenance",
@@ -53,7 +52,6 @@ members = [
     "crates/tracedecay-application",
 ]
 exclude = [
-    "vendor/hotpath-macros",
     ".worktrees",
     ".codex-worktrees",
 ]
@@ -64,33 +62,27 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "1.0.0-beta.66"
+version = "1.0.0-beta.67"
 
 [workspace.dependencies]
-# Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
-# the macros must always resolve, and with no profiling feature selected the
-# crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
-# explicit feature-off comparison build carries no measurable profiler weight.
-# Backend selection (`hotpath/hotpath`, `-alloc`, `-cpu`, `-mcp`) lives on the
-# roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
-# build across the graph, so no member needs a feature just to be measured.
-hotpath = { version = "0.24", default-features = false, features = ["threads"] }
-# grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, branch
-# perf/compact-direct-build). The published crates carry a tiered-storage
+# grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
+# published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an
 # epoch near 32 Ki node records and then panics. The fork spans epochs across
 # chunks, types the exhaustion and oversize errors, fixes compact, overlay,
 # close, and WAL recovery correctness, and adds the direct compact build
 # (`IncrementalCompactStoreBuilder` + `GrafeoDB::write_compact_container`)
 # and in-place, page-verified sealed sections that sealed generation stores
-# are built and reopened with. The fork's workspace resolves sibling crates
+# are built and reopened with. Its `memory_usage()` also counts the catalog,
+# empty property-index shards and plan-cache tables, which the serving graph
+# heap charge reads. The fork's workspace resolves sibling crates
 # by path, so all five crates must name the same `rev`; mixed revisions build
 # type-incompatible instances.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "8dd5e85990581bead93dba4b17aaa15c36069319", default-features = false, features = ["algos"] }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "8dd5e85990581bead93dba4b17aaa15c36069319", default-features = false }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "8dd5e85990581bead93dba4b17aaa15c36069319", default-features = false, features = ["lpg"] }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "8dd5e85990581bead93dba4b17aaa15c36069319", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "8dd5e85990581bead93dba4b17aaa15c36069319", default-features = false, features = ["wal"] }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["algos"] }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["lpg"] }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
@@ -218,6 +210,4 @@ opt-level = 3
 # `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
-# Keep profiled async bodies in one frame; see vendor/hotpath-macros/PATCH.md.
-hotpath-macros = { path = "vendor/hotpath-macros" }
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }

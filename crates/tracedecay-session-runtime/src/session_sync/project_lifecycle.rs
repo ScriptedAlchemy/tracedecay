@@ -105,7 +105,6 @@ impl DaemonSessionSyncService {
         )
     }
 
-    #[hotpath::skip]
     async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -284,7 +283,6 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
-    #[hotpath::skip]
     pub async fn register_project(
         &self,
         config: DaemonSessionSyncConfig,
@@ -376,7 +374,6 @@ impl DaemonSessionSyncService {
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn schedule_startup_import(
         &self,
         context: &Arc<SessionSyncProjectContext>,
@@ -432,7 +429,7 @@ impl DaemonSessionSyncService {
         match outcome {
             SessionSyncOutcomeV1::Accepted(_)
             | SessionSyncOutcomeV1::Joined(_)
-            | SessionSyncOutcomeV1::Complete(_) => Ok(()),
+            | SessionSyncOutcomeV1::Complete { .. } => Ok(()),
             SessionSyncOutcomeV1::Unavailable { reason_code }
                 if reason_code == SESSION_INGEST_DISABLED_REASON_V1 =>
             {
@@ -461,7 +458,11 @@ impl DaemonSessionSyncService {
             .cloned()
     }
 
-    #[hotpath::measure(label = "daemon.session_sync.lifecycle.execute_request", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_sync.lifecycle.execute_request",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn execute_request(
         &self,
         request: SessionSyncRequestV1,
@@ -480,7 +481,6 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn retire_project(
         &self,
         profile_id: &UserProfileId,
@@ -508,7 +508,6 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
-    #[hotpath::skip]
     pub async fn rebind_project(
         &self,
         profile_id: &UserProfileId,
@@ -542,7 +541,6 @@ impl DaemonSessionSyncService {
         Ok(true)
     }
 
-    #[hotpath::skip]
     async fn drain_project_tasks(&self, scope: &SessionSyncScopeV1) -> Result<(), String> {
         let mut project_tasks = {
             let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -616,7 +614,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn restore_previous_context(
         &self,
         scope: &SessionSyncScopeV1,

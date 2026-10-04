@@ -41,7 +41,6 @@ impl WindowsPackageId {
         }
     }
 
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Stable => "tracedecay",
@@ -49,7 +48,6 @@ impl WindowsPackageId {
         }
     }
 
-    #[hotpath::skip]
     const fn task_name_prefix(self) -> &'static str {
         match self {
             Self::Stable => TASK_NAME_PREFIX,
@@ -283,7 +281,6 @@ impl ScoopServiceState {
         Ok(())
     }
 
-    #[hotpath::skip]
     const fn desired_state(&self) -> DaemonServiceState {
         match (self.running, self.enabled) {
             (true, true) => DaemonServiceState::RunningEnabled,

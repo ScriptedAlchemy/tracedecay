@@ -166,6 +166,7 @@ impl IdentityIndexCache {
         let Some(index) = build_identity_index(database, scope, cancellation)? else {
             return Ok(None);
         };
+        crate::runtime::ensure_intact(database)?;
         let index = Arc::new(index);
 
         let mut entries = self
@@ -202,7 +203,11 @@ impl IdentityIndexCache {
     }
 }
 
-#[hotpath::measure(label = "graph_db.projection.identity_index.build")]
+#[tracing::instrument(
+    name = "graph_db.projection.identity_index.build",
+    level = "trace",
+    skip_all
+)]
 fn build_identity_index(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,

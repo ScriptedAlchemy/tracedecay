@@ -261,7 +261,7 @@ where
         })
     }
 
-    #[hotpath::measure(label = "usecases.feedback.invoke", future = true)]
+    #[tracing::instrument(name = "usecases.feedback.invoke", level = "trace", skip_all)]
     async fn invoke_resolved(
         &self,
         operation: FeedbackReadOperationV1,

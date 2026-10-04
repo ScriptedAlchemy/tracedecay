@@ -1,7 +1,7 @@
 //! Hermetic process fixture for production MCP server construction.
 //!
 //! This intentionally stops before listener binding or RMCP traffic. Wrap the
-//! built executable with `scripts/profile-hotpath-os-counters.sh` to measure
+//! built executable to measure
 //! no-RMCP project-open wall time, retained RSS, and high-water memory without
 //! shifting lazy global dispatch-catalog construction onto this lifecycle.
 

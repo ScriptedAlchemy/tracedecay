@@ -1132,9 +1132,7 @@ pub fn remove_result(
             })
         }
         (false, None, None) if !outcome.commit_replayed() => {
-            Ok(FactStoreRemoveResultV1::NotFound {
-                remaining_fact_count: outcome.remaining_fact_count(),
-            })
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
         }
         _ => Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the fact remove outcome had an inconsistent receipt shape",
@@ -1163,7 +1161,9 @@ pub fn supersede_result(
             fact_id: fact_id.clone(),
             superseded_by: superseded_by.clone(),
         }),
-        ProjectMemoryFactSupersedeOutcomeV1::NotFound => Ok(FactStoreSupersedeResultV1::NotFound),
+        ProjectMemoryFactSupersedeOutcomeV1::NotFound => {
+            Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+        }
     }
 }
 

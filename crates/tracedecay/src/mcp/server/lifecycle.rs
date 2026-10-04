@@ -99,14 +99,12 @@ impl McpServer {
         self.project_server_lifecycle.revoke();
     }
 
-    #[hotpath::skip]
     pub(crate) async fn revoke_project_server_responses_after_drain(&self) {
         self.project_server_lifecycle
             .revoke_after_request_drain()
             .await;
     }
 
-    #[hotpath::skip]
     pub(crate) async fn wait_for_project_server_request_drain(&self) {
         self.project_server_lifecycle.wait_for_request_drain().await;
     }
@@ -125,7 +123,11 @@ impl McpServer {
     }
 
     /// Shutdown-side teardown of the startup index-sync phase.
-    #[hotpath::measure(label = "mcp.server.startup_catch_up.shutdown", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.startup_catch_up.shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
@@ -153,7 +155,6 @@ impl McpServer {
     /// If reopening fails the previous instance is kept, the effect-time
     /// branch identity check in the hook writer and
     /// [`Self::maybe_sync_if_stale`] still protect writes.
-    #[hotpath::skip]
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -162,7 +163,11 @@ impl McpServer {
     /// hands back this request's single branch resolution, so the rest of the
     /// request reads the live branch from the memo instead of re-opening the
     /// repository. The memo is request-scoped and never retained.
-    #[hotpath::measure(label = "mcp.server.branch_drift_reopen_memoized", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.branch_drift_reopen_memoized",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn reopen_if_branch_drifted_memoized(
         &self,
     ) -> (Arc<TraceDecay>, tracedecay_runtime_core::branch::BranchMemo) {
@@ -242,7 +247,6 @@ impl McpServer {
     /// Reopens do not block requests, so tests (and any caller that genuinely
     /// needs the post-swap state rather than an answer) observe completion here.
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
@@ -270,7 +274,7 @@ impl McpServer {
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
-    #[hotpath::measure(label = "mcp.server.startup_catch_up", future = true)]
+    #[tracing::instrument(name = "mcp.server.startup_catch_up", level = "trace", skip_all)]
     pub async fn run_startup_catch_up_sync(&self) {
         self.startup_catch_up.begin_sync();
 
@@ -315,7 +319,6 @@ impl McpServer {
     }
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
-    #[hotpath::skip]
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
@@ -347,7 +350,7 @@ impl McpServer {
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
-    #[hotpath::measure(label = "mcp.server.sync_if_stale", future = true)]
+    #[tracing::instrument(name = "mcp.server.sync_if_stale", level = "trace", skip_all)]
     pub async fn maybe_sync_if_stale(&self) {
         if !self.background_tasks.admits() {
             return;
@@ -526,7 +529,7 @@ impl McpServer {
     /// contract) and on a refused spawn during shutdown.
     fn spawn_version_refresh(&self) {
         let server = self.dispatch_authority.server();
-        let spawned = self.spawn_background_task(hotpath::future!(
+        let spawned = self.spawn_background_task(tracing::Instrument::instrument(
             async move {
                 let latest = match tokio::task::spawn_blocking(
                     tracedecay_dashboard_api::cloud::fetch_latest_version,
@@ -549,7 +552,7 @@ impl McpServer {
                     cache.refreshing = false;
                 }
             },
-            label = "mcp.server.version_refresh"
+            tracing::trace_span!("mcp.server.version_refresh"),
         ));
         if !spawned && let Ok(mut cache) = self.version_cache.lock() {
             cache.refreshing = false;

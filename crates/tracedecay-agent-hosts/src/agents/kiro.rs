@@ -210,7 +210,7 @@ impl AgentIntegration for KiroIntegration {
         true
     }
 
-    #[hotpath::measure(label = "kiro_project_install")]
+    #[tracing::instrument(name = "kiro_project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -284,7 +284,7 @@ impl AgentIntegration for KiroIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        dc.section("Kiro integration");
         let host_home = kiro_home(&ctx.home);
         match kiro_doctor_installation_state(&ctx.home) {
             Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
@@ -483,7 +483,7 @@ fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
 /// Returns true when tracedecay owns the resulting agent file. A pre-existing
 /// user-managed `tracedecay.json` is preserved and returns false so the default
 /// agent selector is not pointed at a file whose policy tracedecay does not own.
-#[hotpath::measure(label = "kiro_agent_install")]
+#[tracing::instrument(name = "kiro_agent_install", level = "trace", skip_all)]
 fn install_managed_agent(
     path: &Path,
     tracedecay_bin: &str,

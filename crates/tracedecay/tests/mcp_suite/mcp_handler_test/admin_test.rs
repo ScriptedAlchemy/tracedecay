@@ -681,25 +681,10 @@ async fn storage_status_reports_admitted_page_math_and_rejects_unknown_fields() 
         json!({"not_a_storage_field": true}),
     )
     .await;
-    assert_eq!(rejected["error"]["code"], json!(-32602));
     assert_eq!(
-        rejected["error"]["data"]["tool"],
-        json!("tracedecay_storage_status")
-    );
-    assert_eq!(
-        rejected["error"]["data"]["reason_code"],
-        json!("application_surface_invalid_request")
-    );
-    assert_eq!(rejected["error"]["data"]["kind"], json!("invalid_request"));
-    assert_eq!(
-        rejected["error"]["data"]["code"],
-        json!("application_surface_invalid_request")
-    );
-    assert_eq!(rejected["error"]["data"]["retryable"], json!(false));
-    assert_eq!(
-        rejected["error"]["data"]["detail"],
-        json!(
-            "application surface request does not match its reviewed schema: unknown field `not_a_storage_field`, expected `include_details`"
+        crate::support::route_refusal(&rejected),
+        crate::support::application_invalid_request_error(
+            "unknown field `not_a_storage_field`, expected `include_details`"
         )
     );
     fixture.harness.shutdown().await;

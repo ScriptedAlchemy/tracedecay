@@ -206,7 +206,11 @@ impl CodeIndexSchedulerRegistryV1 {
             .and_then(|(_, worktree)| worktree.index_observability.get().cloned())
     }
 
-    #[hotpath::measure(label = "daemon.code_index.registry.query_authority", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.registry.query_authority",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,

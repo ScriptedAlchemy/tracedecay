@@ -89,9 +89,6 @@ pub fn tool_dispatch_deadline_error(
     tool_name: &str,
     budget: std::time::Duration,
 ) -> TraceDecayError {
-    // A firing ceiling is a defect signal upstream; count every occurrence so
-    // profiling sees the refusals, not only the successful dispatches.
-    hotpath::gauge!("mcp.tool_call.dispatch_deadline_total").inc(1_u64);
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,

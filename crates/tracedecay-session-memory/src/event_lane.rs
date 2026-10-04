@@ -41,7 +41,6 @@ pub enum ActivityFamilyV1 {
 }
 
 impl ActivityFamilyV1 {
-    #[hotpath::skip]
     pub const fn stream_name(self) -> &'static str {
         match self {
             Self::Hook => "hook_activity",
@@ -52,7 +51,6 @@ impl ActivityFamilyV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn observation_label(self) -> &'static str {
         match self {
             Self::Hook => "hook",
@@ -266,7 +264,7 @@ fn mcp_dispatch_envelope(
 /// observability authority. The caller receives a typed storage failure and
 /// must not change the already-determined MCP terminal response because
 /// telemetry persistence failed.
-#[hotpath::measure(label = "usecases.event_lane.record", future = true)]
+#[tracing::instrument(name = "usecases.event_lane.record", level = "trace", skip_all)]
 pub async fn record_observability(
     db: &RegisteredGlobalDb,
     envelope: tracedecay_domain::ObservabilityEnvelopeV1,
@@ -345,16 +343,6 @@ pub async fn publish(
     };
     let bus = live_bus();
     let _ = bus.send(record);
-    observe_publish(bus.len(), bus.receiver_count());
-}
-
-/// Live activity bus state after one publish: queued records not yet seen by
-/// the slowest subscriber, and the current subscriber count. Keys are static
-/// capability names; every gauge is a no-op unless `hotpath` is selected.
-#[inline]
-fn observe_publish(queue_depth: usize, subscribers: usize) {
-    hotpath::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    hotpath::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
 }
 
 pub async fn replay_after(

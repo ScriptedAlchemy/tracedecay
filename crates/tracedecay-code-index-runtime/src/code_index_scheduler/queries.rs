@@ -35,11 +35,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, FileOccurrenceId,
-    FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, ExactFieldV1,
+    FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -84,51 +85,16 @@ enum GenerationResolutionSettlementV1<T> {
     Terminated(code_search::CodeIndexSearchUnavailableReasonV1),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GenerationResolutionTerminalV1 {
-    Ready,
-    Unavailable,
-    Failed,
-}
-
-fn finish_generation_resolution_with<T>(
+fn finish_generation_resolution<T>(
     settlement: GenerationResolutionSettlementV1<T>,
-    observe: impl FnOnce(GenerationResolutionTerminalV1),
 ) -> GenerationResolutionResultV1<T> {
-    let result = match settlement {
+    match settlement {
         GenerationResolutionSettlementV1::Completed(result) => result,
         GenerationResolutionSettlementV1::JoinFailed => {
             Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal)
         }
         GenerationResolutionSettlementV1::Terminated(reason) => Err(reason),
-    };
-    observe(match &result {
-        Ok(Some(_)) => GenerationResolutionTerminalV1::Ready,
-        Ok(None) => GenerationResolutionTerminalV1::Unavailable,
-        Err(_) => GenerationResolutionTerminalV1::Failed,
-    });
-    result
-}
-
-fn finish_generation_resolution<T>(
-    settlement: GenerationResolutionSettlementV1<T>,
-) -> GenerationResolutionResultV1<T> {
-    finish_generation_resolution_with(settlement, |terminal| {
-        #[cfg(feature = "hotpath")]
-        match terminal {
-            GenerationResolutionTerminalV1::Ready => {
-                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Unavailable => {
-                hotpath::gauge!("query.generation.resolve.outcome.unavailable_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Failed => {
-                hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
-            }
-        }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = terminal;
-    })
+    }
 }
 
 /// Validated once per process. Live query pages and the unavailable
@@ -217,7 +183,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "query.generation.resolve")]
+    #[tracing::instrument(name = "query.generation.resolve", level = "trace", skip_all)]
     pub async fn generation_for_controlled(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -225,8 +191,6 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -271,29 +235,34 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
                 return Ok(Some(generation));
             }
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
-            let scheduler = hotpath::measure_block!("query.generation.resolve.scheduler_wait", {
-                scheduler
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            });
-            let generation = hotpath::measure_block!("query.generation.resolve.load", {
-                scheduler
-                    .generation(&generation_id)
-                    .map_err(|error| match error {
+
+            let scheduler = {
+                let _span =
+                    tracing::trace_span!("query.generation.resolve.scheduler_wait").entered();
+                {
+                    scheduler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
+            };
+            let generation =
+                {
+                    let _span = tracing::trace_span!("query.generation.resolve.load").entered();
+                    {
+                        scheduler.generation(&generation_id).map_err(|error| {
+                            match error {
                         super::CodeIndexSchedulerErrorV1::Production(
                             crate::code_index::production::CodeIndexProductionErrorV1::Publication(
                                 error,
                             ),
                         ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
                         _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    })
-            })?;
+                    }
+                        })
+                    }
+                }?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
         let settlement = match crate::ports::park_admission(
@@ -2374,23 +2343,32 @@ fn disclose_unresolved_calls<T>(
     outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
     unresolved: &UnresolvedCallerGapsV1,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let reasons = unresolved
+        .exact_target_unavailable
+        .then_some(OmissionReason::Unsupported)
+        .into_iter()
+        .chain(
+            (!unresolved.unmodeled_imports.is_empty()).then_some(OmissionReason::ImportUnmodeled),
+        );
+    disclose_symbol_omissions(outcome, reasons)
+}
+
+/// Marks an answer partial with one symbol omission per reason, when there
+/// is any reason.
+fn disclose_symbol_omissions<T>(
+    outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
+    reasons: impl IntoIterator<Item = OmissionReason>,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let mut reasons = reasons.into_iter().peekable();
     match outcome {
         RetrievalPortOutcome::Completed(mut evidence)
         | RetrievalPortOutcome::Partial(mut evidence)
-            if !unresolved.is_empty() =>
+            if reasons.peek().is_some() =>
         {
             evidence.coverage.completeness = CoverageCompleteness::Partial;
             for domain in &mut evidence.coverage.domains {
                 domain.completeness = CoverageCompleteness::Partial;
             }
-            let reasons = unresolved
-                .exact_target_unavailable
-                .then_some(OmissionReason::Unsupported)
-                .into_iter()
-                .chain(
-                    (!unresolved.unmodeled_imports.is_empty())
-                        .then_some(OmissionReason::ImportUnmodeled),
-                );
             evidence.omissions.extend(reasons.map(|reason| Omission {
                 domain: EvidenceDomain::Symbol,
                 count: 1,
@@ -2402,7 +2380,7 @@ fn disclose_unresolved_calls<T>(
     }
 }
 
-#[hotpath::measure(label = "query.graph.relation_keys")]
+#[tracing::instrument(name = "query.graph.relation_keys", level = "trace", skip_all)]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
@@ -2496,7 +2474,7 @@ fn graph_relation_keys(
     Ok(GraphRelationKeysV1 { keys, complete })
 }
 
-#[hotpath::measure(label = "query.graph.relation_hydrate")]
+#[tracing::instrument(name = "query.graph.relation_hydrate", level = "trace", skip_all)]
 fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],
@@ -2760,6 +2738,7 @@ fn execute_prepared_exact_query(
     let exact_control = CallableRetrievalExecutionControl::for_request(context.request);
     let lane_request = ExactLaneRequest {
         literals: authority.parse_literals(&query_view, base),
+        path_prefix: request.scope.path_prefix.as_deref(),
         generation: served_generation.clone(),
         budget: base.budget,
         base: base.clone(),
@@ -2778,16 +2757,33 @@ fn execute_prepared_exact_query(
     else {
         return unavailable_for_generation(finished_at, served_generation);
     };
+    // Identifier terms are minted only from definition names, so a complete
+    // lane read still omits every use of the identifier.
+    let definitions_only = lane_request
+        .literals
+        .iter()
+        .any(|literal| literal.field == ExactFieldV1::Identifier);
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
-                native_context.exact(outcome, &request.literal, request.kind, |path| {
+                native_context.exact(outcome, &lane_request.literals, request.kind, |path| {
                     path_is_in_code_query_scope(path, &request.scope)
                 })
             else {
                 return unavailable(finished_at);
             };
-            outcome
+            match outcome {
+                NativeLaneOutcomeV1::Complete(page) if definitions_only => {
+                    NativeLaneOutcomeV1::Partial {
+                        page,
+                        reason: RetrievalFailure::IncompatibleProjection {
+                            detail: "exact projection indexes identifier definitions, not uses"
+                                .to_owned(),
+                        },
+                    }
+                }
+                outcome => outcome,
+            }
         }
         Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
         Err(_) => return unavailable(finished_at),
@@ -2886,6 +2882,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                         })
                         .collect(),
                 ),
+                path_prefix: request.scope.path_prefix.as_deref(),
                 fuzzy_budget: request.fuzzy_budget,
                 lexical_profile_revision: ComponentRevision::new(
                     tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
@@ -3266,6 +3263,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 targets.truncate(cap);
                 complete = false;
             }
+            let interfaces = targets
+                .iter()
+                .map(|target| target.occurrence.clone())
+                .collect::<Vec<_>>();
+            let Ok(undecided) = prepared
+                .reader
+                .has_undecided_implementors(&interfaces, Arc::clone(&cancellation))
+            else {
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
+            };
             let mut keys = Vec::new();
             for target in targets {
                 if keys.len() >= cap {
@@ -3292,16 +3299,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 keys.truncate(cap);
                 complete = false;
             }
-            finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_implementations",
-                binding,
-                keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "implementations",
-                complete,
+            disclose_symbol_omissions(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_implementations",
+                    binding,
+                    keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "implementations",
+                    complete,
+                ),
+                undecided.then_some(OmissionReason::Unsupported),
             )
         })
     }
@@ -4028,7 +4038,7 @@ mod tests {
             .expect("real mounted artifact admission");
         let active = registry.exact_occurrence(port_context, &request).await;
         assert!(
-            matches!(active, RetrievalPortOutcome::Completed(_)),
+            matches!(&active, RetrievalPortOutcome::Partial(evidence) if evidence.payload.is_some()),
             "{active:?}"
         );
 
@@ -4064,6 +4074,340 @@ mod tests {
             CancellationStage::DuringRead
         );
         registry.shutdown().await;
+    }
+
+    async fn exact_occurrences(
+        files: &[(&str, &str)],
+        literal: &str,
+        path_prefix: Option<&str>,
+    ) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
+        let fixture = GitFixture::new(files);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation = callable_code_operation(CallableCodeOperationKind::ExactOccurrence)
+            .expect("exact operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let request = ExactOccurrenceRequest::new(
+            literal,
+            None,
+            CodeQueryScope::new(generation, path_prefix.map(str::to_owned))
+                .expect("exact generation scope"),
+            query_meta(),
+        )
+        .expect("exact request");
+        let outcome = registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await;
+        registry.shutdown().await;
+        outcome
+    }
+
+    #[tokio::test]
+    async fn exact_identifier_definition_only_page_is_not_complete() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "src/lib.rs",
+                    "mod user;\npub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                ),
+                (
+                    "src/user.rs",
+                    "use crate::shared_probe_target;\n\
+                     pub fn remote_caller() { shared_probe_target(); }\n",
+                ),
+            ],
+            "shared_probe_target",
+            None,
+        )
+        .await;
+        let (RetrievalPortOutcome::Completed(evidence) | RetrievalPortOutcome::Partial(evidence)) =
+            &outcome
+        else {
+            panic!("an exact read over a sealed generation must answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(
+            !page.items.is_empty(),
+            "the definition must match: {page:?}"
+        );
+        // The exact projection indexes identifier definitions only, so the
+        // uses in both files can never be on the page.
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Partial,
+            "a definitions-only page must not claim complete coverage: {evidence:?}"
+        );
+        assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+    }
+
+    #[tokio::test]
+    async fn prefixed_identifier_exact_reads_return_the_definition_as_partial() {
+        for literal in [
+            "identifier:shared_probe_target",
+            "id:shared_probe_target",
+            "symbol:shared_probe_target",
+        ] {
+            let outcome = exact_occurrences(
+                &[(
+                    "src/lib.rs",
+                    "pub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                )],
+                literal,
+                None,
+            )
+            .await;
+            let RetrievalPortOutcome::Partial(evidence) = &outcome else {
+                panic!("`{literal}` reads only identifier definitions: {outcome:?}");
+            };
+            let page = evidence.payload.as_ref().expect("exact page");
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|item| (
+                        item.occurrence.path.as_str(),
+                        item.occurrence.span.start_byte,
+                        item.matched_literal.as_str(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![("src/lib.rs", 0, "shared_probe_target")],
+                "`{literal}` must return the definition once: {page:?}"
+            );
+            assert_eq!(page.total, Some(1), "`{literal}`: {page:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_identifier_read_returns_each_definition_once() {
+        let outcome = exact_occurrences(
+            &[(
+                "src/lib.rs",
+                "pub fn shared_probe_target() {}\n\
+                 pub fn local_caller() { shared_probe_target(); }\n",
+            )],
+            "shared_probe_target",
+            None,
+        )
+        .await;
+        let RetrievalPortOutcome::Partial(evidence) = &outcome else {
+            panic!("a bare identifier reads only definitions: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| (
+                    item.occurrence.path.as_str(),
+                    item.occurrence.span.start_byte,
+                    item.matched_literal.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("src/lib.rs", 0, "shared_probe_target")],
+            "the definition must answer once: {page:?}"
+        );
+        assert_eq!(page.total, Some(1), "{page:?}");
+    }
+
+    #[tokio::test]
+    async fn exact_reads_answer_each_nested_occurrence_once() {
+        let source = "pub struct Probe;\n\
+                      impl Probe {\n    \
+                          pub fn probe_method(&self) {\n        \
+                              run(\"--probe-member-flag\");\n    \
+                          }\n\
+                      }\n\
+                      \n\
+                      pub fn multi_line_target(\n    value: u32,\n) -> u32 {\n    value\n}\n";
+        let start_of = |needle: &str| source.find(needle).expect("fixture needle") as u64;
+        for (literal, owner_start) in [
+            ("probe_method", start_of("pub fn probe_method")),
+            ("--probe-member-flag", start_of("pub fn probe_method")),
+            ("multi_line_target", start_of("pub fn multi_line_target")),
+        ] {
+            let outcome = exact_occurrences(&[("src/lib.rs", source)], literal, None).await;
+            let (RetrievalPortOutcome::Completed(evidence)
+            | RetrievalPortOutcome::Partial(evidence)) = &outcome
+            else {
+                panic!("`{literal}` must answer: {outcome:?}");
+            };
+            let page = evidence.payload.as_ref().expect("exact page");
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|item| item.occurrence.span.start_byte)
+                    .collect::<Vec<_>>(),
+                vec![owner_start],
+                "`{literal}` must answer from its owning chunk once: {page:?}"
+            );
+            assert_eq!(page.total, Some(1), "`{literal}`: {page:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn prefixed_flag_exact_read_is_complete() {
+        let outcome = exact_occurrences(
+            &[(
+                "src/lib.rs",
+                "pub fn runner() { run(\"--probe-prefix-flag\"); }\n",
+            )],
+            "flag:--probe-prefix-flag",
+            None,
+        )
+        .await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("a typed flag read is the whole answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.matched_literal.as_str())
+                .collect::<Vec<_>>(),
+            vec!["--probe-prefix-flag"],
+            "{page:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_counts_only_in_scope_matches() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "a/lib.rs",
+                    "pub fn a_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+                (
+                    "b/lib.rs",
+                    "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+            ],
+            "--probe-scope-flag",
+            Some("b"),
+        )
+        .await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("an in-scope flag match is the whole scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        let in_scope = page.items.len() as u64;
+        assert_eq!(page.total, Some(in_scope));
+        assert_eq!(evidence.coverage.eligible, Some(in_scope));
+        assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_finds_matches_ranked_past_the_lane_cap() {
+        let mut files = (0..64)
+            .map(|index| {
+                (
+                    format!("a/m{index}.rs"),
+                    format!("pub fn a_runner_{index}() {{ run(\"--probe-scope-flag\"); }}\n"),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((
+            "b/lib.rs".to_owned(),
+            "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n".to_owned(),
+        ));
+        let files = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let outcome = exact_occurrences(&files, "--probe-scope-flag", Some("b")).await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("out-of-scope matches must not crowd out the scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        assert_eq!(page.total, Some(page.items.len() as u64));
+    }
+
+    #[tokio::test]
+    async fn phrase_path_scope_finds_matches_ranked_past_the_lane_cap() {
+        let mut files = (0..64)
+            .map(|index| {
+                (
+                    format!("a/m{index}.rs"),
+                    format!(
+                        "pub fn a_runner_{index}() {{ scoped_probe_phrase(); scoped_probe_phrase(); }}\n"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push((
+            "b/lib.rs".to_owned(),
+            "pub fn b_runner() { scoped_probe_phrase(); }\n".to_owned(),
+        ));
+        let files = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let fixture = GitFixture::new(&files);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation =
+            callable_code_operation(CallableCodeOperationKind::PhraseSearch).expect("operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+            "scoped_probe_phrase",
+            callable_query_sanitizer_revision(),
+            callable_query_normalization_revision(),
+        )
+        .expect("query");
+        let request = PhraseSearchRequest::new(
+            query,
+            vec!["scoped_probe_phrase".to_owned()],
+            Vec::new(),
+            0,
+            CodeQueryScope::new(generation, Some("b".to_owned())).expect("phrase scope"),
+            query_meta(),
+        )
+        .expect("phrase request");
+        let outcome = registry
+            .phrase_search(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await;
+        registry.shutdown().await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("out-of-scope matches must not crowd out the scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("phrase page");
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
     }
 
     #[test]
@@ -4116,7 +4460,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_resolution_terminal_projection_records_exactly_one_outcome() {
+    fn generation_resolution_settlement_maps_to_one_result() {
         use code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
         let cases = [
@@ -4124,47 +4468,40 @@ mod tests {
                 "serving hit",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("serving"))),
                 Ok(Some("serving")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "durable ready",
                 GenerationResolutionSettlementV1::Completed(Ok(Some("durable"))),
                 Ok(Some("durable")),
-                GenerationResolutionTerminalV1::Ready,
             ),
             (
                 "unavailable",
                 GenerationResolutionSettlementV1::Completed(Ok(None)),
                 Ok(None),
-                GenerationResolutionTerminalV1::Unavailable,
             ),
             (
                 "generation error",
                 GenerationResolutionSettlementV1::Completed(Err(Reason::GenerationUnavailable)),
                 Err(Reason::GenerationUnavailable),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "cancellation",
                 GenerationResolutionSettlementV1::Terminated(Reason::Cancelled),
                 Err(Reason::Cancelled),
-                GenerationResolutionTerminalV1::Failed,
             ),
             (
                 "join error",
                 GenerationResolutionSettlementV1::JoinFailed,
                 Err(Reason::Internal),
-                GenerationResolutionTerminalV1::Failed,
             ),
         ];
 
-        for (label, settlement, expected_result, expected_terminal) in cases {
-            let mut terminals = Vec::new();
-            let result = finish_generation_resolution_with(settlement, |terminal| {
-                terminals.push(terminal);
-            });
-            assert_eq!(result, expected_result, "{label}");
-            assert_eq!(terminals, vec![expected_terminal], "{label}");
+        for (label, settlement, expected_result) in cases {
+            assert_eq!(
+                finish_generation_resolution(settlement),
+                expected_result,
+                "{label}"
+            );
         }
     }
 

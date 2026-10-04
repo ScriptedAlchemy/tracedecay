@@ -158,7 +158,7 @@ pub(crate) async fn activate_manual_branch_head(
     .await
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.activate", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.activate", level = "trace", skip_all)]
 pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     repo_root: &Path,
     graph: &Arc<tracedecay_project::project::TraceDecay>,
@@ -190,13 +190,14 @@ pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     .await
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.activate_manual_branch", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Activation holds the lifecycle lease across resolve-checkout-index so a lease change aborts before any durable branch state is published."
-    )
+#[tracing::instrument(
+    name = "daemon.pr_autotrack.activate_manual_branch",
+    level = "trace",
+    skip_all
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Activation holds the lifecycle lease across resolve-checkout-index so a lease change aborts before any durable branch state is published."
 )]
 async fn activate_manual_branch_with_administration(
     repo_root: &Path,
@@ -397,7 +398,11 @@ async fn cleanup_failed_manual_track(
 /// its subsequent metadata sealing fails. Callers retain the same lifecycle
 /// lease that covered activation, so no concurrent add or removal can replace
 /// the worktree between the ownership proof and cleanup.
-#[hotpath::measure(label = "daemon.pr_autotrack.cleanup_manual_activation", future = true)]
+#[tracing::instrument(
+    name = "daemon.pr_autotrack.cleanup_manual_activation",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn cleanup_manual_branch_activation(
     repo_root: &Path,
     data_root: &Path,
@@ -446,7 +451,11 @@ pub(crate) async fn cleanup_manual_branch_activation(
 /// artifacts. The lifecycle lease returns only after synchronous Git teardown
 /// finishes, so request cancellation cannot admit a concurrent replacement
 /// while the blocking worker still owns those artifacts.
-#[hotpath::measure(label = "daemon.pr_autotrack.cleanup_manual_retirement", future = true)]
+#[tracing::instrument(
+    name = "daemon.pr_autotrack.cleanup_manual_retirement",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn cleanup_manual_branch_retirement(
     repo_root: &Path,
     data_root: &Path,
@@ -537,13 +546,10 @@ pub(crate) async fn retire_worktree_mount(
     Ok(())
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.reconcile", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Closed-PR removals run only on a complete discovery; a partial listing never untracks still-open PRs."
-    )
+#[tracing::instrument(name = "daemon.pr_autotrack.reconcile", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Closed-PR removals run only on a complete discovery; a partial listing never untracks still-open PRs."
 )]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
@@ -752,7 +758,7 @@ async fn reconcile_project_with_administration(
 /// Fetches a PR head, checks it out into a linked worktree, and mounts that
 /// worktree on the injected code-index scheduler. Refuses before Git mutation
 /// when the scheduler, retained graph, or Git worktree authority is missing.
-#[hotpath::measure(label = "daemon.pr_autotrack.track", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.track", level = "trace", skip_all)]
 async fn track_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -849,7 +855,11 @@ async fn track_pr(
     }
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.activate_worktree", future = true)]
+#[tracing::instrument(
+    name = "daemon.pr_autotrack.activate_worktree",
+    level = "trace",
+    skip_all
+)]
 async fn activate_linked_worktree(
     schedulers: &CodeIndexSchedulerRegistryV1,
     graph: &tracedecay_project::project::TraceDecay,
@@ -894,7 +904,7 @@ async fn activate_linked_worktree(
 
 /// Retires the scheduler mount for a managed PR worktree. Git artifacts stay
 /// intact until [`untrack_pr`] or sweep cleanup runs after this returns Ok.
-#[hotpath::measure(label = "daemon.pr_autotrack.remove_store", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.remove_store", level = "trace", skip_all)]
 async fn remove_pr_store(
     _repo_root: &Path,
     data_root: &Path,
@@ -961,7 +971,7 @@ async fn cleanup_failed_track(
 /// Untracks a managed PR: removes its branch store, its worktree, its local
 /// tracking branch, and its ref. The Git artifacts are released only after the
 /// coordinator reports that the store is gone (or was already absent).
-#[hotpath::measure(label = "daemon.pr_autotrack.untrack", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.untrack", level = "trace", skip_all)]
 async fn untrack_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -1001,7 +1011,7 @@ async fn untrack_pr(
 /// Its synthetic branch and fetch ref are cleaned up alongside the checkout.
 /// Only called for a *complete* discovery (never when `partial`), so an open PR
 /// that merely fell outside a truncated listing is never swept.
-#[hotpath::measure(label = "daemon.pr_autotrack.sweep", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.sweep", level = "trace", skip_all)]
 async fn sweep_orphan_pr_worktrees(
     repo_root: &Path,
     data_root: &Path,

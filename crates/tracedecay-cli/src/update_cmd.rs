@@ -364,7 +364,7 @@ impl PluginRefreshOutcome {
     }
 }
 
-#[hotpath::measure(label = "cli.update.run", future = true)]
+#[tracing::instrument(name = "cli.update.run", level = "trace", skip_all)]
 pub(crate) async fn run_update_command(
     profile: &ProfileRoot,
     no_reinstall: bool,
@@ -406,7 +406,7 @@ fn update_completion(
     Ok(HostLifecycleCompletion::Complete)
 }
 
-#[hotpath::measure(label = "cli.upgrade.run", future = true)]
+#[tracing::instrument(name = "cli.upgrade.run", level = "trace", skip_all)]
 pub(crate) async fn run_upgrade_command(
     profile: &ProfileRoot,
     no_reinstall: bool,
@@ -538,7 +538,7 @@ fn combine_operation_and_restore<T>(
     }
 }
 
-#[hotpath::measure(label = "cli.update.post", future = true)]
+#[tracing::instrument(name = "cli.update.post", level = "trace", skip_all)]
 pub(crate) async fn run_post_update_command(
     profile: &ProfileRoot,
     no_reinstall: bool,

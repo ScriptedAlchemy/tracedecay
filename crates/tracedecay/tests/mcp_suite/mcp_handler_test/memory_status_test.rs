@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::application_invalid_request_error;
+use crate::support::{application_invalid_request_error, route_refusal};
 
 use super::memory_facts_test::{
     FactStoreMcpFixture, active_project_id, close_test_graph, invoke_production_tool,
@@ -314,24 +314,11 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
         json!({"project_selector": {"project_id": "project.missing"}}),
     )
     .await;
-    // Routing rejects an unregistered selector before the status handler runs,
-    // so the caller sees a project-route failure, not an application-surface
-    // denial, and the response carries no result.
     assert_eq!(
-        denied["error"],
-        json!({
-            "code": -32602,
-            "message": "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search",
-            "data": {
-                "tool": "tracedecay_memory_status",
-                "reason_code": "project_route_not_found",
-                "retryable": false,
-                "detail": "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
-            }
-        }),
+        route_refusal(&denied),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
         "denied selector response: {denied}"
     );
-    assert_eq!(denied.get("result"), None);
     expect_memory_report(
         &memory_status(
             &fixture,
@@ -351,14 +338,12 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
     // A decode failure is the caller's typed invalid request, naming the
     // rejected argument and the admitted scopes.
     assert_eq!(
-        invalid["error"],
+        route_refusal(&invalid),
         application_invalid_request_error(
-            "tracedecay_memory_status",
             "memory_scope: unknown variant `galaxy`, expected `project` or `user`"
         ),
         "invalid scope response: {invalid}"
     );
-    assert_eq!(invalid.get("result"), None);
 
     invoke_production_tool(
         &fixture,

@@ -351,7 +351,11 @@ fn seal_is_present(path: &std::path::Path) -> Result<bool, GraphDbError> {
 /// by `expected_digest`. The digest is checked over the bytes read from the
 /// opened handle, so a retirement that unlinks the path after the open
 /// cannot change them.
-#[hotpath::measure(label = "daemon.session_registry.seal.read_manifest")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.read_manifest",
+    level = "trace",
+    skip_all
+)]
 fn read_verified_seal_manifest(
     path: &std::path::Path,
     expected_digest: &str,
@@ -383,8 +387,7 @@ fn read_verified_seal_manifest(
             message: "sealed code generation identity changed while it was opened".to_owned(),
         });
     }
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
+
     let mut manifest = Vec::new();
     file.by_ref()
         .take(admitted_len)
@@ -469,7 +472,11 @@ fn with_verified_segments<T>(
 
 /// Builds the code graph of the authenticated seal `manifest` into `spill`,
 /// streaming its file segments from `routes` one window at a time.
-#[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.spill_graph",
+    level = "trace",
+    skip_all
+)]
 #[allow(clippy::too_many_arguments)]
 fn spill_verified_seal_graph(
     seal: &VerifiedSealGraphSourceV1,
@@ -607,7 +614,11 @@ pub(super) type LayeredRowSpillV1 =
 /// reported and replaced by the cold build, which is the authority a
 /// layered generation must equal.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.session_registry.seal.graph_rows")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.graph_rows",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn graph_rows_from_roots(
     generations_root: &std::path::Path,
     replay_root: &std::path::Path,
@@ -871,7 +882,11 @@ fn read_partitioned_segment(
         })
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.verify")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.verify",
+    level = "trace",
+    skip_all
+)]
 fn verify_checked_seal(
     path: &std::path::Path,
     expected_digest: &str,
@@ -879,8 +894,7 @@ fn verify_checked_seal(
 ) -> Result<File, GraphDbError> {
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
     let copied = std::io::copy(&mut reader, &mut std::io::sink());
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_registry.seal.verify.bytes_total").inc(reader.bytes_read);
+
     if let Some(error) = reader.failure.take() {
         return Err(error);
     }
@@ -890,7 +904,11 @@ fn verify_checked_seal(
     reader.finish(path, &opened_metadata, admitted_len, expected_digest)
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.verify_bundle")]
+#[tracing::instrument(
+    name = "daemon.session_registry.seal.verify_bundle",
+    level = "trace",
+    skip_all
+)]
 fn verify_checked_seal_bundle(
     path: &std::path::Path,
     segments_root: &std::path::Path,
@@ -2068,8 +2086,7 @@ mod tests {
             )
             .unwrap(),
         };
-        #[cfg(feature = "hotpath")]
-        let _profile = hotpath::HotpathGuardBuilder::new("active-graph-replay-routes").build();
+
         let _absent_lock = acquire_code_generation_store_lock(&absent_store).unwrap();
         let canonical = store
             .join("code-generations-v1")

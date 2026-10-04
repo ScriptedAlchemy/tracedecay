@@ -432,7 +432,11 @@ impl CodeGraphProjectionStore {
     /// Opens this generation's graph engine once and keeps it resident until
     /// it is released. Corpus-sized on a cold engine, so background
     /// activation calls it before the store serves; readers never pay it.
-    #[hotpath::measure(label = "code_graph.store.warm_serving_engine")]
+    #[tracing::instrument(
+        name = "code_graph.store.warm_serving_engine",
+        level = "trace",
+        skip_all
+    )]
     pub fn warm_serving_engine(&self) -> Result<(), CodeGraphProjectionError> {
         let mut pin = self
             .serving_engine
@@ -1139,24 +1143,28 @@ fn build_code_graph_manifest_inputs_checked(
             "code graph projection identity uses a foreign projector".to_owned(),
         ));
     }
-    let built = hotpath::measure_block!(
-        "code_index.seal.collect",
-        hotpath::measure_block!("code_index.graph.build_projection", {
+    let built = {
+        let _span = tracing::trace_span!("code_index.seal.collect").entered();
+        {
+            let _span = tracing::trace_span!("code_index.graph.build_projection").entered();
             build_projection(&projection, generation, edges, chunks, production, check)
-        })
-    )?;
-    hotpath::measure_block!("code_index.graph.seal_manifest", {
-        GraphGenerationManifest::new_checked(
-            projection,
-            code_graph_generation_id(generation, projector_revision)?,
-            source_generation(generation)?,
-            built.watermark,
-            vec![],
-            built.entities,
-            built.relations,
-            check,
-        )
-    })
+        }
+    }?;
+    {
+        let _span = tracing::trace_span!("code_index.graph.seal_manifest").entered();
+        {
+            GraphGenerationManifest::new_checked(
+                projection,
+                code_graph_generation_id(generation, projector_revision)?,
+                source_generation(generation)?,
+                built.watermark,
+                vec![],
+                built.entities,
+                built.relations,
+                check,
+            )
+        }
+    }
     .map_err(Into::into)
 }
 
@@ -1166,7 +1174,11 @@ struct CurrentGenerationV1 {
     projection_node_count: usize,
 }
 
-#[hotpath::measure(label = "code_graph.projection.read_current_generation")]
+#[tracing::instrument(
+    name = "code_graph.projection.read_current_generation",
+    level = "trace",
+    skip_all
+)]
 fn read_current_generation(
     snapshot: &VerifiedGraphSnapshot,
     projection: &GraphProjectionIdentity,
@@ -1357,7 +1369,10 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
             .validate()
             .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
         if reference.from_occurrence != record.occurrence
-            || reference.kind != RelationEdgeKindV1::Calls
+            || !matches!(
+                reference.kind,
+                RelationEdgeKindV1::Calls | RelationEdgeKindV1::Implements
+            )
         {
             return Err(CodeGraphProjectionError::Corrupt(
                 "unresolved call does not belong to its source symbol".to_owned(),

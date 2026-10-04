@@ -18,7 +18,6 @@ pub enum GitIndexEffectV1 {
     Preview,
     StageHunks,
     UnstageHunks,
-    CommitIndex,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,7 +25,6 @@ pub enum GitIndexEffectV1 {
 pub enum GitEffectClassV1 {
     Preview,
     IndexMutation,
-    CommitCreation,
 }
 
 impl GitIndexEffectV1 {
@@ -34,7 +32,6 @@ impl GitIndexEffectV1 {
         match self {
             Self::Preview => GitEffectClassV1::Preview,
             Self::StageHunks | Self::UnstageHunks => GitEffectClassV1::IndexMutation,
-            Self::CommitIndex => GitEffectClassV1::CommitCreation,
         }
     }
 
@@ -196,7 +193,7 @@ impl GitEffectClassifierV1 {
 }
 
 impl GitEffectClassifier for GitEffectClassifierV1 {
-    #[hotpath::measure(label = "policy.git.evaluate")]
+    #[tracing::instrument(name = "policy.git.evaluate", level = "trace", skip_all)]
     fn evaluate(&self, input: &GitEffectClassificationInputV1) -> GitEffectDecisionV1 {
         if input.policy_revision == 0
             || input.policy_digest.validate().is_err()

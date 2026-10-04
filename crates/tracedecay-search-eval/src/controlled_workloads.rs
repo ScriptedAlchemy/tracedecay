@@ -1,10 +1,9 @@
 //! Controlled, machine-readable acceptance workloads for capture composition
 //! and private-fs framed-log durability.
 //!
-//! This crate does not declare a `hotpath` feature. Workloads measure wall
-//! time and byte identity so a composing binary can compare capture/private-fs
-//! feature-off vs feature-on runs without production-only annotations.
-//! Acceptance is durable identity (`bytes_match` / `both_ok`), not latency.
+//! Workloads measure wall time and byte identity so callers can compare runs
+//! across build modes without production-only annotations. Acceptance is
+//! durable identity (`bytes_match` / `both_ok`), not latency.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -413,8 +412,7 @@ fn operations_by_name(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::path::Path;
 
     use super::{
         CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationV1,
@@ -422,10 +420,6 @@ mod tests {
         compare_controlled_workloads, run_cursor_parse_batch_workload,
         run_framed_log_durability_workload, write_controlled_workload_reports,
     };
-
-    const BUILD_IDENTITY_FILE: &str = "controlled-workload-build-identity.json";
-    const HOTPATH_OFF_BIN_ENV: &str = "TRACEDECAY_CONTROLLED_WORKLOAD_HOTPATH_OFF_BIN";
-    const HOTPATH_ON_BIN_ENV: &str = "TRACEDECAY_CONTROLLED_WORKLOAD_HOTPATH_ON_BIN";
 
     #[test]
     fn framed_log_workload_recovers_the_first_frame_and_verifies_publish() {
@@ -572,44 +566,6 @@ mod tests {
         assert!(cursor.operations.iter().all(|operation| operation.ok));
     }
 
-    // The parity executables are a second, feature-on build of this crate's
-    // dependency graph, so no ordinary test run can produce them. The workflow
-    // helper builds the pair and a dedicated `--run-ignored only` step runs
-    // this test against it; the Windows archive job cannot afford that rebuild
-    // inside its bound (it spent 18 of its 62 minutes on it) and the property
-    // is platform-independent, so only the Linux lane provisions and runs it.
-    #[test]
-    #[ignore = "requires feature-off/on executables built by the workflow helper"]
-    fn hotpath_off_vs_on_durable_results_are_identical() {
-        let scratch = tempfile::tempdir().expect("identity scratch");
-        let off_dir = scratch.path().join("off");
-        let on_dir = scratch.path().join("on");
-        let (off_executable, on_executable) = controlled_workload_executable_pair();
-
-        emit_reports(&off_executable, &off_dir);
-        emit_reports(&on_executable, &on_dir);
-
-        let off_build = load_build_identity(&off_dir);
-        let on_build = load_build_identity(&on_dir);
-        assert_eq!(off_build["feature_mode"], "hotpath-off");
-        assert_eq!(on_build["feature_mode"], "hotpath-on");
-        assert_ne!(
-            off_build["executable_sha256"], on_build["executable_sha256"],
-            "feature-off and feature-on reports must come from distinct executable bytes"
-        );
-
-        assert_durable_identity(
-            FRAMED_LOG_WORKLOAD,
-            &load_report(&off_dir.join(FRAMED_LOG_REPORT_FILE)),
-            &load_report(&on_dir.join(FRAMED_LOG_REPORT_FILE)),
-        );
-        assert_durable_identity(
-            CURSOR_PARSE_WORKLOAD,
-            &load_report(&off_dir.join(CURSOR_PARSE_REPORT_FILE)),
-            &load_report(&on_dir.join(CURSOR_PARSE_REPORT_FILE)),
-        );
-    }
-
     fn report(
         workload: &str,
         operations: Vec<ControlledOperationV1>,
@@ -643,83 +599,5 @@ mod tests {
             std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
-    }
-
-    fn load_build_identity(report_dir: &Path) -> serde_json::Value {
-        let path = report_dir.join(BUILD_IDENTITY_FILE);
-        let bytes =
-            std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        serde_json::from_slice(&bytes)
-            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
-    }
-
-    fn assert_durable_identity(
-        workload: &str,
-        off: &ControlledWorkloadReportV1,
-        on: &ControlledWorkloadReportV1,
-    ) {
-        assert_eq!(off.workload, workload);
-        assert_eq!(on.workload, workload);
-        let comparison = compare_controlled_workloads(off, on).expect("compare");
-        assert!(
-            !comparison.operations.is_empty(),
-            "{workload} comparison must not be empty"
-        );
-        assert!(
-            comparison
-                .operations
-                .iter()
-                .all(|operation| operation.bytes_match && operation.both_ok),
-            "{workload} feature-off vs feature-on durable results must match: {comparison:?}"
-        );
-        assert!(comparison.durable_results_identical());
-    }
-
-    fn controlled_workload_executable_pair() -> (PathBuf, PathBuf) {
-        let configured_off = std::env::var_os(HOTPATH_OFF_BIN_ENV).map(PathBuf::from);
-        let configured_on = std::env::var_os(HOTPATH_ON_BIN_ENV).map(PathBuf::from);
-        let pair = match (configured_off, configured_on) {
-            (Some(off), Some(on)) => (off, on),
-            (None, None) => {
-                let current_executable = std::env::current_exe().expect("current test executable");
-                let target_root = current_executable
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::parent)
-                    .expect("test executable must be under target/<profile>/deps");
-                let helpers = target_root.join("controlled-workload-hotpath");
-                (
-                    helpers.join(format!("hotpath-off{}", std::env::consts::EXE_SUFFIX)),
-                    helpers.join(format!("hotpath-on{}", std::env::consts::EXE_SUFFIX)),
-                )
-            }
-            _ => {
-                panic!("{HOTPATH_OFF_BIN_ENV} and {HOTPATH_ON_BIN_ENV} must be configured together")
-            }
-        };
-        for executable in [&pair.0, &pair.1] {
-            assert!(
-                executable.is_file(),
-                "controlled-workload parity executable is missing at {}; prebuild both feature modes before running tests",
-                executable.display()
-            );
-        }
-        pair
-    }
-
-    fn emit_reports(executable: &Path, report_dir: &Path) {
-        std::fs::create_dir_all(report_dir).expect("report dir");
-        let output = Command::new(executable)
-            .arg(report_dir)
-            .output()
-            .unwrap_or_else(|error| panic!("spawn {}: {error}", executable.display()));
-        assert!(
-            output.status.success(),
-            "controlled-workload helper {} failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
-            executable.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }

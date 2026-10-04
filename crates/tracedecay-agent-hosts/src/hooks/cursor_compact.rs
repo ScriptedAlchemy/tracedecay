@@ -57,7 +57,11 @@ pub async fn cursor_pre_compact_via_daemon(
     cursor_pre_compact_via_daemon_with_telemetry(runtime, event_json, None).await
 }
 
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.cursor.compact_via_daemon")]
+#[tracing::instrument(
+    name = "agent_hosts.hooks.cursor.compact_via_daemon",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
     runtime: &HookRuntimeV1,
     event_json: &str,

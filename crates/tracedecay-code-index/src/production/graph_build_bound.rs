@@ -439,7 +439,7 @@ impl SpillBuffers {
 impl CodeIndexPublishedGenerationV1 {
     /// What building this generation's code graph from its sealed segments
     /// holds at its peak, sized before the build runs.
-    #[hotpath::measure(label = "code_index.graph_build_bound")]
+    #[tracing::instrument(name = "code_index.graph_build_bound", level = "trace", skip_all)]
     pub fn graph_build_bound(&self) -> Result<CodeGraphBuildBoundV1, CodeIndexProductionErrorV1> {
         let snapshot_files = self
             .snapshot

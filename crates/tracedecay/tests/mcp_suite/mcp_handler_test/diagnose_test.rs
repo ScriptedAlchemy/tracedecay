@@ -67,6 +67,7 @@ async fn diagnose_reports_literal_mapping_filters_and_refusals() {
     assert_eq!(
         without_minted_ids(&mapped),
         json!({
+            "freshness": {"state": "fresh"},
             "diagnostics_parsed": 1,
             "diagnostics_returned": 1,
             "mapped_to_node": 1,
@@ -113,6 +114,7 @@ async fn diagnose_reports_literal_mapping_filters_and_refusals() {
     assert_eq!(
         diagnose_text(&fixture, json!({"cargo_output": RUSTC_ERROR})).await,
         "\
+freshness: fresh
 ## Diagnostics
 **Diagnostics parsed:** 1
 **Diagnostics returned:** 1
@@ -312,6 +314,7 @@ async fn diagnose_reports_literal_mapping_filters_and_refusals() {
     assert_eq!(
         diagnose_text(&fixture, json!({"cargo_output": ""})).await,
         "\
+freshness: fresh
 ## Diagnostics
 **Diagnostics parsed:** 0
 **Diagnostics returned:** 0

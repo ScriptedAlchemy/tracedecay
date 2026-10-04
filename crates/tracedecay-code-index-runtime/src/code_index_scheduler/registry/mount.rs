@@ -432,7 +432,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Drop a seat that no longer names the advertised generation. Search
     /// serves the text owner while the seat is empty, and holding the
     /// predecessor's decode would only keep a corpus-sized generation alive.
-    fn release_superseded_serving_seat(
+    pub(super) fn release_superseded_serving_seat(
         serving_generation: &ServingGenerationSlot,
         serving_generation_epoch: &AtomicU64,
         serving_source_witness: &RwLock<Option<super::super::ServingSourceWitnessV1>>,
@@ -594,10 +594,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
-        let serving_generation: Arc<ServingGenerationSlot> = Arc::new(hotpath::rw_lock!(
-            RwLock::new(None),
-            label = "daemon.code_index.serving_generation"
-        ));
+        let serving_generation: Arc<ServingGenerationSlot> = Arc::new(RwLock::new(None));
         let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let (
             complete_generation_requested_changed,
@@ -873,7 +870,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
                     }
-                    hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                    tracing::Instrument::instrument(
+                        notified,
+                        tracing::trace_span!("daemon.code_index.wake_wait"),
+                    )
+                    .await;
                 }
                 worker_owner_headroom.mark_unchanged();
                 worker_admission_headroom.mark_unchanged();
@@ -932,9 +933,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
                 );
-                let Ok(_background_reconcile_admission) = hotpath::future!(
+                let Ok(_background_reconcile_admission) = tracing::Instrument::instrument(
                     Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
-                    label = "daemon.code_index.admission_wait"
+                    tracing::trace_span!("daemon.code_index.admission_wait"),
                 )
                 .await
                 else {
@@ -1158,11 +1159,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // seat to unblock, so the slice stays inline and the pass
                     // keeps yielding back to the loop between slices.
                     let failed_latest = latest.clone();
-                    let build = hotpath::future!(
+                    let build = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                         }),
-                        label = "daemon.code_index.text_projection"
+                        tracing::trace_span!("daemon.code_index.text_projection"),
                     )
                     .await;
                     match build {
@@ -1256,20 +1257,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 if text_slice_incomplete {
                     if !graph_activation_enabled {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .inc(1_u64);
                         continue;
                     }
                     if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .inc(1_u64);
                         continue;
                     }
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
-                        .inc(1_u64);
                 }
                 let refused_retained_text_metadata = if worker_text_generation
                     .read()
@@ -1278,7 +1270,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 {
                     let text_scheduler = Arc::clone(&scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
-                    let retained_text = hotpath::future!(
+                    let retained_text = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             Self::lock_scheduler_unless_shutting_down(
                                 &text_scheduler,
@@ -1286,7 +1278,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             )
                             .map(|mut scheduler| scheduler.restore_retained_text_generation())
                         }),
-                        label = "daemon.code_index.text_restore"
+                        tracing::trace_span!("daemon.code_index.text_restore"),
                     )
                     .await;
                     if worker_shutting_down.load(Ordering::Acquire) {
@@ -1425,7 +1417,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let bind_serving_generation = Arc::clone(&worker_serving_generation);
                 let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
                 let bind_source_freshness = worker_source_freshness.clone();
-                let source_result = hotpath::future!(
+                let source_result = tracing::Instrument::instrument(
                     tokio::task::spawn_blocking(move || {
                         let mut scheduler =
                             Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
@@ -1517,11 +1509,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         Ok(outcome)
                     }),
-                    // Sealing moved inside this blocking reconcile pipeline.
-                    // Keep the outer future labeled so default reports retain
-                    // the end-to-end seal path even when short synchronous
-                    // inner spans fall below the functions-timing row limit.
-                    label = "daemon.code_index.reconcile_or_seal"
+                    // Sealing runs inside this blocking reconcile pipeline; the
+                    // outer span keeps the end-to-end seal path in one trace row.
+                    tracing::trace_span!("daemon.code_index.reconcile_or_seal"),
                 )
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
@@ -1626,10 +1616,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     graph_text = match published_text {
                         Ok(Ok(Ok(Some(published_text)))) => {
-                            *worker_text_generation
+                            let mut serving_text = worker_text_generation
                                 .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(published_text.clone());
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            published_text.hold_outgoing_graph(serving_text.as_ref());
+                            *serving_text = Some(published_text.clone());
+                            drop(serving_text);
                             // The publication broadcast went out before the
                             // successor's owner was installed; waiters that
                             // probed in between must wake now.
@@ -2294,8 +2286,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         #[cfg(test)]
                         let after_decode_gate =
                             Self::enter_graph_decode_gate(&worker_project_root).await;
-                        let prepared = hotpath::future!(
-                            tokio::task::spawn_blocking(move || {
+                        let prepared = tracing::Instrument::instrument(tokio::task::spawn_blocking(move || {
                                 // A graph build the memory watermark stopped
                                 // parks exactly like a decode that does not fit.
                                 if let Some(detail) = graph_publish_refusal {
@@ -2408,9 +2399,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 replay_binding
                                     .transpose()
                                     .map(|binding| (latest, binding, roster_refusal_rebuild, None))
-                            }),
-                            label = "daemon.code_index.graph_prepare"
-                        )
+                            }), tracing::trace_span!("daemon.code_index.graph_prepare"))
                         .await;
                         #[cfg(test)]
                         Self::pass_worker_step_gate(after_decode_gate).await;
@@ -2431,6 +2420,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                 match &stop {
                                     GraphPrepareStopV1::ResidentMemory(detail) => {
                                         if !graph_waits_for_text {
+                                            // The outgoing graph held for reads
+                                            // is the headroom this decode needs.
+                                            if let Some(text) = worker_text_generation
+                                                .read()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .as_ref()
+                                            {
+                                                text.release_graph_predecessor();
+                                            }
                                             if !converged {
                                                 park_convergence(
                                                     &worker_convergence_park,
@@ -2545,12 +2543,20 @@ impl CodeIndexSchedulerRegistryV1 {
                         &worker_phase_signal,
                         super::CodeIndexWorkerPhaseV1::PublishingGraph,
                     );
+                    // The serving generation's graph store is the catalog a
+                    // layered successor carries from.
+                    let predecessor = worker_serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(|serving| serving.interactive_graph_store().ok());
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
                             &worker_repository_id,
                             &worker_worktree_id,
                             latest.clone(),
+                            predecessor,
                             replay_binding.clone(),
                             Arc::clone(&worker_shutting_down),
                         )
@@ -2628,12 +2634,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "graph activation failed retryably; the sealed generation \
                                      still seats and the next pass retries native graph"
                                 );
-                                hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
-                                    .inc(1_u64);
-                                hotpath::gauge!(
-                                    "daemon.code_index.graph_seat.retry_backoff_micros"
-                                )
-                                .set(retry_delay.as_micros() as u64);
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);
@@ -2889,7 +2889,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let swap_passes = Arc::clone(&worker_reconcile_in_progress);
-                    let serving_swap = hotpath::future!(
+                    let serving_swap = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             let (_swap_pass, scheduler) = Self::lock_scheduler_for_graph_step(
                                 &scheduler,
@@ -3015,7 +3015,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                             Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
-                        label = "daemon.code_index.serving_swap"
+                        tracing::trace_span!("daemon.code_index.serving_swap"),
                     )
                     .await;
                     match serving_swap {
@@ -3519,9 +3519,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             worker_loop,
-            label = "daemon.code_index.scheduler_worker"
+            tracing::trace_span!("daemon.code_index.scheduler_worker"),
         ));
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
         let residency_registration = Arc::clone(&residency).register(

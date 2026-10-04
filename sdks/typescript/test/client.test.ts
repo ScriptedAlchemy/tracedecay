@@ -377,6 +377,60 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
+  it("decodes the worktree freshness verdict a graph read opens with", async () => {
+    const possiblyStale = {
+      state: "possibly_stale",
+      indexing: { summary: "rebuilding generation.sdk.2", rebuild_in_flight: true },
+    };
+    const details = {
+      id: "occurrence.sdk.main",
+      name: "main",
+      kind: "function",
+      qualified_name: "crate::main",
+      file: "src/main.rs",
+      start_line: 1,
+      end_line: 3,
+      signature: null,
+      docstring: null,
+      is_async: false,
+      derives: [],
+      visibility: "public",
+      branches: 0,
+      loops: 0,
+      max_nesting: 0,
+      cyclomatic_complexity: 1,
+      complexity_analysis: "complete",
+      cost_to_expand: { body: 60, full_file: 10 },
+      unavailable_fields: [],
+      freshness: possiblyStale,
+    };
+    const notFound = {
+      status: "not_found",
+      reason_code: "node_not_found",
+      node_id: "occurrence.sdk.missing",
+      message: "Node not found: occurrence.sdk.missing",
+      freshness: { state: "fresh" },
+    };
+    const impact = {
+      node_count: 0,
+      complete: true,
+      unavailable_fields: ["edge_count"],
+      nodes: [],
+      freshness: { state: "fresh" },
+    };
+    const responses: unknown[] = [details, notFound, impact];
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      mcp: { callTool: async () => responses.shift() },
+    });
+
+    await expect(client.operations.node({ node_id: details.id })).resolves.toEqual(details);
+    await expect(client.operations.node({ node_id: notFound.node_id })).resolves.toEqual(notFound);
+    await expect(client.operations.impact({ node_id: details.id, max_depth: 2 })).resolves.toEqual(impact);
+  });
+
   it("preserves remote base paths and origin policy", async () => {
     let requestedUrl = "";
     let requestedOrigin = "";

@@ -38,7 +38,7 @@ impl AgentIntegration for RooCodeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mRoo Code integration\x1b[0m");
+        dc.section("Roo Code integration");
         doctor_check_settings(dc, &ctx.home);
     }
 
@@ -74,7 +74,7 @@ impl AgentIntegration for RooCodeIntegration {
         }
     }
 
-    #[hotpath::measure(label = "roo_mcp_install")]
+    #[tracing::instrument(name = "roo_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle::HostComponentV1],

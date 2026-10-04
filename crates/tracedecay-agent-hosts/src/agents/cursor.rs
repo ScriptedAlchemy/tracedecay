@@ -34,7 +34,6 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "managing-session-context",
     "managing-work",
     "managing-workflows",
-    "profiling-tracedecay-performance",
     "project-memory",
     "reviewing-changes",
     "tracing-functions",
@@ -75,7 +74,7 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mCursor integration\x1b[0m");
+        dc.section("Cursor integration");
         doctor_check_plugin(dc, &ctx.home);
         doctor_check_native_extension(dc, &ctx.home);
         super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);

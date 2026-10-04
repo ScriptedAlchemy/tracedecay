@@ -326,6 +326,32 @@ fn refused<T>(
     )
 }
 
+/// Refuses a file-scoped read of a path the admitted generation never
+/// published. `symbols_in_logical_file` answers such a path with an empty
+/// list, which would otherwise read as a complete account of a real file.
+fn unpublished_file_outcome<T>(
+    reader: &CodeGraphInteractiveReader,
+    path: &str,
+    domain: EvidenceDomain,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Option<RetrievalPortOutcome<T>> {
+    match reader.file_by_logical_path(path, cancellation) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(refused(
+            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+            "application.code-graph.file-not-found",
+            "file is not in the admitted graph",
+            domain,
+            now_observed(),
+        )),
+        Err(error) => Some(graph_read_outcome(
+            &tracedecay_graph_query::map_projection_error(error),
+            domain,
+            now_observed(),
+        )),
+    }
+}
+
 /// The outcome of a graph query that failed after its projection opened: the
 /// same typed state an open failure reports when the query surfaced a
 /// code-graph read error, and a failed read otherwise.
@@ -699,7 +725,7 @@ fn now_observed() -> UtcMicros {
     now_micros()
 }
 
-#[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
+#[tracing::instrument(name = "usecases.primitives.open_graph", level = "trace", skip_all)]
 async fn open_code_graph(
     port: &dyn CodeGraphProjectionReadPort,
     context: &RequestContext,
@@ -715,7 +741,7 @@ async fn open_code_graph(
     .reader_with_cancellation(context, observed_at, cancellation)
 }
 
-#[hotpath::measure(label = "usecases.primitives.graph_census")]
+#[tracing::instrument(name = "usecases.primitives.graph_census", level = "trace", skip_all)]
 fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
@@ -876,7 +902,7 @@ impl ProductionPrimitiveOpenRequestV1 {
 }
 
 /// Opens the complete owned application primitive runtime from production authorities.
-#[hotpath::measure(label = "usecases.primitives.open", future = true)]
+#[tracing::instrument(name = "usecases.primitives.open", level = "trace", skip_all)]
 pub async fn open_production_primitive_runtime(
     request: ProductionPrimitiveOpenRequestV1,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {

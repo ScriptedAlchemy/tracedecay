@@ -43,25 +43,18 @@ pub fn normalize_cursor_composer_observation_with_message_id(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    // Composer bubbles order by snapshot position, not file bytes, so there is
-    // no truthful record-bytes gauge here; entries are the normalize span's
-    // call count. Failures are counted, never hidden.
-    let envelope = normalize_composer_bubble_record(
+    normalize_composer_bubble_record(
         native,
         composer_id,
         stable_record_id,
         projected_message_id,
         range,
         position,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
-    }
-    envelope
+    )
 }
 
 /// Cursor composer composition for one source bubble, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize")]
+#[tracing::instrument(name = "capture.cursor_composer.normalize", level = "trace", skip_all)]
 fn normalize_composer_bubble_record(
     native: &Value,
     composer_id: &str,
@@ -397,22 +390,23 @@ pub fn normalize_cursor_composer_envelope_observation(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Same snapshot-ordered source as composer bubbles: no byte-backed range.
     // Bubble and envelope failures share the one composer failure key.
-    let envelope = normalize_composer_envelope_record(
+
+    normalize_composer_envelope_record(
         native,
         composer_id,
         project_path,
         stable_record_id,
         range,
         position,
-    );
-    if envelope.is_err() {
-        hotpath::gauge!("capture.cursor_composer.normalize_failures").inc(1u64);
-    }
-    envelope
+    )
 }
 
 /// Cursor composer composition for one source envelope, not a per-token walk.
-#[hotpath::measure(label = "capture.cursor_composer.normalize_envelope")]
+#[tracing::instrument(
+    name = "capture.cursor_composer.normalize_envelope",
+    level = "trace",
+    skip_all
+)]
 fn normalize_composer_envelope_record(
     native: &Value,
     composer_id: &str,

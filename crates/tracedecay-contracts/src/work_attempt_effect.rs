@@ -42,7 +42,6 @@ pub enum WorkAttemptEffectDispatchOutcomeV1 {
 }
 
 impl WorkAttemptEffectDispatchOutcomeV1 {
-    #[hotpath::skip]
     pub const fn holder(&self) -> &WorkAttemptEffectHolderV1 {
         match self {
             Self::Recorded(holder) | Self::Replayed(holder) => holder,
@@ -89,27 +88,22 @@ impl WorkAttemptEffectHolderV1 {
         &self.attempt
     }
 
-    #[hotpath::skip]
     pub const fn effect_state(&self) -> WorkEffectStateV1 {
         self.effect_state
     }
 
-    #[hotpath::skip]
     pub const fn dispatched_at(&self) -> UtcMicros {
         self.dispatched_at
     }
 
-    #[hotpath::skip]
     pub const fn deadline(&self) -> UtcMicros {
         self.deadline
     }
 
-    #[hotpath::skip]
     pub const fn resolution(&self) -> Option<WorkAttemptEffectResolutionV1> {
         self.resolution
     }
 
-    #[hotpath::skip]
     pub const fn resolved_at(&self) -> Option<UtcMicros> {
         self.resolved_at
     }
@@ -202,12 +196,15 @@ impl<S> WorkAttemptEffectServiceV1<S>
 where
     S: WorkAttemptEffectStoragePortV1,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
 
-    #[hotpath::measure(label = "application.work.attempt_effect.record_dispatch")]
+    #[tracing::instrument(
+        name = "application.work.attempt_effect.record_dispatch",
+        level = "trace",
+        skip_all
+    )]
     pub fn record_dispatch(
         &self,
         context: &RequestContext,
@@ -225,7 +222,11 @@ where
             .map_err(effect_problem)
     }
 
-    #[hotpath::measure(label = "application.work.attempt_effect.settle")]
+    #[tracing::instrument(
+        name = "application.work.attempt_effect.settle",
+        level = "trace",
+        skip_all
+    )]
     pub fn settle(
         &self,
         context: &RequestContext,
@@ -239,7 +240,11 @@ where
             .map_err(effect_problem)
     }
 
-    #[hotpath::measure(label = "application.work.attempt_effect.load")]
+    #[tracing::instrument(
+        name = "application.work.attempt_effect.load",
+        level = "trace",
+        skip_all
+    )]
     pub fn load(
         &self,
         context: &RequestContext,

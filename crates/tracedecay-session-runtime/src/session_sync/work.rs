@@ -10,7 +10,6 @@ pub enum SessionSyncInterruption {
 }
 
 impl SessionSyncInterruption {
-    #[hotpath::skip]
     pub const fn termination(self) -> Option<OperationTermination> {
         match self {
             Self::Cancelled => Some(OperationTermination::Cancelled),
@@ -19,7 +18,6 @@ impl SessionSyncInterruption {
         }
     }
 
-    #[hotpath::skip]
     const fn git_after_commit_reason(self) -> &'static str {
         match self {
             Self::Cancelled => "git_sync_cancelled_after_commit",
@@ -30,7 +28,6 @@ impl SessionSyncInterruption {
 }
 
 impl DaemonSessionSyncService {
-    #[hotpath::skip]
     pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -232,7 +229,6 @@ impl DaemonSessionSyncService {
         });
     }
 
-    #[hotpath::skip]
     pub(super) async fn cancel_request(
         &self,
         control: SessionSyncControlV1,
@@ -400,7 +396,6 @@ fn import_transcript_stats(
 }
 
 impl SessionSyncProjectContext {
-    #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -417,7 +412,6 @@ impl SessionSyncProjectContext {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn source_frontiers(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -457,16 +451,15 @@ impl SessionSyncProjectContext {
         Ok(frontiers)
     }
 
-    #[hotpath::skip]
     async fn git_history_source_frontiers(
         &self,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
-        let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
+        let change_sequence = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
-            tracedecay_sessions::runtime::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+            tracedecay_sessions::runtime::git_correlation::GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
         )
         .await
         .map_err(store_error)?;
@@ -477,13 +470,12 @@ impl SessionSyncProjectContext {
         .await
         .map_err(store_error)?;
         Ok(
-            git_history_frontier_from_meta(activity_timestamp, source_rowid)
+            git_history_frontier_from_meta(change_sequence, source_rowid)
                 .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
                 .unwrap_or_default(),
         )
     }
 
-    #[hotpath::skip]
     pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
@@ -499,7 +491,7 @@ impl SessionSyncProjectContext {
             let stats =
                 import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
             let coverage = observation.coverage.clone();
-            let source_frontiers = hotpath::future!(
+            let source_frontiers = tracing::Instrument::instrument(
                 service.persist_progress(
                     self,
                     &project_sessions,
@@ -507,7 +499,7 @@ impl SessionSyncProjectContext {
                     stats.clone(),
                     coverage.clone(),
                 ),
-                label = "daemon.session_sync.combined_frontier_persist"
+                tracing::trace_span!("daemon.session_sync.combined_frontier_persist"),
             )
             .await;
             (stats, coverage, source_frontiers)
@@ -536,7 +528,6 @@ impl SessionSyncProjectContext {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn synchronize_git(
         &self,
         service: &DaemonSessionSyncService,
@@ -562,6 +553,7 @@ impl SessionSyncProjectContext {
                 tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: usize::MAX,
             dry_run: options.dry_run(),
+            project_root: Some(self.project_root.clone()),
         };
         let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
         tokio::pin!(backfill);
@@ -753,12 +745,12 @@ const fn git_history_interruption_reason(
 }
 
 pub fn git_history_frontier_from_meta(
-    activity_timestamp: Option<i64>,
+    change_sequence: Option<i64>,
     source_rowid: Option<i64>,
 ) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
-    activity_timestamp.map(|activity_timestamp| {
+    change_sequence.map(|change_sequence| {
         tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-            activity_timestamp,
+            change_sequence,
             source_rowid: source_rowid.unwrap_or(0),
         }
     })
@@ -779,7 +771,7 @@ pub fn git_history_source_frontier(
         })
         .to_string(),
         committed_cursor_json: serde_json::json!({
-            "activity_timestamp": frontier.activity_timestamp,
+            "change_sequence": frontier.change_sequence,
             "source_rowid": frontier.source_rowid,
         })
         .to_string(),

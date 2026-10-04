@@ -8,14 +8,16 @@ use tracedecay_temporal_query::execution::TemporalPortError;
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
 use super::relation_projection::candidate_session_relation_projection;
-use super::relation_receipts::{apply_relation_projection, record_relation_receipt};
+use super::relation_receipts::{record_relation_receipt, write_relation_projection};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
 use crate::handle::{SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
-#[hotpath::measure(future = true, label = "session_temporal.rebuild.relations")]
+/// Leaves the relation receipt pending. The caller acknowledges it in the
+/// transaction that activates the generation.
+#[tracing::instrument(name = "session_temporal.rebuild.relations", level = "trace", skip_all)]
 pub(super) async fn rebuild_candidate_session_relations(
     database: &impl SessionTemporalRegisteredDb,
     session_id: &tracedecay_domain::SessionId,
@@ -49,24 +51,32 @@ pub(super) async fn rebuild_candidate_session_relations(
     drop(snapshot);
 
     checkpoint_relation_rebuild_control(control)?;
-    let receipt = hotpath::measure_block!("session_temporal.txn.begin", {
-        database
-            .begin_write_transaction()
-            .await
-            .map_err(|error| storage(operation, error))?
-    });
+    let receipt = {
+        use tracing::Instrument as _;
+        {
+            database
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(operation, error))?
+        }
+    };
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
-    hotpath::measure_block!("session_temporal.txn.commit", {
-        receipt
-            .commit()
-            .await
-            .map_err(|error| storage(operation, error))?
-    });
+    {
+        use tracing::Instrument as _;
+        {
+            receipt
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(operation, error))?
+        }
+    };
     checkpoint_relation_rebuild_control(control)?;
 
     let apply_cancellation = execution_control_graph_cancellation(control);
     checkpoint_relation_rebuild_control(control)?;
-    let applied = apply_relation_projection(database, &reconstructed, apply_cancellation).await;
+    let applied = write_relation_projection(database, &reconstructed, apply_cancellation).await;
     checkpoint_relation_rebuild_control(control)?;
     applied?;
 
@@ -169,7 +179,11 @@ async fn require_unsettled_message_ids(
 /// Proves the candidate introduced exactly the canonical outputs of the
 /// effects past its base frontier. The base proved its own prefix when it
 /// activated, so only the new effects' observations are read.
-#[hotpath::measure(future = true, label = "session_temporal.projection.validate_frontier")]
+#[tracing::instrument(
+    name = "session_temporal.projection.validate_frontier",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn validate_candidate_frontier(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &str,

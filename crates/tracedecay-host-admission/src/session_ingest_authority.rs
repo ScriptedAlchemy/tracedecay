@@ -108,6 +108,7 @@ where
                 brain_id,
                 profile_id,
                 project_id,
+                project_root,
                 repository_provenance,
             } => {
                 let authorities = HostAdmissionAuthorities::for_project(
@@ -115,7 +116,8 @@ where
                     profile_id.clone(),
                     project_id.clone(),
                     self.db(),
-                );
+                )
+                .with_project_root(project_root.to_path_buf());
                 match repository_provenance {
                     Some(provenance) => authorities.with_repository_provenance(provenance),
                     None => authorities,
@@ -149,7 +151,11 @@ where
         GlobalDbTranscriptStore::new(self.db.clone())
     }
 
-    #[hotpath::measure(label = "usecases.session_ingest.project_roots", future = true)]
+    #[tracing::instrument(
+        name = "usecases.session_ingest.project_roots",
+        level = "trace",
+        skip_all
+    )]
     async fn registered_project_roots(&self) -> Option<Vec<PathBuf>> {
         let mut roots = self.db().try_list_project_paths().await.ok()?;
         roots.extend(

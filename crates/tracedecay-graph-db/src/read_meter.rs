@@ -2,7 +2,7 @@
 //!
 //! A request attaches one meter to the snapshot it reads through
 //! ([`crate::VerifiedGraphSnapshot::metered`]); every point read and fan-out
-//! that lease serves is counted at the same boundary its Hotpath span
+//! that lease serves is counted at the same boundary its tracing span
 //! measures, so the receipt and a profile agree on what a call did.
 
 use std::collections::BTreeMap;

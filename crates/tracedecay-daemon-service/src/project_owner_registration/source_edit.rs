@@ -55,7 +55,6 @@ impl ProjectSourceEditAuthorizationV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn current_access(
         &self,
         observed_at: UtcMicros,
@@ -72,7 +71,6 @@ impl ProjectSourceEditAuthorizationV1 {
             .map_err(|_| concealed_source_edit_problem())
     }
 
-    #[hotpath::skip]
     async fn current_authority(
         &self,
         context: &RequestContext,
@@ -302,7 +300,7 @@ impl ProjectSourceEditOwnerV1 {
         self.authorization.scope.clone()
     }
 
-    #[hotpath::measure(label = "daemon.project.source_edit", future = true)]
+    #[tracing::instrument(name = "daemon.project.source_edit", level = "trace", skip_all)]
     pub async fn execute(
         &self,
         request_id: RequestId,
@@ -406,7 +404,11 @@ impl ProjectSourceEditOwnerV1 {
         .await
     }
 
-    #[hotpath::measure(label = "daemon.project.source_edit_rollback", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.source_edit_rollback",
+        level = "trace",
+        skip_all
+    )]
     pub async fn rollback(
         &self,
         request_id: RequestId,
@@ -470,7 +472,11 @@ impl ProjectSourceEditOwnerV1 {
         .map_err(SourceEditOwnerError::ExecutionFailed)
     }
 
-    #[hotpath::measure(label = "daemon.project.source_edit_reconciliation", future = true)]
+    #[tracing::instrument(
+        name = "daemon.project.source_edit_reconciliation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn reconcile(
         &self,
         request_id: RequestId,

@@ -186,7 +186,6 @@ enum RetainedLcmRetrieval<'a> {
 }
 
 impl RetainedLcmRetrieval<'_> {
-    #[hotpath::skip]
     async fn load_session(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -210,7 +209,6 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn grep(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -234,7 +232,6 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn describe(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -258,7 +255,6 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn expand(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -282,7 +278,6 @@ impl RetainedLcmRetrieval<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn expand_query(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -342,7 +337,6 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
-    #[hotpath::skip]
     async fn lcm_authority<'b>(
         &'b self,
         context: &'b RetainedSurfaceExecutionContextV1<'b>,
@@ -379,7 +373,6 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
-    #[hotpath::skip]
     async fn retrieval_service<'b>(
         &'b self,
         context: &'b RetainedSurfaceExecutionContextV1<'b>,
@@ -418,7 +411,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
-    #[hotpath::measure(label = "daemon.retained.lcm.status", future = true)]
+    #[tracing::instrument(name = "daemon.retained.lcm.status", level = "trace", skip_all)]
     async fn execute_status(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -435,7 +428,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty());
         let authority = self.lcm_authority(context).await?;
-        let response = hotpath::future!(
+        let response = tracing::Instrument::instrument(
             authority.as_ref().execute_admitted(
                 context.request_context,
                 context.cancellation_signal,
@@ -445,7 +438,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     deep: request.deep.unwrap_or(false),
                 }),
             ),
-            label = "daemon.retained.lcm.status.execute"
+            tracing::trace_span!("daemon.retained.lcm.status.execute"),
         )
         .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Status)?;
@@ -471,7 +464,6 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_lcm_inner(
         &self,
         context: RetainedSurfaceExecutionContextV1<'_>,
@@ -503,20 +495,20 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         }
     }
 
-    #[hotpath::measure(label = "daemon.retained.lcm.doctor", future = true)]
+    #[tracing::instrument(name = "daemon.retained.lcm.doctor", level = "trace", skip_all)]
     async fn execute_doctor(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
         _request: &LcmDoctorRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let authority = self.lcm_authority(context).await?;
-        let response = hotpath::future!(
+        let response = tracing::Instrument::instrument(
             authority.as_ref().execute_admitted(
                 context.request_context,
                 context.cancellation_signal,
                 LcmAuthorityRequest::Doctor(LcmDoctorQuery),
             ),
-            label = "daemon.retained.lcm.doctor.execute"
+            tracing::trace_span!("daemon.retained.lcm.doctor.execute"),
         )
         .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Doctor)?;
@@ -700,7 +692,6 @@ fn validate_receipt(
         || receipt.cancellation_token_id != request.cancellation().token_id
         || receipt.execution.effective_deadline != *request.deadline()
     {
-        hotpath::gauge!("daemon.retained.lcm.authority.receipt_invalid").inc(1.0);
         return Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the LCM authority execution receipt did not match the admitted request",
         ));
@@ -710,41 +701,25 @@ fn validate_receipt(
 
 fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
-        LcmAuthorityOutcome::Denied => {
-            hotpath::gauge!("daemon.retained.lcm.authority.denied").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
-        }
-        LcmAuthorityOutcome::Cancelled => {
-            hotpath::gauge!("daemon.retained.lcm.authority.cancelled").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_contracts::CancellationStage::DuringRead,
-            )
-        }
-        LcmAuthorityOutcome::TimedOut => {
-            hotpath::gauge!("daemon.retained.lcm.authority.timed_out").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_contracts::CancellationStage::DuringRead,
-            )
-        }
-        LcmAuthorityOutcome::Ready => {
-            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::unavailable(
-                "the LCM authority reported ready without the expected payload",
-            )
-        }
+        LcmAuthorityOutcome::Denied => RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
+        LcmAuthorityOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::Ready => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM authority reported ready without the expected payload",
+        ),
         LcmAuthorityOutcome::Unavailable { reason } => {
-            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
             RetainedSurfaceExecutionErrorV1::unavailable(format!(
                 "the LCM authority is unavailable: {}",
                 lcm_unavailable_reason(reason)
             ))
         }
-        LcmAuthorityOutcome::Failed { diagnostic } => {
-            hotpath::gauge!("daemon.retained.lcm.authority.unavailable").inc(1.0);
-            RetainedSurfaceExecutionErrorV1::unavailable(format!(
-                "the LCM authority failed: {diagnostic}"
-            ))
-        }
+        LcmAuthorityOutcome::Failed { diagnostic } => RetainedSurfaceExecutionErrorV1::unavailable(
+            format!("the LCM authority failed: {diagnostic}"),
+        ),
     }
 }
 

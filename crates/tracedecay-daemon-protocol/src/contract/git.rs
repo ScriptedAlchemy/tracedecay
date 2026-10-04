@@ -15,7 +15,6 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 enum DaemonGitEffectClass {
     IndexStage,
     IndexUnstage,
-    IndexCommit,
 }
 
 impl DaemonGitEffectClass {
@@ -23,19 +22,16 @@ impl DaemonGitEffectClass {
         match effect {
             EffectClass::GitIndexStage => Ok(Self::IndexStage),
             EffectClass::GitIndexUnstage => Ok(Self::IndexUnstage),
-            EffectClass::GitIndexCommit => Ok(Self::IndexCommit),
             _ => Err(ApplicationContractError::Inconsistent {
                 field: "daemon Git effect class",
             }),
         }
     }
 
-    #[hotpath::skip]
     const fn into_application(self) -> EffectClass {
         match self {
             Self::IndexStage => EffectClass::GitIndexStage,
             Self::IndexUnstage => EffectClass::GitIndexUnstage,
-            Self::IndexCommit => EffectClass::GitIndexCommit,
         }
     }
 }
@@ -52,7 +48,6 @@ pub struct DaemonGitPreviewResult {
 }
 
 impl DaemonGitPreviewResult {
-    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
@@ -171,7 +166,6 @@ pub struct DaemonGitEffectResult {
 }
 
 impl DaemonGitEffectResult {
-    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }

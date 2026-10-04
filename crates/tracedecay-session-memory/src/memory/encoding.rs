@@ -47,7 +47,6 @@ impl HolographicEncoder {
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
-    #[hotpath::skip]
     pub const fn new() -> Self {
         Self
     }

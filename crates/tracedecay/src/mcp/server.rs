@@ -519,7 +519,7 @@ struct MountedProjectApplicationRetrievalV1 {
 }
 
 impl MountedProjectApplicationRetrievalV1 {
-    #[hotpath::measure(label = "mcp.server.retrieval_scope_check")]
+    #[tracing::instrument(name = "mcp.server.retrieval_scope_check", level = "trace", skip_all)]
     fn retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_contracts::ResolvedScope,
@@ -592,13 +592,11 @@ impl McpServer {
     /// on large monorepos where nested ignored directories
     /// (`apps/*/node_modules`, `packages/*/target`) drove unbounded event
     /// traffic and `FileId` cache growth.
-    #[hotpath::skip]
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -621,7 +619,6 @@ impl McpServer {
 
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -639,7 +636,6 @@ impl McpServer {
     /// one authority.
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn new_with_retained_test_servers_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -688,7 +684,6 @@ impl McpServer {
     #[cfg(any(test, feature = "test-transport"))]
     #[allow(clippy::expect_used)]
     #[doc(hidden)]
-    #[hotpath::skip]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_servers: Vec<Arc<McpServer>>,
@@ -773,7 +768,6 @@ impl McpServer {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -787,13 +781,10 @@ impl McpServer {
         context
     }
 
-    #[hotpath::measure(label = "mcp.server.construct", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "MCP server construction binds every injected port into one composed server."
-        )
+    #[tracing::instrument(name = "mcp.server.construct", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "MCP server construction binds every injected port into one composed server."
     )]
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
@@ -894,14 +885,14 @@ impl McpServer {
         let worktree_mismatch = {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
                         &project_root,
                         scope_prefix.as_deref(),
                     )
                 }),
-                label = "mcp.server.detect_worktree_mismatch"
+                tracing::trace_span!("mcp.server.detect_worktree_mismatch"),
             )
             .await
             .ok()
@@ -1154,7 +1145,7 @@ impl McpServer {
         self.scope_prefix.as_deref()
     }
 
-    #[hotpath::measure(label = "mcp.server.reconcile_automation", future = true)]
+    #[tracing::instrument(name = "mcp.server.reconcile_automation", level = "trace", skip_all)]
     pub(crate) async fn reconcile_automation_scheduler(
         &self,
     ) -> tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome {
@@ -1189,7 +1180,6 @@ impl McpServer {
     /// bypassing the 30 s cooldown in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
     #[doc(hidden)]
-    #[hotpath::skip]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
     }
@@ -1224,7 +1214,6 @@ impl McpServer {
     /// production code-graph projection port (a direct test server), so the
     /// authority cannot mount; dispatch-boundary behavior is unaffected and
     /// actual edits then report their typed executor-unavailable refusal.
-    #[hotpath::skip]
     pub async fn install_project_open_source_edit_authority_for_test(
         &self,
     ) -> tracedecay_domain::errors::Result<bool> {
@@ -1260,7 +1249,7 @@ impl McpServer {
         self.project_application_retrieval.is_some()
     }
 
-    #[hotpath::measure(label = "mcp.server.mount_work_evidence")]
+    #[tracing::instrument(name = "mcp.server.mount_work_evidence", level = "trace", skip_all)]
     pub(crate) fn work_evidence_retrieval(
         &self,
         expected_scope: &tracedecay_contracts::ResolvedScope,
@@ -1298,7 +1287,7 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.mount_retained_surfaces")]
+    #[tracing::instrument(name = "mcp.server.mount_retained_surfaces", level = "trace", skip_all)]
     pub(crate) fn retained_surface_ports(
         &self,
         project_root: &Path,
@@ -1334,12 +1323,11 @@ impl McpServer {
     }
     /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
-    #[hotpath::skip]
     pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.stats_snapshot", future = true)]
+    #[tracing::instrument(name = "mcp.server.stats_snapshot", level = "trace", skip_all)]
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
         let total_requests = self.stats.total_requests.load(Ordering::Relaxed);

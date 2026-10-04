@@ -9,7 +9,7 @@ use crate::{
     cost_summary::{CostAdminPayload, CostSummaryPayload},
 };
 
-#[hotpath::measure(label = "cli.cost.read", future = true)]
+#[tracing::instrument(name = "cli.cost.read", level = "trace", skip_all)]
 pub(crate) async fn handle_cost(
     profile: &ProfileRoot,
     range: String,
@@ -37,15 +37,18 @@ pub(crate) async fn handle_cost(
         return Ok(());
     }
 
-    hotpath::measure_block!("cli.cost.render", {
-        print_cost_summary(
-            &today.provider_usage,
-            &range,
-            by_model,
-            export.as_deref(),
-            &summary,
-        )
-    })?;
+    {
+        let _span = tracing::trace_span!("cli.cost.render").entered();
+        {
+            print_cost_summary(
+                &today.provider_usage,
+                &range,
+                by_model,
+                export.as_deref(),
+                &summary,
+            )
+        }
+    }?;
     Ok(())
 }
 

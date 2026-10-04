@@ -108,7 +108,6 @@ pub async fn set_parse_offset(
 }
 
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
-    #[hotpath::skip]
     pub(super) async fn begin_transcript_transaction(
         &self,
     ) -> Result<D::WriteTxn<'_>, TranscriptPersistenceError> {
@@ -117,7 +116,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| TranscriptPersistenceError::storage("begin transcript batch", error))
     }
 
-    #[hotpath::skip]
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         let Ok(transaction) = self.begin_transcript_transaction().await else {
             return false;
@@ -131,7 +129,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Writes one session row with its path column in the canonical form that
     /// project-scoped reads query. `project_key` is an opaque authority and
     /// remains byte-exact; `transcript_path` remains the real display path.
-    #[hotpath::skip]
     async fn upsert_session_in_existing_tx(conn: &impl Executor, session: &SessionRecord) -> bool {
         conn.execute(
             "INSERT INTO sessions
@@ -171,7 +168,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .is_ok()
     }
 
-    #[hotpath::skip]
     pub async fn get_session(
         &self,
         provider: &str,
@@ -239,7 +235,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         }))
     }
 
-    #[hotpath::skip]
     pub async fn persist_transcript_offset_result(
         &self,
         parse_offset_path: &str,
@@ -255,7 +250,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
     }
 
-    #[hotpath::skip]
     pub async fn get_parse_offset(
         &self,
         path: &str,
@@ -267,7 +261,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         get_parse_offset(&reader, path).await
     }
 
-    #[hotpath::skip]
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) -> Result<(), String> {
         let transaction = self
             .begin_transcript_transaction()
@@ -282,7 +275,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| format!("commit transcript parse offset: {error}"))
     }
 
-    #[hotpath::skip]
     pub async fn advance_parse_offset_result(
         &self,
         path: &str,
@@ -301,7 +293,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     /// Exact compare-and-set for versioned parse-offset authorities whose
     /// numeric fields are not monotonic transcript positions.
-    #[hotpath::skip]
     pub async fn replace_parse_offset_result(
         &self,
         path: &str,
@@ -319,7 +310,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// Atomically compare-and-replace two parse-offset keys. Both expected
     /// values are checked before either write and one transaction owns the
     /// pair through commit.
-    #[hotpath::skip]
     pub async fn replace_parse_offset_pair_result(
         &self,
         first: (&str, ParseOffset, ParseOffset),
@@ -352,7 +342,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     /// frontiers that carry sentinels or digests in these columns advance
     /// through a changed `file_id` or a strictly greater revision `mtime`
     /// (see `opencode_frontier`), never through the byte-offset comparison.
-    #[hotpath::skip]
     async fn set_parse_offset_monotonic_in_existing_tx(
         conn: &impl Executor,
         path: &str,

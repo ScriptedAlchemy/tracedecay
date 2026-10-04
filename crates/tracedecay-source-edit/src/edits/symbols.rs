@@ -146,7 +146,7 @@ pub(crate) fn edit_symbol_from_summary(summary: &CodeGraphSymbolSummaryV1) -> Re
 /// `src\pricing.rs::total`): stored qualified names are file-path prefixed, so
 /// module qualifiers resolve as a suffix of the candidate's path-expanded
 /// segment chain.
-#[hotpath::measure(label = "edits.resolve_symbol")]
+#[tracing::instrument(name = "edits.resolve_symbol", level = "trace", skip_all)]
 pub(crate) fn resolve_symbol_for_edit(
     graph: &SourceEditGraphReadV1,
     symbol: &str,

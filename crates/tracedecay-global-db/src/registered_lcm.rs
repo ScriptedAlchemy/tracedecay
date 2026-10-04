@@ -34,7 +34,6 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
 }
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
     pub(super) async fn lcm_read_snapshot(
         &self,
     ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, LcmError> {
@@ -45,7 +44,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_storage_root()
     }
 
-    #[hotpath::skip]
     pub async fn lcm_status(
         &self,
         provider: &str,
@@ -56,7 +54,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_describe(
         &self,
         request: LcmDescribeRequest,
@@ -64,7 +61,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_describe(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_expand(
         &self,
         request: LcmExpandRequest,
@@ -72,7 +68,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_expand(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_expand_summary_node(
         &self,
         provider: &str,
@@ -84,7 +79,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_expand_query(
         &self,
         request: LcmExpandQueryRequest,
@@ -94,7 +88,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
+    #[tracing::instrument(name = "global_db.registered.lcm.grep", level = "trace", skip_all)]
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
         let git_scope_session_ids = SessionTemporalAccess::new(self)
             .git_scope_session_ids(&request.git_filter)
@@ -105,7 +99,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_load_session(
         &self,
         request: LcmLoadSessionRequest,
@@ -115,7 +108,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_recent_sessions(
         &self,
         provider: Option<&str>,
@@ -126,14 +118,12 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_providers(&self, session_id: &str) -> Result<Vec<String>, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_session_providers(session_id)
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_replay_slice(
         &self,
         request: &LcmSessionReplayRequest,
@@ -143,7 +133,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_raw_message_store_id(
         &self,
         provider: &str,
@@ -154,7 +143,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_status_with_options(
         &self,
         provider: &str,
@@ -169,7 +157,7 @@ impl RegisteredGlobalDb {
 
     /// Publishes one immutable summary and advances its native relation
     /// projection in the same controlled mutation journey.
-    #[hotpath::measure(future = true, label = "global_db.registered.lcm.publish")]
+    #[tracing::instrument(name = "global_db.registered.lcm.publish", level = "trace", skip_all)]
     pub async fn lcm_publish_immutable_summary_guarded<F>(
         &self,
         publication: LcmImmutableSummaryPublication,
@@ -227,7 +215,6 @@ impl RegisteredGlobalDb {
         Ok(receipt)
     }
 
-    #[hotpath::skip]
     pub async fn lcm_session_boundary_guarded<F>(
         &self,
         request: LcmSessionBoundaryRequest,
@@ -241,7 +228,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_preflight(
         &self,
         request: LcmPreflightRequest,
@@ -249,7 +235,6 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).lcm_preflight(request).await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_compress_guarded<F>(
         &self,
         request: &LcmCompressionRequest,
@@ -317,7 +302,6 @@ impl RegisteredGlobalDb {
         Ok(response)
     }
 
-    #[hotpath::skip]
     pub async fn lcm_compress_retained_page_guarded<F>(
         &self,
         request: &LcmCompressionRequest,
@@ -419,7 +403,6 @@ impl RegisteredGlobalDb {
         Ok(bounded)
     }
 
-    #[hotpath::skip]
     pub async fn lcm_invalidate_retained_raw_revision_page(
         &self,
         candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
@@ -505,7 +488,6 @@ impl RegisteredGlobalDb {
         Ok((work, has_more))
     }
 
-    #[hotpath::skip]
     pub async fn lcm_run_payload_gc_apply(
         &self,
         storage_root: &Path,
@@ -519,7 +501,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_protect_session_raw_messages(
         &self,
         provider: &str,
@@ -530,7 +511,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_protect_session_raw_messages_page(
         &self,
         provider: &str,
@@ -550,13 +530,11 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), LcmError> {
-        crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .lcm_ingest_raw_message(storage_root, message)
             .await

@@ -107,17 +107,14 @@ impl SessionRefreshTarget {
         self.source_scope.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn frozen_frontier(&self) -> SessionRefreshFrontierV1 {
         self.frozen_frontier
     }
@@ -127,7 +124,6 @@ impl SessionRefreshTarget {
 pub struct SessionRefreshDigest([u8; 32]);
 
 impl SessionRefreshDigest {
-    #[hotpath::skip]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -151,17 +147,14 @@ impl SessionRefreshHandle {
         &self.target
     }
 
-    #[hotpath::skip]
     pub const fn accepted_at(&self) -> UtcMicros {
         self.accepted_at
     }
 
-    #[hotpath::skip]
     pub const fn caller_idempotency_digest(&self) -> SessionRefreshDigest {
         self.caller_idempotency_digest
     }
 
-    #[hotpath::skip]
     pub const fn join_digest(&self) -> SessionRefreshDigest {
         self.join_digest
     }
@@ -294,7 +287,7 @@ where
     S: SessionRefreshStore,
     W: Fn() -> Result<(), SessionRefreshSchedulerError>,
 {
-    #[hotpath::measure(label = "usecases.session.refresh.begin", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.begin", level = "trace", skip_all)]
     pub async fn begin_or_join(
         &self,
         context: &RequestContext,
@@ -414,7 +407,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "usecases.session.refresh.status", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.status", level = "trace", skip_all)]
     pub async fn status(
         &self,
         context: &RequestContext,
@@ -463,7 +456,7 @@ where
         SessionRefreshOutcome::Running(progress)
     }
 
-    #[hotpath::measure(label = "usecases.session.refresh.cancel", future = true)]
+    #[tracing::instrument(name = "usecases.session.refresh.cancel", level = "trace", skip_all)]
     pub async fn cancel(
         &self,
         context: &RequestContext,
@@ -564,7 +557,6 @@ where
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn read_receipt(
         &self,
         context: &RequestContext,

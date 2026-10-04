@@ -13,7 +13,6 @@ base64 = "0.22"
 clru = "0.6"
 futures-util = "0.3.33"
 getrandom = "0.2"
-hotpath.workspace = true
 httpdate = "1.0.3"
 schemars.workspace = true
 semver = "1"
@@ -45,12 +44,6 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath", "hotpath/axum-0-8"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
 # Exact BPE counting lives in this crate (`tiktoken-rs`); no agent-hosts forward.

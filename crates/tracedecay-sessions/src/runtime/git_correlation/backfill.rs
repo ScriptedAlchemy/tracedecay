@@ -11,8 +11,8 @@ use super::rows::{GitEvidenceBatch, GitEvidenceWriter};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY,
+    AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation, CommitSessionRecord,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY, GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
     GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SessionGitSpan, SpanOverlapKind,
     SpanScanTarget, TargetScan, normalize_worktree,
 };
@@ -28,7 +28,7 @@ pub use bounded::{
 #[derive(Debug)]
 pub(super) struct SessionActivityPageRow {
     pub source_rowid: i64,
-    pub activity_timestamp: i64,
+    pub change_sequence: i64,
     pub session: SessionActivityRow,
 }
 
@@ -42,6 +42,9 @@ pub(super) struct SessionActivityPageRow {
 pub struct SessionActivityRow {
     pub provider: String,
     pub session_id: String,
+    /// Where the session ran: its retained `{provider}_session_cwd`, else the
+    /// session row's `project_path`. A linked-worktree session shares the
+    /// primary checkout's `project_path`, so only its cwd names its worktree.
     pub project_path: String,
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
@@ -73,6 +76,25 @@ impl SessionActivityRow {
         match (lo, hi) {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => None,
+        }
+    }
+
+    /// The folder whose Git history the session ran against. A provider that
+    /// records a project id rather than a folder (Claude) ran in the project
+    /// store's own admitted root.
+    pub(super) fn folder<'a>(
+        &'a self,
+        project_root: Option<&'a std::path::Path>,
+    ) -> Option<&'a std::path::Path> {
+        let project_path = self.project_path.trim();
+        if project_path.is_empty() {
+            return None;
+        }
+        let path = std::path::Path::new(project_path);
+        if path.is_absolute() {
+            Some(path)
+        } else {
+            project_root
         }
     }
 }
@@ -222,6 +244,9 @@ pub struct BackfillOptions {
     pub max_commits_per_repo: usize,
     /// When true, derive and count everything but write nothing.
     pub dry_run: bool,
+    /// The project store's admitted root, where sessions that record a
+    /// project id instead of a folder ran.
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl Default for BackfillOptions {
@@ -232,6 +257,7 @@ impl Default for BackfillOptions {
             merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: 5_000,
             dry_run: false,
+            project_root: None,
         }
     }
 }
@@ -262,7 +288,6 @@ impl BackfillStats {
         }
     }
 
-    #[hotpath::skip]
     pub const fn skipped_total(&self) -> usize {
         self.skipped_no_window
             + self.skipped_not_worktree
@@ -429,7 +454,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-#[hotpath::measure(label = "sessions.git_correlation.backfill", future = true)]
+#[tracing::instrument(name = "sessions.git_correlation.backfill", level = "trace", skip_all)]
 pub async fn run_backfill<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
@@ -468,10 +493,6 @@ where
         stats.spans_written = written.spans_changed;
         stats.commits_attributed = written.commits_changed;
     }
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
     Ok(stats)
 }
 
@@ -490,15 +511,20 @@ pub struct CollectedBackfill {
     pub settled_through: Option<GitHistoryIndexFrontier>,
 }
 
-/// Derives span and commit evidence for every retained session newer than the
-/// durable `(activity, rowid)` frontier, oldest first. Evidence stops at the
-/// first transient Git failure so the frontier never passes an unresolved
-/// session; permanent exclusions (no activity window, not a worktree,
-/// verified empty history) settle without evidence.
-#[hotpath::measure(label = "sessions.git_correlation.backfill.collect", future = true)]
+/// Derives span and commit evidence for every retained session that changed
+/// past the durable change-sequence frontier, in change order. Evidence stops
+/// at the first transient Git failure so the frontier never passes an
+/// unresolved session; permanent exclusions (no activity window, not a
+/// worktree, verified empty history) settle without evidence.
+#[tracing::instrument(
+    name = "sessions.git_correlation.backfill.collect",
+    level = "trace",
+    skip_all
+)]
 pub async fn collect_incremental_backfill<S, G>(
     session_store: &S,
     git: &G,
+    project_root: Option<&std::path::Path>,
 ) -> Result<CollectedBackfill, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
@@ -506,31 +532,19 @@ where
 {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
-    let start = GitHistoryIndexFrontier {
-        activity_timestamp: super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
-            .await?
-            .unwrap_or(0),
-        source_rowid: super::read_meta_value(&snapshot, GIT_HISTORY_ROWID_FRONTIER_KEY)
-            .await?
-            .unwrap_or(0),
-    };
+    let start = super::read_history_frontier(&snapshot).await?;
     // The whole backlog in one read: it all lands in one transaction, and a
     // bounded page would repeat the grouped session scan once per page.
-    let page = session_activity_page_after(
-        &snapshot,
-        start.activity_timestamp,
-        start.source_rowid,
-        usize::MAX,
-    )
-    .await
-    .map_err(GitCorrelationError::Db)?;
+    let page = session_activity_page_after(&snapshot, start.change_sequence, usize::MAX)
+        .await
+        .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
     let (frontiers, rows): (Vec<_>, Vec<_>) = page
         .into_iter()
         .map(|row| {
             (
                 GitHistoryIndexFrontier {
-                    activity_timestamp: row.activity_timestamp,
+                    change_sequence: row.change_sequence,
                     source_rowid: row.source_rowid,
                 },
                 row.session,
@@ -545,6 +559,7 @@ where
         merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
         max_commits_per_repo: BackfillOptions::default().max_commits_per_repo,
         dry_run: false,
+        project_root: project_root.map(std::path::Path::to_path_buf),
     };
     let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
     let derived = derive_backfill_evidence(git, &opts, &rows, no_analytics);
@@ -566,23 +581,16 @@ pub(super) async fn advance_history_frontier(
     transaction: &(impl Executor + ?Sized),
     candidate: GitHistoryIndexFrontier,
 ) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
-    let current = GitHistoryIndexFrontier {
-        activity_timestamp: super::read_meta_value(transaction, AUTO_BACKFILL_WATERMARK_KEY)
-            .await?
-            .unwrap_or(0),
-        source_rowid: super::read_meta_value(transaction, GIT_HISTORY_ROWID_FRONTIER_KEY)
-            .await?
-            .unwrap_or(0),
-    };
-    if (candidate.activity_timestamp, candidate.source_rowid)
-        <= (current.activity_timestamp, current.source_rowid)
+    let current = super::read_history_frontier(transaction).await?;
+    if (candidate.change_sequence, candidate.source_rowid)
+        <= (current.change_sequence, current.source_rowid)
     {
         return Ok(current);
     }
     super::write_meta_value(
         transaction,
-        AUTO_BACKFILL_WATERMARK_KEY,
-        candidate.activity_timestamp,
+        GIT_HISTORY_SEQUENCE_FRONTIER_KEY,
+        candidate.change_sequence,
     )
     .await?;
     super::write_meta_value(
@@ -664,7 +672,7 @@ struct PlannedSession<'r> {
 /// subprocesses per session only multiplies the pass.
 struct WorktreeHistories<'g, G: ?Sized> {
     git: &'g G,
-    roots: HashMap<String, Option<std::path::PathBuf>>,
+    roots: HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
     timelines: HashMap<std::path::PathBuf, Option<Arc<WorktreeTimeline>>>,
 }
 
@@ -677,14 +685,10 @@ impl<'g, G: GitReflogSource + ?Sized> WorktreeHistories<'g, G> {
         }
     }
 
-    fn worktree_root(&mut self, project_path: &str) -> Option<std::path::PathBuf> {
+    fn worktree_root(&mut self, folder: &std::path::Path) -> Option<std::path::PathBuf> {
         self.roots
-            .entry(project_path.to_owned())
-            .or_insert_with(|| {
-                tracedecay_runtime_core::worktree::git_worktree_root(std::path::Path::new(
-                    project_path,
-                ))
-            })
+            .entry(folder.to_path_buf())
+            .or_insert_with(|| tracedecay_runtime_core::worktree::git_worktree_root(folder))
             .clone()
     }
 
@@ -868,12 +872,11 @@ fn plan_session<'r, G: GitReflogSource + ?Sized>(
     if win_start > win_end {
         return Err(BackfillSkipReason::NoActivityWindow);
     }
-    let project_path = row.project_path.trim();
-    if project_path.is_empty() {
-        return Err(BackfillSkipReason::NotAWorktree);
-    }
+    let folder = row
+        .folder(opts.project_root.as_deref())
+        .ok_or(BackfillSkipReason::NotAWorktree)?;
     let worktree_root = histories
-        .worktree_root(project_path)
+        .worktree_root(folder)
         .ok_or(BackfillSkipReason::NotAWorktree)?;
     let Some(history) = histories.timeline(&worktree_root)? else {
         return Ok(None);
@@ -916,7 +919,13 @@ pub(super) async fn session_activity_rows(
     }
     let mut rows = conn
         .query(
-            "SELECT s.provider, s.session_id, s.project_path,
+            "SELECT s.provider, s.session_id,
+                    COALESCE(
+                        CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                            s.metadata_json, '$.' || s.provider || '_session_cwd'
+                        ), '') END,
+                        s.project_path
+                    ),
                     s.started_at, s.ended_at,
                     MIN(m.timestamp), MAX(m.timestamp)
              FROM sessions s
@@ -940,53 +949,41 @@ pub(super) async fn session_activity_rows(
     Ok(out)
 }
 
-/// Keyset page of sessions whose activity is past `(?1, ?2)`, oldest first.
+/// Page of sessions whose newest stored message is past change sequence `?1`,
+/// in change order.
 ///
-/// A session's activity is at or past the frontier only if one of its messages
-/// is (`idx_lcm_raw_timestamp`) or, with no timestamped message, its session
-/// bounds are (`idx_sessions_activity_fallback`), so the page reads what moved
-/// since the frontier rather than aggregating every session. The `IN` list,
-/// unlike a `UNION`, keeps SQLite from merging the two ranges over a full scan
-/// of `sessions`.
-const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH activity AS (
-         SELECT s.provider, s.session_id, s.project_path,
-                s.started_at, s.ended_at,
-                (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id)
-                    AS first_ts,
-                (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
-                 WHERE m.provider = s.provider AND m.session_id = s.session_id)
-                    AS last_ts,
-                s.rowid AS source_rowid
-         FROM sessions s
-         WHERE s.rowid IN (
-             SELECT touched.rowid
-             FROM lcm_raw_messages m
-             JOIN sessions touched
-               ON touched.provider = m.provider
-              AND touched.session_id = m.session_id
-             WHERE m.timestamp >= ?1
-             UNION ALL
-             SELECT rowid FROM sessions
-             WHERE COALESCE(ended_at, started_at) >= ?1
-         )
+/// A session's change sequence is its highest `lcm_raw_messages.store_id`. The
+/// store assigns ids monotonically at import, so a session imported late
+/// still lands past the frontier however old its activity is. Ids are unique,
+/// so the sequence alone orders the page.
+const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
+         SELECT provider, session_id, MAX(store_id) AS change_sequence
+         FROM lcm_raw_messages
+         WHERE store_id > ?1
+         GROUP BY provider, session_id
      )
-     SELECT provider, session_id, project_path, started_at, ended_at,
-            first_ts, last_ts, source_rowid,
-            COALESCE(last_ts, ended_at, started_at) AS activity_timestamp
-     FROM activity
-     WHERE COALESCE(last_ts, ended_at, started_at) > ?1
-        OR (
-           COALESCE(last_ts, ended_at, started_at) = ?1
-           AND source_rowid > ?2
-        )
-     ORDER BY activity_timestamp ASC, source_rowid ASC
-     LIMIT ?3";
+     SELECT s.provider, s.session_id,
+            COALESCE(
+                CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
+                    s.metadata_json, '$.' || s.provider || '_session_cwd'
+                ), '') END,
+                s.project_path
+            ),
+            s.started_at, s.ended_at,
+            (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id),
+            (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
+             WHERE m.provider = s.provider AND m.session_id = s.session_id),
+            s.rowid, touched.change_sequence
+     FROM touched
+     JOIN sessions s
+       ON s.provider = touched.provider AND s.session_id = touched.session_id
+     ORDER BY touched.change_sequence ASC
+     LIMIT ?2";
 
 pub(super) async fn session_activity_page_after(
     conn: &(impl QueryExecutor + ?Sized),
-    activity_timestamp: i64,
-    source_rowid: i64,
+    change_sequence: i64,
     limit: usize,
 ) -> Result<Vec<SessionActivityPageRow>, String> {
     if limit == 0 {
@@ -995,11 +992,7 @@ pub(super) async fn session_activity_page_after(
     let mut rows = conn
         .query(
             SESSION_ACTIVITY_PAGE_AFTER_SQL,
-            params![
-                activity_timestamp,
-                source_rowid,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
+            params![change_sequence, i64::try_from(limit).unwrap_or(i64::MAX)],
         )
         .await
         .map_err(|error| format!("failed to query git history session page: {error}"))?;
@@ -1013,9 +1006,9 @@ pub(super) async fn session_activity_page_after(
             source_rowid: row
                 .get(7)
                 .map_err(|error| format!("failed to decode session rowid: {error}"))?,
-            activity_timestamp: row
+            change_sequence: row
                 .get(8)
-                .map_err(|error| format!("failed to decode session activity: {error}"))?,
+                .map_err(|error| format!("failed to decode change sequence: {error}"))?,
             session: decode_session_activity_row(&row)?,
         });
     }

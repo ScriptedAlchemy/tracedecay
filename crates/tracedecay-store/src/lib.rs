@@ -18,7 +18,6 @@ pub mod external_source;
 #[path = "../test-support/fault_harness.rs"]
 pub mod fault_harness;
 pub mod git_index_transactions;
-mod hotpath_observe;
 pub mod memory;
 pub mod native_integration;
 pub mod observation;
@@ -153,7 +152,7 @@ pub use projection::{
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V6,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V7,
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord, message_output_digest,
 };
 pub use provider_descriptor::{

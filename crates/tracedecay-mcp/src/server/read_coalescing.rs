@@ -64,7 +64,6 @@ struct ReadFollowerWaitGuard {
 impl ReadFollowerWaitGuard {
     fn enter(active: Arc<AtomicU64>) -> Self {
         active.fetch_add(1, Ordering::AcqRel);
-        hotpath::gauge!("mcp.server.read_coalescing.followers_active").inc(1_u64);
         Self { active }
     }
 }
@@ -72,7 +71,6 @@ impl ReadFollowerWaitGuard {
 impl Drop for ReadFollowerWaitGuard {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
-        hotpath::gauge!("mcp.server.read_coalescing.followers_active").dec(1_u64);
     }
 }
 
@@ -129,7 +127,11 @@ impl IdenticalReadCoalescer {
 }
 
 impl ReadFlight {
-    #[hotpath::measure(label = "mcp.server.read_coalescing.follower_wait", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.read_coalescing.follower_wait",
+        level = "trace",
+        skip_all
+    )]
     pub async fn wait(&self) -> Option<Arc<ToolResult>> {
         let _active = ReadFollowerWaitGuard::enter(Arc::clone(&self.active_followers));
         loop {

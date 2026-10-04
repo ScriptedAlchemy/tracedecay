@@ -4,7 +4,6 @@ use tracedecay_sessions::runtime::SessionStoreAccess;
 use crate::RegisteredGlobalDb;
 
 impl RegisteredGlobalDb {
-    #[hotpath::skip]
     pub async fn list_session_sync_source_frontiers(
         &self,
     ) -> Result<Vec<(String, String, String)>, TraceDecayError> {
@@ -13,7 +12,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn read_session_sync_journal(
         &self,
         key: &str,
@@ -23,7 +21,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn list_session_sync_journals(
         &self,
         key_prefix: &str,
@@ -33,7 +30,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page(
         &self,
         key_prefix: &str,
@@ -44,7 +40,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn list_incomplete_session_sync_journal_page_through(
         &self,
         key_prefix: &str,
@@ -56,7 +51,6 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn session_sync_journal_high_water(
         &self,
         key_prefix: &str,
@@ -66,38 +60,32 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
         value: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .insert_session_sync_journal(key, value)
             .await
     }
 
-    #[hotpath::skip]
     pub async fn compare_and_swap_session_sync_journal(
         &self,
         key: &str,
         expected: &str,
         replacement: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .compare_and_swap_session_sync_journal(key, expected, replacement)
             .await
     }
 
-    #[hotpath::skip]
     pub async fn compare_and_delete_session_sync_journal(
         &self,
         key: &str,
         expected: &str,
     ) -> Result<bool, TraceDecayError> {
-        crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .compare_and_delete_session_sync_journal(key, expected)
             .await

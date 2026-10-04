@@ -62,7 +62,6 @@ struct CanonicalOccurrence {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::skip]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &SessionId,
@@ -87,13 +86,16 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok((generation, relations))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.relation_projection")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.relation_projection",
+        level = "trace",
+        skip_all
+    )]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<GraphWatermark> {
-        crate::support::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -187,7 +189,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.recover_relations")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.recover_relations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -199,9 +205,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .recovered)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.recover_relation_page"
+    #[tracing::instrument(
+        name = "session_temporal.persist.recover_relation_page",
+        level = "trace",
+        skip_all
     )]
     pub async fn recover_pending_session_relation_projection_page(
         &self,
@@ -219,7 +226,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        crate::support::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -353,7 +359,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
             }
         }
-        crate::support::record_output_sessions(u64::try_from(recovered).unwrap_or(u64::MAX));
         let snapshot = self
             .read_snapshot()
             .await
@@ -437,7 +442,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn active_relation_generation(
         &self,
         session_id: &SessionId,
@@ -450,7 +454,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.seed_relation")]
+#[tracing::instrument(
+    name = "session_temporal.persist.seed_relation",
+    level = "trace",
+    skip_all
+)]
 pub async fn seed_session_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -1083,7 +1091,6 @@ async fn introduced_occurrence_relations(
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
         );
         if settled_instant >= first_instant {
-            record_relation_reconstruction();
             return Ok(None);
         }
     }
@@ -1179,12 +1186,6 @@ async fn latest_occurrence(
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         .map(|row| decode_occurrence(&row))
         .transpose()
-}
-
-#[inline(always)]
-fn record_relation_reconstruction() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.relations.full_reconstructions").inc(1_u64);
 }
 
 /// Logical copies a candidate generation introduced, or every copy of the
@@ -1287,7 +1288,6 @@ pub(crate) async fn candidate_session_relation_projection(
     ) {
         Ok(base) => base,
         Err(SessionRelationError::NotFound) => {
-            record_relation_reconstruction();
             return reconstruct().await;
         }
         Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),

@@ -372,7 +372,6 @@ impl<S> RegisteredWorkflowIndexSnapshot<S>
 where
     S: QueryExecutor + Send + Sync,
 {
-    #[hotpath::skip]
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
         if names.is_empty() {
             return Ok(true);
@@ -401,12 +400,10 @@ where
     /// The query methods below already treat an absent index as empty, which is
     /// safe but indistinguishable from a built index holding nothing. Callers
     /// that report to a user ask this first so they can say which one it is.
-    #[hotpath::skip]
     pub async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
-    #[hotpath::skip]
     pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
@@ -436,7 +433,6 @@ where
         Ok(runs)
     }
 
-    #[hotpath::skip]
     pub async fn run_for_id(
         &self,
         run_id: &str,
@@ -452,7 +448,6 @@ where
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
-    #[hotpath::skip]
     pub async fn agents_for_run(
         &self,
         run_id: &str,
@@ -482,7 +477,6 @@ where
         Ok(agents)
     }
 
-    #[hotpath::skip]
     pub async fn agent_count_for_run(&self, run_id: &str) -> Result<i64, WorkflowIndexError> {
         if !self
             .has_tables(&["workflow_runs", "workflow_agents"])
@@ -503,7 +497,6 @@ where
         Ok(row.get(0)?)
     }
 
-    #[hotpath::skip]
     pub async fn agent_for_run_label(
         &self,
         run_id: &str,
@@ -529,7 +522,6 @@ where
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
-    #[hotpath::skip]
     pub async fn runs_for_git_scope(
         &self,
         session_ids: Option<&[(String, String)]>,

@@ -491,9 +491,10 @@ impl ExactSqlHandle {
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.begin_read_snapshot", {
+        {
+            let _span = tracing::trace_span!("rusqlite.begin_read_snapshot").entered();
             self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
-        })
+        }
     }
 
     /// Read snapshot under an explicit priority. A pinned snapshot holds its
@@ -524,9 +525,10 @@ impl ExactSqlHandle {
     /// here as begin latency even when SQLite was never contended, which is the
     /// distinction `rusqlite.exact_sql.write_lock` exists to make.
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.exact_sql.begin_immediate", {
+        {
+            let _span = tracing::trace_span!("rusqlite.exact_sql.begin_immediate").entered();
             self.begin_transaction(TransactionBehavior::Immediate, TransactionPolicy::Ordinary)
-        })
+        }
     }
 
     pub async fn begin_immediate_async(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
@@ -535,9 +537,10 @@ impl ExactSqlHandle {
     }
 
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.begin_deferred", {
+        {
+            let _span = tracing::trace_span!("rusqlite.begin_deferred").entered();
             self.begin_transaction(TransactionBehavior::Deferred, TransactionPolicy::Ordinary)
-        })
+        }
     }
 
     pub async fn begin_deferred_async(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
@@ -564,12 +567,16 @@ impl ExactSqlHandle {
                 "long-lease transaction requires attached write authority".to_owned(),
             ));
         }
-        hotpath::measure_block!("rusqlite.begin_authorized_long_lease_immediate", {
-            self.begin_transaction(
-                TransactionBehavior::Immediate,
-                TransactionPolicy::AuthorizedLongLease,
-            )
-        })
+        {
+            let _span =
+                tracing::trace_span!("rusqlite.begin_authorized_long_lease_immediate").entered();
+            {
+                self.begin_transaction(
+                    TransactionBehavior::Immediate,
+                    TransactionPolicy::AuthorizedLongLease,
+                )
+            }
+        }
     }
 
     pub async fn begin_authorized_long_lease_immediate_async(
@@ -675,13 +682,16 @@ impl ExactSqlHandle {
     }
 
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
-        hotpath::measure_block!("rusqlite.exact_sql.dispatch", {
-            recv_writer_reply(self.enqueue_writer_request(request)?)
-                .map_err(|_| ExactSqlError::WriterUnavailable)?
-        })
+        {
+            let _span = tracing::trace_span!("rusqlite.exact_sql.dispatch").entered();
+            {
+                recv_writer_reply(self.enqueue_writer_request(request)?)
+                    .map_err(|_| ExactSqlError::WriterUnavailable)?
+            }
+        }
     }
 
-    #[hotpath::measure(label = "rusqlite.exact_sql.dispatch", future = true)]
+    #[tracing::instrument(name = "rusqlite.exact_sql.dispatch", level = "trace", skip_all)]
     async fn dispatch_writer_async(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         self.enqueue_writer_request(request)?
             .recv()
@@ -1113,7 +1123,11 @@ fn validate_batch(sql: &String) -> Result<(), ExactSqlError> {
     }
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_statement")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.execute_statement",
+    level = "trace",
+    skip_all
+)]
 fn execute_statement(
     connection: &Connection,
     statement: ExactSqlStatement,
@@ -1201,7 +1215,11 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
     })
 }
 
-#[hotpath::measure(label = "rusqlite_runtime.exact_sql.execute_query")]
+#[tracing::instrument(
+    name = "rusqlite_runtime.exact_sql.execute_query",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
@@ -1265,22 +1283,25 @@ fn execute_query_unchecked(
     // statement (which rides out WAL recovery), SQLite's first step under the
     // snapshot, and materializing the result set. `reader.exact_sql` alone
     // cannot distinguish a scan from a wait.
-    let mut statement = hotpath::measure_block!("rusqlite.exact_sql.query.prepare", {
+    let mut statement = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.prepare").entered();
         prepare_read_statement(connection, &request.sql)
-    })?;
+    }?;
     let columns = statement
         .column_names()
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let values = request.params.into_iter().map(ExactSqlValue::into_rusqlite);
-    let mut query = hotpath::measure_block!("rusqlite.exact_sql.query.start", {
+    let mut query = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.start").entered();
         statement.query(params_from_iter(values))
-    })
+    }
     .map_err(|error| sqlite_error("start query", error))?;
-    let rows = hotpath::measure_block!("rusqlite.exact_sql.query.fetch", {
+    let rows = {
+        let _span = tracing::trace_span!("rusqlite.exact_sql.query.fetch").entered();
         materialize_rows(&mut query, &columns)
-    })?;
+    }?;
     drop(query);
     crate::telemetry::observe_statement(&statement);
     Ok(ExactSqlRows { columns, rows })

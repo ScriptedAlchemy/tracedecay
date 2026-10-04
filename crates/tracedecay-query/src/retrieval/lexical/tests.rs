@@ -264,6 +264,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         phrases: Cow::Owned(Vec::new()),
         proximities: Cow::Owned(Vec::new()),
         field_filters: Cow::Owned(Vec::new()),
+        path_prefix: None,
         fuzzy_budget: 2,
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),

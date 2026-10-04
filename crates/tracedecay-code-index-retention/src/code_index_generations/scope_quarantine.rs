@@ -138,7 +138,7 @@ impl ScopeQuarantineAuthority {
         &self.scope_identities
     }
 
-    #[hotpath::measure(label = "code_index_retention.quarantine")]
+    #[tracing::instrument(name = "code_index_retention.quarantine", level = "trace", skip_all)]
     pub(super) fn stage(
         &mut self,
         scopes: &[StrandedCodeIndexScopeV1],
@@ -236,7 +236,6 @@ impl ScopeQuarantineAuthority {
             }
         }
         self.source_handles.clear();
-        crate::hotpath_observe::retention_scopes_quarantined(scopes.len());
         Ok(())
     }
 
@@ -302,7 +301,6 @@ impl ScopeQuarantineAuthority {
                 }
             }
         }
-        crate::hotpath_observe::retention_scopes_restored(scopes.len());
         self.remove_empty_stage()
     }
 
@@ -337,7 +335,6 @@ impl ScopeQuarantineAuthority {
                 if let Some(stage) = self.stage.as_ref() {
                     sync_directory(stage).map_err(storage)?;
                 }
-                crate::hotpath_observe::retention_scopes_deleted(1);
             }
         }
         self.remove_empty_stage()

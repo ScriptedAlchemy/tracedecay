@@ -277,13 +277,10 @@ async fn doctor_runtime_value(
     value
 }
 
-#[hotpath::measure(label = "daemon.engine.doctor.runtime", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
-    )
+#[tracing::instrument(name = "daemon.engine.doctor.runtime", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
 )]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
@@ -568,7 +565,7 @@ pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> se
     doctor_runtime_value_inner(handshake, None, false, build_version).await
 }
 
-#[hotpath::measure(label = "daemon.engine.doctor.runtime_write", future = true)]
+#[tracing::instrument(name = "daemon.engine.doctor.runtime_write", level = "trace", skip_all)]
 pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
@@ -608,7 +605,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
 /// as a probe. Returns the activity guard when the request falls through to
 /// the broker's regular routing, or `None` once the core response has been
 /// written and the connection is complete.
-#[hotpath::measure(label = "daemon.engine.doctor.serve", future = true)]
+#[tracing::instrument(name = "daemon.engine.doctor.serve", level = "trace", skip_all)]
 pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,

@@ -2,15 +2,15 @@
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use tracedecay_domain::{RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity,
-    GraphProjectionReadRequest, GraphRelation, MAX_VERIFIED_GENERATION_RELATIONS,
-    VerifiedGraphSnapshot,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphGenerationId, GraphLayeredRowsV1,
+    GraphProjectionIdentity, GraphProjectionReadRequest, GraphRelation, GraphRelationId,
+    MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
 };
 
 use super::super::schema::{
@@ -23,7 +23,8 @@ use super::super::{
     symbol_entity_id, validate_symbol_record,
 };
 use super::models::{
-    CatalogBuilder, CatalogSymbol, CodeGraphFileDependenciesV1, InteractiveCatalog,
+    CatalogBuilder, CatalogLayerV1, CatalogSymbol, DeltaEntityV1, DeltaRelationV1,
+    InteractiveCatalog,
 };
 use crate::chunks::CodeIndexImportEvidenceV1;
 
@@ -35,7 +36,7 @@ pub(super) fn build_interactive_catalog(
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
-    let mut scan = CatalogScan::new();
+    let mut scan = CatalogScan::new(snapshot.generation().clone(), snapshot.layered_rows());
     let mut after_entity = None;
     let mut after_relation = None;
     let mut entities_complete = false;
@@ -43,57 +44,65 @@ pub(super) fn build_interactive_catalog(
 
     while !entities_complete || !relations_complete {
         check_cancelled(cancellation.as_ref())?;
-        let page = hotpath::measure_block!("code_graph.catalog.scan_page", {
-            snapshot.read_projection(GraphProjectionReadRequest {
-                namespace: projection.namespace.clone(),
-                projection: projection.projection.clone(),
-                after_entity: after_entity.clone(),
-                after_relation: after_relation.clone(),
-                max_entities: if entities_complete {
-                    0
-                } else {
-                    CATALOG_SCAN_PAGE_ITEMS
-                },
-                max_relations: if relations_complete {
-                    0
-                } else {
-                    CATALOG_SCAN_PAGE_ITEMS
-                },
-                cancellation: Arc::clone(&cancellation),
-            })
-        })?;
-        hotpath::gauge!("code_graph.catalog.pages_scanned").inc(1_u64);
+        let page = {
+            let _span = tracing::trace_span!("code_graph.catalog.scan_page").entered();
+            {
+                snapshot.read_projection(GraphProjectionReadRequest {
+                    namespace: projection.namespace.clone(),
+                    projection: projection.projection.clone(),
+                    after_entity: after_entity.clone(),
+                    after_relation: after_relation.clone(),
+                    max_entities: if entities_complete {
+                        0
+                    } else {
+                        CATALOG_SCAN_PAGE_ITEMS
+                    },
+                    max_relations: if relations_complete {
+                        0
+                    } else {
+                        CATALOG_SCAN_PAGE_ITEMS
+                    },
+                    cancellation: Arc::clone(&cancellation),
+                })
+            }
+        }?;
 
         if !entities_complete {
-            hotpath::measure_block!("code_graph.catalog.record_entities", {
-                scan.record_entity_page(
-                    &page.entities,
-                    projection_node_count,
-                    cancellation.as_ref(),
-                )
-            })?;
-            hotpath::gauge!("code_graph.catalog.entities_recorded").inc(page.entities.len() as u64);
+            {
+                let _span = tracing::trace_span!("code_graph.catalog.record_entities").entered();
+                {
+                    scan.record_entity_page(
+                        &page.entities,
+                        projection_node_count,
+                        cancellation.as_ref(),
+                    )
+                }
+            }?;
             after_entity = page.next_entity;
             entities_complete = after_entity.is_none();
         }
         if !relations_complete {
-            hotpath::measure_block!("code_graph.catalog.record_relations", {
+            {
+                let _span = tracing::trace_span!("code_graph.catalog.record_relations").entered();
                 scan.record_relation_page(&page.relations, cancellation.as_ref())
-            })?;
-            hotpath::gauge!("code_graph.catalog.relations_recorded")
-                .inc(page.relations.len() as u64);
+            }?;
             after_relation = page.next_relation;
             relations_complete = after_relation.is_none();
         }
     }
 
     check_cancelled(cancellation.as_ref())?;
-    hotpath::measure_block!("code_graph.catalog.finish", {
+    {
+        let _span = tracing::trace_span!("code_graph.catalog.finish").entered();
         scan.finish(projection_node_count)
-    })
+    }
 }
 
 struct CatalogScan {
+    generation: GraphGenerationId,
+    /// What the scanned generation layers over, with the contribution of
+    /// each delta row recorded as the scan passes it.
+    layer: Option<LayerScan>,
     catalog: CatalogBuilder,
     imports_by_entity: BTreeMap<GraphEntityId, CodeIndexImportEvidenceV1>,
     import_links: BTreeMap<GraphEntityId, GraphRelation>,
@@ -105,6 +114,86 @@ struct CatalogScan {
     scanned_relations: usize,
 }
 
+struct LayerScan {
+    rows: GraphLayeredRowsV1,
+    delta_entities: BTreeMap<GraphEntityId, DeltaEntityV1>,
+    delta_relations: BTreeMap<GraphRelationId, DeltaRelationV1>,
+}
+
+impl LayerScan {
+    fn record_entity(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
+        if self
+            .rows
+            .delta_entities
+            .binary_search(&entity.identity)
+            .is_ok()
+        {
+            self.delta_entities
+                .insert(entity.identity.clone(), delta_entity(entity)?);
+        }
+        Ok(())
+    }
+
+    fn record_relation(
+        &mut self,
+        relation: &GraphRelation,
+    ) -> Result<(), CodeGraphProjectionError> {
+        if self
+            .rows
+            .delta_relations
+            .binary_search(&relation.identity)
+            .is_ok()
+        {
+            self.delta_relations
+                .insert(relation.identity.clone(), delta_relation(relation)?);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> CatalogLayerV1 {
+        CatalogLayerV1 {
+            base_generation: self.rows.base_generation,
+            hidden_entities: self.rows.hidden_entities.into_boxed_slice(),
+            hidden_relations: self.rows.hidden_relations.into_boxed_slice(),
+            delta_entities: self.delta_entities.into(),
+            delta_relations: self.delta_relations.into(),
+        }
+    }
+}
+
+/// What an entity row contributes, as the layer records it.
+pub(super) fn delta_entity(
+    entity: &GraphEntity,
+) -> Result<DeltaEntityV1, CodeGraphProjectionError> {
+    Ok(if has_label(entity, FILE_LABEL) {
+        DeltaEntityV1::File(decode_file_record(entity)?.file_occurrence_id)
+    } else if has_label(entity, SYMBOL_LABEL) {
+        DeltaEntityV1::Symbol(decode_symbol_record(entity)?.occurrence)
+    } else if has_label(entity, IMPORT_LABEL) {
+        DeltaEntityV1::Import(decode_import_record(entity)?)
+    } else {
+        DeltaEntityV1::Other
+    })
+}
+
+/// What a relation row contributes, as the layer records it.
+pub(super) fn delta_relation(
+    relation: &GraphRelation,
+) -> Result<DeltaRelationV1, CodeGraphProjectionError> {
+    if relation.kind.as_str() == FILE_IMPORT_EDGE_KIND {
+        return Ok(DeltaRelationV1::ImportLink {
+            import: relation.to.clone(),
+        });
+    }
+    match code_edge_kind_edge(relation.kind.as_str()) {
+        Some(kind) => {
+            let (from, to) = edge_endpoints(relation)?;
+            Ok(DeltaRelationV1::Edge { kind, from, to })
+        }
+        None => Ok(DeltaRelationV1::Other),
+    }
+}
+
 /// The fields of an edge record the file dependency fold reads, borrowed so
 /// edges of other kinds allocate nothing.
 #[derive(Deserialize)]
@@ -113,9 +202,36 @@ struct DependencyEdgeRecord {
     to_occurrence: String,
 }
 
+/// Whether edges of `kind` fold into file dependencies.
+pub(super) fn is_dependency_kind(kind: RelationEdgeKindV1) -> bool {
+    matches!(kind, RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses)
+}
+
+/// The symbol occurrences a code edge row joins, as its payload names them.
+pub(super) fn edge_endpoints(
+    relation: &GraphRelation,
+) -> Result<(SymbolOccurrenceId, SymbolOccurrenceId), CodeGraphProjectionError> {
+    let edge: DependencyEdgeRecord =
+        deserialize_property(&relation.properties, EDGE_RECORD_PROPERTY)?;
+    let endpoint = |occurrence: String| {
+        SymbolOccurrenceId::new(occurrence)
+            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
+    };
+    Ok((
+        endpoint(edge.from_occurrence)?,
+        endpoint(edge.to_occurrence)?,
+    ))
+}
+
 impl CatalogScan {
-    fn new() -> Self {
+    fn new(generation: GraphGenerationId, rows: Option<GraphLayeredRowsV1>) -> Self {
         Self {
+            generation,
+            layer: rows.map(|rows| LayerScan {
+                rows,
+                delta_entities: BTreeMap::new(),
+                delta_relations: BTreeMap::new(),
+            }),
             catalog: CatalogBuilder::new(),
             imports_by_entity: BTreeMap::new(),
             import_links: BTreeMap::new(),
@@ -163,20 +279,14 @@ impl CatalogScan {
         if has_label(entity, IMPORT_LABEL) {
             self.record_import(entity)?;
         }
+        if let Some(layer) = &mut self.layer {
+            layer.record_entity(entity)?;
+        }
         Ok(())
     }
 
     fn record_file(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record: SanitizedCodeFileV1 =
-            deserialize_property(&entity.properties, FILE_RECORD_PROPERTY)?;
-        record
-            .validate()
-            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-        if file_entity_id(&record.file_occurrence_id)? != entity.identity {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph file identity does not match its payload".to_owned(),
-            ));
-        }
+        let record = decode_file_record(entity)?;
         let previous = self.catalog.by_logical_path.insert(
             record.logical_path.clone(),
             record.file_occurrence_id.clone(),
@@ -203,14 +313,7 @@ impl CatalogScan {
     }
 
     fn record_symbol(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record: SymbolRecordV1 =
-            deserialize_property(&entity.properties, SYMBOL_RECORD_PROPERTY)?;
-        validate_symbol_record(&record)?;
-        if symbol_entity_id(&record.occurrence)? != entity.identity {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph symbol identity does not match its payload".to_owned(),
-            ));
-        }
+        let record = decode_symbol_record(entity)?;
         if self.catalog.symbols.contains_key(&record.occurrence) {
             return Err(CodeGraphProjectionError::Corrupt(
                 "code graph contains a duplicate symbol entity".to_owned(),
@@ -235,18 +338,7 @@ impl CatalogScan {
     }
 
     fn record_import(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record: CodeIndexImportEvidenceV1 =
-            deserialize_property(&entity.properties, IMPORT_RECORD_PROPERTY)?;
-        record.validate().map_err(|error| {
-            CodeGraphProjectionError::Corrupt(format!(
-                "code graph import row is not canonical: {error}"
-            ))
-        })?;
-        if import_entity_id(&record)? != entity.identity {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph import identity does not match its payload".to_owned(),
-            ));
-        }
+        let record = decode_import_record(entity)?;
         if self
             .imports_by_entity
             .insert(entity.identity.clone(), record)
@@ -275,6 +367,9 @@ impl CatalogScan {
                     }
                 }
             }
+            if let Some(layer) = &mut self.layer {
+                layer.record_relation(relation)?;
+            }
         }
         Ok(())
     }
@@ -286,17 +381,8 @@ impl CatalogScan {
     ) -> Result<(), CodeGraphProjectionError> {
         self.degrees.record_outgoing(relation.from.clone());
         self.degrees.record_incoming(relation.to.clone());
-        if matches!(kind, RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses) {
-            let edge: DependencyEdgeRecord =
-                deserialize_property(&relation.properties, EDGE_RECORD_PROPERTY)?;
-            let endpoint = |occurrence: String| {
-                SymbolOccurrenceId::new(occurrence)
-                    .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
-            };
-            self.dependency_edges.push((
-                endpoint(edge.from_occurrence)?,
-                endpoint(edge.to_occurrence)?,
-            ));
+        if is_dependency_kind(kind) {
+            self.dependency_edges.push(edge_endpoints(relation)?);
         }
         Ok(())
     }
@@ -348,38 +434,9 @@ impl CatalogScan {
         }
 
         for (identity, import) in &self.imports_by_entity {
-            let file = self
-                .catalog
-                .files
-                .get(&import.file_occurrence_id)
-                .ok_or_else(|| {
-                    CodeGraphProjectionError::Corrupt(
-                        "code graph import refers to a missing file occurrence".to_owned(),
-                    )
-                })?;
-            if file.logical_path != import.logical_path {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph import logical path does not match its file occurrence".to_owned(),
-                ));
-            }
-            let expected_file = file_entity_id(&import.file_occurrence_id)?;
-            let relation = self.import_links.get(identity).ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph import entity is missing its file link".to_owned(),
-                )
-            })?;
-            if relation.from != expected_file {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph import file link does not match its payload".to_owned(),
-                ));
-            }
-            if relation.identity != file_import_relation_id(import)?
-                || !relation.properties.is_empty()
-            {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph import file link is not canonical".to_owned(),
-                ));
-            }
+            let file = self.catalog.files.get(&import.file_occurrence_id);
+            let relation = self.import_links.get(identity);
+            validate_import_link(import, file, relation)?;
         }
         if self
             .import_links
@@ -395,50 +452,14 @@ impl CatalogScan {
             (symbol.outgoing, symbol.incoming) = self.degrees.take(&symbol_entity_id(occurrence)?);
         }
         self.degrees.require_drained()?;
-        let file_dependencies = file_dependencies(&self.catalog, &self.dependency_edges);
         let mut imports: Vec<_> = self.imports_by_entity.into_values().collect();
         imports.sort_by(canonical_import_order);
-        Ok(self.catalog.finish(imports, file_dependencies))
-    }
-}
-
-fn file_dependencies(
-    catalog: &CatalogBuilder,
-    edges: &[(SymbolOccurrenceId, SymbolOccurrenceId)],
-) -> CodeGraphFileDependenciesV1 {
-    let logical_path = |occurrence: &SymbolOccurrenceId| {
-        catalog
-            .symbols
-            .get(occurrence)?
-            .binding
-            .as_ref()?
-            .logical_path
-            .as_deref()
-    };
-    let mut folded: HashMap<&str, HashSet<&str>> = catalog
-        .files
-        .values()
-        .map(|file| (file.logical_path.as_str(), HashSet::new()))
-        .collect();
-    for (from, to) in edges {
-        if let (Some(source), Some(target)) = (logical_path(from), logical_path(to))
-            && source != target
-        {
-            folded.entry(source).or_default().insert(target);
-        }
-    }
-    let adjacency = folded
-        .into_iter()
-        .map(|(source, targets)| {
-            (
-                source.to_owned(),
-                targets.into_iter().map(str::to_owned).collect(),
-            )
-        })
-        .collect();
-    CodeGraphFileDependenciesV1 {
-        adjacency: Arc::new(adjacency),
-        dependency_edges: edges.len() as u64,
+        Ok(self.catalog.finish(
+            self.generation,
+            self.layer.map(LayerScan::finish),
+            imports,
+            &self.dependency_edges,
+        ))
     }
 }
 
@@ -484,6 +505,94 @@ impl<K: Ord> SymbolDegreeCounts<K> {
             ))
         }
     }
+}
+
+/// The file record a `CodeFile` entity carries, proven to be the entity's own.
+pub(super) fn decode_file_record(
+    entity: &GraphEntity,
+) -> Result<SanitizedCodeFileV1, CodeGraphProjectionError> {
+    let record: SanitizedCodeFileV1 =
+        deserialize_property(&entity.properties, FILE_RECORD_PROPERTY)?;
+    record
+        .validate()
+        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    if file_entity_id(&record.file_occurrence_id)? != entity.identity {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph file identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+/// The symbol record a `CodeSymbol` entity carries, proven to be the
+/// entity's own.
+pub(super) fn decode_symbol_record(
+    entity: &GraphEntity,
+) -> Result<SymbolRecordV1, CodeGraphProjectionError> {
+    let record: SymbolRecordV1 = deserialize_property(&entity.properties, SYMBOL_RECORD_PROPERTY)?;
+    validate_symbol_record(&record)?;
+    if symbol_entity_id(&record.occurrence)? != entity.identity {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph symbol identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+/// The import record a `CodeImport` entity carries, proven to be the
+/// entity's own.
+pub(super) fn decode_import_record(
+    entity: &GraphEntity,
+) -> Result<CodeIndexImportEvidenceV1, CodeGraphProjectionError> {
+    let record: CodeIndexImportEvidenceV1 =
+        deserialize_property(&entity.properties, IMPORT_RECORD_PROPERTY)?;
+    record.validate().map_err(|error| {
+        CodeGraphProjectionError::Corrupt(format!(
+            "code graph import row is not canonical: {error}"
+        ))
+    })?;
+    if import_entity_id(&record)? != entity.identity {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph import identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+/// An import entity's file link: the import's file is published under the
+/// import's logical path, and exactly one canonical relation from that file
+/// names the import.
+pub(super) fn validate_import_link(
+    import: &CodeIndexImportEvidenceV1,
+    file: Option<&SanitizedCodeFileV1>,
+    relation: Option<&GraphRelation>,
+) -> Result<(), CodeGraphProjectionError> {
+    let file = file.ok_or_else(|| {
+        CodeGraphProjectionError::Corrupt(
+            "code graph import refers to a missing file occurrence".to_owned(),
+        )
+    })?;
+    if file.logical_path != import.logical_path {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph import logical path does not match its file occurrence".to_owned(),
+        ));
+    }
+    let relation = relation.ok_or_else(|| {
+        CodeGraphProjectionError::Corrupt(
+            "code graph import entity is missing its file link".to_owned(),
+        )
+    })?;
+    if relation.from != file_entity_id(&import.file_occurrence_id)? {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph import file link does not match its payload".to_owned(),
+        ));
+    }
+    if relation.identity != file_import_relation_id(import)? || !relation.properties.is_empty() {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph import file link is not canonical".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn canonical_import_order(

@@ -7,7 +7,11 @@ use super::*;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-#[hotpath::measure(label = "daemon.http.application.router_build")]
+#[tracing::instrument(
+    name = "daemon.http.application.router_build",
+    level = "trace",
+    skip_all
+)]
 fn build_http_application_router(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
@@ -51,7 +55,7 @@ pub(super) fn install_http_application_cold_resolver(
     )?;
     registry.install_resolver(move |project_id| {
         let store_administration = store_administration.clone();
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async move {
                 let database = store_administration.registered_profile_database().await?;
                 let profile_id = store_administration
@@ -102,12 +106,16 @@ pub(super) fn install_http_application_cold_resolver(
                 )
                 .map(Some)
             },
-            label = "daemon.http.application.router_cold_resolve"
+            tracing::trace_span!("daemon.http.application.router_cold_resolve"),
         )
     })
 }
 
-#[hotpath::measure(future = true, label = "daemon.http.application.remote_router_install")]
+#[tracing::instrument(
+    name = "daemon.http.application.remote_router_install",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn install_remote_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: &StoreAdministration,
@@ -140,7 +148,11 @@ pub(super) async fn install_remote_http_application_router(
     registry.install_remote(router, credentials, Some(runtime))
 }
 
-#[hotpath::measure(future = true, label = "daemon.http.application.router_mount")]
+#[tracing::instrument(
+    name = "daemon.http.application.router_mount",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn mount_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
     owner: &tracedecay_runtime_core::config::ProfileRoot,

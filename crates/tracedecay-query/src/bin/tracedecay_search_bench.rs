@@ -22,8 +22,7 @@
 //!
 //! Hermeticity matches `tracedecay-index-bench`: no socket, no daemon, no
 //! operator profile; the only path written is a self-created scratch
-//! directory under the system temp dir, removed before exit. With the
-//! `hotpath` feature off the workload is identical and no report is written.
+//! directory under the system temp dir, removed before exit.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -103,14 +102,26 @@ const BUDGET: RetrievalBudget = RetrievalBudget {
     deadline_micros: None,
 };
 
-fn main() -> ExitCode {
-    #[cfg(feature = "hotpath")]
-    configure_hotpath();
+const USAGE: &str = "\
+usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
+                               [--warmups N] [--fuzzy-budget N]
+                               [--class NAME]... [--term CLASS=QUERY]...
 
+  --corpus DIR       fixture corpus to index and query
+                     (default: $TRACEDECAY_SEARCH_BENCH_CORPUS, else
+                     benchmark_data/index-bench/corpus beside this workspace)
+  --replicas N       index the corpus N times under distinct logical path
+                     prefixes (default: $TRACEDECAY_SEARCH_BENCH_REPLICAS, else 1)
+  --iterations N     timed query iterations per class (default: 40)
+  --warmups N        untimed warmup iterations per class (default: 3)
+  --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
+  --class NAME       run only the named classes (repeatable; default: all)
+  --term CLASS=QUERY override one class's query text (repeatable)
+  -h, --help         print this message";
+
+fn main() -> ExitCode {
     // Declared first so it drops last: the exit report must observe every
     // measured span. Nothing here may call `std::process::exit`.
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay-search-bench").build();
 
     let options = match Options::parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
@@ -139,44 +150,6 @@ fn main() -> ExitCode {
 
 /// Same two guard defaults `tracedecay-index-bench` overrides, for the same
 /// reasons: no socket ever, and no stdout report corrupting the summary.
-#[cfg(feature = "hotpath")]
-fn configure_hotpath() {
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
-            std::env::remove_var("HOTPATH_OUTPUT_PATH");
-        }
-    }
-}
-
-const USAGE: &str = "\
-usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
-                               [--warmups N] [--fuzzy-budget N]
-                               [--class NAME]... [--term CLASS=QUERY]...
-
-  --corpus DIR       fixture corpus to index and query
-                     (default: $TRACEDECAY_SEARCH_BENCH_CORPUS, else
-                     benchmark_data/index-bench/corpus beside this workspace)
-  --replicas N       index the corpus N times under distinct logical path
-                     prefixes (default: $TRACEDECAY_SEARCH_BENCH_REPLICAS, else 1)
-  --iterations N     timed query iterations per class (default: 40)
-  --warmups N        untimed warmup iterations per class (default: 3)
-  --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
-  --class NAME       run only the named classes (repeatable; default: all)
-  --term CLASS=QUERY override one class's query text (repeatable)
-  -h, --help         print this message
-
-Profiling: build with `--features production,hotpath` and set
-HOTPATH_OUTPUT_FORMAT and HOTPATH_OUTPUT_PATH. With the feature off the
-workload is identical and no report is written.";
-
 /// Default query classes, written against the committed index-bench corpus.
 /// Every default hits real corpus text so the measured work is candidate
 /// scoring, not empty-result short-circuits.
@@ -595,6 +568,7 @@ where
                 query_view,
                 generation: generation.clone(),
                 literals,
+                path_prefix: None,
                 budget: request.budget,
             })
             .map_err(|error| format!("exact lane {class}: {error}"))?;
@@ -613,6 +587,7 @@ where
                 phrases: std::borrow::Cow::Owned(parts.phrases),
                 proximities: std::borrow::Cow::Owned(Vec::new()),
                 field_filters: std::borrow::Cow::Owned(Vec::new()),
+                path_prefix: None,
                 fuzzy_budget: options.fuzzy_budget,
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),
                 score_domain: prototype.lexical_score_domain.clone(),

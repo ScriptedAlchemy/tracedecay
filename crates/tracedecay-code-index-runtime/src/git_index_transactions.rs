@@ -83,7 +83,6 @@ impl NativeGitIndexError {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_commit_boundary_unknown(&self) -> bool {
         matches!(self, Self::CommitBoundaryUnknown { .. })
     }
@@ -215,7 +214,7 @@ impl FixedGitIndexRunner {
             })
     }
 
-    #[hotpath::measure(label = "daemon.git.index_tx.lock.acquire")]
+    #[tracing::instrument(name = "daemon.git.index_tx.lock.acquire", level = "trace", skip_all)]
     pub fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
         let path = self.index_lock_path();
         let file = OpenOptions::new()
@@ -307,7 +306,7 @@ impl FixedGitIndexRunner {
         self.preview_candidate_tree_inner(&[], false)
     }
 
-    #[hotpath::measure(label = "daemon.git.index_tx.stage")]
+    #[tracing::instrument(name = "daemon.git.index_tx.stage", level = "trace", skip_all)]
     pub fn stage_hunks(
         &self,
         lock: &mut NativeIndexLock,
@@ -323,7 +322,7 @@ impl FixedGitIndexRunner {
         )
     }
 
-    #[hotpath::measure(label = "daemon.git.index_tx.unstage")]
+    #[tracing::instrument(name = "daemon.git.index_tx.unstage", level = "trace", skip_all)]
     pub fn unstage_hunks(
         &self,
         lock: &mut NativeIndexLock,
@@ -364,7 +363,7 @@ impl FixedGitIndexRunner {
         self.preview_candidate_tree_inner(patches, reverse)
     }
 
-    #[hotpath::measure(label = "usecases.git_index_tx.preview")]
+    #[tracing::instrument(name = "usecases.git_index_tx.preview", level = "trace", skip_all)]
     fn preview_candidate_tree_inner(
         &self,
         patches: &[ValidatedIndexPatch],
@@ -419,8 +418,7 @@ impl FixedGitIndexRunner {
 
     pub fn index_bytes(&self) -> Result<Vec<u8>, NativeGitIndexError> {
         match File::open(&self.index_path) {
-            Ok(file) => {
-                let mut file = hotpath::io!(file, label = "usecases.git_index_tx.index.file");
+            Ok(mut file) => {
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes)
                     .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
@@ -443,7 +441,7 @@ impl FixedGitIndexRunner {
         if !matches!(
             preview.disposition,
             GitIndexPreviewDispositionV1::Applicable
-        ) || preview.operation.hunk_direction() != Some(direction)
+        ) || preview.operation.hunk_direction() != direction
         {
             return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
         }
@@ -485,19 +483,23 @@ impl FixedGitIndexRunner {
         if reverse {
             command.arg("--reverse");
         }
-        hotpath::measure_block!("usecases.git_index_tx.apply.patch", {
+        {
+            let _span = tracing::trace_span!("usecases.git_index_tx.apply.patch").entered();
             run_command_with_stdin(command, "apply", &patch_bytes)
-        })?;
+        }?;
 
-        let candidate_tree = hotpath::measure_block!("usecases.git_index_tx.apply.write_tree", {
-            self.command()
-                .env("GIT_INDEX_FILE", &candidate_index)
-                .arg("write-tree")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-        })?;
+        let candidate_tree = {
+            let _span = tracing::trace_span!("usecases.git_index_tx.apply.write_tree").entered();
+            {
+                self.command()
+                    .env("GIT_INDEX_FILE", &candidate_index)
+                    .arg("write-tree")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output()
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+            }
+        }?;
         if !candidate_tree.status.success() {
             return Err(NativeGitIndexError::GitFailed {
                 operation: "apply write-tree",
@@ -521,35 +523,38 @@ impl FixedGitIndexRunner {
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
             .permissions();
         let candidate_bytes = {
-            let mut file = hotpath::io!(
-                File::open(&candidate_index)
-                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
-                label = "usecases.git_index_tx.candidate.file"
-            );
+            let mut file = File::open(&candidate_index)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
             bytes
         };
-        hotpath::measure_block!("usecases.git_index_tx.index.write", {
-            // `io!` is the identity without the backend, leaving a plain
-            // `&mut File` that needs no mutable binding of its own.
-            #[allow(unused_mut)]
-            let mut file = hotpath::io!(&mut lock.file, label = "usecases.git_index_tx.lock.file");
-            file.set_permissions(candidate_permissions)
-                .and_then(|()| file.rewind())
-                .and_then(|()| file.set_len(0))
-                .and_then(|()| file.write_all(&candidate_bytes))
-                .and_then(|()| file.sync_all())
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-        })?;
+        {
+            let _span = tracing::trace_span!("usecases.git_index_tx.index.write").entered();
+            {
+                // `io!` is the identity without the backend, leaving a plain
+                // `&mut File` that needs no mutable binding of its own.
+                #[allow(unused_mut)]
+                let mut file = &mut lock.file;
+                file.set_permissions(candidate_permissions)
+                    .and_then(|()| file.rewind())
+                    .and_then(|()| file.set_len(0))
+                    .and_then(|()| file.write_all(&candidate_bytes))
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+            }
+        }?;
         // rename either publishes atomically or reports failure without
         // changing the destination. Durability becomes ambiguous only after a
         // successful rename when syncing the parent directory fails.
-        hotpath::measure_block!("usecases.git_index_tx.index.rename", {
-            std::fs::rename(&lock.path, &self.index_path)
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-        })?;
+        {
+            let _span = tracing::trace_span!("usecases.git_index_tx.index.rename").entered();
+            {
+                std::fs::rename(&lock.path, &self.index_path)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+            }
+        }?;
         lock.published = true;
         sync_parent_directory(&self.index_path)
             .map_err(|error| error.into_commit_boundary_unknown("index publish"))?;
@@ -563,7 +568,11 @@ impl FixedGitIndexRunner {
         Ok(())
     }
 
-    #[hotpath::measure(label = "usecases.git_index_tx.verify_preconditions")]
+    #[tracing::instrument(
+        name = "usecases.git_index_tx.verify_preconditions",
+        level = "trace",
+        skip_all
+    )]
     fn verify_native_preconditions(
         &self,
         lock: &NativeIndexLock,

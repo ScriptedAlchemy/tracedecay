@@ -264,7 +264,6 @@ impl CancellationContext {
         })
     }
 
-    #[hotpath::skip]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self.state, CancellationState::Cancelled { .. })
     }
@@ -400,7 +399,6 @@ impl CancellationSignal {
     }
 
     /// Resolves when this exact process-local signal is cancelled.
-    #[hotpath::skip]
     pub async fn cancelled(&self) {
         CancellationWait {
             signal: self.clone(),

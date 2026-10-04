@@ -64,13 +64,13 @@ const MEMORY_TOOLS: &[MemoryTool] = &[
     MemoryTool {
         operation: "fact_store_remove",
         title: "Fact Store Remove",
-        description: "Remove one holographic memory fact by exact fact id.",
+        description: "Remove one holographic memory fact by exact fact id. An unknown fact id is refused as `not_found_or_not_authorized`, like `fact_store_get`.",
         write: true,
     },
     MemoryTool {
         operation: "fact_store_supersede",
         title: "Fact Store Supersede",
-        description: "Mark one holographic memory fact as superseded by another fact id. The old fact leaves default list/search/probe results but stays readable by id through its history; payload and trust are untouched. Use this when a newer fact corrects an older one instead of removing the old one.",
+        description: "Mark one holographic memory fact as superseded by another fact id. The old fact leaves default list/search/probe results but stays readable by id through its history; payload and trust are untouched. Use this when a newer fact corrects an older one instead of removing the old one. An unknown fact id is refused as `not_found_or_not_authorized`, like `fact_store_get`.",
         write: true,
     },
     MemoryTool {
@@ -114,4 +114,25 @@ pub(super) fn memory_definitions(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MEMORY_TOOLS;
+
+    #[test]
+    fn remove_and_supersede_document_unknown_ids_as_refused() {
+        for operation in ["fact_store_remove", "fact_store_supersede"] {
+            let tool = MEMORY_TOOLS
+                .iter()
+                .find(|tool| tool.operation == operation)
+                .expect("memory tool");
+            assert!(
+                tool.description
+                    .contains("refused as `not_found_or_not_authorized`"),
+                "{operation}: {}",
+                tool.description
+            );
+        }
+    }
 }

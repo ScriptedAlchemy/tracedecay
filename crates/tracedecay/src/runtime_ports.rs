@@ -55,7 +55,7 @@ fn schedule_user_session_review<'a>(
     provider: &'a str,
     session_id: Option<&'a str>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         async move {
             // Review runs inside the ingest pass that just wrote the sessions,
             // which is scoped to the owning transcript source profile.
@@ -72,7 +72,7 @@ fn schedule_user_session_review<'a>(
             )
             .await;
         },
-        label = "runtime_ports.session_review"
+        tracing::trace_span!("runtime_ports.session_review"),
     ))
 }
 
@@ -96,7 +96,7 @@ fn daemon_tool_json<'a>(
     arguments: Value,
     require_project_identity: bool,
 ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         async move {
             let handshake = crate::daemon::handshake_for_current_client(
                 profile,
@@ -107,21 +107,14 @@ fn daemon_tool_json<'a>(
             )?;
             let result =
                 crate::daemon::call_default_tool(profile, &handshake, tool_name, arguments).await?;
-            let payload = crate::daemon::tool_json_payload(&result, tool_name)?;
-            // An owner refusal is a semantic result whose payload is its
-            // problem envelope; the hook reads it as the owner's typed error.
-            if result.get("isError").and_then(Value::as_bool) == Some(true)
-                && let Ok(problem) = serde_json::from_value::<
-                    tracedecay_contracts::ApplicationProblemEnvelope,
-                >(payload.clone())
+            if let Some(refusal) =
+                tracedecay_mcp::application_output::tool_result::tool_result_refusal(&result)
             {
-                return Err(
-                    tracedecay_mcp::application_output::tool_result::problem_error(problem),
-                );
+                return Err(refusal);
             }
-            Ok(payload)
+            crate::daemon::tool_json_payload(&result, tool_name)
         },
-        label = "runtime_ports.daemon_tool"
+        tracing::trace_span!("runtime_ports.daemon_tool"),
     ))
 }
 
@@ -130,10 +123,10 @@ fn notify_hook_event<'a>(
     project_root: &'a Path,
     event: tracedecay_hooks::DaemonHookEvent,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(hotpath::future!(
+    Box::pin(tracing::Instrument::instrument(
         async move {
             let _ = crate::daemon::notify_hook_event(profile, project_root, event).await;
         },
-        label = "runtime_ports.notify_hook"
+        tracing::trace_span!("runtime_ports.notify_hook"),
     ))
 }

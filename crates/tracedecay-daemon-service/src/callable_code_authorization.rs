@@ -105,7 +105,6 @@ impl DaemonCallableCodeAuthorizationSource {
         })
     }
 
-    #[hotpath::skip]
     pub async fn current(
         &self,
         observed_at: UtcMicros,
@@ -176,7 +175,6 @@ impl DaemonCodeGraphReadAdmission {
         }
     }
 
-    #[hotpath::skip]
     async fn admit_graph_read(
         &self,
         request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'_>,
@@ -214,60 +212,11 @@ impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadA
         request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'a>,
     ) -> tracedecay_graph_query::CodeGraphReadAdmissionFuture<'a> {
         Box::pin(async move {
-            let admission = hotpath::measure_block!(
-                "daemon.authority.callable_code.admit",
-                self.admit_graph_read(request).await
-            );
-            record_graph_read_admission(&admission);
-            admission
+            use tracing::Instrument as _;
+            self.admit_graph_read(request)
+                .instrument(tracing::trace_span!("daemon.authority.callable_code.admit"))
+                .await
         })
-    }
-}
-
-/// Tallies one graph-read admission decision against its exact typed outcome.
-/// The reason set is the closed [`CodeGraphReadError`] enum, so every gauge
-/// key stays compile-time static.
-fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
-    match admission {
-        Ok(_) => {
-            hotpath::gauge!("daemon.code_authorization.admit.admitted").inc(1.0);
-        }
-        Err(CodeGraphReadError::MissingRegistry) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.missing_registry").inc(1.0);
-        }
-        Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.unavailable").inc(1.0);
-        }
-        Err(CodeGraphReadError::Rewarming { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.rewarming").inc(1.0);
-        }
-        Err(CodeGraphReadError::ResetRequired { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.reset_required").inc(1.0);
-        }
-        Err(CodeGraphReadError::Stale { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.stale").inc(1.0);
-        }
-        Err(CodeGraphReadError::Cancelled) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.cancelled").inc(1.0);
-        }
-        Err(CodeGraphReadError::TimedOut) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.timed_out").inc(1.0);
-        }
-        Err(CodeGraphReadError::BudgetExhausted { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.budget_exhausted").inc(1.0);
-        }
-        Err(CodeGraphReadError::Denied) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.denied").inc(1.0);
-        }
-        Err(CodeGraphReadError::InvalidRequest { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.invalid_request").inc(1.0);
-        }
-        Err(CodeGraphReadError::Corrupt { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.corrupt").inc(1.0);
-        }
-        Err(CodeGraphReadError::Parked { .. }) => {
-            hotpath::gauge!("daemon.code_authorization.admit.refused.parked").inc(1.0);
-        }
     }
 }
 
@@ -303,29 +252,12 @@ pub struct DaemonCallableCodeAuthorization {
 }
 
 impl DaemonCallableCodeAuthorization {
-    #[hotpath::skip]
+    #[tracing::instrument(
+        name = "daemon.authority.callable_code.authorize",
+        level = "trace",
+        skip_all
+    )]
     async fn route_receipt(
-        &self,
-        context: &RequestContext,
-        operation: &ApplicationOperation,
-        observed_at: UtcMicros,
-    ) -> Result<AuthorityReceipt, ApplicationProblem> {
-        let receipt = self
-            .route_receipt_checked(context, operation, observed_at)
-            .await;
-        match &receipt {
-            Ok(_) => {
-                hotpath::gauge!("daemon.code_authorization.authorize.granted").inc(1.0);
-            }
-            Err(_) => {
-                hotpath::gauge!("daemon.code_authorization.authorize.refused").inc(1.0);
-            }
-        }
-        receipt
-    }
-
-    #[hotpath::measure(label = "daemon.authority.callable_code.authorize", future = true)]
-    async fn route_receipt_checked(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
@@ -375,26 +307,17 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            let receipt = hotpath::measure_block!(
-                "daemon.authority.callable_code.recheck",
-                self.recheck_route(context, operation, admission, observed_at)
-                    .await
-            );
-            match &receipt {
-                Ok(_) => {
-                    hotpath::gauge!("daemon.code_authorization.recheck.granted").inc(1.0);
-                }
-                Err(_) => {
-                    hotpath::gauge!("daemon.code_authorization.recheck.refused").inc(1.0);
-                }
-            }
-            receipt
+            use tracing::Instrument as _;
+            self.recheck_route(context, operation, admission, observed_at)
+                .instrument(tracing::trace_span!(
+                    "daemon.authority.callable_code.recheck"
+                ))
+                .await
         })
     }
 }
 
 impl DaemonCallableCodeAuthorization {
-    #[hotpath::skip]
     async fn recheck_route(
         &self,
         context: &RequestContext,

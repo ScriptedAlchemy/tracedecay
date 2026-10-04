@@ -78,7 +78,7 @@ impl AgentIntegration for VibeIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mMistral Vibe integration\x1b[0m");
+        dc.section("Mistral Vibe integration");
         doctor_check_registration(
             dc,
             &vibe_config_path(&ctx.home),
@@ -166,7 +166,7 @@ impl AgentIntegration for VibeIntegration {
         ))
     }
 
-    #[hotpath::measure(label = "vibe_component_install")]
+    #[tracing::instrument(name = "vibe_component_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[HostComponentV1],

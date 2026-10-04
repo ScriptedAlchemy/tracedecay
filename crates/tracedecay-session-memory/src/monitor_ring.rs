@@ -89,7 +89,7 @@ fn write_str(mmap: &mut memmap2::MmapMut, offset: usize, value: &str) {
     mmap[offset..offset + copy_len].copy_from_slice(&bytes[..copy_len]);
 }
 
-#[hotpath::measure(label = "runtime_core.monitor_ring.write")]
+#[tracing::instrument(name = "runtime_core.monitor_ring.write", level = "trace", skip_all)]
 fn write_entry_inner(
     mmap_path: &Path,
     prefix: &str,
@@ -155,7 +155,7 @@ fn read_str(mmap: &memmap2::Mmap, offset: usize) -> String {
 
 impl MmapReader {
     /// Open the monitor mmap in the profile data directory `dir`.
-    #[hotpath::measure(label = "runtime_core.monitor_ring.open")]
+    #[tracing::instrument(name = "runtime_core.monitor_ring.open", level = "trace", skip_all)]
     pub fn open_at(dir: &Path) -> std::io::Result<Self> {
         let mmap_path = dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;
@@ -219,7 +219,7 @@ impl MmapReader {
     }
 
     /// Re-read the mmap to pick up new writes.
-    #[hotpath::measure(label = "runtime_core.monitor_ring.refresh")]
+    #[tracing::instrument(name = "runtime_core.monitor_ring.refresh", level = "trace", skip_all)]
     pub fn refresh(&mut self) -> std::io::Result<()> {
         let mmap_path = self.dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;

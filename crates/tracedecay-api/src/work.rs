@@ -490,35 +490,39 @@ async fn dispatch<O>(
 where
     O: WorkApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        // An operation this build does not mount is concealed the same way an
-        // unauthorised one is, so probing a path cannot reveal what exists.
-        match WorkOperation::from_route_segment(&segment) {
-            None => Err(adapter_problem_response(
-                request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            )),
-            Some(operation) => match body {
-                Ok(Json(body)) => Ok(WorkHttpRequest {
-                    operation,
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
+            // An operation this build does not mount is concealed the same way an
+            // unauthorised one is, so probing a path cannot reveal what exists.
+            match WorkOperation::from_route_segment(&segment) {
+                None => Err(adapter_problem_response(
                     request_id,
-                    controls,
-                    body,
-                }),
-                Err(_) => Err(invalid_request_response(
-                    request_id,
-                    "work.invalid_body",
-                    "The Work request body is invalid or exceeds the configured limit",
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
                 )),
-            },
+                Some(operation) => match body {
+                    Ok(Json(body)) => Ok(WorkHttpRequest {
+                        operation,
+                        request_id,
+                        controls,
+                        body,
+                    }),
+                    Err(_) => Err(invalid_request_response(
+                        request_id,
+                        "work.invalid_body",
+                        "The Work request body is invalid or exceeds the configured limit",
+                    )),
+                },
+            }
         }
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move { owner.invoke_work(request).await },
-        label = "api.http.handler"
+        tracing::trace_span!("api.http.handler"),
     )
     .await
 }
@@ -534,27 +538,4 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
         "work.invalid_request",
         "The Work application request is invalid",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use super::WorkOperation;
-
-    #[test]
-    fn retired_projection_operations_are_not_public_routes() {
-        for retired in ["snapshot", "delta", "replan_dependencies", "accept_task"] {
-            assert!(
-                WorkOperation::from_str(retired).is_err(),
-                "retired operation {retired} must not decode"
-            );
-            assert!(
-                WorkOperation::ALL
-                    .iter()
-                    .all(|operation| operation.operation_key() != retired),
-                "retired operation {retired} must not be mounted"
-            );
-        }
-    }
 }

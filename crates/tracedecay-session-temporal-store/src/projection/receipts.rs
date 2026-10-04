@@ -21,7 +21,11 @@ use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
 use crate::sql::{SHARED_GENERATION_TABLES, live_effect_predicate};
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.validate_receipt")]
+#[tracing::instrument(
+    name = "session_temporal.projection.validate_receipt",
+    level = "trace",
+    skip_all
+)]
 pub async fn validate_final_projection_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &tracedecay_domain::SessionId,
@@ -233,7 +237,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
     let mut required = BTreeSet::new();
     while let Some(row) = rows
         .next()
@@ -247,10 +250,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         let anchor_json = row
             .get::<String>(1)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        record_assertion_history_row(
-            u64::try_from(observation_json.len().saturating_add(anchor_json.len()))
-                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
-        );
         let observation: tracedecay_domain::DurableObservationV1 =
             serde_json::from_str(&observation_json)
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
@@ -320,7 +319,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
     while let Some(row) = rows
         .next()
         .await
@@ -360,7 +358,11 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
 /// Asks the next refresh of the session `observation_id` projected into to
 /// rebuild it from its first effect. The observation no longer owns its
 /// output, so occurrences derived from it cannot be extended in place.
-#[hotpath::measure(future = true, label = "session_temporal.persist.reset_request")]
+#[tracing::instrument(
+    name = "session_temporal.persist.reset_request",
+    level = "trace",
+    skip_all
+)]
 pub async fn request_session_temporal_reset(
     conn: &impl Executor,
     observation_id: &str,
@@ -381,7 +383,11 @@ pub async fn request_session_temporal_reset(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.observation_effect")]
+#[tracing::instrument(
+    name = "session_temporal.persist.observation_effect",
+    level = "trace",
+    skip_all
+)]
 pub async fn record_canonical_observation_effect(
     conn: &impl Executor,
     sequence: u64,
@@ -983,7 +989,6 @@ async fn fold_coverage_rows(
         let mut after = (0_i64, 0_i64);
         loop {
             checkpoint_relation_rebuild_control(control)?;
-            record_coverage_query_probe();
             let mut page = conn
                 .query(
                     &sql,
@@ -1010,10 +1015,6 @@ async fn fold_coverage_rows(
                     row.get::<i64>(1)
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                     row.get::<i64>(2)
-                        .map_err(|error| storage(PERSIST_OPERATION, error))?,
-                );
-                record_coverage_row(
-                    u64::try_from(encoded.len())
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                 );
                 match rows {
@@ -1061,7 +1062,11 @@ fn coverage_component_mut(
 /// plus the rows the candidate introduced, minus the row versions it
 /// superseded, with the copy component extended by the candidate's copies.
 /// Reads only the candidate's own rows and their superseded versions.
-#[hotpath::measure(future = true, label = "session_temporal.projection.coverage")]
+#[tracing::instrument(
+    name = "session_temporal.projection.coverage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn candidate_projection_coverage(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
@@ -1104,7 +1109,11 @@ pub(crate) async fn candidate_projection_coverage(
 
 /// Coverage recomputed from every row generation `generation` reads: the
 /// verifier the incremental receipt must equal byte for byte.
-#[hotpath::measure(future = true, label = "session_temporal.projection.full_coverage")]
+#[tracing::instrument(
+    name = "session_temporal.projection.full_coverage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn full_projection_coverage(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
@@ -1190,40 +1199,6 @@ pub(crate) async fn base_projection_coverage(
         current: component(10)?,
         fts: component(12)?,
     })
-}
-
-#[inline(always)]
-fn record_assertion_validation_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.activation.assertion_query_probes").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_assertion_history_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("session_temporal.activation.history_rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes").inc(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
-}
-
-#[inline(always)]
-fn record_coverage_query_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.coverage.query_probes").inc(1_u64);
-}
-
-#[inline(always)]
-fn record_coverage_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("session_temporal.coverage.rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.coverage.row_payload_bytes").inc(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
 }
 
 fn copy_encoding(copy: &LogicalCopyRelation) -> SessionStoreResult<Vec<u8>> {

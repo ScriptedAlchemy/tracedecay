@@ -47,7 +47,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
         log_producer_event(&project_root, "code_index_disabled");
         return false;
     }
-    owner.spawn_background_task(hotpath::future!(
+    owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             let Some(projects) = discover_projects(&project_root).await else {
                 return;
@@ -121,7 +121,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                 }
             }
         },
-        label = "daemon.project.owners.typescript_diagnostics_producer"
+        tracing::trace_span!("daemon.project.owners.typescript_diagnostics_producer"),
     ))
 }
 

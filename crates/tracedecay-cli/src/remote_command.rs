@@ -63,7 +63,7 @@ pub enum RemoteCommand {
     },
 }
 
-#[hotpath::measure(label = "serve.remote.run")]
+#[tracing::instrument(name = "serve.remote.run", level = "trace", skip_all)]
 pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
     match command {
         RemoteCommand::Status { json } => run_status(profile, json),
@@ -75,20 +75,20 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.capture",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.capture").entered();
                     client.capture(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
         RemoteCommand::Query { args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
-            let response = hotpath::measure_block!(
-                "serve.remote.query",
+            let response = {
+                let _span = tracing::trace_span!("serve.remote.query").entered();
                 client.query(&request).map_err(map_remote_client_error)?
-            );
+            };
             // `--json` emits exactly the canonical wire response.
             let local_spool = if args.json {
                 None
@@ -101,12 +101,12 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.transfer_frame",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.transfer_frame").entered();
                     client
                         .transfer_frame(&request)
                         .map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
@@ -114,10 +114,10 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.replay",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.replay").entered();
                     client.replay(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
@@ -125,22 +125,22 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
-                &hotpath::measure_block!(
-                    "serve.remote.failover",
+                &{
+                    let _span = tracing::trace_span!("serve.remote.failover").entered();
                     client.failover(&request).map_err(map_remote_client_error)?
-                ),
+                },
                 args.json,
             )
         }
     }
 }
 
-#[hotpath::measure(label = "serve.remote.status")]
+#[tracing::instrument(name = "serve.remote.status", level = "trace", skip_all)]
 fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
-    let status = hotpath::measure_block!(
-        "serve.remote.status.read",
+    let status = {
+        let _span = tracing::trace_span!("serve.remote.status.read").entered();
         tracedecay::daemon::live_remote_operational_status(profile)?
-    );
+    };
     if json {
         print!("{}", status_json_line(&status)?);
     } else {
@@ -149,7 +149,7 @@ fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
     Ok(())
 }
 
-#[hotpath::measure(label = "serve.remote.enroll")]
+#[tracing::instrument(name = "serve.remote.enroll", level = "trace", skip_all)]
 fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> Result<()> {
     let request: RemoteProtocolRequestV1<EnrollmentRequestV1> =
         read_protocol_request(&args.request_file)?;
@@ -160,17 +160,17 @@ fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> 
         })?;
     let client = build_client(&args)?;
     emit_protocol_response(
-        &hotpath::measure_block!(
-            "serve.remote.enroll_rpc",
+        &{
+            let _span = tracing::trace_span!("serve.remote.enroll_rpc").entered();
             client
                 .enroll(&request, enrollment_credential)
                 .map_err(map_remote_client_error)?
-        ),
+        },
         args.json,
     )
 }
 
-#[hotpath::measure(label = "serve.remote.client")]
+#[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]
 fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
@@ -213,7 +213,7 @@ fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
     .map_err(map_remote_client_error)
 }
 
-#[hotpath::measure(label = "serve.remote.request")]
+#[tracing::instrument(name = "serve.remote.request", level = "trace", skip_all)]
 fn read_protocol_request<T: DeserializeOwned>(path: &Path) -> Result<RemoteProtocolRequestV1<T>> {
     let payload = if path == Path::new("-") {
         let mut payload = String::new();
@@ -267,13 +267,11 @@ fn emit_query_response(
 fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
-        Err(problem) => Err(TraceDecayError::Config {
-            message: format!(
-                "Remote Brain request {} failed: {}",
-                response.request_id,
-                problem.problem.summary()
-            ),
-        }),
+        Err(problem) => Err(TraceDecayError::tool_refused(
+            format!("remote request {}", response.request_id),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )),
     }
 }
 
@@ -610,16 +608,24 @@ mod tests {
     }
 
     #[test]
-    fn emit_protocol_response_returns_config_error_for_typed_problem() {
+    fn emit_protocol_response_returns_a_tool_refusal_for_typed_problem() {
         let response = protocol_problem_response();
         let error = emit_protocol_response(&response, true)
             .expect_err("typed Remote Brain problem must be non-zero");
+        let expected = response.result.as_ref().unwrap_err();
         match error {
-            TraceDecayError::Config { message } => {
-                assert!(message.contains("request.cli.remote.7"));
-                assert!(message.contains(&response.result.as_ref().unwrap_err().problem.code));
+            TraceDecayError::ToolRefused(refusal) => {
+                assert_eq!(refusal.tool, "remote request request.cli.remote.7");
+                assert_eq!(
+                    refusal.code.as_deref(),
+                    Some(expected.problem.code.as_str())
+                );
+                assert_eq!(
+                    refusal.reason.as_deref(),
+                    Some(expected.problem.message.as_str())
+                );
             }
-            other => panic!("expected config error, got {other:?}"),
+            other => panic!("expected tool refusal, got {other:?}"),
         }
     }
 

@@ -141,7 +141,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a SymbolSearchPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("search", &request.meta, |binding| {
                     binding
@@ -217,7 +217,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.symbol_search"
+            tracing::trace_span!("usecases.primitives.symbol_search"),
         ))
     }
 
@@ -226,7 +226,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a ExactSymbolRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("exact", &request.meta, |binding| {
                     binding
@@ -301,7 +301,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.exact_symbol"
+            tracing::trace_span!("usecases.primitives.exact_symbol"),
         ))
     }
 
@@ -310,7 +310,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a SignatureSearchRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("signature", &request.meta, |binding| {
                     binding
@@ -375,7 +375,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.signature_search"
+            tracing::trace_span!("usecases.primitives.signature_search"),
         ))
     }
 
@@ -384,7 +384,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a ImplementationsRequest,
     ) -> SymbolGraphPortFuture<'a, ImplementationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("implementations", &request.meta, |binding| {
                     binding
@@ -405,7 +405,7 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
-                let records = match &request.selector {
+                let (records, gaps) = match &request.selector {
                     ImplementationSelector::Trait { name } => {
                         match trait_implementations(
                             &graph.reader,
@@ -413,7 +413,19 @@ where
                             name,
                             &request.scope,
                         ) {
-                            Ok(records) => records,
+                            Ok((records, undecided)) => (
+                                records,
+                                undecided
+                                    .then(|| PrimitiveSupportGap {
+                                        provider: Some("code_index".to_owned()),
+                                        language: None,
+                                        reason: "Implementors of an interface whose method set \
+                                                 is not fully indexed are undecided"
+                                            .to_owned(),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                            ),
                             Err(()) => {
                                 return failed(context, "trait implementation lookup failed");
                             }
@@ -453,7 +465,7 @@ where
                                 depth: None,
                             });
                         }
-                        records
+                        (records, Vec::new())
                     }
                 };
                 let outcome = complete_or_failed(
@@ -464,13 +476,13 @@ where
                     &claim,
                     &graph,
                     records,
-                    Vec::new(),
+                    gaps,
                     None,
                 )
                 .await;
                 with_implementation_bodies(&self.source_root, context, outcome).await
             },
-            label = "usecases.primitives.implementations"
+            tracing::trace_span!("usecases.primitives.implementations"),
         ))
     }
 
@@ -479,7 +491,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a TypeHierarchyRequest,
     ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("hierarchy", &request.meta, |binding| {
                     binding
@@ -599,7 +611,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.type_hierarchy"
+            tracing::trace_span!("usecases.primitives.type_hierarchy"),
         ))
     }
 
@@ -608,7 +620,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("callers", &request.meta, |binding| {
                     relation_parameters(binding, request)
@@ -695,7 +707,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.callers"
+            tracing::trace_span!("usecases.primitives.callers"),
         ))
     }
 
@@ -704,7 +716,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("callees", &request.meta, |binding| {
                     relation_parameters(binding, request)
@@ -814,7 +826,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.callees"
+            tracing::trace_span!("usecases.primitives.callees"),
         ))
     }
 
@@ -823,7 +835,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphImpactPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("impact", &request.meta, |binding| {
                     binding
@@ -883,7 +895,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.impact"
+            tracing::trace_span!("usecases.primitives.impact"),
         ))
     }
 }
@@ -896,7 +908,7 @@ struct OpenSymbolGraph {
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
-#[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
+#[tracing::instrument(name = "usecases.primitives.open_graph", level = "trace", skip_all)]
 async fn open_graph(
     port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,
@@ -931,7 +943,7 @@ pub(super) fn trait_implementations(
     cancellation: Arc<dyn GraphCancellation>,
     name: &str,
     scope: &SymbolGraphScope,
-) -> Result<Vec<SymbolRelationRecord>, ()> {
+) -> Result<(Vec<SymbolRelationRecord>, bool), ()> {
     let indexed = graph
         .resolve_simple_name(
             name.rsplit("::").next().unwrap_or(name),
@@ -963,6 +975,7 @@ pub(super) fn trait_implementations(
         exact_candidates
     };
     let mut records = Vec::new();
+    let mut interfaces = Vec::new();
     for trait_node in candidates.into_iter().filter(|node| {
         node.metadata.as_ref().is_some_and(|metadata| {
             matches!(
@@ -971,6 +984,7 @@ pub(super) fn trait_implementations(
             )
         })
     }) {
+        interfaces.push(trait_node.occurrence.clone());
         let edges = graph
             .callers(
                 std::slice::from_ref(&trait_node.occurrence),
@@ -1001,7 +1015,10 @@ pub(super) fn trait_implementations(
     });
     records.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
     records.truncate(MAX_IMPLEMENTATION_RESULTS);
-    Ok(records)
+    let undecided = graph
+        .has_undecided_implementors(&interfaces, cancellation)
+        .map_err(|_| ())?;
+    Ok((records, undecided))
 }
 
 fn is_trait_named(node: &CodeGraphSymbolSummaryV1, name: &str, qualified: bool) -> bool {

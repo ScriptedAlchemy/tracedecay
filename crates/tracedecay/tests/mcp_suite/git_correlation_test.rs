@@ -833,14 +833,9 @@ fn assert_invalid_request(envelope: &Value) {
 async fn assert_schema_rejection(server: &McpServer, args: Value, detail: &str) {
     let host = host_call(server, args).await;
     assert_eq!(
-        host.response["error"],
-        crate::support::application_invalid_request_error("tracedecay_sessions_for", detail),
+        crate::support::route_refusal(&host.response),
+        crate::support::application_invalid_request_error(detail),
         "{}",
-        host.response
-    );
-    assert!(
-        host.response.get("result").is_none(),
-        "schema rejection must not return a tool result: {}",
         host.response
     );
 }

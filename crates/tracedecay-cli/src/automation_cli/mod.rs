@@ -33,30 +33,30 @@ pub(crate) async fn handle_automation_command(
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         AutomationAction::Config { action } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 config::handle_automation_config_command(profile, action),
-                label = "cli.automation.config"
+                tracing::trace_span!("cli.automation.config"),
             )
             .await
         }
         AutomationAction::Runs { action } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 runs::handle_automation_runs_command(profile, action),
-                label = "cli.automation.runs"
+                tracing::trace_span!("cli.automation.runs"),
             )
             .await
         }
         AutomationAction::Skills { action } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 skills::handle_automation_skills_command(profile, action),
-                label = "cli.automation.skills"
+                tracing::trace_span!("cli.automation.skills"),
             )
             .await
         }
         AutomationAction::Facts { action } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 facts::handle_automation_facts_command(profile, action),
-                label = "cli.automation.facts"
+                tracing::trace_span!("cli.automation.facts"),
             )
             .await
         }

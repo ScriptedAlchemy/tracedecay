@@ -54,7 +54,7 @@ enum MovedStoreEvidence {
 /// Returns `Ok(None)` when adoption was not requested or there is no
 /// moved-store candidate, so first-touch may mint a new identity.
 /// Ambiguous or conflicting adoption is a typed refusal, never an alias.
-#[hotpath::measure(label = "lifecycle.adopt_moved_nongit", future = true)]
+#[tracing::instrument(name = "lifecycle.adopt_moved_nongit", level = "trace", skip_all)]
 pub async fn adopt_moved_nongit_project(
     project_root: &Path,
     profile_root: &Path,
@@ -182,7 +182,7 @@ fn refuse_if_adoption_conflicts(
     Ok(None)
 }
 
-#[hotpath::measure(label = "lifecycle.discover_moved_nongit", future = true)]
+#[tracing::instrument(name = "lifecycle.discover_moved_nongit", level = "trace", skip_all)]
 async fn discover_moved_nongit_candidates(
     new_root: &Path,
     profile_root: &Path,
@@ -270,7 +270,7 @@ fn paths_record_same_root(recorded: &Path, previous_root: &Path) -> bool {
 /// root. The registry upsert commits last, it is what makes the root resolve,
 /// so every intermediate state either still resolves the old registration
 /// or resumes here on the next explicit init.
-#[hotpath::measure(label = "lifecycle.remap_moved_nongit", future = true)]
+#[tracing::instrument(name = "lifecycle.remap_moved_nongit", level = "trace", skip_all)]
 async fn remap_moved_nongit_project(
     new_root: &Path,
     profile_root: &Path,

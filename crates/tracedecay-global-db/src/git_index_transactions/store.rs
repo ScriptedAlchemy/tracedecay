@@ -37,14 +37,17 @@ pub struct GitIndexPreviewInputGcResult {
 }
 
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
-    #[hotpath::skip]
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitMutationDatabase::Registered(db),
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.preview_input")]
+    #[tracing::instrument(
+        name = "global_db.git_index.persist.preview_input",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_preview_input(
         &self,
         input: GitIndexPreviewInputV1,
@@ -64,7 +67,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_preview_input(
         &self,
         preview_id: &GitIndexPreviewId,
@@ -75,7 +77,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         read_preview_input_from_transaction(&snapshot, preview_id, observed_at).await
     }
 
-    #[hotpath::skip]
     pub async fn purge_expired_preview_inputs(
         &self,
         observed_at: UtcMicros,
@@ -86,7 +87,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             .map(|result| result.purged)
     }
 
-    #[hotpath::skip]
     pub async fn next_live_preview_input_expiry(
         &self,
     ) -> GitIndexTransactionStoreResult<Option<UtcMicros>> {
@@ -94,7 +94,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         next_live_preview_input_expiry(&snapshot).await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.purge")]
+    #[tracing::instrument(name = "global_db.git_index.persist.purge", level = "trace", skip_all)]
     pub async fn purge_expired_preview_inputs_and_next(
         &self,
         observed_at: UtcMicros,
@@ -145,7 +145,11 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.preview")]
+    #[tracing::instrument(
+        name = "global_db.git_index.persist.preview",
+        level = "trace",
+        skip_all
+    )]
     pub async fn save_preview(
         &self,
         preview: GitIndexPreviewV1,
@@ -161,7 +165,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn read_preview(
         &self,
         preview_id: &GitIndexPreviewId,
@@ -175,7 +178,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// key without opening a writer. This is the read-only projection of the
     /// same record `begin_or_replay` reconstructs before it decides to start,
     /// replay, or require recovery.
-    #[hotpath::skip]
     pub async fn read_record(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
@@ -187,7 +189,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
 
     /// Atomically binds a client input and its prepared journal to an immutable
     /// preview before native Git is permitted to run.
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.begin")]
+    #[tracing::instrument(name = "global_db.git_index.persist.begin", level = "trace", skip_all)]
     pub async fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
@@ -260,7 +262,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.cas")]
+    #[tracing::instrument(name = "global_db.git_index.persist.cas", level = "trace", skip_all)]
     pub async fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
@@ -316,7 +318,11 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// database transaction. A failed receipt insert rolls back the journal
     /// phase and any newly required quarantine, so restart recovery never
     /// observes a terminal phase without its immutable receipt or fence.
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.terminal")]
+    #[tracing::instrument(
+        name = "global_db.git_index.persist.terminal",
+        level = "trace",
+        skip_all
+    )]
     pub async fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
@@ -410,7 +416,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn recovery_candidates(
         &self,
         repository_id: &RepositoryId,
@@ -429,7 +434,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             .collect())
     }
 
-    #[hotpath::skip]
     pub async fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
         let snapshot = self.read_snapshot().await?;
         let mut rows = snapshot
@@ -465,7 +469,11 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         Ok(repositories)
     }
 
-    #[hotpath::measure(future = true, label = "global_db.git_index.persist.quarantine")]
+    #[tracing::instrument(
+        name = "global_db.git_index.persist.quarantine",
+        level = "trace",
+        skip_all
+    )]
     pub async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
@@ -498,7 +506,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn clear_repository_quarantine(
         &self,
         repository_id: &RepositoryId,
@@ -558,12 +565,10 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         .await
     }
 
-    #[hotpath::skip]
     async fn begin_write(&self) -> GitIndexTransactionStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
-    #[hotpath::skip]
     async fn read_snapshot(&self) -> GitIndexTransactionStoreResult<GitMutationReadSnapshot> {
         self.db.read_snapshot().await.map_err(unavailable)
     }
@@ -621,9 +626,8 @@ where
         .execute(
             "INSERT INTO git_index_preview_commitments
                 (preview_id, preview_digest, repository_id, worktree_id, operation,
-                 repository_snapshot_digest, commit_intent_digest, created_at, expires_at,
-                 preview_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 repository_snapshot_digest, created_at, expires_at, preview_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 preview.preview_id.as_str(),
                 preview.preview_digest.as_str(),
@@ -635,10 +639,6 @@ where
                     .map(tracedecay_domain::WorktreeId::as_str),
                 operation_code(preview.operation),
                 preview.repository_snapshot_digest.as_str(),
-                preview
-                    .commit_intent_digest
-                    .as_ref()
-                    .map(tracedecay_domain::ManifestDigest::as_str),
                 preview.created_at.0,
                 preview.expires_at.0,
                 encode(preview)?,
@@ -1170,7 +1170,6 @@ fn operation_code(operation: tracedecay_domain::GitIndexTransactionOperationV1) 
     match operation {
         tracedecay_domain::GitIndexTransactionOperationV1::StageHunks => "stage_hunks",
         tracedecay_domain::GitIndexTransactionOperationV1::UnstageHunks => "unstage_hunks",
-        tracedecay_domain::GitIndexTransactionOperationV1::CommitIndex => "commit_index",
     }
 }
 
@@ -1179,7 +1178,6 @@ fn phase_code(phase: GitIndexJournalPhaseV1) -> &'static str {
         GitIndexJournalPhaseV1::Prepared => "prepared",
         GitIndexJournalPhaseV1::NativeApplyStarted => "native_apply_started",
         GitIndexJournalPhaseV1::IndexCommitted => "index_committed",
-        GitIndexJournalPhaseV1::RefCommitted => "ref_committed",
         GitIndexJournalPhaseV1::Verifying => "verifying",
         GitIndexJournalPhaseV1::Committed => "committed",
         GitIndexJournalPhaseV1::AbortedNoChange => "aborted_no_change",

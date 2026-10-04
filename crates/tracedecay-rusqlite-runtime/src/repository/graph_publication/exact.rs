@@ -533,7 +533,11 @@ fn append_replay_in_transaction(
 }
 
 impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
-    #[hotpath::measure(label = "rusqlite.graph_publication.append_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.append_replay",
+        level = "trace",
+        skip_all
+    )]
     fn append_replay(
         &mut self,
         publication: &GraphPublicationReplayV1,
@@ -556,7 +560,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.pending_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.pending_replay",
+        level = "trace",
+        skip_all
+    )]
     fn pending_replay(
         &mut self,
         projection: &GraphProjectionIdentityV1,
@@ -572,7 +580,7 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(pending)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.replay")]
+    #[tracing::instrument(name = "rusqlite.graph_publication.replay", level = "trace", skip_all)]
     fn replay(
         &mut self,
         key: &GraphPublicationKeyV1,
@@ -593,7 +601,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(replay)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.replay_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.replay_page",
+        level = "trace",
+        skip_all
+    )]
     fn replay_page(
         &mut self,
         request: &GraphPublicationReplayPageRequestV1,
@@ -674,7 +686,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(page)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.projection_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.projection_page",
+        level = "trace",
+        skip_all
+    )]
     fn projection_page(
         &mut self,
         request: &GraphPublicationProjectionPageRequestV1,
@@ -696,7 +712,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .map_err(GraphPublicationStoreErrorV1::from)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.retire_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retire_replay",
+        level = "trace",
+        skip_all
+    )]
     fn retire_replay(
         &mut self,
         request: &GraphPublicationReplayRetirementV1,
@@ -724,7 +744,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.retire_verified_head_replay")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retire_verified_head_replay",
+        level = "trace",
+        skip_all
+    )]
     fn retire_verified_head_replay(
         &mut self,
         request: &GraphPublicationReplayRetirementV1,
@@ -757,7 +781,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.graph_publication.discard_pending_replay")]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.graph_publication.discard_pending_replay",
+        level = "trace",
+        skip_all
+    )]
     fn discard_pending_replay(
         &mut self,
         request: &GraphPendingReplayDiscardV1,
@@ -784,7 +812,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.retired_cleanup_page")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.retired_cleanup_page",
+        level = "trace",
+        skip_all
+    )]
     fn retired_cleanup_page(
         &mut self,
         request: &GraphPublicationRetiredCleanupPageRequestV1,
@@ -862,7 +894,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .map_err(GraphPublicationStoreErrorV1::from)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.finalize_retired_cleanup")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.finalize_retired_cleanup",
+        level = "trace",
+        skip_all
+    )]
     fn finalize_retired_replay_cleanup(
         &mut self,
         request: &GraphPublicationReplayRetirementV1,
@@ -922,7 +958,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         ))
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.verified_head")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.verified_head",
+        level = "trace",
+        skip_all
+    )]
     fn verified_head(
         &mut self,
         projection: &GraphProjectionIdentityV1,
@@ -937,7 +977,11 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(head)
     }
 
-    #[hotpath::measure(label = "rusqlite.graph_publication.cas_verified_head")]
+    #[tracing::instrument(
+        name = "rusqlite.graph_publication.cas_verified_head",
+        level = "trace",
+        skip_all
+    )]
     fn compare_and_swap_verified_head(
         &mut self,
         request: &GraphVerifiedHeadCompareAndSwapV1,

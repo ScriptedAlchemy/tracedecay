@@ -505,7 +505,7 @@ pub(crate) fn task_skip_reason(
     None
 }
 
-#[hotpath::measure(label = "automation.scheduler.gate", future = true)]
+#[tracing::instrument(name = "automation.scheduler.gate", level = "trace", skip_all)]
 async fn scheduler_gate_with_lock_retention(
     config: &AutomationConfig,
     executable: Option<&Path>,
@@ -529,7 +529,7 @@ async fn scheduler_gate_with_lock_retention(
     )
     .await?
     else {
-        super::scheduler_metrics::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
+        super::scheduler_trace::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
         let summary = if scheduled {
             Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
         } else {
@@ -568,11 +568,11 @@ async fn scheduler_gate_with_lock_retention(
         )
     };
     if let Some(reason) = decision.skip_reason() {
-        super::scheduler_metrics::observe_skip_reason(reason);
+        super::scheduler_trace::observe_skip_reason(reason);
         return Ok((SchedulerGate::Skip(reason), Some(summary)));
     }
 
-    super::scheduler_metrics::observe_due();
+    super::scheduler_trace::observe_due();
     Ok((SchedulerGate::Proceed(lock), Some(summary)))
 }
 
@@ -653,7 +653,7 @@ async fn task_run_gate_with_lock_retention(
                 Some(reason) => {
                     // The scheduler gate above already reported "due"; the
                     // enablement refusal is the decision that actually stands.
-                    super::scheduler_metrics::observe_skip_reason(reason);
+                    super::scheduler_trace::observe_skip_reason(reason);
                     SchedulerGate::Skip(reason)
                 }
                 None => SchedulerGate::Proceed(lock),
@@ -954,13 +954,15 @@ impl<'a> AgentRunFinalizer<'a> {
         request: &AgentTaskRequest,
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
-        let _startup = super::scheduler_metrics::DurationGuard::backend_startup();
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
         let mut retry_report = AgentTaskRetryReport::default();
-        match hotpath::measure_block!("automation.backend.startup", {
+        let startup_result = {
+            use tracing::Instrument as _;
             run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
+                .instrument(tracing::trace_span!("automation.backend.startup"))
                 .await
-        }) {
+        };
+        match startup_result {
             Ok(response) => Ok(BackendTaskRun::Response {
                 response,
                 retry_report,
@@ -1230,7 +1232,6 @@ impl<'a> AgentRunFinalizer<'a> {
         outcome: RunRecordOutcome,
         completed_at_micros: i64,
     ) -> AutomationRunLedgerRecord {
-        super::scheduler_metrics::observe_run_terminal(outcome.status);
         let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = outcome.error_classification;
         let contract = agent_task_contract(self.task);

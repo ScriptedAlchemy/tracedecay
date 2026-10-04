@@ -16,7 +16,7 @@ fn branch_list_rpc_args() -> serde_json::Value {
     })
 }
 
-#[hotpath::measure(label = "cli.branch.dispatch", future = true)]
+#[tracing::instrument(name = "cli.branch.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_branch_action(
     profile: &ProfileRoot,
     action: BranchAction,
@@ -39,7 +39,7 @@ fn handle_branch_action_inner(
         use tracedecay_runtime_core::branch_meta;
 
         match action {
-            BranchAction::List { path } => {
+            BranchAction::List { path, json } => {
                 let resolved = super::scope::resolve_project_scope(
                     profile,
                     tracedecay_configuration::resolve_path(path),
@@ -57,24 +57,28 @@ fn handle_branch_action_inner(
                         message: "daemon status omitted branch diagnostics".to_string(),
                     }
                 })?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(diagnostics)?);
+                    return Ok(());
+                }
                 if !diagnostics
                     .get("tracking_enabled")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    eprintln!(
+                    println!(
                         "No branch tracking configured. Run `tracedecay branch add` to start."
                     );
                     return Ok(());
                 }
-                eprintln!(
+                println!(
                     "Default branch: {}",
                     diagnostics
                         .get("default_branch")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("<unknown>")
                 );
-                eprintln!(
+                println!(
                     "Current branch: {}",
                     diagnostics
                         .get("current_branch")
@@ -94,14 +98,14 @@ fn handle_branch_action_inner(
                     } else {
                         ""
                     };
-                    eprintln!("Serving branch: {serving}{suffix}");
+                    println!("Serving branch: {serving}{suffix}");
                 }
                 if diagnostics
                     .get("branch_drifted")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    eprintln!(
+                    println!(
                         "Opened branch: {}",
                         diagnostics
                             .get("open_active_branch")
@@ -109,7 +113,7 @@ fn handle_branch_action_inner(
                             .unwrap_or("<detached HEAD>")
                     );
                 }
-                eprintln!();
+                println!();
                 for branch in diagnostics
                     .get("branches")
                     .and_then(serde_json::Value::as_array)
@@ -164,7 +168,7 @@ fn handle_branch_action_inner(
                     } else {
                         "exact index pending".to_string()
                     };
-                    eprintln!(
+                    println!(
                         "  {}{}{}, {}",
                         branch
                             .get("name")
@@ -402,11 +406,11 @@ async fn handle_branch_autotrack_action(
                     message: "PR auto-tracking poll interval is not unsigned".to_owned(),
                 });
             };
-            eprintln!(
+            println!(
                 "PR auto-tracking: {}",
                 if enabled { "enabled" } else { "disabled" }
             );
-            eprintln!(
+            println!(
                 "Poll interval: {}s (effective {}s)",
                 poll_secs,
                 poll_secs.max(MIN_AUTO_TRACK_PR_POLL_SECS)
@@ -416,18 +420,18 @@ async fn handle_branch_autotrack_action(
                 let data_root = resolve_branch_data_root(profile, &resolved.project_path).await?;
                 let managed = tracedecay_application::pr_tracking::managed_summary(&data_root)?;
                 if managed.is_empty() {
-                    eprintln!("Tracked PR branches: none");
+                    println!("Tracked PR branches: none");
                 } else {
-                    eprintln!("Tracked PR branches:");
+                    println!("Tracked PR branches:");
                     for entry in managed {
-                        eprintln!(
+                        println!(
                             "  {}, PR #{} (head {})",
                             entry.branch, entry.pr, entry.head_branch
                         );
                     }
                 }
                 for stale in tracedecay_application::pr_tracking::load_state(&data_root)?.stale {
-                    eprintln!("Stale PR branch: {stale}; the next reconciliation resets it");
+                    println!("Stale PR branch: {stale}; the next reconciliation resets it");
                 }
             }
         }

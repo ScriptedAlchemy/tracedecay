@@ -112,7 +112,7 @@ impl GuardedStoreTelemetryPort {
         store: &'a StoreKeyV1,
         observation: TableGrowthObservation,
     ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !self.admits(context, store) {
                     return TableGrowthTelemetryReadV1::Denied {
@@ -153,7 +153,7 @@ impl GuardedStoreTelemetryPort {
                     observation,
                 )
             },
-            label = "daemon.maintenance.read_table_growth"
+            tracing::trace_span!("daemon.maintenance.read_table_growth"),
         ))
     }
 }
@@ -164,7 +164,7 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
         context: &'a RequestContext,
         store: &'a StoreKeyV1,
     ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !self.admits(context, store) {
                     return StorageTelemetryReadV1::Denied {
@@ -197,7 +197,7 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
                 }
                 StorageTelemetryReadV1::Observed { sample }
             },
-            label = "daemon.maintenance.read_store_size"
+            tracing::trace_span!("daemon.maintenance.read_store_size"),
         ))
     }
 
@@ -210,7 +210,11 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
     }
 }
 
-#[hotpath::measure(label = "daemon.maintenance.compare_table_growth")]
+#[tracing::instrument(
+    name = "daemon.maintenance.compare_table_growth",
+    level = "trace",
+    skip_all
+)]
 pub fn compare_table_growth(
     store: &StoreKeyV1,
     current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
@@ -564,7 +568,6 @@ impl StoreTelemetrySamplingRegistry {
         let loud = self.loud_retention_this_tick.load(Ordering::Acquire);
         if matches!(outcome, MaintenanceTickOutcome::Retry) && !loud {
             if self.quiet_retry_tick_logged.swap(true, Ordering::AcqRel) {
-                hotpath::gauge!("daemon.git.maintenance.retention_quiet_total").inc(1_u64);
                 return false;
             }
             return true;
@@ -573,7 +576,11 @@ impl StoreTelemetrySamplingRegistry {
         true
     }
 
-    #[hotpath::measure(label = "daemon.maintenance.sample_store_telemetry", future = true)]
+    #[tracing::instrument(
+        name = "daemon.maintenance.sample_store_telemetry",
+        level = "trace",
+        skip_all
+    )]
     pub async fn advance_registered(
         &self,
         active_paths: &BTreeSet<PathBuf>,
@@ -613,7 +620,11 @@ impl StoreTelemetrySamplingRegistry {
     }
 }
 
-#[hotpath::measure(label = "daemon.maintenance.mint_telemetry_context")]
+#[tracing::instrument(
+    name = "daemon.maintenance.mint_telemetry_context",
+    level = "trace",
+    skip_all
+)]
 fn storage_telemetry_request_context(
     scope: ResolvedScope,
 ) -> Result<RequestContext, ApplicationContractError> {

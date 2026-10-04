@@ -86,7 +86,7 @@ impl ParsedExtractionArtifactV1 {
             ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
             ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
         };
-        crate::hotpath_observe::measure_emit(|| artifact.canonicalize_order());
+        crate::observe::measure_emit(|| artifact.canonicalize_order());
         Self {
             artifact,
             disposition,
@@ -99,7 +99,7 @@ impl ParsedExtractionArtifactV1 {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| artifact.canonicalize_order());
+        crate::observe::measure_emit(|| artifact.canonicalize_order());
         Self {
             artifact,
             disposition: ParsedExtractionDisposition::Reset { reason },
@@ -129,7 +129,7 @@ impl ParsedExtraction {
             ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
             ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
         };
-        crate::hotpath_observe::measure_emit(|| result.canonicalize_order());
+        crate::observe::measure_emit(|| result.canonicalize_order());
         Self {
             result,
             disposition,
@@ -142,7 +142,7 @@ impl ParsedExtraction {
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
-        crate::hotpath_observe::measure_emit(|| result.canonicalize_order());
+        crate::observe::measure_emit(|| result.canonicalize_order());
         Self {
             result,
             disposition: ParsedExtractionDisposition::Reset { reason },
@@ -161,7 +161,7 @@ pub(crate) fn visit_root_children(
     scope: ParsedExtractionScope<'_>,
     visit: impl FnMut(TreeSitterNode<'_>),
 ) -> ParsedTraversalMetrics {
-    crate::hotpath_observe::measure_query(|| visit_root_children_unmeasured(tree, scope, visit))
+    crate::observe::measure_query(|| visit_root_children_unmeasured(tree, scope, visit))
 }
 
 fn visit_root_children_unmeasured(

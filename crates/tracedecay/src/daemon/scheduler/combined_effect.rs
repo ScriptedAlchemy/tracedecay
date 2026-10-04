@@ -271,7 +271,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.scheduler.combined_effect", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.combined_effect", level = "trace", skip_all)]
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
@@ -318,7 +318,7 @@ fn run_combined_scheduler_effect_inner<'a>(
     first_error: &'a mut Option<tracedecay_domain::errors::TraceDecayError>,
 ) -> Pin<Box<dyn Future<Output = CombinedEffectOutcome> + Send + 'a>> {
     Box::pin(async move {
-        let outcome = match admission {
+        match admission {
             CombinedEffectAdmission::Conflict => {
                 super::log_scheduler_admission_conflict(
                     automation_context.project_root(),
@@ -451,19 +451,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 )
                 .await
             }
-        };
-        match outcome {
-            CombinedEffectOutcome::Completed => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.completed_total").inc(1_u64);
-            }
-            CombinedEffectOutcome::Handled => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.handled_total").inc(1_u64);
-            }
-            CombinedEffectOutcome::Deferred => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.deferred_total").inc(1_u64);
-            }
         }
-        outcome
     })
 }
 
@@ -603,7 +591,11 @@ fn run_execute_pair<'a>(
     clippy::too_many_arguments,
     reason = "composition keeps daemon admission, project memory, cancellation and pinned configuration authorities explicit"
 )]
-#[hotpath::measure(label = "daemon.scheduler.combined_effect_prepare", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.combined_effect_prepare",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn prepare_combined_effects(
     engine: &DaemonEngine,
     memory: &TraceDecay,

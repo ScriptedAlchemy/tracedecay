@@ -466,7 +466,7 @@ impl OwnedPrimitiveRuntime {
         context: RequestContext,
         observed_at: UtcMicros,
     ) -> PrimitiveDispatchFuture<'_> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if let Some(problem) = admission_problem(
                     &self.scope,
@@ -493,7 +493,7 @@ impl OwnedPrimitiveRuntime {
                     result => Ok(result),
                 }
             },
-            label = "usecases.primitives.execute"
+            tracing::trace_span!("usecases.primitives.execute"),
         ))
     }
 }
@@ -561,7 +561,7 @@ const fn reads_code_index(request: &PrimitiveRequest) -> bool {
 /// runtime.
 ///
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "usecases.primitives.open_runtime")]
+#[tracing::instrument(name = "usecases.primitives.open_runtime", level = "trace", skip_all)]
 pub fn open_primitive_project_runtime(
     database: Database,
     source_runtime: Arc<tracedecay_graph_query::SourceReadContext>,
@@ -665,7 +665,7 @@ fn validate_admitted_root_uri(
         })
 }
 
-#[hotpath::measure(label = "usecases.primitives.admit")]
+#[tracing::instrument(name = "usecases.primitives.admit", level = "trace", skip_all)]
 fn admission_problem(
     scope: &ResolvedScope,
     access: &ProjectSourceAccessSnapshot,
@@ -707,7 +707,7 @@ fn admission_problem(
     Ok(None)
 }
 
-#[hotpath::measure(label = "usecases.primitives.admitted", future = true)]
+#[tracing::instrument(name = "usecases.primitives.admitted", level = "trace", skip_all)]
 async fn dispatch_admitted(
     runtime: &OwnedPrimitiveRuntime,
     invocation: PrimitiveInvocation,
@@ -1163,7 +1163,11 @@ fn retrieval_context<'a>(
     }
 }
 
-#[hotpath::measure(label = "usecases.primitives.retrieval_outcome")]
+#[tracing::instrument(
+    name = "usecases.primitives.retrieval_outcome",
+    level = "trace",
+    skip_all
+)]
 fn retrieval_outcome<T: Serialize>(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
@@ -1527,6 +1531,7 @@ fn test_outcome<T: Serialize>(
             )
         }
         TestPrimitivePortOutcome::Failed { .. } => unavailable(context, operation),
+        TestPrimitivePortOutcome::Refused(refusal) => problem(context, operation, *refusal),
     }
 }
 
@@ -1641,7 +1646,7 @@ impl std::io::Write for CountingSink {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "usecases.primitives.evidence")]
+#[tracing::instrument(name = "usecases.primitives.evidence", level = "trace", skip_all)]
 fn evidence_result(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
@@ -1765,7 +1770,11 @@ fn test_results_payload(
     }
 }
 
-#[hotpath::measure(label = "usecases.primitives.recent_test_results", future = true)]
+#[tracing::instrument(
+    name = "usecases.primitives.recent_test_results",
+    level = "trace",
+    skip_all
+)]
 async fn recent_test_results(
     runtime: &OwnedPrimitiveRuntime,
     context: &RequestContext,

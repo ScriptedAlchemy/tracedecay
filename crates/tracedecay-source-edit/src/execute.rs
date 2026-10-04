@@ -221,7 +221,7 @@ fn authority_still_matches(
         && authority.proof == request.proof
 }
 
-#[hotpath::measure(label = "usecases.edit.execute", future = true)]
+#[tracing::instrument(name = "usecases.edit.execute", level = "trace", skip_all)]
 pub(super) async fn execute_source_edit_inner<A>(
     graph: &SourceEditRuntime,
     code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,
@@ -524,7 +524,7 @@ where
         return Ok(record.into_live_application_result(live_outcome, None));
     }
 
-    let (effect_result, plan_complete) = hotpath::future!(
+    let (effect_result, plan_complete) = tracing::Instrument::instrument(
         apply_source_edit_plan(
             planned_files,
             run_source_edit(
@@ -536,7 +536,7 @@ where
                 request.edit.clone().with_dry_run(false),
             ),
         ),
-        label = "usecases.edit.apply_plan"
+        tracing::trace_span!("usecases.edit.apply_plan"),
     )
     .await;
     let outcome = match effect_result {
@@ -626,7 +626,7 @@ where
     Ok(record.into_live_application_result(outcome, verification))
 }
 
-#[hotpath::measure(label = "usecases.edit.preview", future = true)]
+#[tracing::instrument(name = "usecases.edit.preview", level = "trace", skip_all)]
 pub(super) async fn resolve_source_edit_preview(
     graph: &SourceEditRuntime,
     code_graph: &dyn tracedecay_graph_query::CodeGraphProjectionReadPort,

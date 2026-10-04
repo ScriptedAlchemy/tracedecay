@@ -15,7 +15,6 @@ pub enum HandoffApplicationInvocationV1 {
 }
 
 impl HandoffApplicationInvocationV1 {
-    #[hotpath::skip]
     pub const fn operation_key(&self) -> &'static str {
         match self {
             Self::IssueTaskHandoff(_) => "issue_task_handoff",

@@ -68,7 +68,7 @@ pub(crate) struct KimiPluginRefreshV1 {
 
 /// Re-run Kimi's installer for the staged TraceDecay plugin when, and only
 /// when, Kimi already has it installed from that exact source.
-#[hotpath::measure(label = "hosts.agent.kimi.web_refresh")]
+#[tracing::instrument(name = "hosts.agent.kimi.web_refresh", level = "trace", skip_all)]
 pub(crate) fn refresh_installed_plugin(
     home: &Path,
 ) -> Result<KimiPluginRefreshV1, KimiWebRefreshError> {
@@ -154,8 +154,12 @@ fn refresh_through_server(
     staged: &Path,
     staged_version: &str,
 ) -> Result<KimiPluginRefreshV1, KimiWebRefreshError> {
+    // No connection pooling: ureq treats an HTTP/1.0 response as reusable, so
+    // the install POST could ride a connection the server is closing, and
+    // ureq never resends a POST.
     let agent = http_agent(
         ureq::Agent::config_builder()
+            .max_idle_connections(0)
             .timeout_global(Some(KIMI_WEB_REQUEST_TIMEOUT))
             .http_status_as_error(false)
             .proxy(None)

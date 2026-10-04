@@ -181,12 +181,13 @@ fn host_integration_read_from_report(
 /// so doctor and status give one verdict for the same worktree.
 ///
 /// An unmounted worktree reports `Unmounted`; a fresh one `Mounted`; a stale
-/// one `Stale`; a worktree whose background convergence is parked on a
-/// deterministic contract violation reports `Parked` with the exact reason;
-/// one still indexing, refreshing, restoring, or verifying reports
-/// `Indexing`. The read observes only: it neither renews a residency lease
+/// one, or one whose last complete index serves while the scheduler verifies
+/// source freshness, `Stale`, as status labels it; a worktree whose background
+/// convergence is parked on a deterministic contract violation reports
+/// `Parked` with the exact reason; one still indexing, refreshing, or
+/// restoring reports `Indexing`. The read observes only: it neither renews a residency lease
 /// nor wakes code-index work.
-#[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
+#[tracing::instrument(name = "daemon.doctor.code_index", level = "trace", skip_all)]
 pub async fn code_index_read_from_registry(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -206,18 +207,23 @@ pub async fn code_index_read_from_registry(
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
     }
-    observed(match freshness.staleness_state {
+    observed(code_index_mount_state(freshness.staleness_state))
+}
+
+fn code_index_mount_state(staleness: Option<CodeIndexStalenessStateV1>) -> CodeIndexMountStateV1 {
+    match staleness {
         Some(CodeIndexStalenessStateV1::Fresh) => CodeIndexMountStateV1::Mounted,
-        Some(CodeIndexStalenessStateV1::Stale) => CodeIndexMountStateV1::Stale,
+        Some(CodeIndexStalenessStateV1::Stale | CodeIndexStalenessStateV1::Verifying) => {
+            CodeIndexMountStateV1::Stale
+        }
         Some(
             CodeIndexStalenessStateV1::Indexing
             | CodeIndexStalenessStateV1::Refreshing
             | CodeIndexStalenessStateV1::Restoring
-            | CodeIndexStalenessStateV1::Verifying
             | CodeIndexStalenessStateV1::Parked,
         )
         | None => CodeIndexMountStateV1::Indexing,
-    })
+    }
 }
 
 // === Pending schema migrations (Storage family) ==============================
@@ -440,7 +446,7 @@ fn permits_synchronous_table_growth(
     )
 }
 
-#[hotpath::measure(label = "daemon.doctor.over_budget", future = true)]
+#[tracing::instrument(name = "daemon.doctor.over_budget", level = "trace", skip_all)]
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
@@ -455,9 +461,6 @@ async fn collect_over_budget_store_findings(
         over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
     };
 
-    // Items-processed for the over-budget sweep: how many mounted stores this
-    // pass actually sampled, so the sweep span divides into per-store cost.
-    hotpath::gauge!("daemon.doctor.telemetry_stores_total").inc(telemetry_ports.len() as u64);
     let mut reads = BTreeMap::new();
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
@@ -570,7 +573,11 @@ async fn retention_protected_generations(
 /// budget made the finding unreachable on every profile that actually had
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
-#[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
+#[tracing::instrument(
+    name = "daemon.doctor.code_generation_retention",
+    level = "trace",
+    skip_all
+)]
 pub async fn collect_code_generation_retention_findings(
     schedulers: &CodeIndexSchedulerRegistryV1,
     profile_database: &RegisteredGlobalDb,
@@ -943,7 +950,7 @@ impl StorageDoctorPort for KernelDoctorSources<'_> {
 /// unavailable is carried with its real evidence state and an explicit coverage
 /// record, and the report asserts health only when every family was consulted
 /// with complete coverage and every finding is healthy.
-#[hotpath::measure(label = "daemon.doctor.compose", future = true)]
+#[tracing::instrument(name = "daemon.doctor.compose", level = "trace", skip_all)]
 pub async fn compose_doctor_report(
     context: &RequestContext,
     inputs: &DoctorKernelInputsV1,
@@ -1109,7 +1116,8 @@ pub fn production_doctor_report_reader(
                 .source()
                 .full_sha;
             let host_scan = tokio::task::spawn_blocking(move || {
-                hotpath::measure_block!("daemon.doctor.host_scan", {
+                let _span = tracing::trace_span!("daemon.doctor.host_scan").entered();
+                {
                     host_profile
                         .home()
                         .map_or(HostIntegrationReadV1::Unsupported, |home| {
@@ -1129,7 +1137,7 @@ pub fn production_doctor_report_reader(
                                 host_integration_read_from_report,
                             )
                         })
-                })
+                }
             });
             let project_temporal = session_temporal_ok(project_sessions.as_deref());
             let (
@@ -1147,7 +1155,7 @@ pub fn production_doctor_report_reader(
                 advisory_feedback,
                 host_read,
                 code_index,
-            ) = hotpath::future!(
+            ) = tracing::Instrument::instrument(
                 Box::pin(async {
                     tokio::join!(
                         graph.quick_check_report(),
@@ -1179,7 +1187,7 @@ pub fn production_doctor_report_reader(
                         code_index_read_from_registry(&schedulers, &project_root),
                     )
                 }),
-                label = "daemon.doctor.collect"
+                tracing::trace_span!("daemon.doctor.collect"),
             )
             .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());

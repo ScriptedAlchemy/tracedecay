@@ -108,7 +108,7 @@ impl AgentIntegration for KimiIntegration {
         true
     }
 
-    #[hotpath::measure(label = "hosts.agent.kimi.project_install")]
+    #[tracing::instrument(name = "hosts.agent.kimi.project_install", level = "trace", skip_all)]
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
@@ -171,7 +171,7 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mKimi CLI integration\x1b[0m");
+        dc.section("Kimi CLI integration");
         doctor_check_plugin(dc, &ctx.home, &kimi_code_home(&ctx.home));
         // Kimi exports only a project index: `export_managed_skills_local`
         // writes `AGENTS.md` while the user-scope export stays the no-op

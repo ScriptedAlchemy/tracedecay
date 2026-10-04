@@ -46,7 +46,7 @@ fn classify_hook_v2_binding(
     HookV2BindingAdmission::Bound(snapshot)
 }
 
-#[hotpath::measure(label = "mcp.hook_runtime.binding")]
+#[tracing::instrument(name = "mcp.hook_runtime.binding", level = "trace", skip_all)]
 pub(super) fn hook_v2_binding_admission(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -147,7 +147,7 @@ fn hook_v2_work_completion(
 /// past the ledger's age bound is dropped there rather than redriven forever.
 /// A ledger that cannot be read is a typed failure: an empty list is only
 /// "nothing is owed", never "the ledger was unavailable".
-#[hotpath::measure(label = "mcp.hook_runtime.pending_work")]
+#[tracing::instrument(name = "mcp.hook_runtime.pending_work", level = "trace", skip_all)]
 pub fn hook_v2_pending_work_envelopes(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
@@ -440,7 +440,7 @@ pub async fn admit_hook_v2_replayed_envelope_with_lifecycle(
     .await
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
+#[tracing::instrument(name = "mcp.hook_runtime.admit", level = "trace", skip_all)]
 /// Admission composes the lifecycle mount, guidance lookup, and replay
 /// paths into one future large enough to trip `clippy::large_futures`; box
 /// it here so every caller keeps a small frame.
@@ -827,7 +827,7 @@ fn present(value: Value) -> Option<Value> {
 /// Admits a native event that has no project route into the authenticated
 /// profile's V2 ledger. The hook supplies only decoded, content-free native
 /// material; the daemon owns the profile scope binding and all durable writes.
-#[hotpath::measure(label = "mcp.hook_runtime.profile_admit")]
+#[tracing::instrument(name = "mcp.hook_runtime.profile_admit", level = "trace", skip_all)]
 pub(super) fn hook_v2_profile_admit(
     admission: Value,
     profile_root: &Path,

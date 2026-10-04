@@ -27,7 +27,7 @@ static STANDALONE_SESSION_REGISTRIES: LazyLock<
 ///
 /// Returns a live lease the caller stores. Port registration stays in the
 /// composition root so this crate never names root wiring.
-#[hotpath::measure(label = "lifecycle.join_session_registry", future = true)]
+#[tracing::instrument(name = "lifecycle.join_session_registry", level = "trace", skip_all)]
 pub async fn join_standalone_session_registry(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {

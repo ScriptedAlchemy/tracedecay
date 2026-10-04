@@ -53,7 +53,7 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 /// search tool) and irrelevant tools fail open with no output. Each hint
 /// category is emitted at most once per session via
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
+#[tracing::instrument(name = "hosts.hooks.cursor.post_tool_use", level = "trace", skip_all)]
 pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!(
         runtime,
@@ -85,7 +85,7 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     0
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_start")]
+#[tracing::instrument(name = "hosts.hooks.cursor.session_start", level = "trace", skip_all)]
 pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!(
@@ -296,7 +296,7 @@ pub(super) fn cursor_project_root_from_parsed_event(
     }
 }
 
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.resolve_root")]
+#[tracing::instrument(name = "hosts.hooks.cursor.resolve_root", level = "trace", skip_all)]
 async fn cursor_project_root_from_parsed_event_with_identity(
     runtime: &HookRuntimeV1,
     parsed: &Value,

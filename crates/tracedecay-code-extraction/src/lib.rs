@@ -31,8 +31,8 @@ pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
 mod extraction_artifact;
-pub(crate) mod hotpath_observe;
 pub mod incremental;
+pub(crate) mod observe;
 pub mod parsed_extraction;
 pub mod source_mask;
 pub(crate) mod traversal;
@@ -134,10 +134,12 @@ pub use clone_body::{
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
 pub use extraction_artifact::{
-    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1,
-    ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, ExtractionArtifactV1, ImportModuleKindV1,
-    ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceIssueV1, SchemaEvidenceLanguageV1,
-    SchemaEvidenceStatusV1, SqlSchemaActionV1, SqlSchemaObjectKindV1, import_module_kind,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedGoMethodSetRowV1,
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1,
+    ExtractionArtifactV1, GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1,
+    ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1, SchemaEvidenceIssueV1,
+    SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, SqlSchemaActionV1, SqlSchemaObjectKindV1,
+    import_module_kind,
 };
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;
@@ -321,38 +323,33 @@ pub trait LanguageExtractor: Send + Sync {
     /// document. A grammar that fails to load or parse yields an artifact
     /// carrying only that error.
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let started = Instant::now();
-                let parsed_source = self.prepare_parse_source(source);
-                match ts_provider::parse_extractor_source(
-                    &self.retained_grammar_key(file_path),
-                    self.language_name(),
-                    &parsed_source,
-                ) {
-                    Ok(tree) => {
-                        self.extract_parsed_artifact(
-                            file_path,
-                            source,
-                            &parsed_source,
-                            &tree,
-                            ParsedExtractionScope::FullDocument,
-                        )
-                        .artifact
-                    }
-                    Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
-                        nodes: Vec::new(),
-                        edges: Vec::new(),
-                        unresolved_refs: Vec::new(),
-                        errors: vec![error],
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    }),
+        crate::observe::measure_extract_file(|| {
+            let started = Instant::now();
+            let parsed_source = self.prepare_parse_source(source);
+            match ts_provider::parse_extractor_source(
+                &self.retained_grammar_key(file_path),
+                self.language_name(),
+                &parsed_source,
+            ) {
+                Ok(tree) => {
+                    self.extract_parsed_artifact(
+                        file_path,
+                        source,
+                        &parsed_source,
+                        &tree,
+                        ParsedExtractionScope::FullDocument,
+                    )
+                    .artifact
                 }
-            },
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
+                Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    unresolved_refs: Vec::new(),
+                    errors: vec![error],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }),
+            }
+        })
     }
 }
 
@@ -497,15 +494,11 @@ impl LanguageRegistry {
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let extractor = path.rsplit('.').next().and_then(|ext| {
+        path.rsplit('.').next().and_then(|ext| {
             self.by_extension
                 .get(ext)
                 .map(|&index| self.extractors[index].as_ref())
-        });
-        if extractor.is_none() {
-            crate::hotpath_observe::record_dispatch_no_extractor();
-        }
-        extractor
+        })
     }
 
     /// Whether `path` is a configuration document rather than code.

@@ -212,7 +212,11 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
 /// ring from the durable frontier so consecutive passes, including passes
 /// separated by a daemon restart, cover every provider without restarting at
 /// the first one. Single-provider calls are hook-driven and run directly.
-#[hotpath::measure(label = "sessions.ingest.project.rotation_plan", future = true)]
+#[tracing::instrument(
+    name = "sessions.ingest.project.rotation_plan",
+    level = "trace",
+    skip_all
+)]
 async fn plan_project_provider_rotation<S: crate::runtime::store_port::TranscriptIngestStore>(
     transcript_store: &S,
     provider: Option<SessionProvider>,
@@ -237,7 +241,7 @@ async fn plan_project_provider_rotation<S: crate::runtime::store_port::Transcrip
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "sessions.ingest.project", future = true)]
+#[tracing::instrument(name = "sessions.ingest.project", level = "trace", skip_all)]
 async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     project_root: &Path,
@@ -296,6 +300,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         brain_id,
         profile_id,
         project_id: &canonical_project_id,
+        project_root,
         repository_provenance,
     });
     let facade = facade.as_ref();

@@ -45,7 +45,7 @@ pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
 
 /// Uploads pending tokens to the worldwide counter.
 /// Returns the new worldwide total on success, or None on any failure.
-#[hotpath::measure(label = "cloud.flush_pending")]
+#[tracing::instrument(name = "cloud.flush_pending", level = "trace", skip_all)]
 pub fn flush_pending(amount: u64) -> Option<u64> {
     if amount == 0 {
         return None;
@@ -64,7 +64,7 @@ pub fn flush_pending(amount: u64) -> Option<u64> {
 
 /// Fetches the current worldwide total from the worker.
 /// Returns None on timeout, network error, or parse failure.
-#[hotpath::measure(label = "cloud.fetch_worldwide_total")]
+#[tracing::instrument(name = "cloud.fetch_worldwide_total", level = "trace", skip_all)]
 pub fn fetch_worldwide_total() -> Option<u64> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let parsed: WorkerResponse = agent
@@ -85,7 +85,7 @@ struct CountriesResponse {
 
 /// Fetches country flags from the worldwide counter.
 /// Returns a list of emoji flags, or an empty vec on failure.
-#[hotpath::measure(label = "cloud.fetch_country_flags")]
+#[tracing::instrument(name = "cloud.fetch_country_flags", level = "trace", skip_all)]
 pub fn fetch_country_flags() -> Vec<String> {
     let agent = agent_with_timeout(Duration::from_millis(500));
     let Ok(mut resp) = agent.get(&format!("{WORKER_URL}/countries")).call() else {
@@ -307,7 +307,7 @@ pub fn fetch_latest_channel_version(is_beta: bool) -> Result<String, ReleaseLook
     latest_release_version(GITHUB_API_URL, is_beta, github_authorization().as_deref())
 }
 
-#[hotpath::measure(label = "cloud.latest_release_version")]
+#[tracing::instrument(name = "cloud.latest_release_version", level = "trace", skip_all)]
 fn latest_release_version(
     api_base: &str,
     is_beta: bool,
@@ -732,17 +732,34 @@ mod tests {
         let (base, _hold) = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let (stop, stopped) = std::sync::mpsc::channel();
             let hold = std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(stream) = stream else { break };
-                    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
-                    drop(stream);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            socket2::SockRef::from(&stream)
+                                .set_linger(Some(Duration::ZERO))
+                                .unwrap();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("reset listener failed: {error}"),
+                    }
+                    match stopped.recv_timeout(Duration::from_millis(10)) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        _ => break,
+                    }
                 }
             });
-            (base, hold)
+            (base, (stop, hold))
         };
 
         let error = latest_release_version(&base, true, None).unwrap_err();
+        #[cfg(windows)]
+        {
+            _hold.0.send(()).unwrap();
+            _hold.1.join().unwrap();
+        }
 
         assert!(
             matches!(error, ReleaseLookupError::NetworkUnreachable { .. }),

@@ -153,7 +153,7 @@ pub(crate) fn dir_size_bytes_controlled(
 /// Build the on-disk store census from the registry. Reads manifests and sizes
 /// directories but never mutates. Only profile-sharded stores are considered;
 /// other storage modes are not laid out under the profile root here.
-#[hotpath::measure(label = "maintenance.orphan_stores.census", future = true)]
+#[tracing::instrument(name = "maintenance.orphan_stores.census", level = "trace", skip_all)]
 pub async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -172,7 +172,11 @@ pub struct StoreCensusPageV1 {
     pub next_cursor: Option<String>,
 }
 
-#[hotpath::measure(label = "maintenance.orphan_stores.census_page", future = true)]
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.census_page",
+    level = "trace",
+    skip_all
+)]
 pub async fn build_store_census_page(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -621,7 +625,11 @@ pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Pat
 /// [`sweep_unregistered_store_page`] directly so it can persist the returned
 /// cursor across maintenance cadences; Doctor deliberately receives one
 /// bounded preview rather than a hidden full-profile traversal.
-#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered", future = true)]
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.sweep_unregistered",
+    level = "trace",
+    skip_all
+)]
 pub async fn sweep_unregistered_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,

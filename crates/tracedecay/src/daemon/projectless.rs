@@ -14,7 +14,7 @@ use tracedecay_mcp::tools::catalog_discovery::{
 };
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
-    explore_call_budget, project_catalog_discovery_scope, tool_error_response,
+    explore_call_budget, project_catalog_discovery_scope,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -319,7 +319,7 @@ pub(super) async fn projectless_tools_call_response(
         .await
 }
 
-#[hotpath::measure(label = "mcp.tools_call.projectless", future = true)]
+#[tracing::instrument(name = "mcp.tools_call.projectless", level = "trace", skip_all)]
 async fn projectless_tools_call_response_with_connection(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
@@ -342,18 +342,18 @@ async fn projectless_tools_call_response_with_connection(
         });
     let discoverable =
         profile_owner_operation.is_some() || projectless_tool_is_discoverable(tool_name);
-    #[cfg(feature = "hotpath")]
+
     {
-        let hotpath_tool_name = if discoverable { tool_name } else { "unknown" };
-        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+        let bounded_tool_name = if discoverable { tool_name } else { "unknown" };
+        tracing::trace!(name: "mcp.tool.name", value = ?bounded_tool_name);
     }
     if !discoverable {
-        return requires_project_error(id, tool_name);
+        return requires_project_error(id, tool_name, &arguments);
     }
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
         if error.is_store_reset_required() {
-            return tool_error_response(id, tool_name, &error);
+            return crate::mcp::tools::tool_refusal_response(id, tool_name, &error, &arguments);
         }
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
@@ -404,7 +404,7 @@ async fn dispatch_admitted_projectless_call(
     // remaining tool is a retained profile operation.
     let Some(operation) = tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name)
     else {
-        return requires_project_error(id, tool_name);
+        return requires_project_error(id, tool_name, &arguments);
     };
     boxed_projectless_phase(projectless_profile_retained_response(
         id,
@@ -417,8 +417,12 @@ async fn dispatch_admitted_projectless_call(
     .await
 }
 
-fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
-    tool_error_response(
+fn requires_project_error(
+    id: serde_json::Value,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> JsonRpcResponse {
+    crate::mcp::tools::tool_refusal_response(
         id,
         tool_name,
         &TraceDecayError::project_route(
@@ -429,6 +433,7 @@ fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResp
                  initialized project or pass --project <path>"
             ),
         ),
+        arguments,
     )
 }
 
@@ -466,7 +471,7 @@ async fn projectless_profile_owner_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => crate::mcp::tools::tool_refusal_response(id, tool_name, &error, &arguments),
     }
 }
 
@@ -482,17 +487,19 @@ async fn projectless_profile_configuration_response(
 ) -> tracedecay_mcp::JsonRpcResponse {
     let tool_name = operation.mcp_tool_name();
     if configuration_targets_profile_settings(operation, &arguments) == Some(false) {
-        return requires_project_error(id, tool_name);
+        return requires_project_error(id, tool_name, &arguments);
     }
+    let refusal_arguments = json!({ "format": arguments.get("format") });
     let normalized = match adapt_application_tool_request(tool_name, arguments) {
         Ok(normalized) => normalized,
         Err(error) => {
-            return tool_error_response(
+            return crate::mcp::tools::tool_refusal_response(
                 id,
                 tool_name,
                 &TraceDecayError::Config {
                     message: error.to_string(),
                 },
+                &refusal_arguments,
             );
         }
     };
@@ -512,7 +519,9 @@ async fn projectless_profile_configuration_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => {
+            crate::mcp::tools::tool_refusal_response(id, tool_name, &error, &refusal_arguments)
+        }
     }
 }
 
@@ -526,7 +535,11 @@ fn profile_executor(
     }
 }
 
-#[hotpath::measure(label = "daemon.project.projectless_retained", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.projectless_retained",
+    level = "trace",
+    skip_all
+)]
 async fn projectless_profile_retained_response(
     id: serde_json::Value,
     tool_name: &str,
@@ -544,11 +557,14 @@ async fn projectless_profile_retained_response(
                 "projectless retained dispatch requires an explicit user scope".to_string(),
             );
         }
-        Err(error) => return tool_error_response(id, tool_name, &error),
+        Err(error) => {
+            return crate::mcp::tools::tool_refusal_response(id, tool_name, &error, &arguments);
+        }
     }
     let Some(application) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
-        return requires_project_error(id, tool_name);
+        return requires_project_error(id, tool_name, &arguments);
     };
+    let refusal_arguments = json!({ "format": arguments.get("format") });
     let executor = profile_executor(connection, store_administration);
     let result = boxed_projectless_phase(crate::mcp::tools::run_retained_surface_tool(
         None,
@@ -566,7 +582,9 @@ async fn projectless_profile_retained_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => {
+            crate::mcp::tools::tool_refusal_response(id, tool_name, &error, &refusal_arguments)
+        }
     }
 }
 

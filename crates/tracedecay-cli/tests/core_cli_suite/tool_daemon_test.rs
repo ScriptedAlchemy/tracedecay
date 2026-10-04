@@ -1714,6 +1714,98 @@ fn graph_tool_project_selector_answers_from_the_selected_registered_project() {
     );
 }
 
+/// A fact write's `project_selector` lands in that registered project's
+/// store, not the project the CLI runs in.
+#[test]
+fn fact_store_project_selector_writes_into_the_selected_registered_project() {
+    let home = TempDir::new().unwrap();
+    let active = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let active_path = canonical_existing_path(active.path());
+    let other_path = canonical_existing_path(other.path());
+    init_committed_git_project_with_cli(&home_path, &active_path);
+    init_committed_git_project_with_cli(&home_path, &other_path);
+    let other_id = default_profile_project_id(&other_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &active_path,
+        "fact_store_add",
+        json!({
+            "content": "Selected beacon: the corpus ships nightly",
+            "category": "decision",
+            "project_selector": { "project_id": other_id }
+        }),
+    );
+    assert!(added, "{body}");
+
+    let decisions = |cwd: &Path| {
+        let (listed, body) = live_tool_json(
+            &home_path,
+            cwd,
+            "fact_store_list",
+            json!({ "category": "decision", "min_trust": 0.0 }),
+        );
+        assert!(listed, "{body}");
+        body["outcome"]["value"]["payload"]["facts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("fact_store_list returned no facts: {body}"))
+            .iter()
+            .map(|projection| projection["fact"]["content"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        decisions(&other_path),
+        vec![json!("Selected beacon: the corpus ships nightly")]
+    );
+    assert_eq!(decisions(&active_path), Vec::<Value>::new());
+}
+
+/// Removing or superseding an unknown fact id is the same typed not-found
+/// refusal, with a failing exit, that getting it is.
+#[test]
+fn fact_store_effects_on_an_unknown_fact_id_refuse_like_get() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let (added, body) = live_tool_json(
+        &home_path,
+        &project_path,
+        "fact_store_add",
+        json!({ "content": "Known beacon: builds run on push", "category": "decision" }),
+    );
+    assert!(added, "{body}");
+    let known = body["outcome"]["value"]["payload"]["result"]["fact"]["fact"]["fact_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fact_store_add returned no fact id: {body}"))
+        .to_owned();
+    let mut unknown = known.clone();
+    let last = unknown.pop().expect("fact id is not empty");
+    unknown.push(if last == '0' { '1' } else { '0' });
+
+    for (tool, args) in [
+        ("fact_store_get", json!({ "fact_id": unknown })),
+        ("fact_store_remove", json!({ "fact_id": unknown })),
+        (
+            "fact_store_supersede",
+            json!({ "fact_id": unknown, "superseded_by": known }),
+        ),
+    ] {
+        let (succeeded, body) = live_tool_json(&home_path, &project_path, tool, args);
+        assert!(!succeeded, "{tool} of an unknown fact id exited 0: {body}");
+        assert_eq!(
+            body["problem"]["code"], "not_found_or_not_authorized",
+            "{tool}: {body}"
+        );
+    }
+}
+
 /// Retained memory and LCM calls answer through the daemon's typed owner on
 /// both targets: the profile target from a directory outside any project, and
 /// the project target. `fact_store_related` shares its page shape with
@@ -1987,6 +2079,10 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &default_profile_project_id(&project_path),
     );
     let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    // The init daemon keeps publishing into the store after init returns, so
+    // seed between daemons. Dropping the probe table frees its pages and keeps
+    // the exact schema the next daemon requires on open.
+    common::stop_managed_daemon(&home_path);
     common::create_runtime().block_on(async {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
@@ -1998,7 +2094,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
                      VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 128\
                  )\
                  INSERT INTO doctor_daemon_probe SELECT zeroblob(8192) FROM count;\
-                 DELETE FROM doctor_daemon_probe;",
+                 DROP TABLE doctor_daemon_probe;",
         )
         .await
         .expect("seed reclaimable pages");
@@ -2081,6 +2177,12 @@ fn doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
             String::from_utf8_lossy(&output.stdout)
         )
     });
+    for report_line in ["tracedecay doctor v", "Binary: ", "\x1b["] {
+        assert!(
+            !stderr.contains(report_line),
+            "doctor --json must not also write the human report to stderr:\n{stderr}"
+        );
+    }
     (output.status.code(), document, stderr)
 }
 
@@ -2295,6 +2397,14 @@ fn doctor_without_a_daemon_reports_daemon_unavailable_as_pending() {
         json!({"state": "daemon_unavailable"})
     );
     assert_eq!(document["issues"], 0, "{document}");
+    assert!(
+        document["checks"]
+            .as_array()
+            .is_some_and(|checks| checks.iter().any(|check| check["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("Binary: ")))),
+        "the quiet report must still record every check line: {document}"
+    );
 }
 
 #[test]
@@ -2585,6 +2695,61 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
             "{probe:?}: expected explicit daemon-unavailable error, got:\n{stderr}"
         );
     }
+}
+
+fn stdout_problem(output: &std::process::Output) -> Value {
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!("--json refusal must be one JSON document ({error}): {output:?}")
+    });
+    document["problem"].clone()
+}
+
+#[test]
+fn json_command_refusals_print_a_typed_problem_on_stdout() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env(
+            "TRACEDECAY_DAEMON_SOCKET",
+            socket_dir.path().join("missing.sock"),
+        )
+        .args(["status", "--json"])
+        .output()
+        .expect("tracedecay status should run");
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let problem = stdout_problem(&output);
+    assert_eq!(problem["kind"], json!("unavailable"), "{problem}");
+    assert_eq!(problem["retryable"], json!(true), "{problem}");
+
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["projects", "context", "proj_doesnotexist", "--json"])
+        .output()
+        .expect("tracedecay projects context should run");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let problem = stdout_problem(&output);
+    assert_eq!(
+        problem["kind"],
+        json!("not_found_or_not_authorized"),
+        "{problem}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("project_route_not_found"),
+        "{output:?}"
+    );
 }
 
 /// A project-routed client reads the managed unit from the caller's own home,

@@ -189,7 +189,11 @@ impl tracedecay_contracts::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.service.work.adjudicate_leak", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work.adjudicate_leak",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn adjudicate_leak(
     registered: &super::super::RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
@@ -223,7 +227,11 @@ pub(super) async fn adjudicate_leak(
     service.adjudicate(context, command, observed_at, scan_deadline)
 }
 
-#[hotpath::measure(label = "daemon.service.work.read_leak_evidence", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work.read_leak_evidence",
+    level = "trace",
+    skip_all
+)]
 async fn read_leak_evidence(
     registered: &super::super::RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,

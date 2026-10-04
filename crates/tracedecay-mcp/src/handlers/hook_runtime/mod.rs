@@ -63,7 +63,7 @@ fn requires_projectless_routing(action: &str) -> tracedecay_domain::errors::Trac
 }
 
 /// Runs one hook-runtime action for the served project.
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.total")]
+#[tracing::instrument(name = "mcp.hook_runtime.total", level = "trace", skip_all)]
 pub async fn compute_hook_runtime(
     cg: &TraceDecay,
     request: HookRuntimeSurfaceRequestV1,
@@ -138,7 +138,7 @@ pub async fn compute_hook_runtime(
 
 /// Runs one hook-runtime action that has no project route: it lands in the
 /// authenticated profile's stores.
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.projectless")]
+#[tracing::instrument(name = "mcp.hook_runtime.projectless", level = "trace", skip_all)]
 pub async fn compute_projectless_hook_runtime(
     request: HookRuntimeSurfaceRequestV1,
     profile_root: &Path,

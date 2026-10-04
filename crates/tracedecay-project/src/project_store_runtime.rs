@@ -16,7 +16,7 @@ use crate::project::TraceDecay;
 use crate::runtime_ports::require_runtime_ports;
 
 /// Join the process-wide standalone session registry once runtime ports are registered.
-#[hotpath::measure(label = "lifecycle.join_session_registry", future = true)]
+#[tracing::instrument(name = "lifecycle.join_session_registry", level = "trace", skip_all)]
 pub(crate) async fn join_standalone_session_registry(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {

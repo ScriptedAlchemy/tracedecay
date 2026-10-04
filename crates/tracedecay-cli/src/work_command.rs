@@ -5,13 +5,12 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::cli::WorkInvocationArgs;
 
-#[hotpath::measure(label = "cli.work.invoke", future = true)]
+#[tracing::instrument(name = "cli.work.invoke", level = "trace", skip_all)]
 pub(crate) async fn run(
     profile: &ProfileRoot,
     invocation: WorkInvocationArgs,
 ) -> tracedecay_domain::errors::Result<()> {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
+    tracing::trace!(name: "cli.work.operation", value = ?invocation.operation.operation_key());
     let body = crate::application_cli::read_request(
         &invocation.request_file,
         crate::application_cli::WORK,
@@ -22,14 +21,14 @@ pub(crate) async fn run(
     // The application round-trip timed apart from `cli.work.invoke` so daemon
     // latency is separable from request parsing, render, and delivery
     // settlement.
-    let mut response = hotpath::future!(
+    let mut response = tracing::Instrument::instrument(
         crate::work_cli::invoke_work_cli_with_delivery(
             profile,
             project_root.clone(),
             operation,
-            body
+            body,
         ),
-        label = "cli.work.request"
+        tracing::trace_span!("cli.work.request"),
     )
     .await?;
     let rendered = crate::application_cli::render(

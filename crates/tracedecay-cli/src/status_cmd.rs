@@ -162,7 +162,7 @@ impl OnlineRefresh {
 /// is dropped and nothing is cached: only this caller writes the cache, and
 /// the abandoned read ends on its own `ureq` timeout inside the runtime's
 /// bounded shutdown rather than as a detached worker.
-#[hotpath::measure(label = "cli.status.online", future = true)]
+#[tracing::instrument(name = "cli.status.online", level = "trace", skip_all)]
 async fn await_online_refresh(
     deadline: Instant,
     refresh: tokio::task::JoinHandle<OnlineRefresh>,
@@ -335,7 +335,7 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     )
 }
 
-#[hotpath::measure(label = "cli.status.dispatch", future = true)]
+#[tracing::instrument(name = "cli.status.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_status_command(
     profile: &ProfileRoot,
     path: Option<String>,
@@ -545,51 +545,54 @@ async fn handle_status_command_within(
     let country_flags = online_config
         .map(|config| config.cached_country_flags.clone())
         .unwrap_or_default();
-    hotpath::measure_block!("cli.status.render", {
-        if should_print_status_logo(short, stdout_is_terminal) {
-            // Tracked render of resources/logo.png; regenerate with
-            // scripts/render-logo-ansi.sh when the artwork changes.
-            print!("{}", include_str!("resources/logo.ansi"));
-        }
-        let branch_info = status_branch_info(&project_path, &daemon_status);
-        let cost_info = None;
-        if short {
-            crate::display::print_status_header(
-                &census,
-                freshness.as_ref(),
-                tokens_saved,
-                global_tokens_saved,
-                worldwide,
-                &country_flags,
-                branch_info.as_ref(),
-                cost_info.as_ref(),
-            );
-        } else {
-            crate::display::print_status_table_with(crate::display::StatusTable {
-                census: &census,
-                freshness: freshness.as_ref(),
-                tokens_saved,
-                global_tokens_saved,
-                worldwide,
-                country_flags: &country_flags,
-                branch_info: branch_info.as_ref(),
-                cost_info: cost_info.as_ref(),
-            });
-        }
-        for finding in &schema_convergences {
-            match finding.state {
-                SchemaConvergenceStateV1::PendingSchemaMigration
-                | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
-                | SchemaConvergenceStateV1::Degraded
-                | SchemaConvergenceStateV1::Completed => {
-                    println!("{}", schema_convergence_line(finding));
+    {
+        let _span = tracing::trace_span!("cli.status.render").entered();
+        {
+            if should_print_status_logo(short, stdout_is_terminal) {
+                // Tracked render of resources/logo.png; regenerate with
+                // scripts/render-logo-ansi.sh when the artwork changes.
+                print!("{}", include_str!("resources/logo.ansi"));
+            }
+            let branch_info = status_branch_info(&project_path, &daemon_status);
+            let cost_info = None;
+            if short {
+                crate::display::print_status_header(
+                    &census,
+                    freshness.as_ref(),
+                    tokens_saved,
+                    global_tokens_saved,
+                    worldwide,
+                    &country_flags,
+                    branch_info.as_ref(),
+                    cost_info.as_ref(),
+                );
+            } else {
+                crate::display::print_status_table_with(crate::display::StatusTable {
+                    census: &census,
+                    freshness: freshness.as_ref(),
+                    tokens_saved,
+                    global_tokens_saved,
+                    worldwide,
+                    country_flags: &country_flags,
+                    branch_info: branch_info.as_ref(),
+                    cost_info: cost_info.as_ref(),
+                });
+            }
+            for finding in &schema_convergences {
+                match finding.state {
+                    SchemaConvergenceStateV1::PendingSchemaMigration
+                    | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+                    | SchemaConvergenceStateV1::Degraded
+                    | SchemaConvergenceStateV1::Completed => {
+                        println!("{}", schema_convergence_line(finding));
+                    }
                 }
             }
+            if let Some(source) = &github_source {
+                println!("{}", github_source_line(source));
+            }
         }
-        if let Some(source) = &github_source {
-            println!("{}", github_source_line(source));
-        }
-    });
+    };
 
     // A parked deterministic contract violation must be visible on the plain
     // status journey, not only inside the JSON payload: name the exact reason

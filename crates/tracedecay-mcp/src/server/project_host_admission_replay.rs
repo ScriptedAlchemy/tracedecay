@@ -66,7 +66,6 @@ impl ProjectHostAdmissionReplayTask {
         &self.worker
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(mut self) {
         self.worker.cancel();
         if let Some(task) = self.task.take() {
@@ -108,7 +107,6 @@ impl ProjectHostAdmissionReplayWorker {
     }
 
     #[cfg(any(test, feature = "test-transport"))]
-    #[hotpath::skip]
     pub async fn wait_idle(&self) {
         loop {
             // `notify_waiters` stores no permit, so both waits are armed before
@@ -144,7 +142,6 @@ impl ProjectHostAdmissionReplayWorker {
         self.backoff_count.load(Ordering::Acquire)
     }
 
-    #[hotpath::skip]
     async fn run(self: Arc<Self>) {
         let mut consecutive_retryable = 0u32;
         loop {

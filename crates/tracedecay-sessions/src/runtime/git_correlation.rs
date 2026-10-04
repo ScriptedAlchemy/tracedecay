@@ -30,8 +30,9 @@ pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
 // its grep filters and this correlation engine narrow by the same rules.
 pub use tracedecay_lcm::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
-pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+pub const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
+const LEGACY_ACTIVITY_FRONTIER_KEY: &str = "auto_backfill_activity_watermark";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +88,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Produced => "produced",
@@ -96,7 +96,6 @@ impl CommitRelationFilter {
         }
     }
 
-    #[hotpath::skip]
     const fn matches(self, relation: CommitRelation) -> bool {
         matches!(
             (self, relation),
@@ -167,7 +166,11 @@ pub struct GitEvidenceProjectionV1 {
 
 #[cfg(test)]
 impl GitEvidenceProjectionV1 {
-    #[hotpath::measure(label = "sessions.git_correlation.projection_new")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.projection_new",
+        level = "trace",
+        skip_all
+    )]
     pub fn new(
         source_watermark: impl Into<String>,
         mut spans: Vec<SessionGitSpan>,
@@ -242,7 +245,11 @@ impl GitEvidenceProjectionV1 {
     /// Evaluates the query over every row. Bounded production reads go
     /// through [`rows::GitEvidenceView`], which feeds the same aggregation
     /// helpers only the rows that can contribute to the result.
-    #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.sessions_for",
+        level = "trace",
+        skip_all
+    )]
     pub fn sessions_for(
         &self,
         query: &SessionsForQuery,
@@ -265,7 +272,11 @@ impl GitEvidenceProjectionV1 {
         }
     }
 
-    #[hotpath::measure(label = "sessions.git_correlation.session_ids_for_scope")]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.session_ids_for_scope",
+        level = "trace",
+        skip_all
+    )]
     pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         if filter.is_empty() {
             return None;
@@ -479,7 +490,6 @@ impl GitRefFilter {
         }
     }
 
-    #[hotpath::skip]
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Branch(_) => "branch",
@@ -551,12 +561,10 @@ pub struct CorrelationIndexHealth {
 }
 
 impl CorrelationIndexHealth {
-    #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
         self.span_count == 0
     }
 
-    #[hotpath::skip]
     pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
         match git_ref {
             GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => self.span_count == 0,
@@ -581,7 +589,6 @@ pub struct CorrelationIndexPresence {
 }
 
 impl CorrelationIndexPresence {
-    #[hotpath::skip]
     pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
         match git_ref {
             GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => !self.spans_present,
@@ -651,16 +658,100 @@ pub fn span_debounce_key(
     )
 }
 
+/// The worktrees of one admitted repository that session locations resolve to.
+///
+/// Linked worktrees share the admitted project identity while each keeps its
+/// own worktree identity, so a session that ran in a linked worktree is
+/// evidence for that worktree, not for the primary checkout. A recorded
+/// location that does not resolve to a worktree of the admitted repository (a
+/// worktree removed since, a nested foreign repository, a non-Git project) is
+/// evidence for the admitted root: admission already proved the record belongs
+/// to this project, and the admitted root is the one worktree identity it has.
+///
+/// One resolver serves one capture batch; each distinct location is resolved
+/// once because discovery below a worktree root walks the filesystem.
+pub struct AdmittedWorktrees {
+    admitted_root: std::path::PathBuf,
+    admitted: String,
+    common_dir: Option<std::path::PathBuf>,
+    resolved: HashMap<std::path::PathBuf, String>,
+}
+
+impl AdmittedWorktrees {
+    pub fn new(admitted_project_root: &std::path::Path) -> Self {
+        Self {
+            admitted_root: admitted_project_root.to_path_buf(),
+            admitted: normalize_worktree(&admitted_project_root.to_string_lossy()),
+            common_dir: tracedecay_runtime_core::worktree::git_common_dir(admitted_project_root),
+            resolved: HashMap::new(),
+        }
+    }
+
+    pub fn admitted_root(&self) -> &std::path::Path {
+        &self.admitted_root
+    }
+
+    /// Normalized worktree key for a session recorded at `location`.
+    pub fn worktree_for(&mut self, location: Option<&str>) -> String {
+        let Some(location) = location
+            .map(std::path::Path::new)
+            .filter(|location| location.is_absolute())
+        else {
+            return self.admitted.clone();
+        };
+        if let Some(known) = self.resolved.get(location) {
+            return known.clone();
+        }
+        let worktree = self
+            .common_dir
+            .as_deref()
+            .and_then(|common_dir| {
+                let topology = tracedecay_runtime_core::git_repository::repository_topology(
+                    crate::runtime::shared::nearest_existing_ancestor(location),
+                )
+                .ok()?;
+                if topology.common_dir != common_dir {
+                    return None;
+                }
+                topology.worktree_root.clone()
+            })
+            .map_or_else(
+                || self.admitted.clone(),
+                |root| normalize_worktree(&root.to_string_lossy()),
+            );
+        self.resolved
+            .insert(location.to_path_buf(), worktree.clone());
+        worktree
+    }
+}
+
+/// The session location a canonical record carries, if any.
+fn canonical_session_location(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+    envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Session {
+            location_path: Some(location),
+            ..
+        } if !location.trim().is_empty() => Some(location.as_str()),
+        _ => None,
+    })
+}
+
 /// Derives Git evidence from one privacy-approved canonical observation.
 ///
-/// The envelope contributes only typed Git facts and native identity/time.
-/// Worktree identity comes exclusively from the daemon-admitted repository
-/// root. Commit facts become relations only when the referenced object resolves
-/// independently to a commit in that admitted repository.
-#[hotpath::measure(label = "sessions.git_correlation.canonical_observation_evidence")]
+/// The envelope contributes typed Git facts, its session location and native
+/// identity/time. A timestamped message or Git fact is activity in the
+/// worktree its location resolves to under [`AdmittedWorktrees`]; the branch
+/// is attached only when the host recorded one. Commit facts become relations
+/// only when the referenced object resolves independently to a commit in the
+/// admitted repository.
+#[tracing::instrument(
+    name = "sessions.git_correlation.canonical_observation_evidence",
+    level = "trace",
+    skip_all
+)]
 pub fn canonical_observation_git_evidence(
     sanitized_payload: &serde_json::Value,
-    admitted_project_root: &std::path::Path,
+    worktrees: &mut AdmittedWorktrees,
 ) -> Result<(Vec<CommitSessionRecord>, Vec<SpanObservation>), GitCorrelationError> {
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(sanitized_payload.clone()).map_err(|error| {
@@ -670,6 +761,7 @@ pub fn canonical_observation_git_evidence(
         })?;
     let mut branch = None;
     let mut commit_references = BTreeSet::new();
+    let mut conversational = false;
     for fact in envelope.facts() {
         let CanonicalObservationFactV1::Git {
             evidence_kind,
@@ -677,6 +769,7 @@ pub fn canonical_observation_git_evidence(
             ..
         } = fact
         else {
+            conversational |= matches!(fact, CanonicalObservationFactV1::Message { .. });
             continue;
         };
         match evidence_kind {
@@ -689,14 +782,14 @@ pub fn canonical_observation_git_evidence(
             _ => {}
         }
     }
-    if branch.is_none() && commit_references.is_empty() {
+    if !conversational && branch.is_none() && commit_references.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
 
     let provider = envelope.provider().as_str().to_owned();
     let session_id = envelope.relations().session_id().as_str().to_owned();
     let timestamp = envelope.evidence().native_timestamp();
-    let worktree = normalize_worktree(&admitted_project_root.to_string_lossy());
+    let worktree = worktrees.worktree_for(canonical_session_location(&envelope));
     let spans = timestamp
         .map(|ts| {
             vec![SpanObservation {
@@ -713,13 +806,17 @@ pub fn canonical_observation_git_evidence(
             }]
         })
         .unwrap_or_default();
+    if commit_references.is_empty() {
+        return Ok((Vec::new(), spans));
+    }
 
-    let repo =
-        tracedecay_runtime_core::git_open::discover(admitted_project_root).map_err(|error| {
+    let repo = tracedecay_runtime_core::git_open::discover(worktrees.admitted_root()).map_err(
+        |error| {
             GitCorrelationError::Unavailable(format!(
                 "admitted repository could not be opened for canonical commit evidence: {error}"
             ))
-        })?;
+        },
+    )?;
     let mut commits = Vec::new();
     for reference in commit_references {
         let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
@@ -785,7 +882,11 @@ pub fn canonical_observation_git_evidence(
 }
 
 /// Installs the Git evidence rows, convergence receipts and watermarks.
-#[hotpath::measure(label = "sessions.git_correlation.ensure_schema", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.ensure_schema",
+    level = "trace",
+    skip_all
+)]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
@@ -805,6 +906,7 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn.execute_batch(rows::GIT_EVIDENCE_ROWS_SCHEMA).await?;
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
+    migrate_activity_frontier(conn).await?;
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
@@ -813,6 +915,67 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     )
     .await?;
     Ok(())
+}
+
+/// The history pass once walked sessions by activity time, so a session
+/// imported behind that cursor was never visited. Positions recorded on that
+/// axis mean nothing on the change-sequence axis; rescanning from the start
+/// is the only safe conversion. That rescan re-derives every failure it can
+/// still reach, so legacy failure receipts are dropped rather than kept for
+/// sessions the change-sequence axis never revisits.
+async fn migrate_activity_frontier(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), GitCorrelationError> {
+    for (table, reset) in [
+        (
+            "git_history_index_progress",
+            "UPDATE git_history_index_progress SET change_sequence = 0;",
+        ),
+        (
+            "git_history_index_failures",
+            "DELETE FROM git_history_index_failures;",
+        ),
+    ] {
+        let mut legacy = conn
+            .query(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = 'activity_timestamp'",
+                params![table],
+            )
+            .await?;
+        if legacy.next().await?.is_some() {
+            drop(legacy);
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} RENAME COLUMN activity_timestamp TO change_sequence;
+                 {reset}"
+            ))
+            .await?;
+        }
+    }
+    if read_meta_value(conn, LEGACY_ACTIVITY_FRONTIER_KEY)
+        .await?
+        .is_some()
+    {
+        conn.execute(
+            "DELETE FROM git_correlation_meta WHERE key IN (?1, ?2)",
+            params![LEGACY_ACTIVITY_FRONTIER_KEY, GIT_HISTORY_ROWID_FRONTIER_KEY],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reads the durable `(change_sequence, rowid)` history frontier.
+pub async fn read_history_frontier(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
+    Ok(GitHistoryIndexFrontier {
+        change_sequence: read_meta_value(conn, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+        source_rowid: read_meta_value(conn, GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await?
+            .unwrap_or(0),
+    })
 }
 
 /// The Git correlation schema version an existing store recorded, `None` for
@@ -841,7 +1004,7 @@ pub async fn recorded_git_correlation_schema_version(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.read_meta", future = true)]
+#[tracing::instrument(name = "sessions.git_correlation.read_meta", level = "trace", skip_all)]
 pub async fn read_meta_value(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
@@ -858,7 +1021,11 @@ pub async fn read_meta_value(
         .transpose()
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.write_meta", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.write_meta",
+    level = "trace",
+    skip_all
+)]
 pub async fn write_meta_value(
     conn: &(impl Executor + ?Sized),
     key: &str,

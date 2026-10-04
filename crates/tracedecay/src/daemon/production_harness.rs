@@ -32,7 +32,11 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
 #[cfg(all(unix, feature = "test-transport"))]
-#[hotpath::measure(label = "daemon.harness.capture_git_snapshot")]
+#[tracing::instrument(
+    name = "daemon.harness.capture_git_snapshot",
+    level = "trace",
+    skip_all
+)]
 #[doc(hidden)]
 pub fn capture_exact_git_snapshot_for_test(
     repository_root: &Path,
@@ -260,17 +264,19 @@ fn isolate_production_composition_roots(
     project_roots: Vec<PathBuf>,
     live_profile_root: Option<PathBuf>,
 ) -> Result<IsolatedProductionCompositionRoots> {
-    hotpath::measure_block!("daemon.harness.isolate", {
-        std::fs::create_dir_all(&isolation_root).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to create production-composition isolation root '{}': {error}",
-                isolation_root.display()
-            ),
-        })?;
-        // The plain spelling, not raw `canonicalize`'s Windows `\\?\` form: the
-        // shipped daemon roots `%USERPROFILE%\.tracedecay` plainly, and a
-        // verbatim root would hide every open that cannot reach a long path.
-        let isolation_root = canonical_existing_identity(&isolation_root).map_err(|error| {
+    {
+        let _span = tracing::trace_span!("daemon.harness.isolate").entered();
+        {
+            std::fs::create_dir_all(&isolation_root).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to create production-composition isolation root '{}': {error}",
+                    isolation_root.display()
+                ),
+            })?;
+            // The plain spelling, not raw `canonicalize`'s Windows `\\?\` form: the
+            // shipped daemon roots `%USERPROFILE%\.tracedecay` plainly, and a
+            // verbatim root would hide every open that cannot reach a long path.
+            let isolation_root = canonical_existing_identity(&isolation_root).map_err(|error| {
             TraceDecayError::Config {
                 message: format!(
                     "failed to canonicalize production-composition isolation root '{}': {error}",
@@ -278,37 +284,37 @@ fn isolate_production_composition_roots(
                 ),
             }
         })?;
-        if let Some(live_profile_root) =
-            live_profile_root.and_then(|path| canonical_existing_identity(&path).ok())
-        {
-            let overlaps_live_profile = isolation_root == live_profile_root
-                || isolation_root.starts_with(&live_profile_root)
-                || live_profile_root.starts_with(&isolation_root);
-            if overlaps_live_profile {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "production-composition isolation root '{}' overlaps live profile '{}'",
-                        isolation_root.display(),
-                        live_profile_root.display()
-                    ),
-                });
+            if let Some(live_profile_root) =
+                live_profile_root.and_then(|path| canonical_existing_identity(&path).ok())
+            {
+                let overlaps_live_profile = isolation_root == live_profile_root
+                    || isolation_root.starts_with(&live_profile_root)
+                    || live_profile_root.starts_with(&isolation_root);
+                if overlaps_live_profile {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "production-composition isolation root '{}' overlaps live profile '{}'",
+                            isolation_root.display(),
+                            live_profile_root.display()
+                        ),
+                    });
+                }
             }
-        }
 
-        let profile_root = composed_profile_root(&isolation_root);
-        std::fs::create_dir_all(&profile_root).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to create isolated production-composition profile '{}': {error}",
-                profile_root.display()
-            ),
-        })?;
-        #[cfg(unix)]
-        set_owner_only_permissions(&profile_root, 0o700)?;
+            let profile_root = composed_profile_root(&isolation_root);
+            std::fs::create_dir_all(&profile_root).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to create isolated production-composition profile '{}': {error}",
+                    profile_root.display()
+                ),
+            })?;
+            #[cfg(unix)]
+            set_owner_only_permissions(&profile_root, 0o700)?;
 
-        let project_roots = project_roots
-            .into_iter()
-            .map(|project_root| {
-                canonical_existing_identity(&project_root).map_err(|error| {
+            let project_roots = project_roots
+                .into_iter()
+                .map(|project_root| {
+                    canonical_existing_identity(&project_root).map_err(|error| {
                     TraceDecayError::Config {
                         message: format!(
                             "failed to canonicalize production-composition project '{}': {error}",
@@ -316,31 +322,34 @@ fn isolate_production_composition_roots(
                         ),
                     }
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if project_roots.is_empty() {
-            return Err(TraceDecayError::Config {
-                message: "production-composition harness requires at least one project".to_owned(),
-            });
-        }
-        for project_root in &project_roots {
-            if !project_root.starts_with(&isolation_root) || project_root.starts_with(&profile_root)
-            {
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if project_roots.is_empty() {
                 return Err(TraceDecayError::Config {
-                    message: format!(
-                        "production-composition project '{}' must be inside isolation root '{}' and outside its profile",
-                        project_root.display(),
-                        isolation_root.display()
-                    ),
+                    message: "production-composition harness requires at least one project"
+                        .to_owned(),
                 });
             }
+            for project_root in &project_roots {
+                if !project_root.starts_with(&isolation_root)
+                    || project_root.starts_with(&profile_root)
+                {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "production-composition project '{}' must be inside isolation root '{}' and outside its profile",
+                            project_root.display(),
+                            isolation_root.display()
+                        ),
+                    });
+                }
+            }
+            Ok(IsolatedProductionCompositionRoots {
+                isolation_root,
+                profile_root,
+                project_roots,
+            })
         }
-        Ok(IsolatedProductionCompositionRoots {
-            isolation_root,
-            profile_root,
-            project_roots,
-        })
-    })
+    }
 }
 
 fn acquire_production_composition_identity(
@@ -350,19 +359,23 @@ fn acquire_production_composition_identity(
     tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     tracedecay_runtime_core::db::DaemonDatabaseScope,
 )> {
-    hotpath::measure_block!("daemon.harness.identity", {
-        let profile_identity = profile_identity::load_or_create(profile_root)?;
-        let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
-            profile_root,
-            "in-process production composition",
-        )?;
-        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            profile_root,
-            1,
-            "in-process-production-composition",
-        )?;
-        Ok((profile_identity, lifecycle_lease, database_scope))
-    })
+    {
+        let _span = tracing::trace_span!("daemon.harness.identity").entered();
+        {
+            let profile_identity = profile_identity::load_or_create(profile_root)?;
+            let lifecycle_lease =
+                tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+                    profile_root,
+                    "in-process production composition",
+                )?;
+            let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+                profile_root,
+                1,
+                "in-process-production-composition",
+            )?;
+            Ok((profile_identity, lifecycle_lease, database_scope))
+        }
+    }
 }
 
 async fn install_production_composition_stores(
@@ -407,7 +420,7 @@ async fn install_production_composition_profile_workers(
     project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<()> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             let profile_sessions = store_administration
                 .registered_profile_session_database()
@@ -435,7 +448,7 @@ async fn install_production_composition_profile_workers(
             )?;
             Ok::<(), TraceDecayError>(())
         },
-        label = "daemon.harness.stores"
+        tracing::trace_span!("daemon.harness.stores"),
     )
     .await
 }
@@ -531,12 +544,19 @@ async fn mount_one_production_composition_project(
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?
         };
-        Box::pin(wait_for_production_composition_code_index(
+        if let Err(error) = Box::pin(wait_for_production_composition_code_index(
             &stores.invocation,
             &composition.canonical_project_path,
             &code_search_scope,
         ))
-        .await?;
+        .await
+        {
+            // An aborted mount must retire the server's background owners:
+            // file-locked workers like the delivery recorder outlive a dropped
+            // composition and wedge every later open on their lock.
+            composition.server.shutdown().await;
+            return Err(error);
+        }
     }
     Ok((composition.canonical_project_path, composition.server))
 }
@@ -700,7 +720,11 @@ impl ProductionProjectCompositionHarnessV1 {
         &self.profile_root
     }
 
-    #[hotpath::measure(label = "daemon.harness.read_profile_analytics", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.read_profile_analytics",
+        level = "trace",
+        skip_all
+    )]
     pub async fn read_profile_analytics_events(
         &self,
         query: &tracedecay_global_db::AnalyticsEventQuery,
@@ -725,7 +749,11 @@ impl ProductionProjectCompositionHarnessV1 {
 
     /// Seeds exact retained analytics rows through the mounted profile
     /// database authority for production-composition transport tests.
-    #[hotpath::measure(label = "daemon.harness.append_profile_analytics", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.append_profile_analytics",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_profile_analytics_events_for_test(
         &self,
         events: &[tracedecay_global_db::AnalyticsEventInsert],
@@ -751,7 +779,7 @@ impl ProductionProjectCompositionHarnessV1 {
     /// Sums the retained profile's settled savings-ledger rows, optionally
     /// scoped to one project path, the production accounting authority the
     /// MCP analytics journeys assert against.
-    #[hotpath::measure(label = "daemon.harness.sum_profile_savings", future = true)]
+    #[tracing::instrument(name = "daemon.harness.sum_profile_savings", level = "trace", skip_all)]
     pub async fn sum_profile_savings(
         &self,
         project: Option<&str>,
@@ -777,7 +805,11 @@ impl ProductionProjectCompositionHarnessV1 {
 
     /// Reads one project's lifetime saved-token counter from the retained
     /// profile authority.
-    #[hotpath::measure(label = "daemon.harness.project_lifetime_saved_tokens", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.project_lifetime_saved_tokens",
+        level = "trace",
+        skip_all
+    )]
     pub async fn project_lifetime_saved_tokens(&self, project_root: &Path) -> Result<u64> {
         let resources = self
             .resources
@@ -820,7 +852,6 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
-    #[hotpath::skip]
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
@@ -835,7 +866,6 @@ impl ProductionProjectCompositionHarnessV1 {
     /// cross-project selector: tools reject a top-level `project_path`, so a
     /// caller routing to a second mounted project must pass
     /// `project_selector.project_id`.
-    #[hotpath::skip]
     pub async fn project_id(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
         self.server(&project_root)?
@@ -857,7 +887,6 @@ impl ProductionProjectCompositionHarnessV1 {
     /// every configuration mutation tool requires, so a journey can write a
     /// project setting through the production `tracedecay_configuration_*`
     /// surface instead of a private store path.
-    #[hotpath::skip]
     pub async fn configuration_revision(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
         let graph = self.server(&project_root)?.cg().await;
@@ -893,7 +922,11 @@ impl ProductionProjectCompositionHarnessV1 {
     }
 
     #[cfg(unix)]
-    #[hotpath::measure(label = "daemon.harness.track_worktree_branch", future = true)]
+    #[tracing::instrument(
+        name = "daemon.harness.track_worktree_branch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn track_worktree_branch(
         &self,
         project_root: impl AsRef<Path>,
@@ -939,7 +972,7 @@ impl ProductionProjectCompositionHarnessV1 {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.harness.call_tool", future = true)]
+    #[tracing::instrument(name = "daemon.harness.call_tool", level = "trace", skip_all)]
     pub async fn call_tool(
         &self,
         project_root: impl AsRef<Path>,
@@ -1000,12 +1033,11 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(mut self) {
         if let Some(resources) = self.resources.take() {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 Box::pin(shutdown_production_project_harness(resources)),
-                label = "daemon.harness.shutdown"
+                tracing::trace_span!("daemon.harness.shutdown"),
             )
             .await;
         }
@@ -1053,7 +1085,7 @@ async fn await_serving_generation_change(
     }
 }
 
-#[hotpath::measure(label = "daemon.harness.wait_code_index", future = true)]
+#[tracing::instrument(name = "daemon.harness.wait_code_index", level = "trace", skip_all)]
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1182,9 +1214,9 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
             return;
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(hotpath::future!(
+            runtime.spawn(tracing::Instrument::instrument(
                 shutdown_production_project_harness(resources),
-                label = "daemon.harness.shutdown"
+                tracing::trace_span!("daemon.harness.shutdown"),
             ));
         }
     }
@@ -1213,9 +1245,9 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .http_application_registry
         .drain_project_routes_for_shutdown()
         .await;
-    let servers = hotpath::future!(
+    let servers = tracing::Instrument::instrument(
         detach_project_servers(&resources.store_administration),
-        label = "daemon.harness.detach"
+        tracing::trace_span!("daemon.harness.detach"),
     )
     .await;
     resources.servers.clear();
@@ -1223,7 +1255,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         server.ledger_writes_settled().await;
         server.shutdown_background_tasks().await;
     }
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             resources
                 .store_administration
@@ -1240,20 +1272,20 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
                 .shutdown_host_admission_replay()
                 .await;
         },
-        label = "daemon.harness.shutdown_sessions"
+        tracing::trace_span!("daemon.harness.shutdown_sessions"),
     )
     .await;
-    hotpath::future!(
+    tracing::Instrument::instrument(
         resources.invocation.shutdown(),
-        label = "daemon.harness.shutdown_invocation"
+        tracing::trace_span!("daemon.harness.shutdown_invocation"),
     )
     .await;
-    hotpath::future!(
+    tracing::Instrument::instrument(
         shutdown_detached_project_servers(
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             servers,
         ),
-        label = "daemon.harness.shutdown_detached"
+        tracing::trace_span!("daemon.harness.shutdown_detached"),
     )
     .await;
     if let Err(error) = resources
@@ -1285,9 +1317,9 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .store_administration
         .shutdown_retirement_reapers()
         .await;
-    if let Err(error) = hotpath::future!(
+    if let Err(error) = tracing::Instrument::instrument(
         resources.store_administration.close_stores_for_shutdown(),
-        label = "daemon.harness.shutdown_graph"
+        tracing::trace_span!("daemon.harness.shutdown_graph"),
     )
     .await
     {
@@ -1311,7 +1343,6 @@ mod code_index_activation_test {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[hotpath::skip]
     async fn concurrent_composition_opens_fill_but_never_exceed_admission_capacity() {
         let gate = production_composition_admission_gate();
         let open_count = gate.capacity().saturating_add(2);
@@ -1369,7 +1400,6 @@ mod code_index_activation_test {
     }
 
     #[tokio::test]
-    #[hotpath::skip]
     async fn fresh_profile_first_reconcile_makes_query_authority_ready_within_existing_bound() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");
@@ -1474,7 +1504,6 @@ mod code_index_activation_test {
     /// must open on it (the daemon does), not exhaust the publication wait
     /// for a generation that admission forbids.
     #[tokio::test(flavor = "multi_thread")]
-    #[hotpath::skip]
     async fn linked_worktree_without_opt_in_mounts_as_the_typed_disabled_route() {
         let isolation = TempDir::new().expect("production harness isolation");
         let primary = isolation.path().join("primary");
@@ -1559,7 +1588,6 @@ mod code_index_activation_test {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    #[hotpath::skip]
     async fn branch_publication_respects_lifecycle_contention_until_owner_cancellation() {
         let isolation = TempDir::new().expect("production harness isolation");
         let project = isolation.path().join("project");

@@ -45,7 +45,6 @@ pub(super) fn log_scheduler_pre_admission_problem(
         scheduler_pre_admission_gate_key(project_path, task),
         condition,
     ) {
-        hotpath::gauge!("daemon.effect_admission.pre_admission_problem_repeats").inc(1_u64);
         return;
     }
     let mut fields = super::scheduler_project_task_fields(project_path, task);
@@ -98,8 +97,7 @@ fn log_scheduler_schedule_skip(
     reason: tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1,
 ) {
     // Not-due/disabled tasks never reach durable admission; without this
-    // counter a silent schedule skip is indistinguishable from a lost tick.
-    hotpath::gauge!("daemon.effect_admission.deferred_total").inc(1_u64);
+    // event a silent schedule skip is indistinguishable from a lost tick.
     let mut fields = super::scheduler_project_task_fields(project_path, task);
     fields.extend([
         ("outcome", "skipped".to_owned()),
@@ -108,7 +106,11 @@ fn log_scheduler_schedule_skip(
     log_daemon_event("scheduler_task", &fields);
 }
 
-#[hotpath::measure(label = "daemon.scheduler.fixed_task_decision", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.fixed_task_decision",
+    level = "trace",
+    skip_all
+)]
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
@@ -136,7 +138,7 @@ async fn fixed_task_schedule_decision(
     )
 }
 
-#[hotpath::measure(label = "daemon.scheduler.automation_effect", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.automation_effect", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Admission binds the engine, retained memory, cancellation and pinned configuration before creating an effect."
@@ -318,7 +320,7 @@ pub(super) async fn abandon_reused_scheduler_skip(
     }
 }
 
-#[hotpath::measure(label = "daemon.scheduler.tick", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.tick", level = "trace", skip_all)]
 pub(in crate::daemon) async fn run_automation_scheduler_tick(
     project_path: &Path,
     cg: &TraceDecay,

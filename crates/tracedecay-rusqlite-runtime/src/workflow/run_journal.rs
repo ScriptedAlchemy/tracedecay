@@ -141,7 +141,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.workflow.projections_scan")]
+    #[tracing::instrument(name = "rusqlite.workflow.projections_scan", level = "trace", skip_all)]
     fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
         let transaction = self
             .handle()
@@ -170,7 +170,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         Ok(projections)
     }
 
-    #[hotpath::measure(label = "rusqlite.workflow.recovery_page")]
+    #[tracing::instrument(name = "rusqlite.workflow.recovery_page", level = "trace", skip_all)]
     fn active_projection_page(
         &self,
         authority: &WorkAuthority,
@@ -219,10 +219,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                 after_run_id: page_run_ids[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1].clone(),
             }
         });
-        #[cfg(feature = "hotpath")]
-        if let Ok(page_runs) = u64::try_from(page_run_ids.len()) {
-            hotpath::gauge!("rusqlite.workflow.recovery_page.runs").inc(page_runs);
-        }
+
         let projections = page_run_ids
             .iter()
             .map(|run_id| history_tx(&transaction, run_id).and_then(|history| rebuild(&history)))
@@ -243,7 +240,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         })
     }
 
-    #[hotpath::measure(label = "rusqlite.workflow.fan_out_binding")]
+    #[tracing::instrument(name = "rusqlite.workflow.fan_out_binding", level = "trace", skip_all)]
     fn fan_out_binding(
         &self,
         identity: &WorkAttemptIdentityV1,

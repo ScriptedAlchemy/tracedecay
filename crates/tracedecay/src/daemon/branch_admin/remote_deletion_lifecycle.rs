@@ -58,13 +58,14 @@ impl StoreAdministration {
     /// profile's one registered authority. The durable tombstone is written
     /// before any runtime is retired or store directory is removed, so a
     /// failed cleanup stays fail-closed and a retry resumes safely.
-    #[hotpath::measure(label = "daemon.branch_admin.remote_deletion", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
-        )
+    #[tracing::instrument(
+        name = "daemon.branch_admin.remote_deletion",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
     )]
     pub(in super::super) async fn execute_remote_deletion(
         &self,
@@ -588,7 +589,6 @@ impl StoreAdministration {
         .await
     }
 
-    #[hotpath::skip]
     async fn remote_deletion_project_ids(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
@@ -656,7 +656,6 @@ impl StoreAdministration {
         Ok(project_ids)
     }
 
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "Project store removal is one destructive cleanup sequence after the tombstone is durable."

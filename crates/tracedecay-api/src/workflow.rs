@@ -219,33 +219,37 @@ async fn operation<O>(
 where
     O: WorkflowApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        match WorkflowOperation::from_route_segment(&segment) {
-            None => Err(adapter_problem_response(
-                request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            )),
-            Some(operation) => match body {
-                Ok(Json(body)) => Ok(WorkflowHttpRequest {
-                    operation,
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
+            match WorkflowOperation::from_route_segment(&segment) {
+                None => Err(adapter_problem_response(
                     request_id,
-                    controls,
-                    body,
-                }),
-                Err(_) => Err(invalid_request_response(
-                    request_id,
-                    "workflow.invalid_body",
-                    "The Workflow request body is invalid or exceeds the configured limit",
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
                 )),
-            },
+                Some(operation) => match body {
+                    Ok(Json(body)) => Ok(WorkflowHttpRequest {
+                        operation,
+                        request_id,
+                        controls,
+                        body,
+                    }),
+                    Err(_) => Err(invalid_request_response(
+                        request_id,
+                        "workflow.invalid_body",
+                        "The Workflow request body is invalid or exceeds the configured limit",
+                    )),
+                },
+            }
         }
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move { owner.invoke_workflow(request).await },
-        label = "api.http.handler"
+        tracing::trace_span!("api.http.handler"),
     )
     .await
 }

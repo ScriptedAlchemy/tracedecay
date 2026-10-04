@@ -63,7 +63,6 @@ pub enum CodeIndexSearchUnavailableReasonV1 {
 }
 
 impl CodeIndexSearchUnavailableReasonV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CapabilityUnavailable => "code_index_unavailable",
@@ -90,7 +89,6 @@ impl CodeIndexSearchUnavailableReasonV1 {
     /// `verified-code-redundancy-unavailable`. That path is retired: both lanes
     /// now map through these discriminants so future arms cannot re-fork the
     /// wire.
-    #[hotpath::skip]
     pub const fn is_retryable(self) -> bool {
         match self {
             Self::Cancelled
@@ -196,7 +194,6 @@ fn partial_lane_reason(outcome: &tracedecay_domain::RetrieverOutcome<()>) -> Opt
 
 impl CodeIndexLaneStatusV1 {
     /// Whether this lane contributed results to the response.
-    #[hotpath::skip]
     pub const fn is_servable(&self) -> bool {
         matches!(
             self,
@@ -204,7 +201,6 @@ impl CodeIndexLaneStatusV1 {
         )
     }
 
-    #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Complete => "complete",
@@ -230,7 +226,6 @@ pub struct CodeIndexSearchCoverageV1 {
 
 impl CodeIndexSearchCoverageV1 {
     /// Every lane served the current generation.
-    #[hotpath::skip]
     pub const fn warm() -> Self {
         Self {
             exact: CodeIndexLaneStatusV1::Complete,
@@ -346,7 +341,6 @@ impl CodeIndexSearchCoverageV1 {
     }
 
     /// No lane can serve this request.
-    #[hotpath::skip]
     pub const fn unavailable(reason: &'static str) -> Self {
         Self {
             exact: CodeIndexLaneStatusV1::Unavailable { reason },
@@ -355,7 +349,6 @@ impl CodeIndexSearchCoverageV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn lanes(&self) -> [&CodeIndexLaneStatusV1; 3] {
         [&self.exact, &self.lexical, &self.graph]
     }

@@ -172,7 +172,6 @@ fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -
 }
 
 impl super::RegisteredGlobalDb {
-    #[hotpath::skip]
     pub async fn resolve_observation_evidence_anchor(
         &self,
         owner: &ObservationScopeV1,
@@ -185,7 +184,6 @@ impl super::RegisteredGlobalDb {
         resolve_owner_bound_anchor_record(&snapshot, owner, anchor_id).await
     }
 
-    #[hotpath::skip]
     pub async fn resolve_observation_evidence_anchor_report(
         &self,
         owner: &ObservationScopeV1,

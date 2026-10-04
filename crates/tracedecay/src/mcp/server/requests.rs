@@ -264,7 +264,6 @@ impl McpServer {
     }
 
     /// Returns `None` for notifications (requests without an `id`).
-    #[hotpath::skip]
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
@@ -325,7 +324,7 @@ impl McpServer {
     /// typed `rmcp` request and a raw JSON-RPC request take the same path
     /// through the same handler catalog without either one being converted
     /// into the other's representation first.
-    #[hotpath::measure(label = "mcp.server.request", future = true)]
+    #[tracing::instrument(name = "mcp.server.request", level = "trace", skip_all)]
     pub(crate) async fn dispatch_envelope(
         &self,
         request: McpDispatchRequest<'_>,
@@ -428,13 +427,10 @@ impl McpServer {
         result
     }
 
-    #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Hook-event notification is one decode-admit-ack of a host envelope."
-        )
+    #[tracing::instrument(name = "mcp.server.hook_event", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Hook-event notification is one decode-admit-ack of a host envelope."
     )]
     pub(crate) async fn handle_hook_event_notification(
         &self,
@@ -583,7 +579,7 @@ impl McpServer {
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
     /// name field is retained, never the full `clientInfo` payload.
-    #[hotpath::measure(label = "mcp.server.initialize")]
+    #[tracing::instrument(name = "mcp.server.initialize", level = "trace", skip_all)]
     pub(crate) fn handle_initialize(
         &self,
         id: Value,
@@ -604,7 +600,7 @@ impl McpServer {
         recover_lock(&self.client_name).clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_list")]
+    #[tracing::instrument(name = "mcp.server.tools_list", level = "trace", skip_all)]
     pub(crate) fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
         let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
@@ -629,8 +625,8 @@ impl McpServer {
                 );
             }
         };
-        match hotpath::measure_block!(
-            "mcp.server.tools_list.compose",
+        let match_result = {
+            let _span = tracing::trace_span!("mcp.server.tools_list.compose").entered();
             tracedecay_mcp::tools::catalog_discovery::catalog_discovery_tools_list_payload(
                 None,
                 budget,
@@ -639,7 +635,8 @@ impl McpServer {
                 &project_catalog_discovery_scope(),
                 ToolRegistryMode::HostAvailable,
             )
-        ) {
+        };
+        match match_result {
             Ok(payload) => JsonRpcResponse::success(id, payload),
             Err(error) => JsonRpcResponse::error(
                 id,
@@ -649,12 +646,12 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.resources_list")]
+    #[tracing::instrument(name = "mcp.server.resources_list", level = "trace", skip_all)]
     pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
         JsonRpcResponse::success(id, resources_list_result())
     }
 
-    #[hotpath::measure(label = "mcp.server.resources_read", future = true)]
+    #[tracing::instrument(name = "mcp.server.resources_read", level = "trace", skip_all)]
     pub(crate) async fn handle_resources_read(
         &self,
         id: Value,
@@ -721,7 +718,6 @@ impl McpServer {
     /// graph. Until that resource-specific admission exists, exposing files
     /// from another store would make an unverified or stale inventory look
     /// authoritative.
-    #[hotpath::skip]
     pub(crate) fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
         Self::resource_contents(
             id,
@@ -732,7 +728,6 @@ impl McpServer {
     }
 
     /// Returns a high-level project overview as a text resource.
-    #[hotpath::skip]
     pub(crate) async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
         let mut lines = Vec::new();
@@ -746,7 +741,6 @@ impl McpServer {
         Self::resource_contents(id, "tracedecay://overview", "text/plain", &text)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
         let tracedecay_dir = &cg.store_layout().data_root;
@@ -840,7 +834,11 @@ impl McpServer {
     /// Applies the pre-edit freshness policy and records the call in the
     /// server counters and the activity lane. Graph reads probe freshness in
     /// the graph-tool owner, which every MCP and CLI read reaches.
-    #[hotpath::measure(label = "mcp.server.tools_call.begin_dispatch", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.tools_call.begin_dispatch",
+        level = "trace",
+        skip_all
+    )]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
@@ -864,7 +862,6 @@ impl McpServer {
     /// Prepare the application-surface plumbing for a single dispatch. Returns
     /// the typed request id, deadline, cancellation, and daemon invocation
     /// executor, plus the RAII registration guard that must outlive the dispatch.
-    #[hotpath::skip]
     async fn prepare_application_surface_dispatch<'a>(
         &'a self,
         cg: &TraceDecay,
@@ -944,7 +941,11 @@ impl McpServer {
     /// The daemon code-index cutover intentionally stopped reading the legacy
     /// graph database's file table, so a cache miss is not evidence that a
     /// touched source file costs zero tokens.
-    #[hotpath::measure(label = "mcp.server.accounting.raw_file_tokens", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.accounting.raw_file_tokens",
+        level = "trace",
+        skip_all
+    )]
     async fn raw_file_tokens(&self, project_root: &Path, touched_files: &[String]) -> u64 {
         let cached_tokens = self.estimate_raw_file_tokens(touched_files);
         let uncached_files = {
@@ -987,7 +988,6 @@ impl McpServer {
         cached_tokens.saturating_add(uncached_tokens)
     }
 
-    #[hotpath::skip]
     async fn apply_token_accounting(
         self: &Arc<Self>,
         cg: &TraceDecay,
@@ -1114,7 +1114,11 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "mcp.server.tools_call.complete.accounting", future = true)]
+    #[tracing::instrument(
+        name = "mcp.server.tools_call.complete.accounting",
+        level = "trace",
+        skip_all
+    )]
     async fn record_success_accounting(
         self: &Arc<Self>,
         cg: &TraceDecay,
@@ -1143,7 +1147,11 @@ impl McpServer {
         );
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check")]
+    #[tracing::instrument(
+        name = "mcp.server.tools_call.complete.version_check",
+        level = "trace",
+        skip_all
+    )]
     fn append_version_notice(&self, result: &mut ToolResult) {
         // The check serves the cached answer and refreshes in the background,
         // so completion never awaits the fetch.
@@ -1157,7 +1165,11 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete.index_warnings")]
+    #[tracing::instrument(
+        name = "mcp.server.tools_call.complete.index_warnings",
+        level = "trace",
+        skip_all
+    )]
     fn prepend_index_warnings(
         &self,
         include_connection_worktree_warning: bool,
@@ -1179,13 +1191,15 @@ impl McpServer {
         }
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call.complete", future = true)]
+    #[tracing::instrument(name = "mcp.server.tools_call.complete", level = "trace", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     async fn complete_tool_call(
         self: &Arc<Self>,
         id: Value,
         tool_name: String,
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
+        refusal_arguments: &Value,
         dispatch: DispatchedToolCall,
         connection_server: &Self,
     ) -> JsonRpcResponse {
@@ -1206,7 +1220,7 @@ impl McpServer {
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 mark_semantic_tool_error(&mut result);
                 if !tool_result_has_semantic_error(&result)
-                    && let Err(error) = hotpath::future!(
+                    && let Err(error) = tracing::Instrument::instrument(
                         join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
@@ -1217,7 +1231,7 @@ impl McpServer {
                             self.project_session_refresh_wake.as_deref(),
                             self.user_session_refresh_wake.as_deref(),
                         ),
-                        label = "mcp.server.tools_call.complete.transcript_refresh"
+                        tracing::trace_span!("mcp.server.tools_call.complete.transcript_refresh"),
                     )
                     .await
                 {
@@ -1232,7 +1246,12 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        refusal_arguments,
+                    );
                 }
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1256,13 +1275,15 @@ impl McpServer {
                 }
                 self.append_version_notice(&mut result);
                 self.prepend_index_warnings(selected_owner.is_none(), &mut result);
-                hotpath::measure_block!(
-                    "mcp.server.tools_call.complete.response",
+                {
+                    let _span =
+                        tracing::trace_span!("mcp.server.tools_call.complete.response").entered();
                     JsonRpcResponse::success(id, result.value)
-                )
+                }
             }
             Err(error) => {
-                hotpath::measure_block!("mcp.server.tools_call.complete.error", {
+                let _span = tracing::trace_span!("mcp.server.tools_call.complete.error").entered();
+                {
                     self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                         project_root: cg.project_root(),
                         session_id: analytics_session_id,
@@ -1274,8 +1295,13 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    tool_error_response(id, &tool_name, &error)
-                })
+                    crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        refusal_arguments,
+                    )
+                }
             }
         }
     }
@@ -1334,6 +1360,7 @@ impl McpServer {
     fn finish_unavailable_tool_call(
         id: Value,
         tool_name: &str,
+        refusal_arguments: &Value,
         dispatch: DispatchedToolCall,
     ) -> JsonRpcResponse {
         let DispatchedToolCall {
@@ -1347,7 +1374,9 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(error) => tool_error_response(id, tool_name, &error),
+            Err(error) => {
+                crate::mcp::tools::tool_refusal_response(id, tool_name, &error, refusal_arguments)
+            }
         }
     }
 
@@ -1390,7 +1419,7 @@ impl McpServer {
         ))
     }
 
-    #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
+    #[tracing::instrument(name = "mcp.server.tools_call", level = "trace", skip_all)]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,
@@ -1415,7 +1444,6 @@ impl McpServer {
         response
     }
 
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "The response-gate lease and cancellation registrations are RAII-scoped to the frame and must span dispatch."
@@ -1438,6 +1466,7 @@ impl McpServer {
             Ok(call) => call,
             Err(response) => return response,
         };
+        let refusal_arguments = json!({ "format": arguments.get("format") });
         let memory_request_scope = connection.memory_request_scope().to_owned();
         // Resolve the exact execution server before creating cancellation,
         // deadline, settlement, or accounting state. A failed/ambiguous route
@@ -1464,7 +1493,14 @@ impl McpServer {
         .await
         {
             Some(Ok(routed)) => routed,
-            Some(Err(error)) => return tool_error_response(id, &tool_name, &error),
+            Some(Err(error)) => {
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    &error,
+                    &refusal_arguments,
+                );
+            }
             // Cancel won before route selection installed dispatch authority.
             // That is transport abandonment, not an admitted tool cancel:
             // emit the same -32800 / request_cancelled terminal the RMCP and
@@ -1488,7 +1524,12 @@ impl McpServer {
                         true,
                         "MCP server was released before retained dispatch admission",
                     );
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        &refusal_arguments,
+                    );
                 }
             },
         };
@@ -1516,7 +1557,14 @@ impl McpServer {
             caller_deadline,
         ) {
             Ok(prepared) => prepared,
-            Err(error) => return tool_error_response(id, &tool_name, &error),
+            Err(error) => {
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    &error,
+                    &refusal_arguments,
+                );
+            }
         };
 
         // Acquire exactly one response lease from the execution server. The
@@ -1536,12 +1584,9 @@ impl McpServer {
             tracedecay_daemon_protocol::wait_for_cancellation(control.cancellation());
         let response_guard = tokio::select! {
             biased;
-            guard = hotpath::future!(
-                response_gate.read_owned(),
-                label = "mcp.server.response_gate.wait"
-            ) => guard,
+            guard = tracing::Instrument::instrument(response_gate.read_owned(), tracing::trace_span!("mcp.server.response_gate.wait")) => guard,
             () = request_cancelled => {
-                return tool_error_response(
+                return crate::mcp::tools::tool_refusal_response(
                     id,
                     &tool_name,
                     &dispatch_cancelled_error(
@@ -1549,6 +1594,7 @@ impl McpServer {
                         DispatchSettlement::NotStarted,
                         tool_carries_effect(&tool_name),
                     ),
+                    &refusal_arguments,
                 );
             }
         };
@@ -1561,7 +1607,12 @@ impl McpServer {
                         true,
                         "the retained project server was retired before response admission",
                     );
-                    tool_error_response(id, &tool_name, &error)
+                    crate::mcp::tools::tool_refusal_response(
+                        id,
+                        &tool_name,
+                        &error,
+                        &refusal_arguments,
+                    )
                 });
         }
         connection.install_selected_response_lease(
@@ -1637,7 +1688,12 @@ impl McpServer {
             Ok(dispatch) => dispatch,
             Err(failure) => {
                 connection.clear_selected_response_lease();
-                return tool_error_response(id, &tool_name, failure.error());
+                return crate::mcp::tools::tool_refusal_response(
+                    id,
+                    &tool_name,
+                    failure.error(),
+                    &refusal_arguments,
+                );
             }
         };
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {
@@ -1645,7 +1701,12 @@ impl McpServer {
             return response;
         }
         if fast_unavailable {
-            return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
+            return Self::finish_unavailable_tool_call(
+                id,
+                &tool_name,
+                &refusal_arguments,
+                dispatch,
+            );
         }
         let response = dispatch_server
             .complete_tool_call(
@@ -1653,6 +1714,7 @@ impl McpServer {
                 tool_name.clone(),
                 analytics_arguments,
                 analytics_session_id,
+                &refusal_arguments,
                 dispatch,
                 self,
             )

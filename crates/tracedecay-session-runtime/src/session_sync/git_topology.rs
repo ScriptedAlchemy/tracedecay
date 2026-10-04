@@ -31,7 +31,6 @@ pub enum GitTopologySyncFailure {
 }
 
 impl GitTopologySyncFailure {
-    #[hotpath::skip]
     pub(super) const fn failure_code(self) -> &'static str {
         match self {
             Self::Stale => "git_topology_declared_state_stale",
@@ -47,7 +46,6 @@ pub(super) enum GitTopologySyncOutcome {
 }
 
 impl SessionSyncProjectContext {
-    #[hotpath::skip]
     pub(super) async fn publish_git_topology(
         &self,
         service: &DaemonSessionSyncService,

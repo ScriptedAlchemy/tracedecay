@@ -480,7 +480,6 @@ impl CursorComposerSource {
         }
     }
 
-    #[hotpath::skip]
     pub async fn ingest_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
@@ -502,7 +501,6 @@ impl CursorComposerSource {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn ingest_user_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
@@ -523,7 +521,6 @@ impl CursorComposerSource {
             .await
     }
 
-    #[hotpath::skip]
     async fn ingest_with_context(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -598,7 +595,6 @@ impl CursorComposerSource {
         Ok(outcome.finished(byte_budget.consumed(), byte_budget.deferred()))
     }
 
-    #[hotpath::skip]
     async fn ingest_state_vscdb(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -610,10 +606,12 @@ impl CursorComposerSource {
         if context.cancellation.is_cancelled() {
             return;
         }
-        if !hotpath::measure_block!(
-            "sessions.hosts.cursor_composer.state_db_stat_blocking",
+        if !{
+            let _span =
+                tracing::trace_span!("sessions.hosts.cursor_composer.state_db_stat_blocking")
+                    .entered();
             run_blocking_transcript_section(|| self.state_db_path.is_file())
-        ) {
+        } {
             return;
         }
         let ro = match open_readonly_immutable(&self.state_db_path).await {
@@ -731,10 +729,11 @@ impl CursorComposerSource {
             Vec::new()
         };
         let retry_first = initial_retry_first && !retry_page.is_empty();
-        let scope_matcher = hotpath::measure_block!(
-            "sessions.hosts.cursor_composer.state_scope_blocking",
+        let scope_matcher = {
+            let _span = tracing::trace_span!("sessions.hosts.cursor_composer.state_scope_blocking")
+                .entered();
             run_blocking_transcript_section(|| context.scope_matcher())
-        );
+        };
         // Indexed prefix scan of keys + byte lengths only, never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
@@ -1044,12 +1043,15 @@ impl CursorComposerSource {
                 // `Unknown` (bounded git timeout) stops before the envelope's
                 // watermark, so the next sweep re-resolves membership instead
                 // of misfiling or starving the session behind a growing tail.
-                let project_membership = hotpath::measure_block!(
-                    "sessions.hosts.cursor_composer.envelope_scope_blocking",
-                    run_blocking_transcript_section(
-                        || scope_matcher.membership(Some(Path::new(&project.path)))
+                let project_membership = {
+                    let _span = tracing::trace_span!(
+                        "sessions.hosts.cursor_composer.envelope_scope_blocking"
                     )
-                );
+                    .entered();
+                    run_blocking_transcript_section(|| {
+                        scope_matcher.membership(Some(Path::new(&project.path)))
+                    })
+                };
                 match project_membership {
                     ProjectMembership::Match => {}
                     ProjectMembership::NoMatch => {
@@ -1482,7 +1484,6 @@ impl CursorComposerSource {
         }
     }
 
-    #[hotpath::skip]
     async fn ingest_chat_store_dbs(
         &self,
         context: &ComposerIngestContext<'_, '_>,
@@ -1490,8 +1491,10 @@ impl CursorComposerSource {
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
-        let stores = hotpath::measure_block!(
-            "sessions.hosts.cursor_composer.discover_stores_blocking",
+        let stores = {
+            let _span =
+                tracing::trace_span!("sessions.hosts.cursor_composer.discover_stores_blocking")
+                    .entered();
             run_blocking_transcript_section(|| {
                 discover_chat_store_dbs(
                     &self.chats_dir,
@@ -1500,7 +1503,7 @@ impl CursorComposerSource {
                     context.project_root.is_some(),
                 )
             })
-        );
+        };
         for (store_path, project_path) in stores {
             if context.cancellation.is_cancelled() {
                 return;
@@ -1510,7 +1513,6 @@ impl CursorComposerSource {
         }
     }
 
-    #[hotpath::skip]
     async fn ingest_one_store_db(
         &self,
         context: &ComposerIngestContext<'_, '_>,

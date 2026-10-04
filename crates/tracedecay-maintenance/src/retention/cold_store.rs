@@ -58,7 +58,7 @@ impl Default for ColdStorePageReportV1 {
 
 /// Applies one bounded orphan and debris page to profile stores. A store of
 /// any of `owner_roots` is live whether or not its root is still on disk.
-#[hotpath::measure(label = "maintenance.cold_store.page", future = true)]
+#[tracing::instrument(name = "maintenance.cold_store.page", level = "trace", skip_all)]
 pub async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &RegisteredGlobalDb,
@@ -197,13 +197,17 @@ fn checkpoint_path(profile_root: &Path) -> PathBuf {
         .join(CHECKPOINT_FILE)
 }
 
-#[hotpath::measure(label = "maintenance.cold_store.load_cursor")]
+#[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-#[hotpath::measure(label = "maintenance.cold_store.persist_cursor")]
+#[tracing::instrument(
+    name = "maintenance.cold_store.persist_cursor",
+    level = "trace",
+    skip_all
+)]
 fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
     let parent = path
         .parent()

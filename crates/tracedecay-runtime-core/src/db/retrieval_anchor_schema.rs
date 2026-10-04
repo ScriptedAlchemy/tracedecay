@@ -223,7 +223,11 @@ async fn validate_anchor_table_columns(
 /// The caller owns its local binding table (for example observation-to-anchor
 /// or fact-evidence-to-anchor) and should invoke this before creating a table
 /// with a composite foreign key to `retrieval_anchors(anchor_id, owner_json)`.
-#[hotpath::measure(label = "runtime_core.db.anchor_schema_install")]
+#[tracing::instrument(
+    name = "runtime_core.db.anchor_schema_install",
+    level = "trace",
+    skip_all
+)]
 pub async fn install_retrieval_anchor_schema(
     conn: &(impl Executor + Sync),
     operation: &str,

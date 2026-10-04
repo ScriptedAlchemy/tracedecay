@@ -11,7 +11,11 @@ use super::*;
 const PROJECTION_DRAIN_TXN_WINDOW: usize = 32;
 
 impl HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.drain_projection", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.drain_projection",
+        level = "trace",
+        skip_all
+    )]
     pub async fn drain_projection_queue(
         &self,
         provider: &str,
@@ -234,7 +238,9 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let convergence = database.converge_session_git_evidence(&SystemGit).await;
+            let convergence = database
+                .converge_session_git_evidence(&SystemGit, self.authorities.project_root.as_deref())
+                .await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
@@ -317,7 +323,7 @@ mod tests {
                     backfill,
                     frontier:
                         tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-                            activity_timestamp: 0,
+                            change_sequence: 0,
                             source_rowid: 0,
                         },
                     generation: None,

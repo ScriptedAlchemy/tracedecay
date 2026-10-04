@@ -89,7 +89,7 @@ pub fn stored_message_is_shipped_release_rendering(
         .is_some_and(|projection| stores(projection.message()))
 }
 
-#[hotpath::measure(label = "store.projection.derive_canonical")]
+#[tracing::instrument(name = "store.projection.derive_canonical", level = "trace", skip_all)]
 fn derive_canonical_projection_for(
     observation: &DurableObservationV1,
     rendering: CanonicalRendering,
@@ -146,6 +146,15 @@ fn derive_canonical_projection_for(
     // The edit rollup is a session-level fact: it lands on the session row
     // and stays out of the per-message metadata copy below.
     let mut session_row_metadata = session_metadata.clone();
+    // A Claude row keeps its project id as its path, so the cwd its records
+    // carry survives only as a row annotation: Git history evidence for the
+    // session belongs to the worktree it ran in.
+    if provider == "claude" {
+        session_row_metadata.extend(canonical_session_metadata_map(
+            &provider,
+            canonical_session_fields(&envelope).as_ref(),
+        ));
+    }
     let edited_files = canonical_edited_files(&envelope);
     if !edited_files.is_empty() {
         session_row_metadata.insert(
@@ -932,7 +941,10 @@ fn canonical_message_fields_for(
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
         let role = role.as_str();
-        let text = canonical_fact_text(content)?;
+        let text = match rendering {
+            CanonicalRendering::Current => canonical_message_text(content)?,
+            CanonicalRendering::ShippedRelease => canonical_fact_text(content)?,
+        };
         if let Some(semantics) = rendering_message_semantics(
             rendering,
             envelope.provider().as_str(),
@@ -1095,6 +1107,40 @@ fn canonical_message_fields_for(
         return Ok(Some(fields));
     }
     Ok(first_empty)
+}
+
+/// A content-block array renders as its text blocks and subagent dispatch
+/// inputs; other blocks stay in the envelope.
+fn canonical_message_text(content: &serde_json::Value) -> ProjectionStoreResult<String> {
+    let Some(blocks) = content.as_array() else {
+        return canonical_fact_text(content);
+    };
+    let parts = blocks
+        .iter()
+        .filter_map(
+            |block| match block.get("type").and_then(serde_json::Value::as_str)? {
+                "text" | "input_text" | "output_text" => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                "tool_use"
+                    if block
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_subagent_dispatch_tool) =>
+                {
+                    dispatch_text(block)
+                }
+                _ => None,
+            },
+        )
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        canonical_fact_text(content)
+    } else {
+        Ok(parts.join("\n\n"))
+    }
 }
 
 pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
@@ -1309,7 +1355,9 @@ mod tests {
             assert_eq!(output.message().message_id, row_id);
             assert_eq!(output.session().project_key, "user");
             assert_eq!(output.session().project_path, "user");
-            assert!(output.session().metadata_json.is_none());
+            let session_metadata: serde_json::Value =
+                serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+            assert_eq!(session_metadata["claude_session_cwd"], cwd);
         }
     }
 

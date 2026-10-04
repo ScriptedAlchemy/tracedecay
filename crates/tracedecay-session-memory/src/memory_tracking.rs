@@ -31,7 +31,7 @@ impl TrackedExplicitSearch {
     }
 }
 
-#[hotpath::measure(label = "daemon.retained.memory.track", future = true)]
+#[tracing::instrument(name = "daemon.retained.memory.track", level = "trace", skip_all)]
 pub async fn track_explicit_search(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     memory: &MemoryApplication<DatabaseFactStore<'_>>,
@@ -53,9 +53,9 @@ pub async fn track_explicit_search(
             .map_err(memory_mapping::map_store_error)?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.record_project_memory_fact_retrieval(command, &write_control),
-            label = "daemon.retained.memory.track.commit"
+            tracing::trace_span!("daemon.retained.memory.track.commit"),
         )
         .await)
     })

@@ -23,7 +23,7 @@ impl TraceDecay {
     /// Returns `(serving_branch, fallback_warning)`: which tracked branch's
     /// provenance the open is scoped to and whether the caller must be warned
     /// about a fallback.
-    #[hotpath::measure(label = "lifecycle.resolve_serving_branch")]
+    #[tracing::instrument(name = "lifecycle.resolve_serving_branch", level = "trace", skip_all)]
     pub fn resolve_serving_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
@@ -40,13 +40,11 @@ impl TraceDecay {
     ///
     /// Returns an error if the branch is not tracked or the project DB does
     /// not exist.
-    #[hotpath::skip]
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
         Self::open_branch_with_options(project_root, branch_name, TraceDecayOpenOptions::default())
             .await
     }
 
-    #[hotpath::skip]
     pub async fn open_branch_with_options(
         project_root: &Path,
         branch_name: &str,
@@ -75,7 +73,6 @@ impl TraceDecay {
     /// [`Self::open_branch_with_options`] through the shared registered test
     /// runtime; see [`Self::init_with_options_for_test`].
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn open_branch_with_options_for_test(
         project_root: &Path,
         branch_name: &str,
@@ -92,7 +89,7 @@ impl TraceDecay {
 
     /// Opens a tracked branch through the canonical registered runtime while
     /// the caller holds the exact profile's exclusive maintenance lease.
-    #[hotpath::measure(label = "lifecycle.open_branch.exclusive", future = true)]
+    #[tracing::instrument(name = "lifecycle.open_branch.exclusive", level = "trace", skip_all)]
     pub async fn open_branch_with_exclusive_maintenance(
         project_root: &Path,
         branch_name: &str,
@@ -140,7 +137,7 @@ impl TraceDecay {
         .await
     }
 
-    #[hotpath::measure(label = "lifecycle.open_branch.registered", future = true)]
+    #[tracing::instrument(name = "lifecycle.open_branch.registered", level = "trace", skip_all)]
     pub async fn open_branch_with_registered_configuration(
         project_root: &Path,
         branch_name: &str,
@@ -165,7 +162,6 @@ impl TraceDecay {
         .await
     }
 
-    #[hotpath::skip]
     #[allow(
         clippy::too_many_arguments,
         reason = "Branch opening keeps configuration and profile leases distinct from graph access mode and read-only policy."

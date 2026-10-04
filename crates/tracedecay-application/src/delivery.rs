@@ -1359,7 +1359,7 @@ pub fn gated_project_delivery_read_handle_v1(
     })
 }
 
-#[hotpath::measure(label = "usecases.delivery.open")]
+#[tracing::instrument(name = "usecases.delivery.open", level = "trace", skip_all)]
 pub fn open_project_delivery_read_authority_v1(
     input: ProjectDeliveryReadOpenV1,
 ) -> ProjectDeliveryReadAuthorityOpenOutcomeV1 {
@@ -1411,7 +1411,7 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
         request: &'a ProjectDeliveryReadRequestV1,
         control: &'a GitHubReleaseReadControlV1,
     ) -> ProjectDeliveryReadFutureV1<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !request.validate() || !context_matches_delivery_scope(context, &self.scope) {
                     return ProjectDeliveryReadOutcomeV1::Denied;
@@ -1425,10 +1425,10 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
                 }
                 let github_read = async {
                     if github_allowed {
-                        let manifest = hotpath::future!(
+                        let manifest = tracing::Instrument::instrument(
                             self.github_reviews
                                 .load_inventory_manifest(context, &self.scope),
-                            label = "usecases.delivery.github_manifest"
+                            tracing::trace_span!("usecases.delivery.github_manifest"),
                         )
                         .await;
                         self.github_source(context, request, manifest).await
@@ -1440,9 +1440,9 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
                 };
                 let ci_read = async {
                     if ci_allowed {
-                        let manifest = hotpath::future!(
+                        let manifest = tracing::Instrument::instrument(
                             self.ci_checks.load_inventory_manifest(context, &self.scope),
-                            label = "usecases.delivery.ci_manifest"
+                            tracing::trace_span!("usecases.delivery.ci_manifest"),
                         )
                         .await;
                         self.ci_source(context, request, manifest).await
@@ -1480,13 +1480,13 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
                     }),
                 }
             },
-            label = "usecases.delivery.read"
+            tracing::trace_span!("usecases.delivery.read"),
         ))
     }
 }
 
 impl ProjectDeliveryReadAuthorityV1 {
-    #[hotpath::measure(label = "usecases.delivery.github_source", future = true)]
+    #[tracing::instrument(name = "usecases.delivery.github_source", level = "trace", skip_all)]
     async fn github_source(
         &self,
         context: &RequestContext,
@@ -1670,7 +1670,7 @@ impl ProjectDeliveryReadAuthorityV1 {
     /// Expands bounded sanitized body previews through the canonical
     /// body-evidence authority. Every non-expanded state stays typed as an
     /// absent preview beside the always-served body digest and anchor.
-    #[hotpath::measure(label = "usecases.delivery.hydrate_bodies", future = true)]
+    #[tracing::instrument(name = "usecases.delivery.hydrate_bodies", level = "trace", skip_all)]
     async fn hydrate_review_body_previews(
         &self,
         context: &RequestContext,
@@ -1722,7 +1722,7 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(label = "usecases.delivery.ci_source", future = true)]
+    #[tracing::instrument(name = "usecases.delivery.ci_source", level = "trace", skip_all)]
     async fn ci_source(
         &self,
         context: &RequestContext,
@@ -1822,7 +1822,7 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(label = "usecases.delivery.release_read", future = true)]
+    #[tracing::instrument(name = "usecases.delivery.release_read", level = "trace", skip_all)]
     async fn release_read(
         &self,
         context: &RequestContext,
@@ -1852,9 +1852,9 @@ impl ProjectDeliveryReadAuthorityV1 {
             repository_id: self.scope.repository_id.clone(),
             max_releases,
         };
-        let outcome = hotpath::future!(
+        let outcome = tracing::Instrument::instrument(
             tokio::task::spawn_blocking(move || authority.read(&request, &control)),
-            label = "usecases.delivery.release_blocking"
+            tracing::trace_span!("usecases.delivery.release_blocking"),
         )
         .await;
         if !crate::advisory::context_allows_feedback_operation(

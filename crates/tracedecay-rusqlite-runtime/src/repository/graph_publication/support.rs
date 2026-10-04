@@ -143,15 +143,14 @@ fn acquire_within_begin_budget<T>(
     }
 }
 
-#[hotpath::measure(label = "rusqlite.graph_publication.begin")]
+#[tracing::instrument(name = "rusqlite.graph_publication.begin", level = "trace", skip_all)]
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
     acquire_within_begin_budget(context, || {
-        hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
-            handle.begin_immediate()
-        })
+        let _span = tracing::trace_span!("rusqlite.graph_publication.begin_immediate").entered();
+        handle.begin_immediate()
     })?
     .ok_or_else(|| {
         GraphPublicationStoreErrorV1::Infrastructure(
@@ -193,27 +192,34 @@ pub(super) fn ensure_shard_owner(
     }
 }
 
-#[hotpath::measure(label = "rusqlite.graph_publication.begin_read")]
+#[tracing::instrument(
+    name = "rusqlite.graph_publication.begin_read",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
     if let Some(snapshot) = acquire_within_begin_budget(context, || {
-        hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
-            handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
-        })
+        let _span =
+            tracing::trace_span!("rusqlite.graph_publication.begin_read_snapshot").entered();
+        handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
     })? {
         return Ok(ExactPublicationRead::Snapshot(snapshot));
     }
     // The deferred fallback waits the writer without consulting `context`, so
     // this is the last point that can answer a cancelled or expired caller.
     ensure_not_interrupted(context)?;
-    hotpath::measure_block!("rusqlite.graph_publication.begin_deferred", {
-        handle
-            .begin_deferred()
-            .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
-            .map_err(|error| infrastructure("begin deferred graph publication read", error))
-    })
+    {
+        let _span = tracing::trace_span!("rusqlite.graph_publication.begin_deferred").entered();
+        {
+            handle
+                .begin_deferred()
+                .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
+                .map_err(|error| infrastructure("begin deferred graph publication read", error))
+        }
+    }
 }
 
 pub(super) fn commit(transaction: ExactSqlTransaction) -> GraphPublicationStoreResultV1<()> {
@@ -827,7 +833,11 @@ pub(super) fn has_active_inbound_dependencies(
 /// cleanup would release. The single paged query replaces the former
 /// per-record `LIMIT 1` probe, which issued one reader round trip per
 /// enumerated tombstone.
-#[hotpath::measure(label = "rusqlite.graph_publication.retired_cleanup_metadata_page")]
+#[tracing::instrument(
+    name = "rusqlite.graph_publication.retired_cleanup_metadata_page",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn retired_cleanup_metadata_page(
     transaction: &impl ExactQueryAuthority,
     encoded: &EncodedProjection,
@@ -877,7 +887,11 @@ pub(super) fn retired_cleanup_metadata_page(
 /// transport's 64 MiB materialization bound) keeps the batched source fetch
 /// inside one query's budget, and `sequences` is bounded by the page record
 /// cap, far below the parameter limit.
-#[hotpath::measure(label = "rusqlite.graph_publication.read_tombstones_by_sequences")]
+#[tracing::instrument(
+    name = "rusqlite.graph_publication.read_tombstones_by_sequences",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn read_tombstones_by_sequences(
     transaction: &impl ExactQueryAuthority,
     sequences: &[i64],

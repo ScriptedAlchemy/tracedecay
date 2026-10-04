@@ -122,71 +122,27 @@ async fn affected_tests_refuses_bad_handles_while_the_cycle_names_covering_tests
     fixture.harness.shutdown().await;
 }
 
-fn error_str<'a>(error: &'a tracedecay_mcp::jsonrpc::JsonRpcError, field: &str) -> &'a str {
-    error
-        .data
-        .as_ref()
-        .and_then(|data| data.get(field))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("{field} missing on tool error: {error:?}"))
-}
-
 fn assert_invalid_handle(response: &JsonRpcResponse) {
-    let error = response
-        .error
-        .as_ref()
-        .expect("an untrimmed handle is a JSON-RPC error, not an empty success");
-    assert_eq!(error.code, -32602);
-    assert_eq!(error_str(error, "tool"), "tracedecay_affected_tests");
     assert_eq!(
-        error_str(error, "reason_code"),
-        "application_surface_invalid_request"
-    );
-    assert_eq!(error_str(error, "kind"), "invalid_request");
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("retryable"))
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        error_str(error, "detail"),
-        "application surface request handle is invalid"
-    );
-    assert_eq!(
-        error.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request handle is invalid"
+        crate::support::route_refusal(&serde_json::to_value(response).expect("response")),
+        crate::support::application_surface_refusal_error(
+            "application surface request handle is invalid"
+        ),
+        "an untrimmed handle is a typed refusal, not an empty success"
     );
 }
 
 fn assert_missing_handle_field(response: &JsonRpcResponse) {
-    let error = response
-        .error
-        .as_ref()
-        .expect("omitting request_handle is a JSON-RPC error");
-    assert_eq!(error.code, -32602);
-    assert_eq!(error_str(error, "tool"), "tracedecay_affected_tests");
+    let refusal = crate::support::route_refusal(&serde_json::to_value(response).expect("response"));
+    assert_eq!(refusal["kind"], "invalid_request", "{refusal}");
+    assert_eq!(refusal["retryable"], false, "{refusal}");
     assert_eq!(
-        error_str(error, "reason_code"),
+        refusal["diagnostic"]["code"],
         "application_surface_invalid_request"
     );
-    assert_eq!(error_str(error, "kind"), "invalid_request");
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("retryable"))
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-    let detail = error
-        .data
-        .as_ref()
-        .and_then(|data| data.get("detail"))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("missing schema detail: {error:?}"));
+    let detail = refusal["diagnostic"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing schema detail: {refusal}"));
     assert!(
         detail.contains("missing field `request_handle`"),
         "the refusal must name the missing handle: {detail}"

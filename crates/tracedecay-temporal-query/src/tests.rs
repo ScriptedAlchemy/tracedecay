@@ -1751,3 +1751,24 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         assert!(resumed.next_cursor.is_none());
     });
 }
+
+#[test]
+fn empty_and_goal_queries_plan_a_scope_sweep_while_text_queries_do_not() {
+    for query in ["", " \t\n"] {
+        let plan = super::plan_temporal_candidates(query, None, false);
+        assert!(plan.contains(CandidateChannel::Scope, ""), "{query:?}");
+    }
+    assert!(
+        super::plan_temporal_candidates("cargo test", None, true)
+            .contains(CandidateChannel::Scope, "")
+    );
+
+    let text = super::plan_temporal_candidates("cargo test 2026-07-18", None, false);
+    assert!(!text.clauses().is_empty());
+    assert!(
+        !text
+            .clauses()
+            .iter()
+            .any(|clause| clause.channel == CandidateChannel::Scope)
+    );
+}

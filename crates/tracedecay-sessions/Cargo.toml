@@ -9,12 +9,6 @@ description = "TraceDecay session parsing and retrieval primitives"
 include = ["/src/**", "/tests/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
 test-helpers = []
@@ -23,7 +17,6 @@ test-helpers = []
 base64 = "0.22"
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
-hotpath.workspace = true
 rayon = "1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 serde = { version = "1", features = ["derive"] }

@@ -47,7 +47,7 @@ fn is_explicit_project_path_selector(selector: &str) -> bool {
 /// Computes one profile registry read. `active_project_root` is the project
 /// the calling connection serves, when it has one; it only marks that
 /// project active and is the context read's default selector.
-#[hotpath::measure(future = true, label = "mcp.info.project_registry.total")]
+#[tracing::instrument(name = "mcp.info.project_registry.total", level = "trace", skip_all)]
 pub async fn compute_registry_read(
     registry: &dyn ProjectRegistryReadPort,
     active_project_root: Option<&Path>,

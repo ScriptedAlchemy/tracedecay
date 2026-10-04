@@ -67,7 +67,11 @@ impl RetainedCompactionStore<'_> {
     }
 }
 
-#[hotpath::measure(label = "maintenance.live_compaction.registered", future = true)]
+#[tracing::instrument(
+    name = "maintenance.live_compaction.registered",
+    level = "trace",
+    skip_all
+)]
 pub async fn compact_registered_store(
     database: &RegisteredGlobalDb,
     config: &CompactionThresholdConfig,
@@ -75,7 +79,11 @@ pub async fn compact_registered_store(
     compact_store(RetainedCompactionStore::Registered(database), config).await
 }
 
-#[hotpath::measure(label = "maintenance.live_compaction.project", future = true)]
+#[tracing::instrument(
+    name = "maintenance.live_compaction.project",
+    level = "trace",
+    skip_all
+)]
 pub async fn compact_project_store(
     database: &Database,
     config: &CompactionThresholdConfig,

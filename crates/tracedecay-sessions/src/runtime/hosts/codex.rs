@@ -582,7 +582,6 @@ impl CodexDiscoveryHub {
                 converged: HashMap::new(),
             },
         );
-        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
     pub fn deregister(&self, consumer: &str) {
@@ -621,10 +620,8 @@ impl CodexDiscoveryHub {
                 }
             }
         }
-        hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
     }
 
-    #[hotpath::skip]
     pub(crate) async fn discover(
         &self,
         consumer: &str,
@@ -688,7 +685,6 @@ impl CodexDiscoveryHub {
                         None => consumer_state.source_key = Some(source_key.clone()),
                     }
                     if let Some(awaiting) = &consumer_state.awaiting_ack {
-                        hotpath::gauge!("codex_discovery_generation_retries").inc(1.0);
                         return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
                             &awaiting.pass,
                         )));
@@ -712,7 +708,6 @@ impl CodexDiscoveryHub {
                         .replay_indexes
                         .get(&source_key)
                         .is_some_and(|index| index.complete && !index.rebuilding);
-                    let mut start_probe = false;
                     if ready {
                         let (consumer_generation, consumer_position, observed_probe_revision) =
                             inner
@@ -750,7 +745,7 @@ impl CodexDiscoveryHub {
                             .range((lower, Bound::Unbounded))
                             .next()
                             .is_some();
-                        start_probe = !has_remaining
+                        let start_probe = !has_remaining
                             && frontier.is_complete()
                             && observed_probe_revision == index.probe_revision;
                         if !start_probe {
@@ -793,7 +788,6 @@ impl CodexDiscoveryHub {
                     }
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
-                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
                         inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
@@ -810,9 +804,6 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     };
                     index.scanning = true;
-                    if start_probe {
-                        hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
-                    }
                     CodexDiscoveryWork::Replay {
                         source_key,
                         state,
@@ -856,7 +847,6 @@ impl CodexDiscoveryHub {
                         continue;
                     }
                     if inner.discovery_scanning {
-                        hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
                         inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
@@ -901,10 +891,6 @@ impl CodexDiscoveryHub {
                 pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
                     &pass.report.paths,
                 )));
-                hotpath::gauge!("codex_discovery_pending_paths")
-                    .set(pass.report.paths.len() as f64);
-                hotpath::gauge!("codex_discovery_pending_bytes")
-                    .set(pass.report.bytes_charged as f64);
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -1072,14 +1058,11 @@ impl CodexDiscoveryHub {
     /// `witness`.
     fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let converged = inner
+
+        inner
             .consumers
             .get(consumer)
-            .is_some_and(|state| state.holds_converged(path, witness));
-        if converged {
-            hotpath::gauge!("codex_discovery_converged_skips").inc(1.0);
-        }
-        converged
+            .is_some_and(|state| state.holds_converged(path, witness))
     }
 
     /// The delivered paths `consumer` would still read, in delivery order, so
@@ -1131,7 +1114,6 @@ impl CodexDiscoveryHub {
         let Some(reservation) =
             reserve_shared_jsonl_bytes(charge, "converged transcript index capacity")?
         else {
-            hotpath::gauge!("codex_discovery_converged_unrecorded").inc(1.0);
             return Ok(());
         };
         state
@@ -1489,7 +1471,7 @@ impl CodexSource {
     /// Advances one bounded retained discovery slice and resolves the exact
     /// rollout filename used by a Codex hook event. Repeated calls continue the
     /// same iterator instead of rereading the corpus prefix.
-    #[hotpath::measure(label = "sessions.hosts.codex.find_session")]
+    #[tracing::instrument(name = "sessions.hosts.codex.find_session", level = "trace", skip_all)]
     pub(crate) fn find_session_transcript_paths_bounded(
         &self,
         session_id: &str,
@@ -1816,7 +1798,7 @@ impl CodexSource {
     /// Bounded discovery for long-lived schedulers. The caller must
     /// acknowledge only after every returned path was dispositioned and any
     /// advanced durable frontier was persisted.
-    #[hotpath::measure(label = "sessions.hosts.codex.discover")]
+    #[tracing::instrument(name = "sessions.hosts.codex.discover", level = "trace", skip_all)]
     pub(crate) fn discover_transcript_paths_with_state(
         &self,
         bounds: TranscriptDiscoveryBounds,
@@ -1826,7 +1808,6 @@ impl CodexSource {
         if let Some(pending) = &state.pending {
             let mut valid = true;
             for source in &pending.sources {
-                hotpath::gauge!("codex_discovery_pending_revalidations").inc(1.0);
                 let metadata = match std::fs::metadata(&source.path) {
                     Ok(metadata) => metadata,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1856,7 +1837,6 @@ impl CodexSource {
                 }
                 return Ok(pass);
             }
-            hotpath::gauge!("codex_discovery_pending_revalidation_misses").inc(1.0);
             state.reset(self);
         }
         let work_limit = bounds.max_files.max(1);
@@ -1990,11 +1970,6 @@ impl CodexSource {
         if state.scan.is_none() {
             state.reset_for(self, frontier.is_complete());
         }
-        if state.scan.as_ref().is_some_and(|scan| scan.validation) {
-            hotpath::gauge!("codex_discovery_validation_passes").inc(1.0);
-        } else {
-            hotpath::gauge!("codex_discovery_emit_passes").inc(1.0);
-        }
         let pass = retained_scan_step(self, state, bounds, frontier)?;
         let sources = pass.selected_sources.clone();
         state.pending = Some(CodexPendingPass {
@@ -2042,7 +2017,6 @@ enum CodexDiscoverySweep {
 }
 
 impl CodexDiscoveryFrontier {
-    #[hotpath::skip]
     pub(crate) const fn initial() -> Self {
         Self {
             epoch: CodexCorpusEpoch::initial(),
@@ -2050,7 +2024,6 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     const fn in_progress(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -2058,7 +2031,6 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     const fn complete(epoch: CodexCorpusEpoch) -> Self {
         Self {
             epoch,
@@ -2066,12 +2038,10 @@ impl CodexDiscoveryFrontier {
         }
     }
 
-    #[hotpath::skip]
     pub(crate) const fn is_complete(self) -> bool {
         matches!(self.state, CodexDiscoverySweep::Complete)
     }
 
-    #[hotpath::skip]
     pub(crate) const fn for_coverage(self, coverage_complete: bool) -> Self {
         if self.is_complete() && !coverage_complete {
             Self::in_progress(self.epoch)
@@ -2100,7 +2070,6 @@ impl CodexDiscoveryFrontier {
         Ok(decoded)
     }
 
-    #[hotpath::skip]
     pub(crate) const fn into_parse_offsets(self) -> (ParseOffset, ParseOffset) {
         if self.epoch.is_initial() && matches!(self.state, CodexDiscoverySweep::InProgress) {
             return (
@@ -2139,7 +2108,6 @@ pub(crate) struct CodexCorpusEpoch {
 }
 
 impl CodexCorpusEpoch {
-    #[hotpath::skip]
     const fn initial() -> Self {
         Self {
             high: 0,
@@ -2148,12 +2116,10 @@ impl CodexCorpusEpoch {
         }
     }
 
-    #[hotpath::skip]
     const fn is_initial(self) -> bool {
         self.high == 0 && self.low == 0 && self.files == 0
     }
 
-    #[hotpath::skip]
     const fn from_parse_offset(offset: ParseOffset) -> Self {
         Self {
             high: offset.byte_offset,
@@ -2162,7 +2128,6 @@ impl CodexCorpusEpoch {
         }
     }
 
-    #[hotpath::skip]
     const fn into_parse_offset(self) -> ParseOffset {
         ParseOffset {
             byte_offset: self.high,

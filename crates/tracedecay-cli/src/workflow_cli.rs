@@ -176,7 +176,7 @@ fn workflow_outcome_matches(
     )
 }
 
-#[hotpath::measure(label = "workflow_cli.invoke", future = true)]
+#[tracing::instrument(name = "workflow_cli.invoke", level = "trace", skip_all)]
 pub async fn invoke_workflow_cli(
     profile: &ProfileRoot,
     project_root: PathBuf,

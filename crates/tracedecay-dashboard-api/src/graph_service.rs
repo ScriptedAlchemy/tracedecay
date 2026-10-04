@@ -241,7 +241,7 @@ impl GraphReadAdmissionOperation {
     }
 }
 
-#[hotpath::measure(label = "dashboard_api.graph.admitted_read", future = true)]
+#[tracing::instrument(name = "dashboard_api.graph.admitted_read", level = "trace", skip_all)]
 async fn admitted_graph(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
@@ -257,7 +257,7 @@ async fn admitted_graph(
     // Admission and projection-open are the per-request store-open cost every
     // explorer route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.
-    let context = hotpath::future!(
+    let context = tracing::Instrument::instrument(
         admission.admit(CodeGraphReadAdmissionRequest::new(
             &operation,
             control.request_id(),
@@ -265,17 +265,17 @@ async fn admitted_graph(
             control.cancellation(),
             control.observed_at(),
         )),
-        label = "dashboard_api.graph.explorer_admission"
+        tracing::trace_span!("dashboard_api.graph.explorer_admission"),
     )
     .await?;
     let cancellation = application_graph_cancellation(control.cancellation());
-    let verified = hotpath::future!(
+    let verified = tracing::Instrument::instrument(
         projection.open(CodeGraphReadRequest::new(
             &context,
             control.observed_at(),
             Arc::clone(&cancellation),
         )),
-        label = "dashboard_api.graph.explorer_open"
+        tracing::trace_span!("dashboard_api.graph.explorer_open"),
     )
     .await?;
     let freshness = verified.freshness();

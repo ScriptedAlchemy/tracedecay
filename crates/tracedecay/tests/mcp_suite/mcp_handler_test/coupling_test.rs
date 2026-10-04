@@ -26,15 +26,18 @@ use crate::support::{
     warm_code_index_search,
 };
 
-const FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
-const FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"},{"coupled_files":1,"file":"src/warehouse/auditor.rs"}],"result_count":3}"#;
-const SHOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":2,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
-const SHOP_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"}],"result_count":2}"#;
-const TOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"}],"result_count":1}"#;
-const EMPTY_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","ranking":[],"result_count":0}"#;
-const EMPTY_FAN_IN_JSON: &str = r#"{"direction":"fan_in","ranking":[],"result_count":0}"#;
+const FAN_IN_JSON: &str = r#"{"direction":"fan_in","freshness":{"state":"fresh"},"ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
+const FAN_OUT_JSON: &str = r#"{"direction":"fan_out","freshness":{"state":"fresh"},"ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"},{"coupled_files":1,"file":"src/warehouse/auditor.rs"}],"result_count":3}"#;
+const SHOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","freshness":{"state":"fresh"},"ranking":[{"coupled_files":2,"file":"src/shop/pricing.rs"},{"coupled_files":1,"file":"src/shop/inventory.rs"}],"result_count":2}"#;
+const SHOP_FAN_OUT_JSON: &str = r#"{"direction":"fan_out","freshness":{"state":"fresh"},"ranking":[{"coupled_files":2,"file":"src/shop/orders.rs"},{"coupled_files":1,"file":"src/shop/reports.rs"}],"result_count":2}"#;
+const TOP_FAN_IN_JSON: &str = r#"{"direction":"fan_in","freshness":{"state":"fresh"},"ranking":[{"coupled_files":3,"file":"src/shop/pricing.rs"}],"result_count":1}"#;
+const EMPTY_FAN_OUT_JSON: &str =
+    r#"{"direction":"fan_out","freshness":{"state":"fresh"},"ranking":[],"result_count":0}"#;
+const EMPTY_FAN_IN_JSON: &str =
+    r#"{"direction":"fan_in","freshness":{"state":"fresh"},"ranking":[],"result_count":0}"#;
 
 const FAN_IN_MARKDOWN: &str = "\
+freshness: fresh
 **direction:** fan_in
 **result_count:** 2
 

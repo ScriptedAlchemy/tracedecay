@@ -360,7 +360,7 @@ pub async fn run_session_retention_authorized(
 type RetentionAuthorization<'a> = dyn Fn(&str) -> Result<(), LcmError> + Send + Sync + 'a;
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "sessions.lcm.retention", future = true)]
+#[tracing::instrument(name = "sessions.lcm.retention", level = "trace", skip_all)]
 async fn run_session_retention_inner(
     store: RetentionStore<'_>,
     storage_root: &Path,
@@ -449,7 +449,6 @@ async fn run_session_retention_inner(
     let read = store.read_connection();
     report.freelist_after = pragma_u64(&read, "freelist_count").await;
     report.page_count_after = pragma_u64(&read, "page_count").await;
-    crate::metrics::record_lcm_retention(report.bytes_reclaimed());
     Ok(report)
 }
 
@@ -495,7 +494,6 @@ enum RetentionReadConnection {
 }
 
 impl QueryExecutor for RetentionReadConnection {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -519,7 +517,6 @@ enum RetentionWriteTransaction<'a> {
 }
 
 impl RetentionWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn commit(self) -> Result<(), LcmError> {
         match self {
             Self::Database(transaction) => transaction
@@ -531,7 +528,6 @@ impl RetentionWriteTransaction<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn rollback(self) -> Result<(), LcmError> {
         match self {
             Self::Database(transaction) => transaction
@@ -545,7 +541,6 @@ impl RetentionWriteTransaction<'_> {
 }
 
 impl QueryExecutor for RetentionWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn query<P>(
         &self,
         sql: &str,
@@ -563,7 +558,6 @@ impl QueryExecutor for RetentionWriteTransaction<'_> {
 }
 
 impl Executor for RetentionWriteTransaction<'_> {
-    #[hotpath::skip]
     async fn execute<P>(
         &self,
         sql: &str,
@@ -579,7 +573,6 @@ impl Executor for RetentionWriteTransaction<'_> {
         }
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Database(transaction) => transaction.execute_batch(sql).await,
@@ -609,7 +602,6 @@ impl<'a> RetentionStore<'a> {
         }
     }
 
-    #[hotpath::skip]
     async fn begin_memory_write_transaction(
         self,
         intent: &str,

@@ -46,7 +46,6 @@ async fn settled_advisory_cycle(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[hotpath::skip]
 async fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");
@@ -109,7 +108,6 @@ async fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
 /// advisory-cycle call after the reopen answers instead of the retryable
 /// pre-mount state a second call would get past.
 #[tokio::test(flavor = "multi_thread")]
-#[hotpath::skip]
 async fn first_advisory_cycle_after_a_reopen_answers_without_a_retry() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");
@@ -160,7 +158,6 @@ async fn first_advisory_cycle_after_a_reopen_answers_without_a_retry() {
 /// that failure as soon as the mount gives up, instead of holding the request
 /// to its deadline and then answering the retryable pre-mount state.
 #[tokio::test(flavor = "multi_thread")]
-#[hotpath::skip]
 async fn reopened_checkout_whose_advisory_mount_failed_names_the_failure() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");
@@ -259,7 +256,6 @@ async fn reopened_checkout_whose_advisory_mount_failed_names_the_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[hotpath::skip]
 async fn checkout_without_indexable_source_names_why_the_advisory_cycle_cannot_run() {
     let isolation = tempfile::TempDir::new().expect("production harness isolation");
     let project = isolation.path().join("project");

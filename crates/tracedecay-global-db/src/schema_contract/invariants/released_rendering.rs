@@ -8,13 +8,18 @@
 //! `PayloadReferenceV1::for_payload`, `canonical_json_bytes`,
 //! `serialize_canonical`), the two digested record structs, and the canonical
 //! observation envelope's serialization are byte-identical across those tags.
-//! This tree writes `claude-session-message-v6`; retained v5 ownership is
+//! This tree writes `claude-session-message-v7`; retained v5 ownership is
 //! rebuilt before ordinary projection so the projector-version change cannot
-//! be mistaken for a rendering disagreement.
+//! be mistaken for a rendering disagreement. v6 (v1.0.0-beta.66) stored a
+//! block-array message as the array's JSON where v7 renders its text, and its
+//! stores carry immutable session-temporal effects bound to the v6 digests, so
+//! they are reset through the LCM schema version (14 -> 15) rather than
+//! rebuilt.
 //!
 //! | shipped tags                     | projector version           | digest chain | digested records |
 //! | -------------------------------- | --------------------------- | ------------ | ---------------- |
 //! | v0.1.0-beta.25 .. v0.1.0-beta.37 | `claude-session-message-v5` | unchanged    | unchanged        |
+//! | v1.0.0-beta.66                   | `claude-session-message-v6` | unchanged    | unchanged        |
 //!
 //! Since LCM schema 12 the digested message is the stored message row (its
 //! sanitized body and protected metadata), so a stored row is digestible into

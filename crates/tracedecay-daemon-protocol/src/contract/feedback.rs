@@ -28,12 +28,10 @@ pub struct DaemonFeedbackResult {
 impl DaemonFeedbackResult {
     /// Read-only views for the daemon's operation accounting. The fields stay
     /// private so the envelope can only be built from an application packet.
-    #[hotpath::skip]
     pub const fn execution(&self) -> &OperationReceipt {
         &self.execution
     }
 
-    #[hotpath::skip]
     pub const fn page(&self) -> &PageState {
         &self.page
     }

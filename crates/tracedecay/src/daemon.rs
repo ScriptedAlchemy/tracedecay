@@ -128,7 +128,6 @@ pub(super) struct AuthenticatedFirstRequest {
 
 impl AuthenticatedFirstRequest {
     pub(super) fn new(raw: String) -> Self {
-        hotpath::gauge!("daemon.engine.first_request.decode").inc(1_u64);
         let parsed = JsonRpcRequest::decode(raw.trim()).ok();
         Self { raw, parsed }
     }

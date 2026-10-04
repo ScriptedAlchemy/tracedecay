@@ -53,7 +53,7 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mZed integration\x1b[0m");
+        dc.section("Zed integration");
         doctor_check_registration(
             dc,
             &zed_settings_path(&ctx.home),
@@ -129,7 +129,7 @@ impl AgentIntegration for ZedIntegration {
         Ok(vec![zed_project_settings_path(project_path)])
     }
 
-    #[hotpath::measure(label = "zed_mcp_install")]
+    #[tracing::instrument(name = "zed_mcp_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[HostComponentV1],

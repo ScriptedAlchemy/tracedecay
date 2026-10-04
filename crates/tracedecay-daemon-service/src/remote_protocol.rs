@@ -58,7 +58,7 @@ struct DaemonRemoteEnrollmentProtocolPortV1 {
 }
 
 impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
-    #[hotpath::measure(label = "daemon.remote.enrollment")]
+    #[tracing::instrument(name = "daemon.remote.enrollment", level = "trace", skip_all)]
     fn execute_enrollment(
         &self,
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
@@ -114,7 +114,7 @@ struct DaemonRemoteCaptureProtocolPortV1 {
 impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtocolPortV1 {
     type Output = RemoteCaptureReceiptV1;
 
-    #[hotpath::measure(label = "daemon.remote.capture")]
+    #[tracing::instrument(name = "daemon.remote.capture", level = "trace", skip_all)]
     fn execute(
         &self,
         request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
@@ -163,7 +163,7 @@ struct DaemonRemoteReplayProtocolPortV1 {
 impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolPortV1 {
     type Output = RemoteReplayOutcomeV1;
 
-    #[hotpath::measure(label = "daemon.remote.replay_protocol")]
+    #[tracing::instrument(name = "daemon.remote.replay_protocol", level = "trace", skip_all)]
     fn execute(
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
@@ -290,7 +290,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                 )
             }
 
-            #[hotpath::measure(label = "daemon.remote.recovery")]
+            #[tracing::instrument(name = "daemon.remote.recovery", level = "trace", skip_all)]
             fn execute_controlled(
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
@@ -331,7 +331,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
     };
 }
 
-#[hotpath::measure(label = "daemon.remote.router_build")]
+#[tracing::instrument(name = "daemon.remote.router_build", level = "trace", skip_all)]
 pub fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,

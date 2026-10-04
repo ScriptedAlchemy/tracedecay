@@ -77,7 +77,7 @@ impl AgentIntegration for CopilotIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
-        eprintln!("\n\x1b[1mGitHub Copilot integration\x1b[0m");
+        dc.section("GitHub Copilot integration");
         doctor_check_vscode_settings(dc, &super::vscode_data_dir(&ctx.home), "VS Code");
         doctor_check_vscode_settings(
             dc,
@@ -341,7 +341,7 @@ fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
 ///
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "copilot_mcp_install")]
+#[tracing::instrument(name = "copilot_mcp_install", level = "trace", skip_all)]
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let config_path = copilot_cli_mcp_config_path(home);
     let previous_registration =

@@ -413,7 +413,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.code_index.query.execute", future = true)]
+    #[tracing::instrument(name = "daemon.code_index.query.execute", level = "trace", skip_all)]
     pub async fn execute_controlled_query<C>(
         &self,
         scope: &ResolvedScope,
@@ -672,45 +672,54 @@ where
     // lifetime: admission (sanitize + production owner resolution), one span per
     // retrieval lane, and composition/encode below. The lanes run sequentially,
     // so their spans are disjoint slices of the outer wall time.
-    let (sanitized, owners) = hotpath::measure_block!("daemon.code_index.query.admission", {
-        let sanitized = RawRetrievalRequestV1::new(input.query, request)
-            .sanitize(input.sanitizer_revision, input.normalization_revision)?;
-        let readiness = text.query_owner_readiness();
-        // Only this search's own owners decide whether it needs the worker:
-        // stamping the pending-wake slot on a seat whose source proof is
-        // current makes the freshness ladder answer `verifying`.
-        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_)) {
-            match schedulers.request_query_background_reconcile(scope).await {
-                CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
-                    return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
+    let (sanitized, owners) = tracing::Instrument::instrument(
+        async {
+            let sanitized = RawRetrievalRequestV1::new(input.query, request)
+                .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+            let readiness = text.query_owner_readiness();
+            // Only this search's own owners decide whether it needs the worker:
+            // stamping the pending-wake slot on a seat whose source proof is
+            // current makes the freshness ladder answer `verifying`.
+            if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_)) {
+                match schedulers.request_query_background_reconcile(scope).await {
+                    CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
+                        return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
                         tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
                     ));
+                    }
+                    CodeIndexReconcileAdmissionV1::Accepted
+                    | CodeIndexReconcileAdmissionV1::Unavailable => {}
                 }
-                CodeIndexReconcileAdmissionV1::Accepted
-                | CodeIndexReconcileAdmissionV1::Unavailable => {}
             }
-        }
-        let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
-            return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
-        };
-        (sanitized, owners)
-    });
+            let CodeTextQueryOwnerReadinessV1::Ready(owners) = readiness else {
+                return Err(QuerySearchExecutionErrorV1::GenerationUnverified);
+            };
+            Ok::<_, QuerySearchExecutionErrorV1>((sanitized, owners))
+        },
+        tracing::trace_span!("daemon.code_index.query.admission"),
+    )
+    .await?;
     let request = sanitized.request();
     let query_view = sanitized.query_view();
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-    let exact = hotpath::measure_block!("daemon.code_index.query.lane.exact", {
-        owners.retrieve_exact(&ExactLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            literals: parser.parse_literals(query_view, request),
-            budget: request.budget,
-            control: graph_control.as_ref(),
-        })
-    })?;
+    let exact = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.exact").entered();
+        {
+            owners.retrieve_exact(&ExactLaneRequest {
+                base: request.clone(),
+                query_view,
+                generation: generation.clone(),
+                literals: parser.parse_literals(query_view, request),
+                path_prefix: None,
+                budget: request.budget,
+                control: graph_control.as_ref(),
+            })
+        }
+    }?;
     let route_plan = LexicalRoutePlanV1::plan(query_view.as_str(), &input.lexical_routing)?;
-    let (lexical, lexical_routes) =
-        hotpath::measure_block!("daemon.code_index.query.lane.lexical", {
+    let (lexical, lexical_routes) = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.lexical").entered();
+        {
             let mut route_outcomes = Vec::with_capacity(route_plan.routes().len());
             for route in route_plan.routes() {
                 let outcome = owners.retrieve_lexical(&LexicalLaneRequest {
@@ -722,6 +731,7 @@ where
                     phrases: std::borrow::Cow::Borrowed(route.parts.phrases.as_slice()),
                     proximities: std::borrow::Cow::Borrowed(route.proximities.as_slice()),
                     field_filters: std::borrow::Cow::Borrowed(route.field_filters.as_slice()),
+                    path_prefix: None,
                     fuzzy_budget: input.fuzzy_budget,
                     lexical_profile_revision: input.lexical_profile_revision.clone(),
                     score_domain: input.lexical_score_domain.clone(),
@@ -739,50 +749,54 @@ where
                 &request.budget,
                 route_outcomes,
             )
-        })?;
+        }
+    }?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
     let graph_activation_enabled = schedulers.graph_activation_enabled_for_scope(scope).await;
-    let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
-        // Graph retrieval requires at least one seed. An empty seed list is
-        // "the lane had nothing to expand", not "the retriever is missing",
-        // once a generation has seated native graph serving. Reporting
-        // Unavailable here made a terminal delete/miss search look like a
-        // seating failure (`retriever_unavailable`) after exact and lexical
-        // had already completed. Text-only or still-pending generations keep
-        // the typed unavailable receipt.
-        //
-        // Graph activation state is owned per sealed generation and shared by
-        // every handle bound to it, so the text owner answers for its own
-        // generation when no decoded complete generation accompanies it. A
-        // clean restart whose retained revision-7 head recovered serves graph
-        // reads from exactly that owner and deliberately leaves the sealed
-        // seat empty; resolving the lane only through the seat reported the
-        // recovered graph as `retriever_unavailable` until the next publish.
-        let graph_serving = graph_latest.as_ref().map_or_else(
-            || text.search_graph_serving(graph_activation_enabled),
-            |latest| latest.search_graph_serving(graph_activation_enabled),
-        );
-        match graph_serving {
-            Err(failure) => RetrieverOutcome::Unavailable(failure),
-            Ok(_) if graph_seeds.is_empty() => RetrieverOutcome::Complete(RetrieverBatch {
-                candidates: Vec::new(),
-                evidence_by_occurrence: BTreeMap::default(),
-                coverage: RetrieverCoverage::default(),
-                continuation: None,
-            }),
-            Ok(graph_serving) => graph_serving.graph.retrieve_graph(
-                &GraphLaneRequest {
-                    base: request.clone(),
-                    generation: generation.clone(),
-                    seed_anchors: graph_seeds,
-                    edge_kinds: input.graph_edge_kinds,
-                    max_depth: input.graph_max_depth,
-                    budget: request.budget,
-                },
-                graph_control,
-            )?,
+    let graph = {
+        let _span = tracing::trace_span!("daemon.code_index.query.lane.graph").entered();
+        {
+            // Graph retrieval requires at least one seed. An empty seed list is
+            // "the lane had nothing to expand", not "the retriever is missing",
+            // once a generation has seated native graph serving. Reporting
+            // Unavailable here made a terminal delete/miss search look like a
+            // seating failure (`retriever_unavailable`) after exact and lexical
+            // had already completed. Text-only or still-pending generations keep
+            // the typed unavailable receipt.
+            //
+            // Graph activation state is owned per sealed generation and shared by
+            // every handle bound to it, so the text owner answers for its own
+            // generation when no decoded complete generation accompanies it. A
+            // clean restart whose retained revision-7 head recovered serves graph
+            // reads from exactly that owner and deliberately leaves the sealed
+            // seat empty; resolving the lane only through the seat reported the
+            // recovered graph as `retriever_unavailable` until the next publish.
+            let graph_serving = graph_latest.as_ref().map_or_else(
+                || text.search_graph_serving(graph_activation_enabled),
+                |latest| latest.search_graph_serving(graph_activation_enabled),
+            );
+            match graph_serving {
+                Err(failure) => RetrieverOutcome::Unavailable(failure),
+                Ok(_) if graph_seeds.is_empty() => RetrieverOutcome::Complete(RetrieverBatch {
+                    candidates: Vec::new(),
+                    evidence_by_occurrence: BTreeMap::default(),
+                    coverage: RetrieverCoverage::default(),
+                    continuation: None,
+                }),
+                Ok(graph_serving) => graph_serving.graph.retrieve_graph(
+                    &GraphLaneRequest {
+                        base: request.clone(),
+                        generation: generation.clone(),
+                        seed_anchors: graph_seeds,
+                        edge_kinds: input.graph_edge_kinds,
+                        max_depth: input.graph_max_depth,
+                        budget: request.budget,
+                    },
+                    graph_control,
+                )?,
+            }
         }
-    });
+    };
     let lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
             .map_err(QueryAuthorityErrorV1::from)?,
@@ -802,7 +816,7 @@ where
         .min(request.budget.max_fused_candidates as usize);
     // Encode phase: fusion, pagination, and cursor encoding under the
     // composition authority.
-    let authorized = hotpath::future!(
+    let authorized = tracing::Instrument::instrument(
         schedulers.compose_query_fallback(
             scope,
             request,
@@ -812,7 +826,7 @@ where
             page_size,
             input.cursor.as_ref(),
         ),
-        label = "daemon.code_index.query.compose"
+        tracing::trace_span!("daemon.code_index.query.compose"),
     )
     .await?;
     // Retrieval-pipeline observation from the composition this query actually

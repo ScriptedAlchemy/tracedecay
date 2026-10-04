@@ -254,7 +254,6 @@ pub enum NativeWorktreeSurfaceRequest {
 }
 
 impl NativeWorktreeSurfaceRequest {
-    #[hotpath::skip]
     pub const fn operation(&self) -> &'static str {
         match self {
             Self::Inventory(_) => NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
@@ -544,7 +543,6 @@ where
     S: AuthorizedScopeSetPort,
     P: NativeWorktreePort,
 {
-    #[hotpath::skip]
     pub const fn new(scope_sets: S, port: P) -> Self {
         Self { scope_sets, port }
     }
@@ -580,7 +578,7 @@ where
         Ok(scope_set)
     }
 
-    #[hotpath::measure(label = "application.git.worktree.inventory")]
+    #[tracing::instrument(name = "application.git.worktree.inventory", level = "trace", skip_all)]
     pub fn inventory(
         &self,
         request: &WorktreeInventoryRequestV1,
@@ -591,7 +589,7 @@ where
         self.port.inventory(request, &scope_set, cancellation)
     }
 
-    #[hotpath::measure(label = "application.git.worktree.inspect")]
+    #[tracing::instrument(name = "application.git.worktree.inspect", level = "trace", skip_all)]
     pub fn inspect(
         &self,
         request: &WorktreeCleanupInspectRequestV1,
@@ -602,7 +600,7 @@ where
         self.port.inspect(request, &scope_set, cancellation)
     }
 
-    #[hotpath::measure(label = "application.git.worktree.confirm")]
+    #[tracing::instrument(name = "application.git.worktree.confirm", level = "trace", skip_all)]
     pub fn confirm(
         &self,
         request: &WorktreeCleanupConfirmRequestV1,
@@ -613,7 +611,7 @@ where
         self.port.confirm(request, &scope_set, cancellation)
     }
 
-    #[hotpath::measure(label = "application.git.worktree.remove")]
+    #[tracing::instrument(name = "application.git.worktree.remove", level = "trace", skip_all)]
     pub fn remove(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
@@ -624,7 +622,7 @@ where
         self.port.remove(request, &scope_set, cancellation)
     }
 
-    #[hotpath::measure(label = "application.git.worktree.reconcile")]
+    #[tracing::instrument(name = "application.git.worktree.reconcile", level = "trace", skip_all)]
     pub fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,

@@ -292,7 +292,11 @@ pub fn github_source_status_v1(project_root: &Path) -> Option<GitHubSourceStatus
 /// scan uses the REST issue search's `head:` qualifier and reads each
 /// candidate pull request for its exact head. Either way the scan result must
 /// agree across scans before it is trusted.
-#[hotpath::measure(label = "usecases.github_network.discover_pr")]
+#[tracing::instrument(
+    name = "usecases.github_network.discover_pr",
+    level = "trace",
+    skip_all
+)]
 pub fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
@@ -309,7 +313,7 @@ pub fn discover_exact_commit_pull_request_v1(
         .https_only(true)
         .max_redirects(0)
         .http_status_as_error(false);
-    let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
+    let agent = http_agent(builder.build());
     discover_with_agent(
         &agent,
         &DiscoveryRequestV1 {

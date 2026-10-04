@@ -16,7 +16,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::preview::edit_success_message;
 
 /// Performs structural rewrite using ast-grep CLI.
-#[hotpath::measure(label = "edits.ast_grep_rewrite", future = true)]
+#[tracing::instrument(name = "edits.ast_grep_rewrite", level = "trace", skip_all)]
 pub(crate) async fn ast_grep_rewrite(
     project_root: &Path,
     path: &str,
@@ -28,10 +28,10 @@ pub(crate) async fn ast_grep_rewrite(
     let file = SourceEditFileAuthority::open(project_root, Path::new(&rel_path))?;
     let (source, source_identity) = file.read_to_string(path)?;
 
-    let check_output = hotpath::measure_block!(
-        "edits.ast_grep.probe",
+    let check_output = {
+        let _span = tracing::trace_span!("edits.ast_grep.probe").entered();
         ast_grep_command().args(["--version"]).output()
-    );
+    };
 
     if check_output.is_err() {
         if !can_use_literal_rewrite_fallback(pattern) {
@@ -99,10 +99,10 @@ pub(crate) async fn ast_grep_rewrite(
     let snapshot_path_arg = snapshot.path().to_string_lossy();
     let mut ast_grep_args: Vec<&str> = vec!["run", "-p", pattern, "-r", rewrite, "--json=compact"];
     ast_grep_args.push(snapshot_path_arg.as_ref());
-    let output = hotpath::measure_block!(
-        "edits.ast_grep.match",
+    let output = {
+        let _span = tracing::trace_span!("edits.ast_grep.match").entered();
         ast_grep_command().args(&ast_grep_args).output()
-    )
+    }
     .map_err(|e| TraceDecayError::Config {
         message: format!("failed to run ast-grep: {e}"),
     })?;
@@ -169,7 +169,7 @@ struct AstGrepJsonOffsets {
     end: usize,
 }
 
-#[hotpath::measure(label = "edits.ast_grep.reconstruct")]
+#[tracing::instrument(name = "edits.ast_grep.reconstruct", level = "trace", skip_all)]
 fn reconstruct_ast_grep_rewrite(source: &str, output: &[u8]) -> Result<String> {
     let mut replacements: Vec<AstGrepJsonReplacement> = if output.is_empty() {
         Vec::new()

@@ -24,15 +24,15 @@ where
     // and would otherwise answer warming for a refusal already on the watch.
     // Callers repair that with `prefer_recorded_open_failure` against the
     // claim's own watch channel instead of weakening the bound.
-    hotpath::future!(
+    tracing::Instrument::instrument(
         tokio::time::timeout_at(deadline, publication),
-        label = "daemon.project.open.publication_wait"
+        tracing::trace_span!("daemon.project.open.publication_wait"),
     )
     .await
     .map_err(|_| project_warming_error(project_path))?
 }
 
-#[hotpath::measure(label = "daemon.project.orchestrate.start", future = true)]
+#[tracing::instrument(name = "daemon.project.orchestrate.start", level = "trace", skip_all)]
 pub(super) async fn start_lifecycle_project_open<OpenOperation, OpenFuture>(
     tasks: &ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
@@ -46,14 +46,12 @@ where
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
-        hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
         return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
             "daemon is draining before project warm-up".to_string(),
         ));
     }
     tasks.start_cancellable(route, move |cancellation| async move {
         let Some(activity) = lifecycle.try_enter() else {
-            hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
             return Err(TraceDecayError::Config {
                 message: "daemon is draining before project warm-up".to_string(),
             });
@@ -113,7 +111,7 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     let Some(activity) = lifecycle.try_enter() else {
         return;
     };
-    tokio::spawn(hotpath::future!(
+    tokio::spawn(tracing::Instrument::instrument(
         async move {
             let _activity = activity;
             tokio::select! {
@@ -122,17 +120,14 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
                 () = activation => {}
             }
         },
-        label = "daemon.project.activate.automation"
+        tracing::trace_span!("daemon.project.activate.automation"),
     ));
 }
 
-#[hotpath::measure(label = "daemon.project.enroll.route", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Registered route ensure is one lookup-or-open for the admitted project."
-    )
+#[tracing::instrument(name = "daemon.project.enroll.route", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Registered route ensure is one lookup-or-open for the admitted project."
 )]
 pub(super) async fn ensure_registered_project_route(
     store_administration: &StoreAdministration,
@@ -335,7 +330,7 @@ fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
 }
 
 #[cfg(any(not(unix), test))]
-#[hotpath::measure(label = "daemon.project.orchestrate.cached", future = true)]
+#[tracing::instrument(name = "daemon.project.orchestrate.cached", level = "trace", skip_all)]
 pub(super) async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
@@ -366,7 +361,7 @@ pub(super) async fn portable_cached_project_server(
 #[cfg(any(not(unix), test))]
 // Cohesive route-open context; a params struct would only move the same ownership bundle.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.project.orchestrate.begin", future = true)]
+#[tracing::instrument(name = "daemon.project.orchestrate.begin", level = "trace", skip_all)]
 async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -411,7 +406,7 @@ async fn begin_portable_project_open(
 }
 
 #[cfg(any(not(unix), test))]
-#[hotpath::measure(label = "daemon.project.orchestrate.warmup", future = true)]
+#[tracing::instrument(name = "daemon.project.orchestrate.warmup", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Warmup retains the independent daemon owners across the background handoff; the extra argument is a test probe."
@@ -461,7 +456,7 @@ pub(super) async fn schedule_portable_project_server_warmup(
 }
 
 #[cfg(any(not(unix), test))]
-#[hotpath::measure(label = "daemon.project.orchestrate.request", future = true)]
+#[tracing::instrument(name = "daemon.project.orchestrate.request", level = "trace", skip_all)]
 #[allow(
     clippy::too_many_arguments,
     reason = "Foreground admission borrows the handshake while retaining independent daemon owners; the extra argument is a test probe."

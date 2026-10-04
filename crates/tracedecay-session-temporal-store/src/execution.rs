@@ -91,12 +91,10 @@ impl AuthorizedTemporalExecutionRequest {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
-    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -105,17 +103,14 @@ impl AuthorizedTemporalExecutionRequest {
         &self.context_budget
     }
 
-    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.snapshot_request.limits()
     }
 
-    #[hotpath::skip]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
-    #[hotpath::skip]
     pub const fn ranking_version(&self) -> u32 {
         self.ranking_version
     }
@@ -193,7 +188,6 @@ impl SessionTemporalExecutionReport {
         &self.result
     }
 
-    #[hotpath::skip]
     pub const fn freshness(&self) -> SessionDataFreshness {
         self.freshness
     }

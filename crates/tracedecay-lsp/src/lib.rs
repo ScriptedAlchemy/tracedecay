@@ -10,6 +10,7 @@
 // signatures and control flow: these are stylistic findings whose "fixes"
 // ripple across daemon call sites.
 #![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_precision_loss)]
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_excessive_bools)]

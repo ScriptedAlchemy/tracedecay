@@ -309,11 +309,10 @@ impl LspSessionRegistry {
                 control: LspSessionControl::default(),
             },
         );
-        self.observe_active_sessions();
         Ok(access)
     }
 
-    #[hotpath::measure(label = "lsp_session_authenticate", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp_session_authenticate", level = "trace", skip_all)]
     pub fn authenticate(
         &mut self,
         access: &LspSessionAccess,
@@ -333,7 +332,6 @@ impl LspSessionRegistry {
             if let Some(mut expired) = self.sessions.remove(access.session_id()) {
                 expired.control.expire();
             }
-            self.observe_active_sessions();
             return Err(LspEndpointError::SessionExpired);
         }
         self.sessions
@@ -376,7 +374,7 @@ impl LspSessionRegistry {
             .map_err(LspEndpointError::Lifecycle)
     }
 
-    #[hotpath::measure(label = "lsp.session.close", impl_type = "LspSessionRegistry")]
+    #[tracing::instrument(name = "lsp.session.close", level = "trace", skip_all)]
     pub fn close(
         &mut self,
         access: &LspSessionAccess,
@@ -388,7 +386,6 @@ impl LspSessionRegistry {
             .remove(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.control.expire();
-        self.observe_active_sessions();
         Ok(())
     }
 
@@ -398,7 +395,6 @@ impl LspSessionRegistry {
         if let Some(mut session) = self.sessions.remove(session_id) {
             session.control.expire();
         }
-        self.observe_active_sessions();
     }
 
     pub fn reconnect(
@@ -454,16 +450,11 @@ impl LspSessionRegistry {
         }
         self.sessions
             .retain(|_, session| session.expires_at_ms > now_ms);
-        self.observe_active_sessions();
         expired.len()
     }
 
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
-    }
-
-    fn observe_active_sessions(&self) {
-        hotpath::gauge!("lsp.session.active").set(self.sessions.len());
     }
 
     fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
@@ -504,7 +495,7 @@ where
         }
     }
 
-    #[hotpath::measure(label = "lsp_session_open", impl_type = "DaemonLspSessionEndpoint")]
+    #[tracing::instrument(name = "lsp_session_open", level = "trace", skip_all)]
     pub fn open(
         &mut self,
         request: LspSessionOpenRequest,
@@ -514,10 +505,10 @@ where
         // Separates the daemon admission-authority wait (workspace/root
         // resolution, credential minting) from registry bookkeeping inside
         // the enclosing open span; rejected admissions are recorded too.
-        let authorized = hotpath::measure_block!(
-            "lsp.session.admission_wait",
+        let authorized = {
+            let _span = tracing::trace_span!("lsp.session.admission_wait").entered();
             self.admission.admit_lsp_session(&request, now_ms)
-        )?;
+        }?;
         self.registry.register(authorized, now_ms)
     }
 
