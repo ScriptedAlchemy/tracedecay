@@ -275,21 +275,11 @@ pub(crate) async fn seed_all(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     function_qnames: &[String],
+    // The context builder's one successful `tracedecay_files` listing —
+    // re-fetching it here could drop every file probe on a transient error.
+    files: &[Value],
 ) -> Seeds {
     let mut seeds = Seeds::default();
-    // File probes consume the same flat listing the context builder samples;
-    // fetch it here so this stays self-contained for the caller that owns
-    // `ctx.seeds`.
-    let files: Vec<Value> = match crate::queries::list_repo_files(harness, project_root).await {
-        Ok(files) => files,
-        Err(e) => {
-            seeds
-                .skipped
-                .push(format!("tracedecay_files for seeding: {e}"));
-            Vec::new()
-        }
-    };
-    let files = files.as_slice();
     seeds.sample_files = files
         .iter()
         .filter_map(|f| f.get("path").and_then(Value::as_str))

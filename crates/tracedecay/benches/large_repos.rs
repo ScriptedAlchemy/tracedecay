@@ -63,7 +63,7 @@ async fn prepare_repo(
         .map_err(|error| format!("sample {}: {error}", repo.name))?;
     // Coverage seeds/groups live only under this root — `queries.rs` stays
     // coverage-free so the standalone `queries` bench still compiles.
-    ctx.seeds = coverage::seed_all(harness, &dir, &ctx.function_qnames).await;
+    ctx.seeds = coverage::seed_all(harness, &dir, &ctx.function_qnames, &ctx.files).await;
     let mut groups = build_queries(&ctx);
     groups.extend(coverage::coverage_groups(&ctx));
     Ok(RepoBench {

@@ -269,6 +269,9 @@ pub struct QueryContext {
     pub dir_prefixes: Vec<String>,
     /// Mounted repo root on disk (file URIs, worktree targets).
     pub project_root: PathBuf,
+    /// The flat `tracedecay_files` listing (file objects with `path`), so
+    /// seed probes reuse the one successful fetch rather than re-reading it.
+    pub files: Vec<Value>,
     /// Coverage-sweep seeds, populated by `coverage::seed_all` when the
     /// `large_repos` root wires it in; the standalone `queries` bench leaves
     /// it defaulted.
@@ -394,6 +397,7 @@ async fn try_build_context(
         function_qnames,
         dir_prefixes,
         project_root: project_root.to_path_buf(),
+        files,
         seeds: Seeds::default(),
     })
 }
