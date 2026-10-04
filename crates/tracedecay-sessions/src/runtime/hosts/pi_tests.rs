@@ -105,7 +105,11 @@ async fn fixture_session_lands_with_stable_entry_identities_and_messages() {
     assert!(!outcome.deferred, "{outcome:?}");
     assert_eq!(outcome.discovery_failures, 0);
     let stored = admission.observations();
-    assert_eq!(stored.len(), 8, "every fixture line is one observation");
+    assert_eq!(
+        stored.len(),
+        8,
+        "the contentless message line is refused and every other fixture line is one observation"
+    );
     for observation in &stored {
         assert_eq!(
             observation.observation().source().session_id().as_str(),

@@ -117,17 +117,6 @@ fn normalize_pi_entry(
     } else {
         let entry_id = non_empty_str(native, "id").ok_or_else(invalid)?;
         let stable_record_id = native_record_id(session_id, entry_id)?;
-        // The `session` header and `session_info` records carry richer Session
-        // facts but are skipped as non-conversational; the transcript path must
-        // ride the conversational records or it never reaches the row.
-        if kind != "session_info"
-            && let Some(transcript_path) = transcript_path
-        {
-            facts.insert(
-                0,
-                session_fact(None, Some(transcript_path.to_owned()), None, None),
-            );
-        }
         if let Some(parent_id) = native.get("parentId").and_then(Value::as_str) {
             relations = relations.with_parent_message_id(native_record_id(session_id, parent_id)?);
         }
@@ -174,6 +163,19 @@ fn normalize_pi_entry(
                 other.to_owned()
             }
         };
+        // The `session` header and `session_info` records carry richer Session
+        // facts but are skipped as non-conversational; the transcript path must
+        // ride the conversational records or it never reaches the row. It goes
+        // in after content normalization so an empty record still refuses with
+        // `Empty` instead of becoming a durable session-only observation.
+        if kind != "session_info"
+            && let Some(transcript_path) = transcript_path
+        {
+            facts.insert(
+                0,
+                session_fact(None, Some(transcript_path.to_owned()), None, None),
+            );
+        }
         (stable_record_id, native_kind)
     };
 
