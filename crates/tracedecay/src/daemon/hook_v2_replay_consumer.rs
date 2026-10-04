@@ -9,16 +9,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
+use tracedecay_contracts::ApplicationContractError;
 use tracedecay_contracts::retrieval::{
     StatusHookReplayFailureV1, StatusHookReplaySpoolV1, StatusHookReplayV1,
 };
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_global_db::DeliverySourceReceiptReadV1;
 use tracedecay_hooks::{
-    HookDeliveryReceiptSpoolV1, HookReplayAdmissionOutcomeV1, HookReplayPassReportV1,
-    HookSpoolConfigV1, HookSpoolV1, admit_replayed_envelope_with_authoritative_session,
-    drain_host_spool_once, hook_v2_spool_root, published_hook_scope_binding,
+    HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, HookReplayAdmissionOutcomeV1,
+    HookReplayPassReportV1, HookSpoolConfigV1, HookSpoolV1,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
+    published_hook_scope_binding,
 };
 
 use tracedecay_mcp::handlers::hook_runtime::{
@@ -123,13 +126,28 @@ async fn drain_hook_delivery_receipts(
     for receipt in receipts {
         let receipt_hex = encode_lowercase_hex(&receipt.receipt_id);
         let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
-        let settlement = match authority
-            .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
-            .await
-        {
-            Ok(_claim) => authority.settle(&receipt.settlement).await.map(drop),
-            Err(error) => Err(error),
-        };
+        let settlement = async {
+            // A retry after spool acknowledgement has fresh wall-clock evidence
+            // but the same logical key. Replay the durable settlement, keeping
+            // exact database identity and its first timestamps authoritative.
+            if let Some(DeliverySourceReceiptReadV1::Settled(stored)) =
+                authority.attempt_for_receipt(&source_receipt_ref).await?
+            {
+                let stored = HookDeliverySourceReceiptV1::new(stored)
+                    .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+                if !stored.same_identity(&receipt) {
+                    return Err(ApplicationContractError::Domain(
+                        "hook delivery source receipt identity conflict".to_owned(),
+                    ));
+                }
+                return authority.settle(&stored.settlement).await.map(drop);
+            }
+            authority
+                .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
+                .await?;
+            authority.settle(&receipt.settlement).await.map(drop)
+        }
+        .await;
         match settlement {
             // A successful durable settlement is enough to release the source
             // receipt.  Early recipients legitimately return `observability: None`
