@@ -2193,13 +2193,7 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
     };
 
     runner
-        .install(
-            &profile,
-            &service_path,
-            false,
-            &spec.socket_path,
-            TEST_BUILD_VERSION,
-        )
+        .install(&service_path, false, &spec.socket_path, TEST_BUILD_VERSION)
         .expect("install service without starting it");
     super::refresh_installed_service_with_state_and_runner(
         &runner,

@@ -1093,7 +1093,6 @@ pub fn install_service_under_lease(
         let materialized_spec = spec.clone();
         let service_path = write_service_unit(&materialized_spec)?;
         runner.install(
-            &spec.profile,
             &service_path,
             start,
             &materialized_spec.socket_path,
@@ -1142,7 +1141,6 @@ fn refresh_service_with_runner(
     let materialized_spec = spec.clone();
     let service_path = write_service_unit(&materialized_spec)?;
     runner.refresh(
-        &spec.profile,
         &service_path,
         &materialized_spec.socket_path,
         previous_state,
