@@ -4167,11 +4167,21 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
     })
     .await
     .expect("the edit must seal its successor while the projection is still running");
+    let successor = active_pointer().generation_id;
 
+    // An edit after the early seal is not part of that successor and must
+    // still reach a generation of its own.
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n\
+         pub fn edited_after_seal() -> u32 { 3 }\n",
+    );
+    registry
+        .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+        .await;
     release_projection
         .send(())
         .expect("release publication projection");
-    let successor = active_pointer().generation_id;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let pointer = active_pointer();
@@ -4180,14 +4190,18 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
                     entry.generation_id == generation_id && entry.text_artifact().is_some()
                 })
             };
-            if projected(&projecting) && projected(&successor) {
+            if projected(&projecting)
+                && projected(&successor)
+                && pointer.generation_id != successor
+                && projected(&pointer.generation_id)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the superseded projection finishes and its successor projects after it");
+    .expect("both projections finish and the later edit seals and projects its own generation");
     registry.shutdown().await;
 }
 
