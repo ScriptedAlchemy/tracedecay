@@ -1918,27 +1918,32 @@ impl PartitionedLexicalFileSourceV1 {
         }
     }
 
-    /// Ordinals of the files whose segment differs from `parent`'s at the same
-    /// position, or `None` when the two rosters name different files.
-    pub(super) fn changed_files_since(&self, parent: &Self) -> Option<Vec<u64>> {
-        if self.descriptors.len() != parent.descriptors.len() {
-            return None;
-        }
-        let mut changed = Vec::new();
-        for (ordinal, (child, parent)) in
-            self.descriptors.iter().zip(&parent.descriptors).enumerate()
-        {
-            if child.file_key != parent.file_key {
-                return None;
+    /// Each file's snapshot key, in file ordinal order.
+    pub(super) fn file_keys(&self) -> impl Iterator<Item = u32> + '_ {
+        self.descriptors
+            .iter()
+            .map(|descriptor| descriptor.file_key)
+    }
+
+    /// Whether file `ordinal` seals the same segment as `parent`'s file
+    /// `parent_ordinal`, so both emit the same pages.
+    pub(super) fn same_segment(
+        &self,
+        ordinal: usize,
+        parent: &Self,
+        parent_ordinal: usize,
+    ) -> bool {
+        match (
+            self.descriptors.get(ordinal),
+            parent.descriptors.get(parent_ordinal),
+        ) {
+            (Some(child), Some(parent)) => {
+                child.segment_digest == parent.segment_digest
+                    && child.file_occurrence_id == parent.file_occurrence_id
+                    && child.symbol_identities_digest == parent.symbol_identities_digest
             }
-            if child.segment_digest != parent.segment_digest
-                || child.file_occurrence_id != parent.file_occurrence_id
-                || child.symbol_identities_digest != parent.symbol_identities_digest
-            {
-                changed.push(u64::try_from(ordinal).ok()?);
-            }
+            _ => false,
         }
-        Some(changed)
     }
 
     pub(super) fn lexical_byte_offsets(&self) -> Result<Vec<u64>, CodeIndexProductionErrorV1> {

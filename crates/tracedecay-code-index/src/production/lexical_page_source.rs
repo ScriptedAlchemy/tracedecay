@@ -849,6 +849,25 @@ impl VerifiedSealedLexicalPageV1 {
     }
 }
 
+/// One run of a successor's files that replaces a run of its parent's:
+/// parent file ordinals `parent_files` give way to successor ordinals
+/// `files`. Either run can be empty, for files added or removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedLexicalFileReplacementV1 {
+    pub parent_files: std::ops::Range<u64>,
+    pub files: std::ops::Range<u64>,
+}
+
+impl SealedLexicalFileReplacementV1 {
+    fn new(parent_files: (usize, usize), files: (usize, usize)) -> Option<Self> {
+        let ordinal = |ordinal: usize| u64::try_from(ordinal).ok();
+        Some(Self {
+            parent_files: ordinal(parent_files.0)?..ordinal(parent_files.1)?,
+            files: ordinal(files.0)?..ordinal(files.1)?,
+        })
+    }
+}
+
 /// Final proof that all file ranges in one verified seal were exhausted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSealedLexicalSourceReceiptV1 {
@@ -1382,11 +1401,16 @@ impl VerifiedSealedLexicalPageSourceV1 {
         &self.source_state_digest
     }
 
-    /// File ordinals whose pages differ from `parent`'s, or `None` when the
-    /// two sources cannot share pages: a different file roster, or route
-    /// identities of a different width, which the serialized rows carry and
-    /// page cuts therefore follow.
-    pub fn changed_files_since(&self, parent: &Self) -> Option<Vec<u64>> {
+    /// The runs of files whose pages differ from `parent`'s, aligned by
+    /// path: a run replaces parent files with successor files, either side
+    /// possibly empty, so an added or removed file is a run too. `None`
+    /// when the two sources cannot share pages: route identities of a
+    /// different width, which the serialized rows carry and page cuts
+    /// therefore follow, or a roster that does not name each file once.
+    pub fn file_replacements_since(
+        &self,
+        parent: &Self,
+    ) -> Option<Vec<SealedLexicalFileReplacementV1>> {
         if self.format_revision != parent.format_revision
             || self.maximum_page_chunks != parent.maximum_page_chunks
             || self.maximum_page_bytes != parent.maximum_page_bytes
@@ -1397,7 +1421,67 @@ impl VerifiedSealedLexicalPageSourceV1 {
         {
             return None;
         }
-        self.file_source.changed_files_since(&parent.file_source)
+        let paths = self.file_paths()?;
+        let parent_paths = parent.file_paths()?;
+        let mut replacements = Vec::new();
+        let mut run: Option<(usize, usize)> = None;
+        let (mut file, mut parent_file) = (0, 0);
+        loop {
+            let (path, parent_path) = (paths.get(file), parent_paths.get(parent_file));
+            if path.is_none() && parent_path.is_none() {
+                break;
+            }
+            let carried = path == parent_path
+                && self
+                    .file_source
+                    .same_segment(file, &parent.file_source, parent_file);
+            if carried {
+                if let Some((parent_start, start)) = run.take() {
+                    replacements.push(SealedLexicalFileReplacementV1::new(
+                        (parent_start, parent_file),
+                        (start, file),
+                    )?);
+                }
+            } else {
+                run.get_or_insert((parent_file, file));
+            }
+            match (path, parent_path) {
+                (Some(path), Some(parent_path)) if path < parent_path => file += 1,
+                (Some(path), Some(parent_path)) if path > parent_path => parent_file += 1,
+                (Some(_), None) => file += 1,
+                (None, Some(_)) => parent_file += 1,
+                _ => {
+                    file += 1;
+                    parent_file += 1;
+                }
+            }
+        }
+        if let Some((parent_start, start)) = run {
+            replacements.push(SealedLexicalFileReplacementV1::new(
+                (parent_start, parent_file),
+                (start, file),
+            )?);
+        }
+        Some(replacements)
+    }
+
+    /// Each file's logical path in file ordinal order, or `None` unless the
+    /// paths strictly ascend, which is the order a build visits files in.
+    fn file_paths(&self) -> Option<Vec<&str>> {
+        let files = &self.metadata.snapshot().files;
+        let paths = self
+            .file_source
+            .file_keys()
+            .map(|key| {
+                files
+                    .get(usize::try_from(key).ok()?)
+                    .map(|file| file.logical_path.as_str())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        paths
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+            .then_some(paths)
     }
 
     /// Stage every page of one file as a build that reached it at
