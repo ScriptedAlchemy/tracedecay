@@ -3061,6 +3061,20 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     ));
     std::fs::write(&orphan_carrying, b"abandoned carry journal").expect("write orphan carry");
 
+    let initializing_suffixes = [".staging.initializing", ".staging.initializing-journal"];
+    for suffix in initializing_suffixes {
+        std::fs::write(
+            artifacts_root.join(format!(".text-artifact-{active_digest}{suffix}")),
+            b"active initialization",
+        )
+        .expect("write active initialization");
+        std::fs::write(
+            artifacts_root.join(format!(".text-artifact-{}{suffix}", "c".repeat(64))),
+            b"abandoned initialization",
+        )
+        .expect("write abandoned initialization");
+    }
+
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
@@ -3070,7 +3084,7 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     )
     .expect("apply sidecar-aware retention");
 
-    assert_eq!(report.deleted_text_artifacts.len(), 4);
+    assert_eq!(report.deleted_text_artifacts.len(), 6);
     assert!(
         active_staging.is_file()
             && active_sidecar.is_file()
@@ -3082,6 +3096,18 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     assert!(!orphan_sidecar.exists());
     assert!(!orphan_compacting.exists());
     assert!(!orphan_carrying.exists());
+    for suffix in initializing_suffixes {
+        assert!(
+            artifacts_root
+                .join(format!(".text-artifact-{active_digest}{suffix}"))
+                .is_file()
+        );
+        assert!(
+            !artifacts_root
+                .join(format!(".text-artifact-{}{suffix}", "c".repeat(64)))
+                .exists()
+        );
+    }
 }
 
 /// A daemon killed while `VACUUM INTO` writes the compacted rewrite leaves

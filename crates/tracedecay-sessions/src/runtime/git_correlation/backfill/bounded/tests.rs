@@ -353,6 +353,114 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
 }
 
 #[tokio::test]
+async fn history_change_journal_survives_upserts_reinstall_and_rollback() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let initial = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO sessions(provider, session_id, project_path, started_at)
+         VALUES ('codex', 'session-1', ?1, 1)
+         ON CONFLICT(provider, session_id) DO UPDATE SET started_at = excluded.started_at",
+            params![repository.path().to_str().unwrap()],
+        )
+        .await
+        .unwrap();
+    let changed = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(changed > initial);
+
+    for content_hash in ["first", "revised"] {
+        store.connection.execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+             VALUES ('codex', 'stable-message', 'session-1', ?1)
+             ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            params![content_hash],
+        ).await.unwrap();
+    }
+    let revised = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(revised > changed);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_session_change").await,
+        1
+    );
+
+    let transaction = store
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    transaction
+        .execute("UPDATE lcm_raw_messages SET timestamp = 99", ())
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+
+    // A shipped trigger must be repaired on open without resetting the frontier.
+    store
+        .connection
+        .execute_batch(
+            "DROP TRIGGER git_history_message_update;
+         CREATE TRIGGER git_history_message_update AFTER UPDATE ON lcm_raw_messages BEGIN
+             INSERT OR REPLACE INTO git_history_session_change(provider, session_id)
+                 VALUES (NEW.provider, NEW.session_id);
+         END;",
+        )
+        .await
+        .unwrap();
+    crate::runtime::git_correlation::install_history_change_schema(&store.connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+         VALUES ('codex', 'stable-message', 'session-1', 'after-reopen')
+         ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await
+            > revised
+    );
+}
+
+#[tokio::test]
 async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
     for rewrite_message in [true, false] {
         let repository = repository_fixture();

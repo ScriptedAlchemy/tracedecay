@@ -632,7 +632,7 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(recorded, 6);
+    assert_eq!(recorded, current.git_correlation);
     cg.close();
 }
 

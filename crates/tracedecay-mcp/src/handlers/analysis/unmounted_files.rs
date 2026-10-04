@@ -105,6 +105,7 @@ pub(super) async fn compute_unmounted_files(
             path: path_filter,
             ecosystem: ecosystem_filter,
             unmounted,
+            freshness: None,
         }),
         touched_files,
     ))

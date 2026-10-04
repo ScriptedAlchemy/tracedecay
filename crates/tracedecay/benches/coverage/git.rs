@@ -51,7 +51,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_git_hunks",
                 "hunks",
                 json!({
-                    "scope": *["working_tree", "staged"].iter().nth(i % 2).unwrap_or(&""),
+                    "scope": *["working_tree", "staged"].get(i % 2).unwrap_or(&""),
                     "max_bytes": 65536,
                     "max_entries": 64,
                 }),
@@ -106,7 +106,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "branch_search",
                 json!({
                     "branch": ctx.seeds.branch.clone().unwrap_or_else(|| "main".into()),
-                    "query": *["feat", "fix", "main", "dev", "rel"].iter().nth(i).unwrap_or(&""),
+                    "query": *["feat", "fix", "main", "dev", "rel"].get(i).unwrap_or(&""),
                     "limit": 10,
                 }),
             )

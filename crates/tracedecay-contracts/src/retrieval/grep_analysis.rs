@@ -9,6 +9,7 @@ use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{CoverageCompleteness, OpaqueCursor};
+use crate::retrieval::PrimitiveSearchFreshnessV1;
 
 pub const MAX_GREP_RESULTS_V1: u32 = 200;
 pub const MAX_GREP_CONTEXT_LINES_V1: u32 = 3;
@@ -196,6 +197,9 @@ pub struct DependencyDepthResultV1 {
     pub ideal_depth: u64,
     pub depth_score: f64,
     pub chains: Vec<DependencyDepthChainV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -1111,12 +1111,11 @@ async fn wait_for_production_composition_code_index(
         .await;
     let publication = timeout(Duration::from_secs(20), async {
         loop {
-            // Scope-aware readiness is the authenticated demand boundary that
-            // starts the registered route-local activation owner. The root-only
-            // probe cannot mount an idle on-demand scheduler.
-            let generation_ready = invocation
+            // Demand the exact registered route without decoding a generation
+            // solely to discover a native graph already held by the text owner.
+            let query_authority_ready = invocation
                 .code_index_schedulers
-                .latest_complete_ready_for_scope(scope)
+                .query_authority_for_scope(scope)
                 .await
                 .is_some();
             // A publication and a clean restart both seat the graph head on
@@ -1131,14 +1130,18 @@ async fn wait_for_production_composition_code_index(
                 .await
                 .and_then(|text| text.interactive_graph_store().ok())
                 .map(|store| store.interactive_catalog_is_warm().unwrap_or(false));
-            if (generation_ready || text_graph_catalog_warm.is_some())
-                && text_graph_catalog_warm != Some(false)
-                && invocation
+            // A warming native catalog cannot be made ready by decoding the
+            // same generation. Other mounts can use an already-decoded serving
+            // owner; this publication wait must not create a second owner.
+            let generation_ready = match text_graph_catalog_warm {
+                Some(warm) => warm,
+                None => invocation
                     .code_index_schedulers
-                    .query_authority_for_scope(scope)
+                    .latest_complete_ready_decoded_for_scope(scope)
                     .await
-                    .is_some()
-            {
+                    .is_some(),
+            };
+            if generation_ready && query_authority_ready {
                 return;
             }
             // A project whose verified source publishes no generation at all

@@ -2128,8 +2128,8 @@ fn copy_sealed_parent(
             .map_err(|error| staging_initialization_error("name the staging path", error))
     });
     if let Err(error) = named {
-        // No sidecar sweep recognises the initializing name, so an abandoned
-        // copy would otherwise outlive every generation that could reuse it.
+        // Remove the incomplete carry immediately; retention is only the
+        // recovery authority when the process exits before this cleanup.
         if let Err(cleanup) = std::fs::remove_file(&initializing)
             && cleanup.kind() != std::io::ErrorKind::NotFound
         {

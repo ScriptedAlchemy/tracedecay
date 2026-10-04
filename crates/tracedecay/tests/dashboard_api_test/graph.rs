@@ -147,6 +147,7 @@ impl DashboardCodeReadPortV1 for FixtureCodeReadPortV1 {
                     next_cursor: None,
                 }],
                 coverage: SimilarCoverageV1::Complete,
+                freshness: None,
             })
         })
     }

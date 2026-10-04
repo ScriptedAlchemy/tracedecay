@@ -75,6 +75,7 @@ pub async fn compute_dsm(
             stats,
             clusters,
             matrix,
+            freshness: None,
         }),
         Vec::new(),
     ))

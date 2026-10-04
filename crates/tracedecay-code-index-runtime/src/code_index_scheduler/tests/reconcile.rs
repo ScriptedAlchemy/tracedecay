@@ -11539,6 +11539,18 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             .is_none(),
         "graph-off must leave the complete serving slot empty"
     );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            registry.latest_complete_fresh_for_scope_awaiting_seat(
+                &scope,
+                tokio::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
+            ),
+        )
+        .await
+        .expect("a policy-disabled graph seat must refuse without awaiting its deadline")
+        .is_none()
+    );
     let indexed_file = latest
         .metadata()
         .snapshot()

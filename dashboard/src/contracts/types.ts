@@ -4058,6 +4058,24 @@ export type PrepareWorkProductMutationRequestV1 = {
   selection: WorkProductSelectionScopeV1;
 };
 
+export type PrimitiveFreshnessStateV1 = "fresh" | "possibly_stale";
+
+export type PrimitiveIndexingStateV1 = {
+  latest_generation?: string | null | undefined;
+  parked?: CodeIndexConvergenceParkedV1 | null | undefined;
+  reason?: string | null | undefined;
+  rebuild_in_flight?: boolean | null | undefined;
+  served_generation?: string | null | undefined;
+  stale_lanes?: Array<string> | undefined;
+  staleness_state?: CodeIndexStalenessStateV1 | null | undefined;
+  summary: string;
+};
+
+export type PrimitiveSearchFreshnessV1 = {
+  indexing?: PrimitiveIndexingStateV1 | null | undefined;
+  state: PrimitiveFreshnessStateV1;
+};
+
 export type ProblemOwningLayer = "adapter" | "application" | "port" | "runtime";
 
 export type ProblemTerminality = "admitted_terminal" | "pre_admission";
@@ -4934,6 +4952,7 @@ export type SimilarOccurrenceV1 = {
 export type SimilarResultV1 = {
   coverage: SimilarCoverageV1;
   families: Array<SimilarFamilyV1>;
+  freshness?: PrimitiveSearchFreshnessV1 | null | undefined;
   source: SimilarOccurrenceV1;
   source_generation: CodeGenerationId;
 };

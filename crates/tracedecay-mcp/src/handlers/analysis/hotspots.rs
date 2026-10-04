@@ -80,6 +80,7 @@ pub(super) async fn compute_hotspots(
         GraphToolResultV1::Hotspots(HotspotsResultV1 {
             hotspot_count: hotspots.len() as u64,
             hotspots,
+            freshness: None,
         }),
         touched_files,
     ))

@@ -241,6 +241,7 @@ pub async fn compute_port_status(
         unmatched_by_file,
         matched_symbols,
         target_only_symbols: target_only,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::PortStatus(result),

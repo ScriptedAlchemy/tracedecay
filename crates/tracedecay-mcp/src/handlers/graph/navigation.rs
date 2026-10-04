@@ -162,9 +162,9 @@ pub async fn compute_node(
             ))
         }
         None => Ok(graph_tool_completion(
-            GraphToolResultV1::Node(NodeResultV1::NotFound(node_not_found_result(
+            GraphToolResultV1::Node(NodeResultV1::NotFound(Box::new(node_not_found_result(
                 &request.node_id,
-            ))),
+            )))),
             Vec::new(),
         )),
     }

@@ -253,6 +253,7 @@ pub async fn analyze_test_risk(
             confidence: TestRiskConfidenceV1::StaticLowerBound,
             confidence_note: "coverage_pct is a depth-3 static attribution lower bound over the admitted generation; complexity uses extraction-attested branches, loops, and maximum nesting, and is null (with risk weighing lower-bound counters) when complexity_analysis reports an incomplete walk; direct_unit is strongest, while closure retains higher residual risk.".to_owned(),
         },
+        freshness: None,
     })
 }
 

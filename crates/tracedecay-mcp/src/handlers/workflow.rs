@@ -234,6 +234,7 @@ pub async fn compute_diagnose(
         truncated: total > items.len(),
         published,
         diagnostics: items,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::Diagnose(result),

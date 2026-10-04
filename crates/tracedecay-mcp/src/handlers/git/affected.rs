@@ -195,6 +195,7 @@ where
             recommended_proximity: ["changed", "direct", "near"].map(str::to_owned).to_vec(),
             compatibility_field: "affected_tests".to_owned(),
         },
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::Affected(result),

@@ -93,6 +93,7 @@ pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToo
                 ConfigResultV1 {
                     match_count,
                     matches,
+                    freshness: None,
                 },
                 touched,
             ))

@@ -520,6 +520,9 @@ import type {
   PrAutoTrackPayloadV1,
   PrepareWorkDuplicateAdjudicationRequestV1,
   PrepareWorkProductMutationRequestV1,
+  PrimitiveFreshnessStateV1,
+  PrimitiveIndexingStateV1,
+  PrimitiveSearchFreshnessV1,
   ProblemOwningLayer,
   ProblemTerminality,
   ProjectAliasRecord,
@@ -7306,6 +7309,43 @@ export const PrepareWorkProductMutationRequestV1Schema: z.ZodObject<{
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
+/** Whether the served code generation is known current at serve time. */
+export const PrimitiveFreshnessStateV1Schema: z.ZodEnum<["fresh", "possibly_stale"]> = z.enum(["fresh", "possibly_stale"]);
+
+/** The indexing state behind a `possibly_stale` verdict: the served
+generation, the scheduler's latest sealed generation, its staleness-ladder
+state, and the lanes that answered from an older generation. `summary` is
+the one-line rendering agents read. */
+export const PrimitiveIndexingStateV1Schema: z.ZodObject<{
+  latest_generation: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  parked: z.ZodOptional<z.ZodType<CodeIndexConvergenceParkedV1 | null, z.ZodTypeDef, unknown>>;
+  reason: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  rebuild_in_flight: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
+  served_generation: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  stale_lanes: z.ZodOptional<z.ZodType<Array<string>, z.ZodTypeDef, unknown>>;
+  staleness_state: z.ZodOptional<z.ZodType<CodeIndexStalenessStateV1 | null, z.ZodTypeDef, unknown>>;
+  summary: z.ZodType<string, z.ZodTypeDef, unknown>;
+}, "strict"> = z.object({
+  latest_generation: z.string().nullable().optional(),
+  parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]).optional(),
+  reason: z.string().nullable().optional(),
+  rebuild_in_flight: z.boolean().nullable().optional(),
+  served_generation: z.string().nullable().optional(),
+  stale_lanes: z.array(z.string()).optional(),
+  staleness_state: z.union([z.lazy(() => CodeIndexStalenessStateV1Schema), z.null()]).optional(),
+  summary: z.string(),
+}).strict();
+
+/** Freshness verdict carried by every search and context response. `indexing`
+is present exactly when the state is `possibly_stale`. */
+export const PrimitiveSearchFreshnessV1Schema: z.ZodObject<{
+  indexing: z.ZodOptional<z.ZodType<PrimitiveIndexingStateV1 | null, z.ZodTypeDef, unknown>>;
+  state: z.ZodType<PrimitiveFreshnessStateV1, z.ZodTypeDef, unknown>;
+}, "strict"> = z.object({
+  indexing: z.union([z.lazy(() => PrimitiveIndexingStateV1Schema), z.null()]).optional(),
+  state: z.lazy(() => PrimitiveFreshnessStateV1Schema),
+}).strict();
+
 /** Layer that owns resolving the problem rather than merely presenting it. */
 export const ProblemOwningLayerSchema: z.ZodEnum<["adapter", "application", "port", "runtime"]> = z.enum(["adapter", "application", "port", "runtime"]);
 
@@ -8735,11 +8775,13 @@ export const SimilarOccurrenceV1Schema: z.ZodObject<{
 export const SimilarResultV1Schema: z.ZodObject<{
   coverage: z.ZodType<SimilarCoverageV1, z.ZodTypeDef, unknown>;
   families: z.ZodType<Array<SimilarFamilyV1>, z.ZodTypeDef, unknown>;
+  freshness: z.ZodOptional<z.ZodType<PrimitiveSearchFreshnessV1 | null, z.ZodTypeDef, unknown>>;
   source: z.ZodType<SimilarOccurrenceV1, z.ZodTypeDef, unknown>;
   source_generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
 }, "strict"> = z.object({
   coverage: z.lazy(() => SimilarCoverageV1Schema),
   families: z.array(z.lazy(() => SimilarFamilyV1Schema)),
+  freshness: z.union([z.lazy(() => PrimitiveSearchFreshnessV1Schema), z.null()]).optional(),
   source: z.lazy(() => SimilarOccurrenceV1Schema),
   source_generation: z.lazy(() => CodeGenerationIdSchema),
 }).strict();

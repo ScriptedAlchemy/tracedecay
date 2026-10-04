@@ -20607,6 +20607,101 @@
       ],
       "type": "object"
     },
+    "PrimitiveFreshnessStateV1": {
+      "description": "Whether the served code generation is known current at serve time.",
+      "enum": [
+        "fresh",
+        "possibly_stale"
+      ],
+      "type": "string"
+    },
+    "PrimitiveIndexingStateV1": {
+      "additionalProperties": false,
+      "description": "The indexing state behind a `possibly_stale` verdict: the served\ngeneration, the scheduler's latest sealed generation, its staleness-ladder\nstate, and the lanes that answered from an older generation. `summary` is\nthe one-line rendering agents read.",
+      "properties": {
+        "latest_generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parked": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexConvergenceParkedV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The park holding convergence until the operator applies its remedy.\nNo wake retries it, so repeating the request cannot change the answer."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rebuild_in_flight": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "served_generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stale_lanes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "staleness_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexStalenessStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "type": "object"
+    },
+    "PrimitiveSearchFreshnessV1": {
+      "additionalProperties": false,
+      "description": "Freshness verdict carried by every search and context response. `indexing`\nis present exactly when the state is `possibly_stale`.",
+      "properties": {
+        "indexing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrimitiveIndexingStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/PrimitiveFreshnessStateV1"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
     "ProblemOwningLayer": {
       "description": "Layer that owns resolving the problem rather than merely presenting it.",
       "enum": [
@@ -24496,6 +24591,17 @@
             "$ref": "#/$defs/SimilarFamilyV1"
           },
           "type": "array"
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrimitiveSearchFreshnessV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The worktree verdict a served graph read opens with."
         },
         "source": {
           "$ref": "#/$defs/SimilarOccurrenceV1"

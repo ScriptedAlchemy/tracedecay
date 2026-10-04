@@ -90,6 +90,7 @@ pub(super) async fn compute_complexity(
             note: "cyclomatic_complexity = branches + 1 (computed from AST during extraction); counters are null when complexity_analysis is not complete".to_owned(),
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         touched_files,
     ))
@@ -347,6 +348,7 @@ pub(super) async fn compute_doc_coverage(
             limit: limit as u64,
             file_count: files.len() as u64,
             files,
+            freshness: None,
         }),
         touched_files,
     ))
@@ -428,6 +430,7 @@ pub(super) async fn compute_god_class(
         GraphToolResultV1::GodClass(GodClassResultV1 {
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         touched_files,
     ))

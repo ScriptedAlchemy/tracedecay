@@ -369,7 +369,7 @@ pub struct WorktreeInspectionV1 {
     pub locked: WorktreeObservationV1,
     pub holder: WorktreeObservationV1,
     pub unique_data: WorktreeObservationV1,
-    pub operation: Option<GitOperationStateV1>,
+    pub operation_state: Option<GitOperationStateV1>,
     pub observed_at: UtcMicros,
     pub inspection_digest: ManifestDigest,
 }
@@ -382,7 +382,7 @@ impl WorktreeInspectionV1 {
             && self.locked == WorktreeObservationV1::No
             && self.holder == WorktreeObservationV1::No
             && self.unique_data == WorktreeObservationV1::No
-            && self.operation.is_none()
+            && self.operation_state.is_none()
     }
 }
 
@@ -655,7 +655,7 @@ pub fn worktree_inspection_digest(
         inspection.locked,
         inspection.holder,
         inspection.unique_data,
-        &inspection.operation,
+        &inspection.operation_state,
     ))
     .map_err(|_| WorktreeContractError::Inconsistent {
         field: "worktree inspection digest",

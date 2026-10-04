@@ -456,7 +456,6 @@ async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_ev
                 .collect::<Vec<_>>(),
             [
                 (json!(project_id), json!("graph_catalog")),
-                (json!(project_id), json!("decoded_generation")),
                 (json!(project_id), json!("graph_engine")),
             ],
             "{status}"
@@ -477,12 +476,16 @@ async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_ev
     let doctor = runtime["doctor_report"].to_string();
     for worktree in &worktrees {
         let worktree = worktree.as_str().expect("worktree id");
-        for kind in ["graph_catalog", "decoded_generation", "graph_engine"] {
+        for kind in ["graph_catalog", "graph_engine"] {
             assert!(
                 doctor.contains(&format!("{kind} of worktree {worktree} holds")),
                 "doctor must list {kind} of {worktree}: {doctor}"
             );
         }
+        assert!(
+            !doctor.contains(&format!("decoded_generation of worktree {worktree} holds")),
+            "status must not demand a decoded owner: {doctor}"
+        );
     }
     harness.shutdown().await;
 }
@@ -540,13 +543,12 @@ fn owner_row(owner: &Value, worktree_id: &Value, generation_id: &Value) -> Value
     })
 }
 
-/// The sealed worktree retains its interactive catalog, serving decode, and
-/// graph engine, each sized by its owner and protected while the worktree is
-/// in use.
+/// Native graph reads retain the interactive catalog and graph engine. Status
+/// must not demand a redundant decoded generation; both native owners remain
+/// sized and protected while the worktree is in use.
 fn serving_owner_rows() -> Vec<Value> {
     vec![
         json!({ "kind": "graph_catalog", "measured": true, "protected": true }),
-        json!({ "kind": "decoded_generation", "measured": true, "protected": true }),
         json!({ "kind": "graph_engine", "measured": true, "protected": true }),
     ]
 }
