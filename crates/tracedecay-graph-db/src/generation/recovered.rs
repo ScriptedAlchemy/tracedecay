@@ -20,9 +20,9 @@ use crate::{GraphDbError, GraphNamespace};
 
 use super::{
     CheckedDigestWriter, CheckedVecWriter, GraphEntityRef, GraphGenerationManifestIdentity,
-    GraphGenerationRelation, GraphProjectionIdentity, frame_length_headers,
-    physical_namespace_projection_map, recovered_entity_ref, write_canonical_row_frame,
-    write_generation_identity_frames,
+    GraphGenerationRelation, GraphProjectionIdentity, RowLanes, frame_length_headers,
+    physical_namespace_projection_map, recovered_entity_ref, row_frame_lanes,
+    write_canonical_row_frame, write_generation_identity_frames,
 };
 
 /// Rows per encode chunk. Sized so one chunk is a few milliseconds of decode
@@ -142,6 +142,46 @@ pub(crate) fn recovered_generation_digest_chunked(
     let canonical_bytes = writer.total_bytes();
     writer.finish()?;
     Ok((encode_lowercase_hex(&digest.finalize()), canonical_bytes))
+}
+
+/// Each stored relation of `identity`'s generation with the row-sum lanes
+/// of its frame as `identity` recovers it, in identity order. A relation's
+/// frame names its endpoints' projection, so the same stored rows hash
+/// differently under each projection that reads them.
+pub(crate) fn recovered_relation_lanes(
+    database: &GrafeoDB,
+    identity: &GraphGenerationManifestIdentity,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<(String, RowLanes)>, GraphDbError> {
+    let store = database.graph_store();
+    let relations = projection_relation_nodes_sorted_checked(
+        database,
+        &identity.physical_namespace()?,
+        &identity.projection.projection,
+        check,
+    )?;
+    let namespace_projection = physical_namespace_projection_map(identity)?;
+    let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    let mut endpoints = EndpointIdentityCache::default();
+    let mut endpoint_refs = HashMap::new();
+    let mut lanes = Vec::with_capacity(relations.len());
+    for (sorted_identity, locator) in &relations {
+        check()?;
+        let relation = decode_sorted_relation(
+            store.as_ref(),
+            sorted_identity,
+            *locator,
+            &namespace_projection,
+            &mut endpoints,
+            &mut endpoint_refs,
+        )?;
+        let bytes = canonical.encode(&relation, "recovered generation relation")?;
+        lanes.push((
+            sorted_identity.as_str().to_owned(),
+            row_frame_lanes("relation", bytes)?,
+        ));
+    }
+    Ok(lanes)
 }
 
 /// The single-pass stream for generations at or below one chunk: one decoded

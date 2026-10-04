@@ -322,6 +322,67 @@ impl RowIndex {
             .map(|(lanes, from, to)| IndexedRelation { lanes, from, to }))
     }
 
+    /// Writes this index to `path` with every relation's lanes replaced by
+    /// those `relations` records for it, entity records and endpoint
+    /// ordinals unchanged: the index of the same rows read under another
+    /// projection. `relations` must name exactly the relations recorded.
+    pub(crate) fn write_with_relation_lanes(
+        &self,
+        path: &Path,
+        relations: &[(String, RowLanes)],
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        if relations.len() as u64 != self.relations {
+            return Err(corrupt("relanes a different relation set than it records"));
+        }
+        let mut lanes = relations
+            .iter()
+            .map(|(identity, lanes)| (row_key("relation", identity), *lanes))
+            .collect::<Vec<_>>();
+        lanes.sort_unstable_by_key(|(key, _)| *key);
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("graph row index lock is poisoned"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| index_io("seek", error))?;
+        let mut reader = std::io::BufReader::new(&mut *file);
+        let mut header = [0_u8; HEADER_BYTES as usize];
+        reader
+            .read_exact(&mut header)
+            .map_err(|error| index_io("header read", error))?;
+        let target = File::create(path).map_err(|error| index_io("create", error))?;
+        let mut writer = BufWriter::new(target);
+        writer
+            .write_all(&header)
+            .map_err(|error| index_io("write", error))?;
+        let mut record = [0_u8; RECORD_BYTES as usize];
+        for position in 0..self.entities + self.relations {
+            if position % 65_536 == 0 {
+                check()?;
+            }
+            reader
+                .read_exact(&mut record)
+                .map_err(|error| index_io("record read", error))?;
+            if position >= self.entities {
+                let relation = position - self.entities;
+                let (key, replacement) = lanes[relation as usize];
+                if key != record_parts(&record).0 {
+                    return Err(corrupt("relanes a relation it does not record"));
+                }
+                record[16..48].copy_from_slice(&lanes_bytes(replacement));
+            }
+            writer
+                .write_all(&record)
+                .map_err(|error| index_io("write", error))?;
+        }
+        writer
+            .into_inner()
+            .map_err(|error| index_io("flush", error.into_error()))?
+            .sync_all()
+            .map_err(|error| index_io("sync", error))
+    }
+
     /// The sum of every recorded row: equal to the generation's row sum
     /// exactly when the index records the generation's rows.
     pub(crate) fn row_sum(

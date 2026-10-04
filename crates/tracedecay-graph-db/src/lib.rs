@@ -99,7 +99,7 @@ pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnap
 pub use schema::graph_stable_identity;
 pub use sealed_layer::{
     GraphLayeredRowSpill, GraphLayeredRowsV1, GraphSealedBaseAbsenceV1, GraphSealedBaseV1,
-    LayeredGraphGeneration,
+    GraphSiblingSealedBaseV1, LayeredGraphGeneration,
 };
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
