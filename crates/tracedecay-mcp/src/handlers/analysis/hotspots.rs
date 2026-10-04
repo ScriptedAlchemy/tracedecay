@@ -74,7 +74,8 @@ pub(super) async fn compute_hotspots(
             if churn_available {
                 churn_weighted_rank(
                     symbol_degree,
-                    u64::try_from(churn_by_file.get(path).copied().unwrap_or(0)).unwrap_or(u64::MAX),
+                    u64::try_from(churn_by_file.get(path).copied().unwrap_or(0))
+                        .unwrap_or(u64::MAX),
                 )
             } else {
                 symbol_degree
