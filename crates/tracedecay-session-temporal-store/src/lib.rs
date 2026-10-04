@@ -106,7 +106,10 @@ pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub use projection::{record_canonical_observation_effect, request_session_temporal_reset};
-pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+pub use refresh::{
+    SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1, SessionRefreshRecoveryV1,
+    SessionRefreshRestartStateV1,
+};
 pub use store::SessionTemporalStore;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {

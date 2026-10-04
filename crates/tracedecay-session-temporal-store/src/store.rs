@@ -96,6 +96,39 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
             .await
     }
 
+    /// Plans a refresh begin without committing it so the worker can fold
+    /// the begin into the first projected batch's commit.
+    pub async fn plan_session_refresh_begin(
+        &self,
+        request: SessionRefreshBeginOrJoinRequestV1,
+    ) -> SessionStoreResult<crate::SessionRefreshBeginPlanV1> {
+        self.access()
+            .plan_session_refresh_begin_result(request)
+            .await
+    }
+
+    /// Commits a refresh begin and its first projected batch in one write
+    /// transaction; see
+    /// [`SessionTemporalAccess::commit_session_refresh_begin_batch_result`].
+    pub async fn commit_session_refresh_begin_batch(
+        &self,
+        request: SessionRefreshBeginOrJoinRequestV1,
+        accepted_at: tracedecay_domain::UtcMicros,
+        progress: SessionRefreshProgressV1,
+        batch: SessionTemporalProjectionBatchV1,
+        execution_control: ExecutionControl,
+    ) -> SessionStoreResult<crate::SessionRefreshBeginBatchOutcomeV1> {
+        self.access()
+            .commit_session_refresh_begin_batch_result(
+                request,
+                accepted_at,
+                progress,
+                batch,
+                execution_control,
+            )
+            .await
+    }
+
     pub async fn session_refresh_recovery(
         &self,
         session_id: &tracedecay_domain::SessionId,
