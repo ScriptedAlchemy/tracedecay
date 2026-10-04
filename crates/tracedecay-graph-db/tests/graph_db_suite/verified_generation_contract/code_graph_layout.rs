@@ -305,6 +305,26 @@ fn sweep_keeps_the_shared_head_while_the_deleted_generation_still_serves() {
     );
     assert_eq!(authority.head_retirement_calls, 0);
 
+    // A restart mounts the registry before any snapshot seats a lease, so
+    // the relational head is the only serving authority left. The sweep
+    // must keep it exactly the same.
+    assert!(registered.close().unwrap());
+    drop(registered);
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.retire_one_code_generation_replay(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &alpha,
+            &sealed_digest,
+        ),
+        Ok(GraphReplayCollectionOutcome::Retained),
+        "the relational head must survive with no installed lease",
+    );
+    assert_eq!(authority.head_retirement_calls, 0);
+
     let g2 = manifest(identity.clone(), "serving-g2", "g2", vec![], vec![]);
     let g2_record = stage_manifest(
         &mut authority,

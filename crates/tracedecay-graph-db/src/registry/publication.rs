@@ -410,10 +410,18 @@ impl GraphDbRegistry {
             .iter()
             .map(|(locator, _, _)| locator.clone())
             .collect::<BTreeSet<_>>();
+        // Every verified head is serving authority. A code-shard head stays
+        // authority even while its generation is deleted, because one shared
+        // projection serves every generation of the scope until a successor
+        // publish supersedes it; only per-generation namespaces make a
+        // deleted generation's head disposable.
         retained.extend(
             heads
                 .keys()
-                .filter(|locator| !candidate_locators.contains(*locator))
+                .filter(|locator| {
+                    !candidate_locators.contains(*locator)
+                        || is_code_graph_shard_namespace(&locator.projection.namespace)
+                })
                 .cloned(),
         );
         if candidates.is_empty() {
@@ -437,19 +445,11 @@ impl GraphDbRegistry {
         let selected = {
             let mut state = database.wait_verified_generations_write()?;
             for head in state.heads.values() {
-                if candidate_locators.contains(&head.locator)
-                    && !is_code_graph_shard_namespace(&head.locator.projection.namespace)
-                    && Arc::strong_count(head) == 1
-                {
+                if candidate_locators.contains(&head.locator) && Arc::strong_count(head) == 1 {
                     // Once the code index deletes a per-generation head, the
                     // registry's installed pointer is not reader liveness.
                     // Its dependency closure remains protected; any snapshot
                     // clone raises the count and retains the whole lease.
-                    // A code-shard head is different: one projection serves
-                    // every generation of the scope, so the installed head is
-                    // still the serving authority until a successor publish
-                    // supersedes it, and it stays retained like any other
-                    // installed head.
                     for dependency in head.dependencies.values() {
                         retain_lease_closure(dependency, &mut retained);
                     }
