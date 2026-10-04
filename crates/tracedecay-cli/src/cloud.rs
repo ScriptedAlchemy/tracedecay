@@ -732,17 +732,34 @@ mod tests {
         let (base, _hold) = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let (stop, stopped) = std::sync::mpsc::channel();
             let hold = std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(stream) = stream else { break };
-                    let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
-                    drop(stream);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            socket2::SockRef::from(&stream)
+                                .set_linger(Some(Duration::ZERO))
+                                .unwrap();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("reset listener failed: {error}"),
+                    }
+                    match stopped.recv_timeout(Duration::from_millis(10)) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        _ => break,
+                    }
                 }
             });
-            (base, hold)
+            (base, (stop, hold))
         };
 
         let error = latest_release_version(&base, true, None).unwrap_err();
+        #[cfg(windows)]
+        {
+            _hold.0.send(()).unwrap();
+            _hold.1.join().unwrap();
+        }
 
         assert!(
             matches!(error, ReleaseLookupError::NetworkUnreachable { .. }),
