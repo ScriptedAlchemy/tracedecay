@@ -279,13 +279,15 @@ pub(crate) async fn seed_all(
     // re-fetching it here could drop every file probe on a transient error.
     files: &[Value],
 ) -> Seeds {
-    let mut seeds = Seeds::default();
-    seeds.sample_files = files
-        .iter()
-        .filter_map(|f| f.get("path").and_then(Value::as_str))
-        .take(64)
-        .map(str::to_owned)
-        .collect();
+    let mut seeds = Seeds {
+        sample_files: files
+            .iter()
+            .filter_map(|f| f.get("path").and_then(Value::as_str))
+            .take(64)
+            .map(str::to_owned)
+            .collect(),
+        ..Seeds::default()
+    };
     let call = |tool: &'static str, args: Value| call_transient(harness, project_root, tool, args);
 
     // ── identity ─────────────────────────────────────────────────────────
@@ -450,12 +452,11 @@ pub(crate) async fn seed_all(
     seed_refresh(harness, project_root, &mut seeds).await;
 
     // ── automation run id (only present if a run exists) ──────────────────
-    if let Some(v) = call(
+    if let Ok(v) = call(
         "tracedecay_automation_run_list",
         json!({"limit": 1, "format": "json"}),
     )
     .await
-    .ok()
     {
         seeds.automation_run_id = dig_str(&v, "run_id").map(str::to_owned);
     }
@@ -749,12 +750,11 @@ async fn seed_configuration(
         seeds.config_key = Some(scalar_key.to_owned());
         seeds.config_scalar = Some(toggled);
     }
-    if let Some(v) = call(
+    if let Ok(v) = call(
         "tracedecay_configuration_get",
         json!({"key": "work.topology_policy.v1", "format": "json"}),
     )
     .await
-    .ok()
     {
         seeds.topology_policy = dig(&v, "effective_value")
             .and_then(|e| e.get("value"))

@@ -97,6 +97,7 @@ pub async fn compute_ast_grep_search(
             results,
             files_scanned: search.files_scanned as u64,
             truncated: search.truncated,
+            freshness: None,
         }),
         touched_files,
     ))

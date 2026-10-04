@@ -301,6 +301,7 @@ fn shared_family_result(
         source,
         families,
         coverage,
+        freshness: None,
     })
 }
 

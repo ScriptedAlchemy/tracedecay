@@ -101,6 +101,7 @@ pub(super) async fn compute_recursion(
         GraphToolResultV1::Recursion(RecursionResultV1 {
             cycle_count: result_cycles.len() as u64,
             cycles: result_cycles,
+            freshness: None,
         }),
         touched_files,
     ))

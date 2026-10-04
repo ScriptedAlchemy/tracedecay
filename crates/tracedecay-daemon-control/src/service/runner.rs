@@ -163,7 +163,6 @@ impl ServiceRunner {
     #[tracing::instrument(name = "daemon.service.runner.install", level = "trace", skip_all)]
     pub(super) fn install(
         &self,
-        profile: &ProfileRoot,
         service_path: &Path,
         start: bool,
         socket_path: &Path,
@@ -201,7 +200,6 @@ impl ServiceRunner {
     #[tracing::instrument(name = "daemon.service.runner.refresh", level = "trace", skip_all)]
     pub(super) fn refresh(
         &self,
-        profile: &ProfileRoot,
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,

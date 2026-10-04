@@ -853,17 +853,18 @@ impl CodeIndexSchedulerRegistryV1 {
     /// is what starts that decode: it waits for the seat rather than answering
     /// the demanding request unavailable, until `deadline`. A seat that does
     /// not serve this scope, or no published text owner to decode, ends it.
-    pub(crate) async fn latest_complete_fresh_for_scope_awaiting_seat(
+    pub async fn latest_complete_fresh_for_scope_awaiting_seat(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
         deadline: tokio::time::Instant,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;
-            unique_mounted_for_scope(&mounted, scope)
-                .unique()?
-                .0
-                .clone()
+            let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            if !worktree.graph_activation.policy().is_enabled() {
+                return None;
+            }
+            root.clone()
         };
         let root = &root;
         let slots = || async move {

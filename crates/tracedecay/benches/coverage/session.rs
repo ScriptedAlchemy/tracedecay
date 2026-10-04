@@ -59,20 +59,20 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     let has_session = ctx.seeds.lcm_session.is_some();
     if has_session {
         out.push(ToolGroup {
-        tool: "tracedecay_message_search",
-        queries: five(|i| {
-            rq(
-                "tracedecay_message_search",
-                "message_search",
-                json!({
-                    "query": *["bench", "import", "fn", "error", "test"].iter().nth(i).unwrap_or(&""),
-                    "session_id": session,
-                    "provider": "codex",
-                    "limit": 10,
-                }),
-            )
-        }),
-    });
+            tool: "tracedecay_message_search",
+            queries: five(|i| {
+                rq(
+                    "tracedecay_message_search",
+                    "message_search",
+                    json!({
+                        "query": *["bench", "import", "fn", "error", "test"].get(i).unwrap_or(&""),
+                        "session_id": session,
+                        "provider": "codex",
+                        "limit": 10,
+                    }),
+                )
+            }),
+        });
         out.push(ToolGroup {
             tool: "tracedecay_session_lookup",
             queries: five(|i| {
@@ -119,7 +119,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 json!({
                     "provider": "codex",
                     "session_id": session,
-                    "prompt": *["bench", "mount", "session", "store", "index"].iter().nth(i).unwrap_or(&""),
+                    "prompt": *["bench", "mount", "session", "store", "index"].get(i).unwrap_or(&""),
                     "max_results": 10,
                 }),
             )
@@ -140,20 +140,20 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             }),
         });
         out.push(ToolGroup {
-        tool: "tracedecay_lcm_grep",
-        queries: five(|i| {
-            rq(
-                "tracedecay_lcm_grep",
-                "lcm_grep",
-                json!({
-                    "query": *["bench", "import", "fn", "error", "test"].iter().nth(i).unwrap_or(&""),
-                    "session_id": session,
-                    "provider": "codex",
-                    "limit": 10,
-                }),
-            )
-        }),
-    });
+            tool: "tracedecay_lcm_grep",
+            queries: five(|i| {
+                rq(
+                    "tracedecay_lcm_grep",
+                    "lcm_grep",
+                    json!({
+                        "query": *["bench", "import", "fn", "error", "test"].get(i).unwrap_or(&""),
+                        "session_id": session,
+                        "provider": "codex",
+                        "limit": 10,
+                    }),
+                )
+            }),
+        });
         out.push(ToolGroup {
             tool: "tracedecay_lcm_status",
             queries: five(|i| {

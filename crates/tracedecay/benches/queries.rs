@@ -840,8 +840,8 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                     "search_fn",
                     "tracedecay_ast_grep_search",
                     json!({
-                        "pattern": *["fn $NAME($$$ARGS)", "let $X = $Y", "impl $T { $$$B }", "pub fn $NAME($$$A)", "match $E { $$$ARMS }"].iter().nth(i).unwrap_or(&""),
-                        "lang": *["rust", "python", "rust", "rust", "python"].iter().nth(i).unwrap_or(&"rust"),
+                        "pattern": *["fn $NAME($$$ARGS)", "let $X = $Y", "impl $T { $$$B }", "pub fn $NAME($$$A)", "match $E { $$$ARMS }"].get(i).unwrap_or(&""),
+                        "lang": *["rust", "python", "rust", "rust", "python"].get(i).unwrap_or(&"rust"),
                         "max_results": 20,
                     }),
                 )

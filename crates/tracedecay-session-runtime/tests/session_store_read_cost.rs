@@ -16,6 +16,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -381,6 +382,52 @@ impl DrainFixture {
     }
 }
 
+/// Compare drain queries at the same WAL phase. A threshold-triggered
+/// checkpoint copies earlier messages' dirty pages, so including it in only
+/// one probe measures periodic maintenance rather than this message's reads.
+/// Ordinary capture/drain writes on a separate session advance the log to its
+/// next generation; checkpoint policy and the probed session stay unchanged.
+async fn probe_drain_after_wal_restart(
+    facade: &HostAdmissionFacade<'_>,
+    fixture: &DrainFixture,
+    probed: &mut SessionCursor,
+    padding: &mut SessionCursor,
+    timestamp: i64,
+) -> u64 {
+    let (project, scope) = (fixture.project.as_path(), fixture.scope());
+    let wal = session_store_path(fixture).with_extension("db-wal");
+    let sequence = wal_checkpoint_sequence(&wal);
+    let mut restarted = false;
+    for _ in 0..DRAIN_WINDOW {
+        capture(
+            facade,
+            message_requests(project, &scope, padding, 1, timestamp, PROMPT_TITLE_WORDS),
+        )
+        .await;
+        assert_eq!(drain(facade, &scope).await, 1);
+        if wal_checkpoint_sequence(&wal) != sequence {
+            restarted = true;
+            break;
+        }
+    }
+    assert!(
+        restarted,
+        "ordinary ingest must restart the WAL before the probe"
+    );
+    let database = fixture
+        .runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
+    let read = probe_one_message(facade, project, &scope, probed, timestamp).await;
+    assert_eq!(
+        writer_telemetry(database).wal.checkpointed_frames,
+        checkpointed,
+        "the drain query comparison must not include a periodic checkpoint"
+    );
+    read
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_message_drain_reads_do_not_scale_with_the_session_store() {
     let _measured = MEASURED.lock().await;
@@ -390,7 +437,15 @@ async fn single_message_drain_reads_do_not_scale_with_the_session_store() {
 
     let mut probed = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
     let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
-    let base_read = probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp).await;
+    let mut padding = session_cursor(GROWN_SESSIONS);
+    let base_read = probe_drain_after_wal_restart(
+        &facade,
+        &fixture,
+        &mut probed,
+        &mut padding,
+        probe_timestamp,
+    )
+    .await;
 
     seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
     assert_eq!(
@@ -399,10 +454,25 @@ async fn single_message_drain_reads_do_not_scale_with_the_session_store() {
             .project_session_message_count_for_test()
             .await
             .unwrap(),
-        i64::try_from(GROWN_SESSIONS * MESSAGES_PER_SESSION + 1).unwrap(),
+        i64::try_from(GROWN_SESSIONS * MESSAGES_PER_SESSION + 1 + padding.next_ordinal).unwrap(),
     );
-    let grown_read =
-        probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp + 1).await;
+    let grown_read = probe_drain_after_wal_restart(
+        &facade,
+        &fixture,
+        &mut probed,
+        &mut padding,
+        probe_timestamp + 1,
+    )
+    .await;
+
+    assert_eq!(
+        fixture
+            .runtime
+            .project_session_message_count_for_test()
+            .await
+            .unwrap(),
+        i64::try_from(GROWN_SESSIONS * MESSAGES_PER_SESSION + 2 + padding.next_ordinal).unwrap(),
+    );
 
     eprintln!("single-message drain read bytes: base={base_read} grown={grown_read}");
     assert!(
@@ -710,7 +780,11 @@ fn session_store_path(fixture: &DrainFixture) -> PathBuf {
 /// The WAL header's checkpoint sequence, which SQLite advances each time the
 /// writer restarts the log from its head after a complete checkpoint.
 fn wal_checkpoint_sequence(wal: &Path) -> u32 {
-    let header = std::fs::read(wal).unwrap();
+    let mut header = [0; 16];
+    std::fs::File::open(wal)
+        .unwrap()
+        .read_exact(&mut header)
+        .unwrap();
     u32::from_be_bytes(header[12..16].try_into().unwrap())
 }
 

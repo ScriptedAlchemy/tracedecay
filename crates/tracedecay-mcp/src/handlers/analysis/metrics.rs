@@ -101,6 +101,7 @@ pub(super) async fn compute_rank(
             node_kind_filter: request.node_kind,
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         touched_files,
     ))
@@ -162,6 +163,7 @@ pub(super) async fn compute_largest(
             node_kind_filter: request.node_kind,
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         touched_files,
     ))
@@ -238,6 +240,7 @@ pub(super) async fn compute_coupling(
             direction,
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         Vec::new(),
     ))
@@ -311,6 +314,7 @@ pub(super) async fn compute_inheritance_depth(
         GraphToolResultV1::InheritanceDepth(InheritanceDepthResultV1 {
             result_count: ranking.len() as u64,
             ranking,
+            freshness: None,
         }),
         touched_files,
     ))
@@ -426,6 +430,7 @@ pub(super) async fn compute_distribution(
     Ok(graph_tool_completion(
         GraphToolResultV1::Distribution(DistributionResultV1 {
             path_filter: path_prefix.map(str::to_owned),
+            freshness: None,
             view,
         }),
         Vec::new(),

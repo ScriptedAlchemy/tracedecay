@@ -9,7 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::result::{EvidenceCoverage, Omission};
-use crate::retrieval::{NodeExpansionCostV1, PrimitiveSymbolLocationV1};
+use crate::retrieval::{
+    NodeExpansionCostV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1,
+};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +43,9 @@ pub struct FindExactSymbolResultV1 {
     pub name: String,
     pub count: u64,
     pub matches: Vec<FindExactSymbolMatchV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -205,6 +210,9 @@ pub struct GrepSearchResultV1 {
     #[serde(default, skip_serializing_if = "GrepScanOmissionsV1::is_empty")]
     pub scan_omissions: GrepScanOmissionsV1,
     pub graph_enrichment: GrepGraphEnrichmentV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -242,4 +250,7 @@ pub struct AstGrepSearchResultV1 {
     pub match_count: u64,
     pub files_scanned: u64,
     pub truncated: bool,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }

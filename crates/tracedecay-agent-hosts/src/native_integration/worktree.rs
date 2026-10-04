@@ -371,7 +371,7 @@ impl DaemonNativeWorktreeAuthority {
                 locked: WorktreeObservationV1::Unknown,
                 holder: WorktreeObservationV1::Unknown,
                 unique_data: WorktreeObservationV1::Unknown,
-                operation: None,
+                operation_state: None,
                 observed_at,
                 inspection_digest: zero_digest()?,
             });
@@ -431,7 +431,7 @@ impl DaemonNativeWorktreeAuthority {
             },
             holder,
             unique_data,
-            operation,
+            operation_state: operation,
             observed_at,
             inspection_digest: zero_digest()?,
         })
@@ -455,7 +455,7 @@ impl DaemonNativeWorktreeAuthority {
             locked: WorktreeObservationV1::Unknown,
             holder: WorktreeObservationV1::Unknown,
             unique_data: WorktreeObservationV1::Unknown,
-            operation: None,
+            operation_state: None,
             observed_at,
             inspection_digest: zero_digest()?,
         })
@@ -513,7 +513,7 @@ impl DaemonNativeWorktreeAuthority {
             locked: inspection.locked,
             holder: inspection.holder,
             unique_data: inspection.unique_data,
-            operation: inspection.operation,
+            operation: inspection.operation_state,
             observed_at,
             evidence_digest: zero_digest()?,
         })
@@ -740,9 +740,10 @@ mod tests {
     use std::process::Command;
 
     use tracedecay_contracts::git::{
-        NativeWorktreeTargetV1, WorktreeInspectionV1, WorktreeKindV1, WorktreeObservationV1,
-        WorktreePresenceV1,
+        NativeWorktreeSurfaceResultV1, NativeWorktreeTargetV1, WorktreeInspectionOutcomeV1,
+        WorktreeInspectionV1, WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1,
     };
+    use tracedecay_domain::git::GitOperationStateV1;
     use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
     use tracedecay_runtime_core::git::try_git_program;
     use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
@@ -786,9 +787,28 @@ mod tests {
             locked: WorktreeObservationV1::No,
             holder: WorktreeObservationV1::No,
             unique_data,
-            operation: None,
+            operation_state: None,
             observed_at: UtcMicros(1),
             inspection_digest: zero_digest().expect("inspection digest"),
+        }
+    }
+
+    #[test]
+    fn worktree_inspection_roundtrips_its_surface_tag_and_git_operation() {
+        for operation in [None, Some(GitOperationStateV1::Merge)] {
+            let mut observation = inspection(WorktreeObservationV1::Yes, WorktreeObservationV1::No);
+            observation.operation_state = operation;
+            let result = NativeWorktreeSurfaceResultV1::Inspection(
+                WorktreeInspectionOutcomeV1::Inspection(Box::new(observation)),
+            );
+            let encoded = serde_json::to_vec(&result).unwrap();
+            let decoded: NativeWorktreeSurfaceResultV1 = serde_json::from_slice(&encoded)
+                .expect("the operation tag and Git state must both survive the wire");
+            assert_eq!(decoded, result);
+            assert_eq!(
+                serde_json::to_value(result).unwrap()["operation"],
+                "inspection"
+            );
         }
     }
 

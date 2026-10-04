@@ -329,8 +329,10 @@ pub fn render_graph_tool(
     };
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
-        GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
-        | GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
+        GraphToolResultV1::Node(NodeResultV1::NotFound(not_found)) => {
+            not_found_tool_result(not_found)?
+        }
+        GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }
@@ -544,6 +546,7 @@ mod tests {
                     text: "// TODO: probe".to_owned(),
                     enclosing: None,
                 }],
+                freshness: None,
             }),
             touched_files: vec!["src/lib.rs".to_owned()],
             code_graph,
@@ -798,6 +801,7 @@ mod tests {
                     match_count: 400,
                     by_kind: BTreeMap::from([("TODO".to_owned(), 400)]),
                     markers,
+                    freshness: None,
                 }),
                 touched_files: Vec::new(),
                 code_graph: Some(fresh_worktree_seat()),

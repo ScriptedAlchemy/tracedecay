@@ -323,26 +323,31 @@ fn capture_tokens(
 fn run_cleanup(
     rt: &Runtime,
     harness: &ProductionProjectCompositionHarnessV1,
-    project_root: &std::path::Path,
-    ctx: &QueryContext,
+    repository: &RepoBench,
     q: &Query,
     timed_payload: &Value,
     tokens: &mut std::collections::HashMap<String, Value>,
-    cleanup: &crate::queries::EffectCleanup,
     iteration: u64,
 ) -> Result<(), String> {
+    let QueryKind::Effect {
+        cleanup: Some(cleanup),
+        ..
+    } = &q.kind
+    else {
+        return Ok(());
+    };
     capture_tokens(timed_payload, cleanup.capture, tokens, q)?;
-    for step in (cleanup.steps)(ctx, iteration) {
+    for step in (cleanup.steps)(&repository.ctx, iteration) {
         // Cleanup calls commit real events after the timed call: `{{now}}`
         // must postdate it just as it does across prime steps.
         tokens.insert(String::from("now"), Value::from(coverage::now_micros()));
         for (name, mut value) in step.inject {
-            coverage::substitute_tokens(&mut value, &tokens);
+            coverage::substitute_tokens(&mut value, tokens);
             tokens.insert(name, value);
         }
         let mut args = step.args;
         coverage::substitute_tokens(&mut args, tokens);
-        let payload = call_step_transient(rt, harness, project_root, step.tool, args)
+        let payload = call_step_transient(rt, harness, &repository.dir, step.tool, args)
             .map_err(|error| format!("{} cleanup step {} failed: {error}", q.tool, step.tool))?;
         capture_tokens(&payload, step.capture, tokens, q)?;
     }
@@ -554,7 +559,7 @@ fn bench_all(c: &mut Criterion) {
                             continue;
                         }
                     }
-                    QueryKind::Effect { prime, cleanup } => {
+                    QueryKind::Effect { prime, .. } => {
                         let mut iteration = coverage::now_micros() as u64;
                         let warm = run_primes(
                             &rt,
@@ -568,21 +573,15 @@ fn bench_all(c: &mut Criterion) {
                         .and_then(|(args, mut tokens)| {
                             run_effect_query(&rt, &harness, &rb.dir, first, args).and_then(
                                 |payload| {
-                                    if let Some(cleanup) = cleanup {
-                                        run_cleanup(
-                                            &rt,
-                                            &harness,
-                                            &rb.dir,
-                                            &rb.ctx,
-                                            first,
-                                            &payload,
-                                            &mut tokens,
-                                            cleanup,
-                                            iteration,
-                                        )
-                                    } else {
-                                        Ok(())
-                                    }
+                                    run_cleanup(
+                                        &rt,
+                                        &harness,
+                                        rb,
+                                        first,
+                                        &payload,
+                                        &mut tokens,
+                                        iteration,
+                                    )
                                 },
                             )
                         });
@@ -709,7 +708,7 @@ fn bench_all(c: &mut Criterion) {
                             );
                         });
                     }
-                    QueryKind::Effect { prime, cleanup } => {
+                    QueryKind::Effect { prime, .. } => {
                         g.bench_with_input(id, q, |b, q| {
                             let mut iteration = coverage::now_micros() as u64;
                             // PerIteration: primed state is consumed by the
@@ -734,20 +733,8 @@ fn bench_all(c: &mut Criterion) {
                                 |((args, mut tokens), iter)| {
                                     let payload = run_effect_query(&rt, &harness, &rb.dir, q, args)
                                         .unwrap_or_else(|e| panic!("{e}"));
-                                    if let Some(cleanup) = cleanup {
-                                        run_cleanup(
-                                            &rt,
-                                            &harness,
-                                            &rb.dir,
-                                            &rb.ctx,
-                                            q,
-                                            &payload,
-                                            &mut tokens,
-                                            cleanup,
-                                            iter,
-                                        )
+                                    run_cleanup(&rt, &harness, rb, q, &payload, &mut tokens, iter)
                                         .unwrap_or_else(|e| panic!("{e}"));
-                                    }
                                 },
                                 BatchSize::PerIteration,
                             );

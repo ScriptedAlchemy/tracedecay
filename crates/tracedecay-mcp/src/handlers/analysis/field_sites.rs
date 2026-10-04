@@ -184,6 +184,7 @@ pub(super) async fn compute_field_sites(
             write_sites: writes,
             read_sites,
             field: request.field,
+            freshness: None,
         }),
         touched,
     ))

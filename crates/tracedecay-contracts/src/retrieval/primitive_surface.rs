@@ -593,7 +593,7 @@ pub struct PrimitiveNotFoundV1 {
 #[serde(untagged)]
 pub enum NodeResultV1 {
     Found(Box<NodeDetailsV1>),
-    NotFound(PrimitiveNotFoundV1),
+    NotFound(Box<PrimitiveNotFoundV1>),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -644,6 +644,9 @@ pub struct SimilarResultV1 {
     pub families: Vec<SimilarFamilyV1>,
     pub source_generation: CodeGenerationId,
     pub coverage: SimilarCoverageV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -690,6 +693,9 @@ pub struct RedundancyResultV1 {
     pub families: Vec<RedundancyFamilyV1>,
     pub coverage: RedundancyCoverageV1,
     pub next_cursor: Option<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -735,6 +741,9 @@ pub struct RenamePreviewPrimitiveResultV1 {
     pub reference_count: usize,
     pub references: Vec<RenamePreviewReferenceV1>,
     pub text_only_matches: Vec<RenamePreviewTextOnlyMatchV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -785,6 +794,9 @@ pub struct PortStatusResultV1 {
     pub unmatched_by_file: BTreeMap<String, Vec<PortUnmatchedSymbolV1>>,
     pub matched_symbols: Vec<PortMatchedSymbolV1>,
     pub target_only_symbols: Vec<PortTargetOnlySymbolV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -853,6 +865,9 @@ pub struct PortOrderResultV1 {
     pub returned: usize,
     pub levels: Vec<PortOrderLevelV1>,
     pub cycles: Vec<PortCycleV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -871,6 +886,9 @@ pub struct TodosResultV1 {
     pub match_count: usize,
     pub by_kind: BTreeMap<String, u64>,
     pub markers: Vec<TodoMarkerV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[cfg(test)]

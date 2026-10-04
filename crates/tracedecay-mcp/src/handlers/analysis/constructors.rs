@@ -55,6 +55,7 @@ pub(super) async fn compute_constructors(
                     struct_name: request.struct_name,
                     match_count: 0,
                     sites: Vec::new(),
+                    freshness: None,
                 },
             )),
             Vec::new(),
@@ -196,6 +197,7 @@ pub(super) async fn compute_constructors(
             match_count: sites.len() as u64,
             sites,
             struct_name: request.struct_name,
+            freshness: None,
         })),
         touched,
     ))

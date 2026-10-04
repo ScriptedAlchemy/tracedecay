@@ -171,7 +171,7 @@ pub async fn compute_branch_list(
     )
     .await
     {
-        Ok(page) => BranchListResultV1::Page(BranchListPageV1 {
+        Ok(page) => BranchListResultV1::Page(Box::new(BranchListPageV1 {
             status: if page.truncated {
                 GitPageStatusV1::Partial
             } else {
@@ -199,7 +199,8 @@ pub async fn compute_branch_list(
                     source_tree: snapshot.tree,
                 })
                 .collect(),
-        }),
+            freshness: None,
+        })),
         Err(error) => BranchListResultV1::Unavailable(branch_read_unavailable(&error)),
     };
     Ok(graph_tool_completion(
@@ -407,7 +408,7 @@ pub async fn compute_branch_search(
                         .collect::<Vec<_>>()
                 }
             };
-            BranchSearchResultV1::Page(BranchSearchPageV1 {
+            BranchSearchResultV1::Page(Box::new(BranchSearchPageV1 {
                 status: if has_more {
                     GitPageStatusV1::Partial
                 } else {
@@ -421,7 +422,8 @@ pub async fn compute_branch_search(
                 code_generation: complete.code_generation,
                 next_cursor,
                 results,
-            })
+                freshness: None,
+            }))
         }
         tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             branch_search_unavailable(
@@ -675,6 +677,7 @@ pub async fn compute_branch_diff(
                     total_changes: completed.total_changes,
                     summary: branch_change_summary(&completed.changes),
                     changes: completed.changes.iter().map(branch_change).collect(),
+                    freshness: None,
                 })
             };
             (result, touched)
@@ -702,6 +705,7 @@ pub async fn compute_branch_diff(
                     next_cursor: partial.next_cursor,
                     summary: branch_change_summary(&partial.changes),
                     changes: partial.changes.iter().map(branch_change).collect(),
+                    freshness: None,
                 })
             };
             (result, touched)

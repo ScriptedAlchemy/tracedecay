@@ -335,8 +335,14 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
                     made_progress: false,
                 };
             }
-            while !self.cancelled.load(Ordering::Acquire) {
-                self.wake.notified().await;
+            loop {
+                // notify_waiters covers futures created before cancellation,
+                // even when the notification arrives before their first poll.
+                let notified = self.wake.notified();
+                if self.cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
             }
             SessionHistoricalIngestOutcome::Cancelled
         })
@@ -369,8 +375,12 @@ impl SessionHistoricalIngestor for CancelAwareHistoricalIngestor {
     ) -> Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + '_>> {
         Box::pin(async move {
             self.entered.store(true, Ordering::Release);
-            while !self.cancelled.load(Ordering::Acquire) {
-                self.wake.notified().await;
+            loop {
+                let notified = self.wake.notified();
+                if self.cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
             }
             self.exited.store(true, Ordering::Release);
             SessionHistoricalIngestOutcome::Cancelled
