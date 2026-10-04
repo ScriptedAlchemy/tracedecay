@@ -144,15 +144,16 @@ pub(crate) fn recovered_generation_digest_chunked(
     Ok((encode_lowercase_hex(&digest.finalize()), canonical_bytes))
 }
 
-/// Each stored relation of `identity`'s generation with the row-sum lanes
-/// of its frame as `identity` recovers it, in identity order. A relation's
-/// frame names its endpoints' projection, so the same stored rows hash
-/// differently under each projection that reads them.
+/// Streams each stored relation of `identity`'s generation to `emit` with
+/// the row-sum lanes of its frame as `identity` recovers it, in identity
+/// order. A relation's frame names its endpoints' projection, so the same
+/// stored rows hash differently under each projection that reads them.
 pub(crate) fn recovered_relation_lanes(
     database: &GrafeoDB,
     identity: &GraphGenerationManifestIdentity,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<(String, RowLanes)>, GraphDbError> {
+    emit: &mut dyn FnMut(&str, RowLanes) -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
     let store = database.graph_store();
     let relations = projection_relation_nodes_sorted_checked(
         database,
@@ -164,7 +165,6 @@ pub(crate) fn recovered_relation_lanes(
     let mut canonical = CheckedVecWriter::new(check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
     let mut endpoints = EndpointIdentityCache::default();
     let mut endpoint_refs = HashMap::new();
-    let mut lanes = Vec::with_capacity(relations.len());
     for (sorted_identity, locator) in &relations {
         check()?;
         let relation = decode_sorted_relation(
@@ -176,12 +176,12 @@ pub(crate) fn recovered_relation_lanes(
             &mut endpoint_refs,
         )?;
         let bytes = canonical.encode(&relation, "recovered generation relation")?;
-        lanes.push((
-            sorted_identity.as_str().to_owned(),
+        emit(
+            sorted_identity.as_str(),
             row_frame_lanes("relation", bytes)?,
-        ));
+        )?;
     }
-    Ok(lanes)
+    Ok(())
 }
 
 /// The single-pass stream for generations at or below one chunk: one decoded

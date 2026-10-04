@@ -292,13 +292,26 @@ impl RowIndex {
         count: u64,
         key: RowKey,
     ) -> Result<Option<(RowLanes, u32, u32)>, GraphDbError> {
+        Ok(self
+            .position(first, count, key)?
+            .map(|(_, lanes, first_word, second_word)| (lanes, first_word, second_word)))
+    }
+
+    fn position(
+        &self,
+        first: u64,
+        count: u64,
+        key: RowKey,
+    ) -> Result<Option<(u64, RowLanes, u32, u32)>, GraphDbError> {
         let (mut low, mut high) = (0_u64, count);
         while low < high {
             let middle = low + (high - low) / 2;
             let (found, lanes, first_word, second_word) =
                 record_parts(&self.record(first + middle)?);
             match found.cmp(&key) {
-                std::cmp::Ordering::Equal => return Ok(Some((lanes, first_word, second_word))),
+                std::cmp::Ordering::Equal => {
+                    return Ok(Some((first + middle, lanes, first_word, second_word)));
+                }
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
             }
@@ -323,64 +336,47 @@ impl RowIndex {
     }
 
     /// Writes this index to `path` with every relation's lanes replaced by
-    /// those `relations` records for it, entity records and endpoint
-    /// ordinals unchanged: the index of the same rows read under another
-    /// projection. `relations` must name exactly the relations recorded.
-    pub(crate) fn write_with_relation_lanes(
+    /// the lanes `relane` emits for it, entity records and endpoint ordinals
+    /// unchanged: the index of the same rows read under another projection.
+    /// `relane` streams each recorded relation exactly once, in strictly
+    /// increasing identity order, so only one record is resident at a time.
+    pub(crate) fn write_relaned(
         &self,
         path: &Path,
-        relations: &[(String, RowLanes)],
-        check: &dyn Fn() -> Result<(), GraphDbError>,
+        relane: impl FnOnce(
+            &mut dyn FnMut(&str, RowLanes) -> Result<(), GraphDbError>,
+        ) -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
-        if relations.len() as u64 != self.relations {
+        std::fs::copy(&self.path, path).map_err(|error| index_io("copy", error))?;
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| index_io("open", error))?;
+        let mut relaned = 0_u64;
+        let mut previous: Option<String> = None;
+        relane(&mut |identity, lanes| {
+            if previous.as_deref().is_some_and(|last| last >= identity) {
+                return Err(corrupt("relanes relations out of identity order"));
+            }
+            previous = Some(identity.to_owned());
+            let Some((position, ..)) =
+                self.position(self.entities, self.relations, row_key("relation", identity))?
+            else {
+                return Err(corrupt("relanes a relation it does not record"));
+            };
+            target
+                .seek(SeekFrom::Start(HEADER_BYTES + position * RECORD_BYTES + 16))
+                .map_err(|error| index_io("seek", error))?;
+            target
+                .write_all(&lanes_bytes(lanes))
+                .map_err(|error| index_io("write", error))?;
+            relaned += 1;
+            Ok(())
+        })?;
+        if relaned != self.relations {
             return Err(corrupt("relanes a different relation set than it records"));
         }
-        let mut lanes = relations
-            .iter()
-            .map(|(identity, lanes)| (row_key("relation", identity), *lanes))
-            .collect::<Vec<_>>();
-        lanes.sort_unstable_by_key(|(key, _)| *key);
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| GraphDbError::unavailable("graph row index lock is poisoned"))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| index_io("seek", error))?;
-        let mut reader = std::io::BufReader::new(&mut *file);
-        let mut header = [0_u8; HEADER_BYTES as usize];
-        reader
-            .read_exact(&mut header)
-            .map_err(|error| index_io("header read", error))?;
-        let target = File::create(path).map_err(|error| index_io("create", error))?;
-        let mut writer = BufWriter::new(target);
-        writer
-            .write_all(&header)
-            .map_err(|error| index_io("write", error))?;
-        let mut record = [0_u8; RECORD_BYTES as usize];
-        for position in 0..self.entities + self.relations {
-            if position % 65_536 == 0 {
-                check()?;
-            }
-            reader
-                .read_exact(&mut record)
-                .map_err(|error| index_io("record read", error))?;
-            if position >= self.entities {
-                let relation = position - self.entities;
-                let (key, replacement) = lanes[relation as usize];
-                if key != record_parts(&record).0 {
-                    return Err(corrupt("relanes a relation it does not record"));
-                }
-                record[16..48].copy_from_slice(&lanes_bytes(replacement));
-            }
-            writer
-                .write_all(&record)
-                .map_err(|error| index_io("write", error))?;
-        }
-        writer
-            .into_inner()
-            .map_err(|error| index_io("flush", error.into_error()))?
-            .sync_all()
-            .map_err(|error| index_io("sync", error))
+        target.sync_all().map_err(|error| index_io("sync", error))
     }
 
     /// The sum of every recorded row: equal to the generation's row sum

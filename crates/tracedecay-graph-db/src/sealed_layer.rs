@@ -309,13 +309,14 @@ impl GraphSealedBaseV1 {
             Vec::new(),
         )
         .stored_under(base.physical_namespace.clone())?;
-        let relations = engine.read_intact(&NeverCancelled, |native| {
-            crate::generation::recovered_relation_lanes(native, &identity, check)
-        })?;
-        let _ = engine.hibernate_if_lazy_when_idle();
         let staged = index_path.with_extension("reattested");
-        base.index
-            .write_with_relation_lanes(&staged, &relations, check)?;
+        let relaned = base.index.write_relaned(&staged, |emit| {
+            engine.read_intact(&NeverCancelled, |native| {
+                crate::generation::recovered_relation_lanes(native, &identity, check, emit)
+            })
+        });
+        let _ = engine.hibernate_if_lazy_when_idle();
+        relaned?;
         std::fs::rename(&staged, index_path)
             .map_err(|error| layered_io("reattested row index install", error))?;
         let index = RowIndex::open(index_path)?;
