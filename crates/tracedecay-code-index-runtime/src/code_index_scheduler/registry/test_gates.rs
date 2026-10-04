@@ -19,8 +19,7 @@ use super::{
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
     cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
     graph_decode_gate, published_text_projection_gate, query_admission_controls, serving_swap_gate,
-    test_gate_root,
-    unique_mounted_for_scope, wait_notified_if_unset,
+    test_gate_root, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 

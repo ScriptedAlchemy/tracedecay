@@ -992,7 +992,7 @@ pub(in crate::runtime) fn shared_jsonl_file_identity(
         device: metadata.dev(),
         #[cfg(unix)]
         inode: metadata.ino(),
-        changed: RewriteWitness::NATIVE.stamp(&metadata, sampled_at),
+        changed: RewriteWitness::native_path_stamp(path, &metadata, sampled_at),
     })
 }
 

@@ -1513,24 +1513,11 @@ mod tests {
         .await
         .unwrap();
         assert!(!second.deferred);
-        // Skipping the reread needs a settled change-time witness to record
-        // convergence; hosts without one (Windows) honestly re-read the file.
-        #[cfg(unix)]
+        let settled = crate::runtime::source::spin_until_jsonl_change_settled(&state);
         assert_eq!(
             super::kimi_state_read_count_for_test(&state),
-            admitted,
-            "a later pass must not open state.json once its agents are settled"
-        );
-        // The first pass's read count varies with where the wire admission
-        // settles, so the honest contract is the two-pass total: without a
-        // stat witness both passes re-read state.json instead of skipping
-        // settled agents.
-        #[cfg(not(unix))]
-        assert_eq!(
-            super::kimi_state_read_count_for_test(&state),
-            4,
-            "no stat witness exists, so each pass reads state.json in the \
-             discovery scan and again resolving the wire's session identity"
+            if settled { admitted } else { 4 },
+            "settled native identity skips rereads; unvouched files are reread"
         );
         assert_eq!(admission.observations().len(), 1);
     }

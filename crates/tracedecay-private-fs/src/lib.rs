@@ -20,6 +20,8 @@ pub use file_lease::FileLease;
 pub use lock_admission::{LockAdmissionError, lock_shared_until, lock_until};
 #[cfg(windows)]
 pub mod windows_file;
+#[cfg(windows)]
+mod windows_rewrite_witness;
 
 /// A private-file creation failure that distinguishes pre-creation errors from
 /// validation errors on an already-created exact file handle.

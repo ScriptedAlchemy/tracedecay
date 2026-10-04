@@ -216,7 +216,7 @@ impl SettledFileWitness {
         let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
             return Ok(None);
         };
-        let changed = change_stamp(&metadata);
+        let changed = change_stamp(path, &metadata);
         if !metadata.is_file() || !changed.is_settled() {
             return Ok(None);
         }
@@ -1823,8 +1823,11 @@ impl CodexSource {
                     }
                 };
                 if !metadata.is_file()
-                    || codex_corpus_identity(&source.path, &metadata, change_stamp(&metadata))?
-                        != source.identity
+                    || codex_corpus_identity(
+                        &source.path,
+                        &metadata,
+                        change_stamp(&source.path, &metadata),
+                    )? != source.identity
                 {
                     valid = false;
                     break;
@@ -1899,8 +1902,11 @@ impl CodexSource {
                         }
                     };
                     if !metadata.is_file()
-                        || codex_corpus_identity(&file.path, &metadata, change_stamp(&metadata))?
-                            != file.identity
+                        || codex_corpus_identity(
+                            &file.path,
+                            &metadata,
+                            change_stamp(&file.path, &metadata),
+                        )? != file.identity
                     {
                         changed = true;
                         break;
@@ -2619,7 +2625,8 @@ fn retained_scan_step(
                     discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
                     break;
                 }
-                let identity = codex_corpus_identity(&path, &metadata, change_stamp(&metadata))?;
+                let identity =
+                    codex_corpus_identity(&path, &metadata, change_stamp(&path, &metadata))?;
                 scan.epoch.observe(identity)?;
                 retain_active_file(
                     &mut scan.active_files,
@@ -2723,7 +2730,7 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
             ),
         });
     }
-    let changed = change_stamp(&metadata);
+    let changed = change_stamp(path, &metadata);
     Ok(Some(DirectoryStatWitness {
         stat: codex_corpus_identity(path, &metadata, changed)?,
         settled: changed.is_settled(),
@@ -2796,8 +2803,8 @@ fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult
 
 /// The change stamp a corpus identity carries, settled against the clock now:
 /// after the stat, before any read of the bytes the identity stands for.
-fn change_stamp(metadata: &std::fs::Metadata) -> ChangeStamp {
-    RewriteWitness::NATIVE.stamp(metadata, ChangeClockReading::now())
+fn change_stamp(path: &Path, metadata: &std::fs::Metadata) -> ChangeStamp {
+    RewriteWitness::native_path_stamp(path, metadata, ChangeClockReading::now())
 }
 
 /// Discovery skips re-delivering a file whose identity is unchanged, so an

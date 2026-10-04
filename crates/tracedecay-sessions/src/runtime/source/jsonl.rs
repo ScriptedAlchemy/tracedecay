@@ -11,6 +11,8 @@ use std::os::unix::fs::MetadataExt;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
+#[cfg(test)]
+use tracedecay_private_fs::ChangeClockReading;
 use tracedecay_private_fs::RewriteWitness;
 
 use super::{
@@ -380,7 +382,7 @@ impl HoldUnchangedGenerationCache {
 /// instead of sleeping for a fixed budget: the condition is the clock
 /// quantum itself.
 #[cfg(test)]
-pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
+pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) -> bool {
     for _ in 0..10_000_000u32 {
         let Ok(file) = std::fs::File::open(path) else {
             std::thread::yield_now();
@@ -390,9 +392,10 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
             std::thread::yield_now();
             continue;
         };
-        let witness = RewriteWitness::NATIVE;
-        if !witness.proves_unchanged_bytes() || witness.vouches_for_unchanged_bytes(&metadata) {
-            return;
+        let settled = RewriteWitness::native_path_stamp(path, &metadata, ChangeClockReading::now())
+            .is_settled();
+        if settled || !RewriteWitness::NATIVE.proves_unchanged_bytes() {
+            return settled;
         }
         std::thread::yield_now();
     }
