@@ -246,6 +246,15 @@ pub struct CoChangePartnerV1 {
     pub partner_of_changes: u64,
 }
 
+/// Why co-change mining produced no answer, so an empty
+/// `missing_co_change_partners` does not read as "no partner is missing".
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoChangeUnavailableV1 {
+    pub reason: String,
+    pub retryable: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiffContextResultV1 {
@@ -260,6 +269,9 @@ pub struct DiffContextResultV1 {
     /// Files that usually change with a changed file, per bounded Git
     /// history, but are absent from this change set.
     pub missing_co_change_partners: Vec<CoChangePartnerV1>,
+    /// Present when Git history could not be mined for co-change partners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change_unavailable: Option<CoChangeUnavailableV1>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
@@ -617,6 +629,9 @@ pub struct PrContextCompleteV1 {
     /// Files that usually change with a changed file, per bounded Git
     /// history, but are absent from this change set.
     pub missing_co_change_partners: Vec<CoChangePartnerV1>,
+    /// Present when Git history could not be mined for co-change partners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change_unavailable: Option<CoChangeUnavailableV1>,
     pub symbols_added: usize,
     pub symbols_removed: usize,
     pub symbols_modified: usize,
@@ -659,6 +674,9 @@ pub struct PrContextSymbolsUnavailableV1 {
     /// Files that usually change with a changed file, per bounded Git
     /// history, but are absent from this change set.
     pub missing_co_change_partners: Vec<CoChangePartnerV1>,
+    /// Present when Git history could not be mined for co-change partners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change_unavailable: Option<CoChangeUnavailableV1>,
     pub symbols_added: usize,
     pub symbols_removed: usize,
     pub symbols_modified: usize,
@@ -694,6 +712,9 @@ pub struct PrContextGraphPendingV1 {
     /// Files that usually change with a changed file, per bounded Git
     /// history, but are absent from this change set.
     pub missing_co_change_partners: Vec<CoChangePartnerV1>,
+    /// Present when Git history could not be mined for co-change partners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change_unavailable: Option<CoChangeUnavailableV1>,
     pub symbols_added: usize,
     pub symbols_modified: usize,
     pub added: Vec<PrSymbolEntryV1>,

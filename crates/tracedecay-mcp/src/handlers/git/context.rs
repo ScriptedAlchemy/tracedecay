@@ -17,13 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CoChangePartnerV1,
-    CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1,
-    CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1, DiffContextResultV1,
-    DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1, GitReadCompleteV1,
-    GitReadPartialV1, GitReadUnavailableV1, PrAnalysisCoverageV1, PrContextCompleteV1,
-    PrContextGraphPendingV1, PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1,
-    PrCoverageSelectionV1, PrSelectionCoverageV1, PrSymbolChangesCompleteV1, PrSymbolEntryV1,
-    PrSymbolPageV1, PrSymbolSelectionV1, SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
+    CoChangeUnavailableV1, CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1,
+    CommitFileRoleV1, CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1,
+    DiffContextResultV1, DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1,
+    GitReadCompleteV1, GitReadPartialV1, GitReadUnavailableV1, PrAnalysisCoverageV1,
+    PrContextCompleteV1, PrContextGraphPendingV1, PrContextSurfaceRequestV1,
+    PrContextSymbolsUnavailableV1, PrCoverageSelectionV1, PrSelectionCoverageV1,
+    PrSymbolChangesCompleteV1, PrSymbolEntryV1, PrSymbolPageV1, PrSymbolSelectionV1,
+    SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
 };
 use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
@@ -305,29 +306,82 @@ fn context_symbol(symbol: &CodeGraphSymbolSummaryV1) -> Result<GitContextSymbolV
     })
 }
 
-async fn missing_co_change_partners(
-    project_root: &std::path::Path,
-    history: &str,
-    tree: &str,
-    changed_files: &[String],
-) -> Result<Vec<CoChangePartnerV1>> {
-    Ok(
+/// Co-change partners missing from a change set. Mining is enrichment: when
+/// it fails the primary context still answers and says why partners are absent.
+struct CoChangeEvidence {
+    missing: Vec<CoChangePartnerV1>,
+    unavailable: Option<CoChangeUnavailableV1>,
+}
+
+struct CancelGitReadOnDrop(tracedecay_runtime_core::cancellation::CancellationToken);
+
+impl Drop for CancelGitReadOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn co_change_evidence(
+    ctx: &McpToolContext<'_>,
+    history: String,
+    tree: String,
+    changed_files: Vec<String>,
+) -> CoChangeEvidence {
+    let cancel = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let _cancel_on_drop = CancelGitReadOnDrop(cancel.clone());
+    let mut bounds = tracedecay_runtime_core::git::GitCommandBounds {
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
+    if let Some(deadline) = ctx.deadline() {
+        let remaining =
+            tracedecay_daemon_protocol::deadline_remaining(deadline).unwrap_or_default();
+        bounds.deadline = bounds.deadline.min(std::time::Instant::now() + remaining);
+    }
+    let root = ctx.project_root().to_path_buf();
+    let mut worker = tokio::task::spawn_blocking(move || {
         tracedecay_runtime_core::git::co_change::missing_co_change_partners(
-            project_root,
-            history,
-            tree,
-            changed_files,
+            &root,
+            &history,
+            &tree,
+            &changed_files,
+            &bounds,
         )
-        .await?
-        .into_iter()
-        .map(|partner| CoChangePartnerV1 {
-            file: partner.file,
-            partner_of: partner.partner_of,
-            co_changes: partner.co_changes as u64,
-            partner_of_changes: partner.partner_of_changes as u64,
-        })
-        .collect(),
-    )
+    });
+    let joined = match ctx.cancellation() {
+        Some(signal) => tokio::select! {
+            biased;
+            joined = &mut worker => joined,
+            () = signal.cancelled() => {
+                cancel.cancel();
+                worker.await
+            }
+        },
+        None => worker.await,
+    };
+    let unavailable = |reason: String, retryable: bool| CoChangeEvidence {
+        missing: Vec::new(),
+        unavailable: Some(CoChangeUnavailableV1 { reason, retryable }),
+    };
+    match joined {
+        Ok(Ok(partners)) => CoChangeEvidence {
+            missing: partners
+                .into_iter()
+                .map(|partner| CoChangePartnerV1 {
+                    file: partner.file,
+                    partner_of: partner.partner_of,
+                    co_changes: partner.co_changes as u64,
+                    partner_of_changes: partner.partner_of_changes as u64,
+                })
+                .collect(),
+            unavailable: None,
+        },
+        Ok(Err(error)) => {
+            let retryable = !matches!(error, TraceDecayError::HostCliUnavailable { .. });
+            unavailable(error.to_string(), retryable)
+        }
+        Err(join_error) => unavailable(format!("co-change task failed: {join_error}"), true),
+    }
 }
 
 fn all_symbols_in_files(
@@ -599,11 +653,11 @@ where
     let mut tests_sorted: Vec<String> = affected_tests.into_iter().collect();
     tests_sorted.sort();
 
-    let missing_co_change_partners = tracing::Instrument::instrument(
-        missing_co_change_partners(ctx.project_root(), "HEAD", "HEAD", &files),
+    let co_change = tracing::Instrument::instrument(
+        co_change_evidence(ctx, "HEAD".to_owned(), "HEAD".to_owned(), files.clone()),
         tracing::trace_span!("mcp.git.diff_context.co_change"),
     )
-    .await?;
+    .await;
 
     let touched_files = unique_file_paths(
         all_touched_files
@@ -619,7 +673,8 @@ where
         impacted_symbols,
         impact_complete: impacted.complete,
         affected_tests: tests_sorted,
-        missing_co_change_partners,
+        missing_co_change_partners: co_change.missing,
+        co_change_unavailable: co_change.unavailable,
         freshness: None,
     };
     Ok(graph_tool_completion(
@@ -1070,7 +1125,7 @@ struct PrContextGitEvidence {
     merge_base: String,
     commits: Vec<GitCommitSubjectV1>,
     changes: Vec<GitFileChangeV1>,
-    missing_co_change_partners: Vec<CoChangePartnerV1>,
+    co_change: CoChangeEvidence,
 }
 
 impl PrContextGitEvidence {
@@ -1092,7 +1147,8 @@ impl PrContextGitEvidence {
             commits: self.commits,
             files_changed: self.changes.len(),
             changes: self.changes,
-            missing_co_change_partners: self.missing_co_change_partners,
+            missing_co_change_partners: self.co_change.missing,
+            co_change_unavailable: self.co_change.unavailable,
             symbols_added: 0,
             symbols_removed: 0,
             symbols_modified: 0,
@@ -1178,11 +1234,16 @@ where
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
     // History up to the merge base is the evidence; the compared change set
     // is what it is checked against, and partners must survive at head.
-    let missing_co_change_partners = tracing::Instrument::instrument(
-        missing_co_change_partners(ctx.project_root(), &merge_base, &head_oid, &changed_files),
+    let co_change = tracing::Instrument::instrument(
+        co_change_evidence(
+            ctx,
+            merge_base.clone(),
+            head_oid.clone(),
+            changed_files.clone(),
+        ),
         tracing::trace_span!("mcp.pr_context.co_change"),
     )
-    .await?;
+    .await;
     controls.checkpoint()?;
 
     let maximum_symbols = request
@@ -1199,7 +1260,7 @@ where
         merge_base,
         commits,
         changes,
-        missing_co_change_partners,
+        co_change,
     };
 
     let stage_started = std::time::Instant::now();
@@ -1248,7 +1309,8 @@ where
                 commits: evidence.commits,
                 files_changed: evidence.changes.len(),
                 changes: evidence.changes,
-                missing_co_change_partners: evidence.missing_co_change_partners,
+                missing_co_change_partners: evidence.co_change.missing,
+                co_change_unavailable: evidence.co_change.unavailable,
                 symbols_added: 0,
                 symbols_modified: 0,
                 added: Vec::new(),
@@ -1593,7 +1655,8 @@ where
         commits: evidence.commits,
         files_changed: evidence.changes.len(),
         changes: evidence.changes,
-        missing_co_change_partners: evidence.missing_co_change_partners,
+        missing_co_change_partners: evidence.co_change.missing,
+        co_change_unavailable: evidence.co_change.unavailable,
         symbols_added: added.len(),
         symbols_removed: removed.len(),
         symbols_modified: modified.len(),

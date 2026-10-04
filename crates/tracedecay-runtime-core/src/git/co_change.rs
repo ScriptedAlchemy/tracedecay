@@ -48,40 +48,13 @@ pub struct MissingCoChangePartner {
 /// Reports files that usually change with `changed` (mined from the history
 /// reachable from `history`) but are missing from `changed` and still exist
 /// in `tree`. Missing/unborn repositories have no history; unreadable history
-/// and non-UTF-8 paths are errors.
+/// is an error. Every Git read observes `bounds`, including its cancellation.
 #[tracing::instrument(
     name = "runtime_core.git.missing_co_change_partners",
     level = "trace",
     skip_all
 )]
-pub async fn missing_co_change_partners(
-    project_root: &Path,
-    history: &str,
-    tree: &str,
-    changed: &[String],
-) -> Result<Vec<MissingCoChangePartner>> {
-    let root = project_root.to_owned();
-    let history = history.to_owned();
-    let tree = tree.to_owned();
-    let changed = changed.to_vec();
-    tokio::task::spawn_blocking(move || {
-        read_missing_co_change_partners(
-            &root,
-            &history,
-            &tree,
-            &changed,
-            &GitCommandBounds::default(),
-        )
-    })
-    .await
-    .map_err(|error| co_change_error(error.to_string()))?
-}
-
-fn co_change_error(detail: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::project_route("git-co-change-unavailable", false, detail.into())
-}
-
-fn read_missing_co_change_partners(
+pub fn missing_co_change_partners(
     root: &Path,
     history: &str,
     tree: &str,
@@ -121,7 +94,7 @@ fn read_missing_co_change_partners(
         return Ok(Vec::new());
     }
 
-    let changed = changed.iter().map(String::as_str).collect::<HashSet<_>>();
+    let changed = changed.iter().map(String::as_bytes).collect::<HashSet<_>>();
     let gate = if changed.len() == 1 {
         &SINGLE_FILE_GATE
     } else {
@@ -143,19 +116,18 @@ fn read_missing_co_change_partners(
         ],
         bounds,
     )?;
-    let mut changes = HashMap::<&str, usize>::new();
-    let mut co_changes = HashMap::<(&str, String), usize>::new();
+    // Paths stay Git-native bytes: an unrelated non-UTF-8 name in history or
+    // the tree must not cost the answer for the paths that are decodable.
+    let mut changes = HashMap::<&[u8], usize>::new();
+    let mut co_changes = HashMap::<(&[u8], &[u8]), usize>::new();
     for commit in commit_file_sets(&log)? {
         if commit.len() > MAX_COMMIT_FILES {
             continue;
         }
-        for anchor in commit.iter().filter_map(|path| changed.get(path.as_str())) {
+        for anchor in commit.iter().filter_map(|path| changed.get(path)) {
             *changes.entry(anchor).or_default() += 1;
-            for partner in commit
-                .iter()
-                .filter(|path| !changed.contains(path.as_str()))
-            {
-                *co_changes.entry((anchor, partner.clone())).or_default() += 1;
+            for partner in commit.iter().filter(|path| !changed.contains(*path)) {
+                *co_changes.entry((anchor, partner)).or_default() += 1;
             }
         }
     }
@@ -166,16 +138,20 @@ fn read_missing_co_change_partners(
         if together < gate.min_co_changes || together * 100 < total * gate.min_percent {
             continue;
         }
+        let (Ok(file), Ok(anchor)) = (std::str::from_utf8(file), std::str::from_utf8(anchor))
+        else {
+            continue;
+        };
         let candidate = MissingCoChangePartner {
-            file: file.clone(),
+            file: file.to_owned(),
             partner_of: anchor.to_owned(),
             co_changes: together,
             partner_of_changes: total,
         };
-        match strongest.get(&file) {
+        match strongest.get(file) {
             Some(current) if rank(current) <= rank(&candidate) => {}
             _ => {
-                strongest.insert(file, candidate);
+                strongest.insert(file.to_owned(), candidate);
             }
         }
     }
@@ -184,17 +160,13 @@ fn read_missing_co_change_partners(
     }
 
     let listing = git_stdout(root, &["ls-tree", "-r", "--name-only", "-z", tree], bounds)?;
-    let mut present = HashSet::new();
-    for path in listing
+    let present = listing
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-    {
-        present
-            .insert(std::str::from_utf8(path).map_err(|error| co_change_error(error.to_string()))?);
-    }
+        .collect::<HashSet<_>>();
     let mut partners = strongest
         .into_values()
-        .filter(|partner| present.contains(partner.file.as_str()))
+        .filter(|partner| present.contains(partner.file.as_bytes()))
         .collect::<Vec<_>>();
     partners.sort_by(|left, right| rank(left).cmp(&rank(right)));
     partners.truncate(MAX_PARTNERS);
@@ -238,9 +210,9 @@ fn git_stdout(root: &Path, args: &[&str], bounds: &GitCommandBounds) -> Result<V
 /// Splits `git log --format=%x01 --name-only -z` output into per-commit file
 /// sets. Each commit is a `\x01` header token; the first path after it carries
 /// the one `\n` separator Git writes between the header and the name list.
-fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<String>>> {
+fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<&[u8]>>> {
     let mut commits = Vec::new();
-    let mut current: Option<Vec<String>> = None;
+    let mut current: Option<Vec<&[u8]>> = None;
     let mut after_header = false;
     for token in log.split(|byte| *byte == 0) {
         let token = if after_header {
@@ -258,15 +230,17 @@ fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<String>>> {
         if token.is_empty() {
             continue;
         }
-        let path =
-            std::str::from_utf8(token).map_err(|error| co_change_error(error.to_string()))?;
         current
             .as_mut()
             .ok_or_else(|| co_change_error("git log listed a path before any commit"))?
-            .push(path.to_owned());
+            .push(token);
     }
     commits.extend(current);
     Ok(commits)
+}
+
+fn co_change_error(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("git-co-change-unavailable", false, detail.into())
 }
 
 #[cfg(test)]
@@ -317,7 +291,7 @@ mod tests {
                 .iter()
                 .map(|path| (*path).to_owned())
                 .collect::<Vec<_>>();
-            read_missing_co_change_partners(
+            missing_co_change_partners(
                 self.0.path(),
                 "HEAD",
                 "HEAD",
@@ -351,7 +325,7 @@ mod tests {
     fn a_change_missing_its_usual_companion_is_reported() {
         let missing = tempfile::tempdir().unwrap();
         assert_eq!(
-            read_missing_co_change_partners(
+            missing_co_change_partners(
                 &missing.path().join("absent"),
                 "HEAD",
                 "HEAD",
@@ -401,6 +375,55 @@ mod tests {
         repo.git(&["rm", "-q", "migrations/next.sql"]);
         repo.git(&["commit", "-m", "drop migration"]);
         assert_eq!(repo.partners(&["schema.rs"]), Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_non_utf8_paths_do_not_hide_partners() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let repo = Repo::new();
+        let binary = std::ffi::OsStr::from_bytes(b"assets/\xff.bin");
+        std::fs::create_dir_all(repo.0.path().join("assets")).unwrap();
+        std::fs::write(repo.0.path().join(binary), b"x").unwrap();
+        let output = std::process::Command::new(try_git_program().unwrap())
+            .args(["add", "--"])
+            .arg(binary)
+            .current_dir(repo.0.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        repo.git(&["commit", "-m", "binary asset"]);
+        for _ in 0..3 {
+            repo.commit(&["schema.rs", "migrations/next.sql"]);
+        }
+        assert_eq!(
+            repo.partners(&["schema.rs", "handler.rs"]),
+            vec![partner("migrations/next.sql", "schema.rs", 3, 3)]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_read_stops_before_mining() {
+        let repo = Repo::new();
+        repo.commit(&["schema.rs"]);
+        let cancel = crate::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let read = missing_co_change_partners(
+            repo.0.path(),
+            "HEAD",
+            "HEAD",
+            &["schema.rs".to_owned()],
+            &GitCommandBounds {
+                cancel: Some(cancel),
+                ..GitCommandBounds::default()
+            },
+        );
+        assert!(
+            read.as_ref()
+                .is_err_and(|error| error.to_string().contains("cancelled")),
+            "{read:?}"
+        );
     }
 
     #[test]
