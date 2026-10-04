@@ -30,7 +30,7 @@ use tracedecay_store::{ParseOffset, TranscriptStoreError};
 pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 pub use super::host_coverage::HostCoverageReason;
-use crate::admission::HostAdmission;
+use crate::admission::{HostAdmission, HostAdmissionOutcome};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
 
@@ -168,20 +168,47 @@ pub(super) async fn persist_host_provider_coverage(
             crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
         })?
         .unwrap_or_default();
+    revise_host_record(
+        admission,
+        scope,
+        &key,
+        current,
+        deferred_units,
+        coverage.file_id(reason),
+    )
+    .await
+    .map_err(|outcome| {
+        crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
+    })
+}
+
+/// Writes a host bookkeeping record whose readers consult only its
+/// `byte_offset` and `file_id`. Its `mtime` is a revision that lets a changed
+/// record move `byte_offset` backwards past the monotonic cursor guard. An
+/// unchanged record stays as stored, so a sweep that finds nothing new
+/// commits nothing.
+pub(super) async fn revise_host_record(
+    admission: &(impl HostAdmission + ?Sized),
+    scope: &ObservationScopeV1,
+    key: &str,
+    current: ParseOffset,
+    byte_offset: u64,
+    file_id: u64,
+) -> Result<(), HostAdmissionOutcome> {
+    if (current.byte_offset, current.file_id) == (byte_offset, file_id) {
+        return Ok(());
+    }
     admission
         .advance_parse_offset(
             scope,
-            &key,
+            key,
             ParseOffset {
-                byte_offset: deferred_units,
+                byte_offset,
                 mtime: current.mtime.saturating_add(1).max(1),
-                file_id: coverage.file_id(reason),
+                file_id,
             },
         )
         .await
-        .map_err(|outcome| {
-            crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
-        })
 }
 
 #[derive(Debug, Error)]
