@@ -44,6 +44,7 @@ fn seeded_projection(sessions: usize) -> GitEvidenceProjectionV1 {
             last_ts: main_first + 50,
             event_count: 2,
             source: SpanSource::Ingest,
+            branch_provenance: BranchProvenance::Captured,
         });
         if index % 4 == 0 {
             spans.push(SessionGitSpan {
@@ -57,6 +58,7 @@ fn seeded_projection(sessions: usize) -> GitEvidenceProjectionV1 {
                 last_ts: main_first - 480,
                 event_count: 3,
                 source: SpanSource::Backfill,
+                branch_provenance: BranchProvenance::Inferred,
             });
         }
         spans.push(SessionGitSpan {
@@ -70,6 +72,7 @@ fn seeded_projection(sessions: usize) -> GitEvidenceProjectionV1 {
             last_ts: BASE_TS + 100 * index as i64 + 40,
             event_count: 1,
             source: SpanSource::HookRoute,
+            branch_provenance: BranchProvenance::Captured,
         });
         let commit_sha = sha(index / 8, (index / 4) % 2);
         let produced = index % 4 == 0;
@@ -351,6 +354,7 @@ async fn rows_view_reports_empty_row_families() {
             last_ts: 2,
             event_count: 1,
             source: SpanSource::Ingest,
+            branch_provenance: BranchProvenance::Captured,
         }],
         Vec::new(),
     )

@@ -185,6 +185,7 @@ pub fn stable_backfill_span(
         last_ts,
         event_count: 2,
         source: super::SpanSource::Backfill,
+        branch_provenance: super::BranchProvenance::Inferred,
     }
 }
 
@@ -200,7 +201,7 @@ pub(super) fn transcript_spans_from_observations(
             providers_compatible(&span.provider, &observation.provider)
                 && span.session_id == observation.session_id
                 && span.thread_id == observation.thread_id
-                && span.branch == observation.branch
+                && span.captured_branch() == observation.branch.as_deref()
                 && span.worktree == worktree
                 && span.source == observation.source
                 && observation_extends_span(
@@ -235,6 +236,7 @@ pub(super) fn transcript_spans_from_observations(
                 last_ts: observation.ts,
                 event_count: 1,
                 source: observation.source,
+                branch_provenance: super::BranchProvenance::Captured,
             },
         };
         if let Some(candidate) = candidates
@@ -268,6 +270,7 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
             && span.session_id == incoming.session_id
             && span.thread_id == incoming.thread_id
             && span.branch == incoming.branch
+            && span.branch_provenance == incoming.branch_provenance
             && span.worktree == incoming.worktree
             && span.source == incoming.source
             && incoming.first_ts <= span.last_ts
@@ -283,6 +286,43 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
         return *existing != previous;
     } else {
         spans.push(incoming.clone());
+    }
+    true
+}
+
+/// Attributes a reflog-inferred branch to the captured spans of the same
+/// session and worktree that `inferred` overlaps, so capture and inference
+/// share one span. Captured branches are never replaced. Returns `false` when
+/// no captured span overlaps, or one already carries a different inference;
+/// the inferred span then stands on its own.
+pub(super) fn infer_captured_branch(
+    spans: &mut [SessionGitSpan],
+    inferred: &SessionGitSpan,
+) -> bool {
+    let mut overlapping = spans
+        .iter_mut()
+        .filter(|span| {
+            span.source != super::SpanSource::Backfill
+                && providers_compatible(&span.provider, &inferred.provider)
+                && span.session_id == inferred.session_id
+                && span.worktree == inferred.worktree
+                && inferred.first_ts <= span.last_ts
+                && inferred.last_ts >= span.first_ts
+        })
+        .collect::<Vec<_>>();
+    if overlapping.is_empty()
+        || overlapping.iter().any(|span| {
+            span.branch_provenance == super::BranchProvenance::Inferred
+                && span.branch != inferred.branch
+        })
+    {
+        return false;
+    }
+    for span in &mut overlapping {
+        if span.branch.is_none() {
+            span.branch.clone_from(&inferred.branch);
+            span.branch_provenance = super::BranchProvenance::Inferred;
+        }
     }
     true
 }

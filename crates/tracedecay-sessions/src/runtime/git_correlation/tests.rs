@@ -20,6 +20,7 @@ fn span(
         last_ts,
         event_count: 2,
         source: SpanSource::Ingest,
+        branch_provenance: BranchProvenance::Captured,
     }
 }
 
