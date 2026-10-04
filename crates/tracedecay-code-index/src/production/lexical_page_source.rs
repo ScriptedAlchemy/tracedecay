@@ -868,6 +868,52 @@ impl SealedLexicalFileReplacementV1 {
     }
 }
 
+/// Merge-walk two strictly ascending path rosters into the runs of files
+/// that differ: a successor file is carried only when its parent holds the
+/// same path and `same_segment(file, parent_file)` holds.
+fn file_replacement_runs(
+    paths: &[&str],
+    parent_paths: &[&str],
+    same_segment: impl Fn(usize, usize) -> bool,
+) -> Option<Vec<SealedLexicalFileReplacementV1>> {
+    let mut replacements = Vec::new();
+    let mut run: Option<(usize, usize)> = None;
+    let (mut file, mut parent_file) = (0, 0);
+    loop {
+        let (path, parent_path) = (paths.get(file), parent_paths.get(parent_file));
+        if path.is_none() && parent_path.is_none() {
+            break;
+        }
+        if path == parent_path && same_segment(file, parent_file) {
+            if let Some((parent_start, start)) = run.take() {
+                replacements.push(SealedLexicalFileReplacementV1::new(
+                    (parent_start, parent_file),
+                    (start, file),
+                )?);
+            }
+        } else {
+            run.get_or_insert((parent_file, file));
+        }
+        match (path, parent_path) {
+            (Some(path), Some(parent_path)) if path < parent_path => file += 1,
+            (Some(path), Some(parent_path)) if path > parent_path => parent_file += 1,
+            (Some(_), None) => file += 1,
+            (None, Some(_)) => parent_file += 1,
+            _ => {
+                file += 1;
+                parent_file += 1;
+            }
+        }
+    }
+    if let Some((parent_start, start)) = run {
+        replacements.push(SealedLexicalFileReplacementV1::new(
+            (parent_start, parent_file),
+            (start, file),
+        )?);
+    }
+    Some(replacements)
+}
+
 /// Final proof that all file ranges in one verified seal were exhausted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSealedLexicalSourceReceiptV1 {
@@ -1423,46 +1469,10 @@ impl VerifiedSealedLexicalPageSourceV1 {
         }
         let paths = self.file_paths()?;
         let parent_paths = parent.file_paths()?;
-        let mut replacements = Vec::new();
-        let mut run: Option<(usize, usize)> = None;
-        let (mut file, mut parent_file) = (0, 0);
-        loop {
-            let (path, parent_path) = (paths.get(file), parent_paths.get(parent_file));
-            if path.is_none() && parent_path.is_none() {
-                break;
-            }
-            let carried = path == parent_path
-                && self
-                    .file_source
-                    .same_segment(file, &parent.file_source, parent_file);
-            if carried {
-                if let Some((parent_start, start)) = run.take() {
-                    replacements.push(SealedLexicalFileReplacementV1::new(
-                        (parent_start, parent_file),
-                        (start, file),
-                    )?);
-                }
-            } else {
-                run.get_or_insert((parent_file, file));
-            }
-            match (path, parent_path) {
-                (Some(path), Some(parent_path)) if path < parent_path => file += 1,
-                (Some(path), Some(parent_path)) if path > parent_path => parent_file += 1,
-                (Some(_), None) => file += 1,
-                (None, Some(_)) => parent_file += 1,
-                _ => {
-                    file += 1;
-                    parent_file += 1;
-                }
-            }
-        }
-        if let Some((parent_start, start)) = run {
-            replacements.push(SealedLexicalFileReplacementV1::new(
-                (parent_start, parent_file),
-                (start, file),
-            )?);
-        }
-        Some(replacements)
+        file_replacement_runs(&paths, &parent_paths, |file, parent_file| {
+            self.file_source
+                .same_segment(file, &parent.file_source, parent_file)
+        })
     }
 
     /// Each file's logical path in file ordinal order, or `None` unless the

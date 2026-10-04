@@ -1067,3 +1067,69 @@ fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
         cursor_before,
     );
 }
+
+/// Runs from [`file_replacement_runs`] as `(parent_files, files)` pairs,
+/// where a file is carried when its path matches and it is not in `edited`.
+fn replacement_runs(
+    paths: &[&str],
+    parent_paths: &[&str],
+    edited: &[&str],
+) -> Vec<(std::ops::Range<u64>, std::ops::Range<u64>)> {
+    file_replacement_runs(paths, parent_paths, |file, _| {
+        !edited.contains(&paths[file])
+    })
+    .expect("ordinals fit")
+    .into_iter()
+    .map(|run| (run.parent_files, run.files))
+    .collect()
+}
+
+#[test]
+fn file_replacement_runs_align_rosters_by_path() {
+    let parent = ["b", "d", "f"];
+    assert_eq!(replacement_runs(&parent, &parent, &[]), vec![]);
+    assert_eq!(
+        replacement_runs(&parent, &parent, &["d"]),
+        vec![(1..2, 1..2)]
+    );
+    assert_eq!(
+        replacement_runs(&["a", "b", "d", "f"], &parent, &[]),
+        vec![(0..0, 0..1)],
+        "a file added first"
+    );
+    assert_eq!(
+        replacement_runs(&["b", "d", "f", "g"], &parent, &[]),
+        vec![(3..3, 3..4)],
+        "a file added last"
+    );
+    assert_eq!(
+        replacement_runs(&["d", "f"], &parent, &[]),
+        vec![(0..1, 0..0)],
+        "the first file removed"
+    );
+    assert_eq!(
+        replacement_runs(&["b", "d"], &parent, &[]),
+        vec![(2..3, 2..2)],
+        "the last file removed"
+    );
+    assert_eq!(
+        replacement_runs(&["b", "c", "f"], &parent, &[]),
+        vec![(1..2, 1..2)],
+        "a removal beside an addition is one run"
+    );
+    assert_eq!(
+        replacement_runs(&["a", "b", "e", "f"], &parent, &["f"]),
+        vec![(0..0, 0..1), (1..3, 2..4)],
+        "an edit after a replacement extends that run"
+    );
+    assert_eq!(
+        replacement_runs(&["x", "y"], &parent, &[]),
+        vec![(0..3, 0..2)],
+        "every file replaced"
+    );
+    assert_eq!(
+        replacement_runs(&[], &parent, &[]),
+        vec![(0..3, 0..0)],
+        "every file removed"
+    );
+}

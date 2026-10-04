@@ -227,8 +227,8 @@ type RosterChange<'a> = (Vec<(&'a str, &'a str)>, Vec<&'a str>);
 /// Files added and removed shift every later file's ordinal, yet the edit
 /// still carries: with every parent segment out of the store, the successor
 /// seals byte for byte what a cold build seals through an added file, a
-/// removed one, a file replaced by its neighbour beside a body edit, and a
-/// rename across the roster.
+/// removed one, a file replaced by its neighbour beside a body edit, a
+/// rename across the roster, and a file added first and removed last.
 #[test]
 fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
     let fixture = corpus_fixture();
@@ -245,7 +245,8 @@ fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a
     let body_edit = module(6, "").replace("wrapping_mul(31)", "wrapping_mul(37)");
     let replacement = module(10, "");
     let renamed = module(1, "").replace("wrapping_mul(31)", "wrapping_mul(43)");
-    let rounds: [RosterChange<'_>; 4] = [
+    let first = module(11, "");
+    let rounds: [RosterChange<'_>; 6] = [
         (vec![("src/m03a.rs", added.as_str())], vec![]),
         (vec![], vec!["src/m05.rs"]),
         (
@@ -256,6 +257,8 @@ fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a
             vec!["src/m03a.rs"],
         ),
         (vec![("src/n01.rs", renamed.as_str())], vec!["src/m01.rs"]),
+        (vec![("a_first.rs", first.as_str())], vec![]),
+        (vec![], vec!["src/untouched_6.rs"]),
     ];
     let hidden = TempDir::new().expect("hidden segments");
     for (round, (edits, removals)) in rounds.iter().enumerate() {
