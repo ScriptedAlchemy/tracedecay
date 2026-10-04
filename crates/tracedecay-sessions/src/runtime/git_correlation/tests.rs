@@ -21,6 +21,7 @@ fn span(
         event_count: 2,
         source: SpanSource::Ingest,
         branch_provenance: BranchProvenance::Captured,
+        capture_window: None,
     }
 }
 

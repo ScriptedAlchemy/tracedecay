@@ -186,6 +186,7 @@ pub fn stable_backfill_span(
         event_count: 2,
         source: super::SpanSource::Backfill,
         branch_provenance: super::BranchProvenance::Inferred,
+        capture_window: None,
     }
 }
 
@@ -229,6 +230,15 @@ pub(super) fn transcript_spans_from_observations(
                 if extends {
                     span.event_count = span.event_count.saturating_add(1);
                 }
+                if let Some(capture) = span.capture_window.as_mut() {
+                    let capture_extends =
+                        observation.ts < capture.first_ts || observation.ts > capture.last_ts;
+                    capture.first_ts = capture.first_ts.min(observation.ts);
+                    capture.last_ts = capture.last_ts.max(observation.ts);
+                    if capture_extends {
+                        capture.event_count = capture.event_count.saturating_add(1);
+                    }
+                }
                 span
             }
             None => SessionGitSpan {
@@ -243,6 +253,7 @@ pub(super) fn transcript_spans_from_observations(
                 event_count: 1,
                 source: observation.source,
                 branch_provenance: super::BranchProvenance::Captured,
+                capture_window: None,
             },
         };
         if let Some(candidate) = candidates
@@ -326,6 +337,13 @@ pub(super) fn infer_captured_branch(
         return false;
     }
     for span in &mut overlapping {
+        if span.capture_window.is_none() {
+            span.capture_window = Some(super::CaptureWindow {
+                first_ts: span.first_ts,
+                last_ts: span.last_ts,
+                event_count: span.event_count,
+            });
+        }
         if span.branch.is_none() {
             span.branch.clone_from(&inferred.branch);
             span.branch_provenance = super::BranchProvenance::Inferred;

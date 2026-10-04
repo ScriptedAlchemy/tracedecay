@@ -204,15 +204,24 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
         let mut cleared = BTreeSet::new();
         for span in spans.values().filter(|span| {
-            span.provider == provider && span.branch_provenance == super::BranchProvenance::Inferred
+            span.provider == provider
+                && (span.branch_provenance == super::BranchProvenance::Inferred
+                    || span.capture_window.is_some())
         }) {
             if span.source == super::SpanSource::Backfill {
                 continue;
             }
             cleared.insert(span.span_id.clone());
             let mut captured = span.clone();
-            captured.branch = None;
-            captured.branch_provenance = super::BranchProvenance::Captured;
+            if captured.branch_provenance == super::BranchProvenance::Inferred {
+                captured.branch = None;
+                captured.branch_provenance = super::BranchProvenance::Captured;
+            }
+            if let Some(capture) = captured.capture_window.take() {
+                captured.first_ts = capture.first_ts;
+                captured.last_ts = capture.last_ts;
+                captured.event_count = capture.event_count;
+            }
             self.upsert_span(&captured).await?;
         }
         let removed = spans

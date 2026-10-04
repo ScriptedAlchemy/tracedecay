@@ -1618,6 +1618,7 @@ mod tests {
             source: tracedecay_sessions::runtime::git_correlation::SpanSource::Ingest,
             branch_provenance:
                 tracedecay_sessions::runtime::git_correlation::BranchProvenance::Captured,
+            capture_window: None,
         }
     }
 

@@ -1058,6 +1058,123 @@ async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
     );
 }
 
+/// A fold unions the segment's window and count into the captured span only
+/// while the inference lives. Retracting the inference must restore the
+/// capture-only values, or the session keeps claiming activity the
+/// retracted evidence alone covered.
+#[tokio::test]
+async fn revisit_restores_the_capture_window_a_fold_unioned() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at - 50, active_at + 600, 2),
+        "the folded span carries the segment's coverage while the inference lives"
+    );
+    drop(view);
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap()
+        .pass;
+    assert_eq!(revisited.backfill.sessions_scanned, 1);
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at, active_at, 1),
+        "retracting the inference restores the capture-only window: {spans:#?}"
+    );
+    assert_eq!(spans[0].capture_window, None);
+    assert!(
+        view.sessions_for(
+            &SessionsForQuery {
+                git_ref: crate::runtime::git_correlation::GitRefFilter::Worktree(
+                    repository.path().to_string_lossy().into_owned(),
+                ),
+                since: Some(active_at + 300),
+                until: None,
+                limit: 10,
+            },
+            crate::runtime::git_correlation::CommitRelationFilter::All,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "segment-covered time must not outlive the retracted inference"
+    );
+}
+
 /// A fresh project has never recorded Git evidence. Reporting that as a
 /// retryable unavailability put every fresh project's ingest into an endless
 /// retry loop.
@@ -1119,6 +1236,7 @@ async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
         event_count: 2,
         source: crate::runtime::git_correlation::SpanSource::Ingest,
         branch_provenance: crate::runtime::git_correlation::BranchProvenance::Captured,
+        capture_window: None,
     };
     ensure_git_correlation_receipt_schema_in_transaction(&store.connection)
         .await
