@@ -231,9 +231,6 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 if frontier_persisted && let Some((hub, consumer)) = self.codex_discovery {
                     hub.acknowledge(consumer);
                 }
-                crate::runtime::pipeline_metrics::record_historical_ingest(
-                    coverage == HostProviderCoverage::Complete,
-                );
                 run
             }
             Err(error) => failed_observation_run(

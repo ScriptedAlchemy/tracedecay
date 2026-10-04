@@ -101,27 +101,6 @@ impl DaemonLcmEffectService {
 
     pub(super) async fn compress(
         &self,
-        request: LcmCompressionRequest,
-    ) -> Result<LcmCompressionResponse, LcmError> {
-        let result = self.compress_phases(request).await;
-        observe_compression_outcome(result.as_ref());
-        result
-    }
-
-    pub(super) async fn compress_retained_page(
-        &self,
-        request: LcmCompressionRequest,
-        convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
-    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-        let result = self
-            .compress_retained_phases(request, convergence_candidate)
-            .await;
-        observe_compression_outcome(result.as_ref().map(|bounded| &bounded.response));
-        result
-    }
-
-    async fn compress_phases(
-        &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         // Observation-projected sessions land raw rows without ingest
@@ -184,7 +163,7 @@ impl DaemonLcmEffectService {
         self.commit_compression(&request).await
     }
 
-    async fn compress_retained_phases(
+    pub(super) async fn compress_retained_page(
         &self,
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
@@ -398,36 +377,6 @@ pub async fn lcm_session_boundary_for_test(
     DaemonLcmEffectService::new(db, None, None)
         .session_boundary(request)
         .await
-}
-
-/// Terminal compression outcomes for profiling, including deferrals and
-/// failures: a lane that only counts commits hides exactly the retried and
-/// cancelled work a compaction investigation needs to see. Borrows the
-/// outcome so classifying a retained page never copies its response payload.
-fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
-    match result {
-        Ok(response) if response.retry_status.is_some() => {
-            metrics::gauge!("daemon.lcm.compress.deferred").increment(1.0);
-        }
-        Ok(response) if response.status == "needs_summary" => {
-            metrics::gauge!("daemon.lcm.compress.needs_summary").increment(1.0);
-        }
-        Ok(response) if response.summary_nodes_created > 0 => {
-            metrics::gauge!("daemon.lcm.compress.committed").increment(1.0);
-        }
-        Ok(_) => {
-            metrics::gauge!("daemon.lcm.compress.noop").increment(1.0);
-        }
-        Err(LcmError::Cancelled) => {
-            metrics::gauge!("daemon.lcm.compress.cancelled").increment(1.0);
-        }
-        Err(LcmError::DeadlineExceeded) => {
-            metrics::gauge!("daemon.lcm.compress.deadline").increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.lcm.compress.failed").increment(1.0);
-        }
-    }
 }
 
 fn summary_unavailable(

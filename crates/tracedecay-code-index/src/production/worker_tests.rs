@@ -539,7 +539,7 @@ fn parallel_collection_returns_the_lowest_index_failure() {
     let visited = AtomicUsize::new(0);
     let items = (0..256_usize).collect::<Vec<_>>();
 
-    let error = collect_bounded_ordered(&items, |item, _worker| {
+    let error = collect_bounded_ordered(&items, |item| {
         visited.fetch_add(1, Ordering::Relaxed);
         if *item == 2 || *item == 200 {
             Err(WorkerTestError::Mapping(*item))
@@ -567,7 +567,7 @@ fn parallel_collection_contains_a_panicking_unit_without_poisoning_the_rest() {
 
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let outcome = collect_bounded_ordered(&items, |item, _worker| {
+    let outcome = collect_bounded_ordered(&items, |item| {
         if *item == 200 {
             panic!("synthetic per-file panic");
         }
@@ -602,7 +602,7 @@ fn parallel_collection_reports_the_lowest_index_failure_across_panics() {
 
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let error = collect_bounded_ordered(&items, |item, _worker| {
+    let error = collect_bounded_ordered(&items, |item| {
         assert_ne!(*item, 200, "synthetic per-file panic");
         if *item == 2 {
             Err(WorkerTestError::Mapping(*item))

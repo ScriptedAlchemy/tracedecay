@@ -20,35 +20,26 @@ pub(super) fn not_current_unavailable(
         SessionProjectionServingState::Current => return None,
         SessionProjectionServingState::Stale { reason } => match reason {
             SessionProjectionStaleReason::HistoricalConvergence => {
-                metrics::gauge!("daemon.session_retrieval.stale.historical_convergence")
-                    .increment(1.0);
                 SessionRetrievalUnavailableReason::HistoricalConvergence
             }
             SessionProjectionStaleReason::HistoricalRetry { .. } => {
-                metrics::gauge!("daemon.session_retrieval.stale.historical_retry").increment(1.0);
                 SessionRetrievalUnavailableReason::HistoricalRetry
             }
             SessionProjectionStaleReason::HistoricalBlocked { .. } => {
-                metrics::gauge!("daemon.session_retrieval.stale.historical_blocked").increment(1.0);
                 SessionRetrievalUnavailableReason::HistoricalBlocked
             }
         },
         SessionProjectionServingState::Unavailable { reason } => match *reason {
             SessionProjectionUnavailableReason::WorkerMissing => {
-                metrics::gauge!("daemon.session_retrieval.refused.worker_missing").increment(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerMissing
             }
             SessionProjectionUnavailableReason::WorkerRecovering => {
-                metrics::gauge!("daemon.session_retrieval.refused.worker_recovering")
-                    .increment(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerRecovering
             }
             SessionProjectionUnavailableReason::WorkerStalled => {
-                metrics::gauge!("daemon.session_retrieval.refused.worker_stalled").increment(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerStalled
             }
             SessionProjectionUnavailableReason::WorkerStopped => {
-                metrics::gauge!("daemon.session_retrieval.refused.worker_stopped").increment(1.0);
                 SessionRetrievalUnavailableReason::RefreshWorkerStopped
             }
         },

@@ -251,7 +251,6 @@ impl CapabilityRoutingEvaluatorV1 {
         selected_capability_id: Option<CapabilityId>,
         ordered_reason_codes: Vec<CapabilityRoutingReasonV1>,
     ) -> CapabilityRoutingDecisionV1 {
-        crate::observe::routing_outcome(disposition, request.candidates.len());
         CapabilityRoutingDecisionV1 {
             evaluator_id: self.evaluator_id.clone(),
             evaluator_revision: Self::EVALUATOR_REVISION,

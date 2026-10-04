@@ -10,7 +10,6 @@ use tracedecay_store::{
 use super::query::{storage, storage_message};
 use super::refresh::SessionRefreshRecoveryV1;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use crate::support as observe;
 
 mod derived;
 mod materialize;
@@ -419,7 +418,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        observe::record_snapshot_admissions(1);
         if limit == 0 {
             return Ok(SessionTemporalRefreshDiscoveryPage {
                 requests: Vec::new(),
@@ -526,7 +524,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
 
         let requests = requests.into_values().collect::<Vec<_>>();
-        observe::record_output_sessions(u64::try_from(requests.len()).unwrap_or(u64::MAX));
         next.active_swept = active_exhausted;
         next.active_after = if active_exhausted {
             None
@@ -555,7 +552,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        observe::record_snapshot_admissions(1);
         materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
     }
 }

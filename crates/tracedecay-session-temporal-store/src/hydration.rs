@@ -15,7 +15,6 @@ use zeroize::Zeroizing;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
-use crate::support::{record_hydration_emitted_bytes, record_hydration_verified_bytes};
 use tracedecay_lcm::payload::{
     PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
 };
@@ -151,7 +150,6 @@ impl BoundedPayload {
                 for chunk in bytes.chunks(max_chunk_bytes) {
                     control.checkpoint()?;
                     emit(chunk)?;
-                    record_hydration_emitted_bytes(chunk.len());
                 }
                 Ok(())
             }
@@ -163,7 +161,6 @@ impl BoundedPayload {
                 stream
                     .emit(&mut window, &mut checkpoint, &mut |chunk| {
                         emit(chunk)?;
-                        record_hydration_emitted_bytes(chunk.len());
                         Ok(())
                     })
                     .map(drop)
@@ -237,7 +234,6 @@ impl SessionTemporalHydrationAdapter<'_> {
         if !payload.matches(descriptor) {
             return Err(HydrationError::Unavailable);
         }
-        record_hydration_verified_bytes(descriptor.byte_count);
         control.checkpoint()?;
         if max_chunk_bytes == 0 && descriptor.byte_count > 0 {
             return Err(HydrationError::BudgetExceeded {
@@ -566,7 +562,6 @@ impl SessionTemporalHydrationBackend<'_> {
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        metrics::gauge!("session_temporal.hydration").increment(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -587,7 +582,6 @@ impl SessionTemporalHydrationBackend<'_> {
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<BoundedPayload, HydrationError> {
-        metrics::gauge!("session_temporal.hydration").increment(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {

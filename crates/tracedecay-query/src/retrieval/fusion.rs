@@ -636,8 +636,6 @@ impl CompositionKernel {
 
         let mut all_dedupe_decisions = dedupe_decisions;
         all_dedupe_decisions.append(&mut copy_decisions);
-        metrics::gauge!("query.fusion.candidates").set((ranked_candidates.len()) as f64);
-        metrics::gauge!("query.fusion.results").set((ranked_candidates.len()) as f64);
         Ok(CompositionOutputV1 {
             profile_id: input.profile.profile_id.clone(),
             ranked_candidates,
@@ -750,7 +748,6 @@ impl CompositionKernel {
         } else {
             None
         };
-        metrics::gauge!("query.stream.results").set((ranked_candidates.len()) as f64);
         Ok(CompositionPageV1 {
             ranked_candidates,
             cursor,

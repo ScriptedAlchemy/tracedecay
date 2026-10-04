@@ -81,8 +81,7 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     }
     require_contiguous_checkpoint(conn, batch).await?;
 
-    let occurrence_work = persist_occurrences(conn, batch, control).await?;
-    record_occurrence_persistence_work(occurrence_work);
+    persist_occurrences(conn, batch, control).await?;
     for copy in batch.copies() {
         checkpoint_relation_rebuild_control(control)?;
         validate_copy(conn, batch, copy).await?;
@@ -132,14 +131,6 @@ struct CanonicalOccurrenceProjection {
     observation: DurableObservationV1,
     envelope: CanonicalObservationEnvelopeV1,
     outputs: Vec<SessionMessageProjection>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct OccurrencePersistenceWork {
-    pub(super) source_projections: u64,
-    pub(super) envelope_parses: u64,
-    pub(super) indexed_outputs: u64,
-    pub(super) output_lookups: u64,
 }
 
 async fn canonical_occurrence_projection(
@@ -210,8 +201,7 @@ pub(super) async fn persist_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
-) -> SessionStoreResult<OccurrencePersistenceWork> {
-    let mut work = OccurrencePersistenceWork::default();
+) -> SessionStoreResult<()> {
     let mut occurrences_by_source = BTreeMap::<_, Vec<_>>::new();
     for occurrence in batch.occurrences() {
         occurrences_by_source
@@ -228,24 +218,6 @@ pub(super) async fn persist_occurrences(
             )
         })?;
         let canonical = canonical_occurrence_projection(conn, batch, first).await?;
-        work.source_projections = work.source_projections.checked_add(1).ok_or_else(|| {
-            storage_message(PERSIST_OPERATION, "source projection work count overflow")
-        })?;
-        work.envelope_parses = work.envelope_parses.checked_add(1).ok_or_else(|| {
-            storage_message(PERSIST_OPERATION, "source envelope parse count overflow")
-        })?;
-        work.indexed_outputs = work
-            .indexed_outputs
-            .checked_add(
-                u64::try_from(canonical.outputs.len())
-                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            )
-            .ok_or_else(|| {
-                storage_message(
-                    PERSIST_OPERATION,
-                    "indexed projection output count overflow",
-                )
-            })?;
         for occurrence in occurrences {
             checkpoint_relation_rebuild_control(control)?;
             let ordinal = usize::try_from(occurrence.projection_output_ordinal.value())
@@ -256,13 +228,10 @@ pub(super) async fn persist_occurrences(
                     "canonical observation has no atomically recorded temporal effect output",
                 )
             })?;
-            work.output_lookups = work.output_lookups.checked_add(1).ok_or_else(|| {
-                storage_message(PERSIST_OPERATION, "projection output lookup count overflow")
-            })?;
             persist_occurrence(conn, batch, occurrence, &canonical, output).await?;
         }
     }
-    Ok(work)
+    Ok(())
 }
 
 async fn persist_occurrence(
@@ -561,20 +530,6 @@ pub(super) async fn canonical_occurrence(
         .map(|source| source.anchor_id().clone())
         .collect();
     Ok((record, copied_from))
-}
-
-#[inline(always)]
-fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
-    {
-        metrics::gauge!("session_temporal.persistence.source_projections")
-            .increment(work.source_projections as f64);
-        metrics::gauge!("session_temporal.persistence.envelope_parses")
-            .increment(work.envelope_parses as f64);
-        metrics::gauge!("session_temporal.persistence.projection_output_index_rows")
-            .increment(work.indexed_outputs as f64);
-        metrics::gauge!("session_temporal.persistence.projection_output_lookups")
-            .increment(work.output_lookups as f64);
-    }
 }
 
 /// Versions a thread whose earliest grouping or creation time moved. The

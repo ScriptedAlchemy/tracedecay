@@ -15,8 +15,9 @@ cargo build -p tracedecay-query --bin tracedecay-index-bench \
 target/debug/tracedecay-index-bench
 ```
 
-The workload summary goes to stdout as JSON. Spans and gauges ride the
-workspace's unconditional `tracing`/`metrics` instrumentation.
+The workload summary, including each phase's wall time, goes to stdout as
+JSON. The bench installs no `tracing` subscriber, so the summary is its only
+timing output.
 
 ## What it measures
 

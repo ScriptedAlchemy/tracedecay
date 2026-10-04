@@ -20,9 +20,7 @@ pub(super) fn read_generation_format_revision(
     let mut file = File::open(path).map_err(deferred_if_absent)?;
     let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
     let bytes_read = file.read(&mut prefix).map_err(storage)?;
-    crate::observe::retention_inspected(bytes_read as u64);
     if is_cancelled() {
-        crate::observe::retention_cancelled();
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     prefix.truncate(bytes_read);
@@ -51,15 +49,12 @@ pub(super) fn read_generation_metadata(
         if bytes_read == 0 {
             break;
         }
-        crate::observe::retention_inspected(bytes_read as u64);
         if verification == GenerationDigestVerificationV1::Full {
             hasher.update(&buffer[..bytes_read]);
-            crate::observe::retention_hashed(bytes_read as u64);
         }
         let remaining = MAX_GENERATION_METADATA_PREFIX_BYTES.saturating_sub(prefix.len());
         prefix.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
         if is_cancelled() {
-            crate::observe::retention_cancelled();
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if verification == GenerationDigestVerificationV1::MetadataOnly

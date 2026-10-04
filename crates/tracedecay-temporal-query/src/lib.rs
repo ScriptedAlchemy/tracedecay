@@ -399,22 +399,6 @@ pub async fn execute_temporal_candidate_export(
         let _span = tracing::trace_span!("temporal_query.participant_manifest.validate").entered();
         snapshot.participant_manifest().validate()
     } {
-        match &error {
-            TemporalPortError::ParticipantLimitExceeded { .. } => {
-                metrics::gauge!("temporal_query.refusal.participant_manifest.participants_total")
-                    .increment(1.0);
-            }
-            TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
-                metrics::gauge!(
-                    "temporal_query.refusal.participant_manifest.canonical_bytes_total"
-                )
-                .increment(1.0);
-            }
-            _ => {
-                metrics::gauge!("temporal_query.refusal.participant_manifest.invalid_total")
-                    .increment(1.0);
-            }
-        }
         return Err(map_port_error(error));
     }
     check_control(&snapshot)?;
@@ -443,7 +427,6 @@ pub async fn execute_temporal_candidate_export(
         Some(prepared) => (prepared.candidates().to_vec(), None),
         None => read_candidate_window(read_port, &snapshot, request, limits, &resume).await?,
     };
-    metrics::gauge!("temporal_query.candidates.generated").set((candidates.len()) as f64);
 
     let after = resume.last_sort_key.clone();
     check_control(&snapshot)?;
@@ -569,21 +552,17 @@ pub async fn execute_temporal_candidate_export(
                 && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
-    metrics::gauge!("temporal_query.candidates.visible").set((visible_candidates.len()) as f64);
     let eligible =
         u64::try_from(visible_candidates.len()).map_err(|_| TemporalKernelError::BudgetExceeded)?;
     let excluded = examined
         .checked_sub(eligible)
         .ok_or(TemporalKernelError::BudgetExceeded)?;
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;
-    metrics::gauge!("temporal_query.candidates.ranked").set((ranked.len()) as f64);
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
-    metrics::gauge!("temporal_query.candidates.after_cursor").set((ranked.len()) as f64);
     let mut deduplicated_anchors = BTreeSet::new();
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
-    metrics::gauge!("temporal_query.candidates.deduped").set((ranked.len()) as f64);
 
     // Two independent reasons to continue: this window still ranks rows past
     // the page, or the window itself was bounded and storage holds more. The
@@ -593,7 +572,6 @@ pub async fn execute_temporal_candidate_export(
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
-    metrics::gauge!("temporal_query.candidates.paged").set((ranked.len()) as f64);
     let next_position = if strict_population.is_some() {
         None
     } else if window_has_more {

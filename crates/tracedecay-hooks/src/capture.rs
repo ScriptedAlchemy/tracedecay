@@ -78,44 +78,6 @@ pub fn capture_native_event_for_replay(
     now: UtcMicros,
     wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
-    let outcome = capture_native_event_for_replay_inner(
-        data_root,
-        worktree_id,
-        source,
-        payload,
-        material,
-        now,
-        wait_budget,
-    );
-
-    {
-        metrics::gauge!(match outcome {
-            NativeHookCaptureOutcomeV1::AdmissionTimedOut =>
-                "hooks.capture.outcome.admission_timed_out",
-            NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
-            NativeHookCaptureOutcomeV1::Unsupported => "hooks.capture.outcome.unsupported",
-            NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
-            NativeHookCaptureOutcomeV1::Rejected => "hooks.capture.outcome.rejected",
-            NativeHookCaptureOutcomeV1::Full => "hooks.capture.outcome.full",
-            NativeHookCaptureOutcomeV1::ResetRequired(_) => "hooks.capture.outcome.reset_required",
-            NativeHookCaptureOutcomeV1::Unavailable(_) => "hooks.capture.outcome.unavailable",
-            NativeHookCaptureOutcomeV1::ScopeUnavailable =>
-                "hooks.capture.outcome.scope_unavailable",
-        })
-        .increment(1);
-    }
-    outcome
-}
-
-fn capture_native_event_for_replay_inner(
-    data_root: &Path,
-    worktree_id: [u8; 16],
-    source: NativeHookCaptureSourceV1,
-    payload: &[u8],
-    material: NativeEnvelopeMaterialV1,
-    now: UtcMicros,
-    wait_budget: Duration,
-) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
         NativeHookCaptureSourceV1::Host(host) => decode_native_hook_event(host, payload),

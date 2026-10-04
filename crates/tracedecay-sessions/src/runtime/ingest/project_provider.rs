@@ -416,9 +416,6 @@ impl<'a> ProjectProviderRun<'a> {
         {
             hub.acknowledge(consumer);
         }
-        crate::runtime::pipeline_metrics::record_historical_ingest(
-            coverage == HostProviderCoverage::Complete,
-        );
         outcome
     }
 

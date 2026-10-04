@@ -78,7 +78,6 @@ lang-toml = ["large-grammars"]
 lang-lean = ["large-grammars"]
 
 [dependencies]
-metrics.workspace = true
 serde = { version = "1", features = ["derive", "rc"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 # v0.5.0 plus the COBOL external-scanner fix (yutaro-sakamoto/tree-sitter-cobol#42,

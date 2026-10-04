@@ -297,10 +297,7 @@ impl CodeIndexActivationV1 {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => {
-                metrics::gauge!("daemon.code_index.generation_state")
-                    .set(f64::from(ACTIVATION_MOUNTING));
-            }
+            Ok(_) => {}
             Err(ACTIVATION_MOUNTING | ACTIVATION_MOUNTED) => return true,
             Err(_) => return false,
         }
@@ -308,7 +305,6 @@ impl CodeIndexActivationV1 {
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
-            metrics::gauge!("daemon.code_index.generation_state").set(f64::from(ACTIVATION_IDLE));
             return false;
         };
         let project_root = self.project_root.clone();
@@ -326,15 +322,11 @@ impl CodeIndexActivationV1 {
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    metrics::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
                 let mounted = mount().await;
                 if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    metrics::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
                     // The retained failure publishes only once the attempt
                     // has fully settled: a waiter that reads the flag while
                     // `mount_in_progress` still holds is observing a retry
@@ -353,8 +345,6 @@ impl CodeIndexActivationV1 {
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    metrics::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
                 let batch = {
@@ -362,8 +352,6 @@ impl CodeIndexActivationV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.store(ACTIVATION_MOUNTED, Ordering::Release);
-                    metrics::gauge!("daemon.code_index.generation_state")
-                        .set(f64::from(ACTIVATION_MOUNTED));
                     pending.take()
                 };
                 if route_is_live() && (!batch.paths.is_empty() || batch.overflow) {

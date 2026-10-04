@@ -62,7 +62,6 @@ grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
 base64 = "0.22"
 hex = "0.4"
-metrics.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }

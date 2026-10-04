@@ -192,7 +192,7 @@ fn publish_pages<T: Serialize + Sync>(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<Vec<PartitionedIndexSegmentDescriptorV1>, CodeIndexProductionErrorV1> {
-    let encoded = collect_bounded_ordered(pages, |page, _worker| encode_segment(page))?;
+    let encoded = collect_bounded_ordered(pages, |page| encode_segment(page))?;
     let mut descriptors = Vec::with_capacity(encoded.len());
     for (descriptor, bytes) in encoded {
         publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
@@ -305,7 +305,6 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             descriptor.segment_size_bytes,
         )?;
         let canonical = inflate_index_segment(&bytes, descriptor.decoded_size_bytes)?;
-        metrics::gauge!("code_index.sparse.index_bytes_decoded").increment(canonical.len() as f64);
         serde_json::from_slice(&canonical)
             .map_err(|error| contract(format!("sealed resolution index decoding failed: {error}")))
     }

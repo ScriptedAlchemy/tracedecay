@@ -291,7 +291,6 @@ pub(super) async fn execute_grep(
                 | RetainedSurfaceExecutionErrorV1::TimedOut(_)
             )) => return Err(error),
             Err(_) => {
-                metrics::gauge!("daemon.store_runtime.lcm.grep.store_ids_unavailable").increment(1.0);
                 BTreeMap::new()
             }
         },

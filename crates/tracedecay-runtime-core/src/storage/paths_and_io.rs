@@ -304,11 +304,8 @@ impl PrivateStoreIo {
             temp.write_all(contents)?;
             {
                 let _span = tracing::trace_span!("runtime_core.storage.fsync_temp").entered();
-                temp.sync_all()
+                temp.sync_all()?;
             }
-            .inspect_err(|_| {
-                metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
-            })?;
         }
         set_owner_private_file_mode(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
@@ -319,11 +316,8 @@ impl PrivateStoreIo {
                 path,
                 "private store durable file",
             )
-            .map_err(io::Error::other)
+            .map_err(io::Error::other)?;
         }
-        .inspect_err(|_| {
-            metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
-        })?;
         {
             let _span = tracing::trace_span!("runtime_core.storage.fsync_publish").entered();
             fs::OpenOptions::new()
@@ -334,11 +328,8 @@ impl PrivateStoreIo {
                 .and_then(|()| {
                     inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename)
                 })
-                .and_then(|()| sync_parent_directory(path))
+                .and_then(|()| sync_parent_directory(path))?;
         }
-        .inspect_err(|_| {
-            metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
-        })?;
         Ok(())
     }
 
@@ -357,7 +348,6 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
-        metrics::gauge!("runtime_core.storage.copy_bytes").increment(bytes as f64);
         set_owner_private_file_mode(target)?;
         Ok(bytes)
     }

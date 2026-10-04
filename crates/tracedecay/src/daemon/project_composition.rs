@@ -121,7 +121,6 @@ async fn release_one_idle_project_server_before_open(
         .into_iter()
         .map(|(_, server)| server)
         .collect::<Vec<_>>();
-    let retired_server_count = retired_servers.len();
     let stores = CapacityRetirementStores {
         administration: store_administration.clone(),
         invocation: invocation.clone(),
@@ -156,7 +155,6 @@ async fn release_one_idle_project_server_before_open(
             drop(capacity_admission);
             released
         });
-    metrics::gauge!("project_servers").increment(-(retired_server_count as f64));
     drop(retirement_admission);
     completion
         .wait()
@@ -1063,15 +1061,11 @@ impl ProjectOpenInputs<'_> {
                 owner,
                 super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
             );
-            metrics::gauge!("project_servers").increment(-1.0);
         }
         // The owner registry guard was dropped before the synchronous
         // retirement handoff. Release admission before the remaining
         // project-open awaits.
         drop(retirement_admission);
-        if inserted {
-            metrics::gauge!("project_servers").increment(1.0);
-        }
         Ok(CoreRouteBinding { resolved, inserted })
     }
 

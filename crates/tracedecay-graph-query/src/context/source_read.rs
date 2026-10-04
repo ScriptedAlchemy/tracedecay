@@ -133,7 +133,6 @@ pub async fn read_source(
             })?,
         }
     };
-    metrics::gauge!("usecases.context.source_read.bytes").increment(body.len() as f64);
     let context = source_symbol_context(
         reader,
         cancellation,

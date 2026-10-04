@@ -1678,7 +1678,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
                 }
-                crate::observe::record_pages(staged.cursor.next_page_ordinal());
                 self.accept_cursor(staged.cursor);
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
@@ -1800,7 +1799,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 }
                 let accepted_cursor = pages[accepted_page_count - 1].next_cursor().clone();
                 pages.truncate(accepted_page_count);
-                crate::observe::record_pages(accepted_cursor.next_page_ordinal());
                 self.accept_cursor(accepted_cursor);
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
             }
@@ -2167,7 +2165,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             control,
         )?;
         let inputs = files.into_iter().enumerate().collect::<Vec<_>>();
-        let admitted = super::collect_bounded_ordered(&inputs, |(index, file), _| {
+        let admitted = super::collect_bounded_ordered(&inputs, |(index, file)| {
             let next_offset = u64::try_from(start + index + 1).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed lexical file ordinal exceeds u64".to_owned(),

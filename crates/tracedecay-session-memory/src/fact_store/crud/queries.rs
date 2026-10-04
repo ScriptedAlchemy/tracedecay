@@ -137,7 +137,6 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
         })?;
         facts.push(fact);
     }
-    metrics::gauge!("runtime_core.memory.query_rows").increment(facts.len() as f64);
     Ok(facts)
 }
 
@@ -980,7 +979,8 @@ impl DatabaseFactStore<'_> {
         let write_control = write_control.clone();
         // The task owns every commit input so caller-future cancellation cannot
         // interrupt SQLite after the control admits the commit-start transition.
-        let outcome = tokio::spawn(async move {
+
+        tokio::spawn(async move {
             if write_control.interrupted() {
                 return Err(storage_message(
                     COMMIT_OPERATION,
@@ -1049,10 +1049,6 @@ impl DatabaseFactStore<'_> {
             Ok(outcome)
         })
         .await
-        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        if outcome.is_err() {
-            metrics::gauge!("runtime_core.memory.commit_failures").increment(1.0);
-        }
-        outcome
+        .map_err(|error| storage_error(COMMIT_OPERATION, error))?
     }
 }

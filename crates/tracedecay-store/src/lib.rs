@@ -21,7 +21,6 @@ pub mod git_index_transactions;
 pub mod memory;
 pub mod native_integration;
 pub mod observation;
-mod observe;
 pub mod projection;
 pub mod provider_descriptor;
 pub mod remote;

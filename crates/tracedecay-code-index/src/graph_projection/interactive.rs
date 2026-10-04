@@ -1660,16 +1660,11 @@ impl CodeGraphInteractiveReader {
                 )
             };
             match carried {
-                Ok(Ok(catalog)) => {
-                    metrics::gauge!("code_graph.catalog.carried_builds").increment(1.0);
-                    return Ok(catalog);
-                }
+                Ok(Ok(catalog)) => return Ok(catalog),
                 Ok(Err(decline)) => {
-                    metrics::gauge!("code_graph.catalog.carry_declined").increment(1.0);
                     tracing::trace!(name: "code_graph.catalog.carry_decline", value = ?decline.as_str());
                 }
                 Err(CodeGraphProjectionError::Corrupt(message)) => {
-                    metrics::gauge!("code_graph.catalog.carry_failed").increment(1.0);
                     tracing::trace!(name: "code_graph.catalog.carry_failure", value = ?message.as_str());
                 }
                 Err(error) => return Err(error),

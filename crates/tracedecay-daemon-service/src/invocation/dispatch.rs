@@ -15,52 +15,6 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
-/// In-flight accounting for the daemon invocation front door. Entering counts
-/// one request; dropping settles it, so cancellation, panic, and every early
-/// denial path release the in-flight gauge.
-struct InvocationDispatchGaugeGuard;
-
-impl InvocationDispatchGaugeGuard {
-    fn enter() -> Self {
-        metrics::gauge!("daemon.service.invocation.active").increment(1.0);
-        metrics::gauge!("daemon.service.invocation.requests_total").increment(1.0);
-        Self
-    }
-}
-
-impl Drop for InvocationDispatchGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.service.invocation.active").decrement(1.0);
-        metrics::gauge!("daemon.service.invocation.settled_total").increment(1.0);
-    }
-}
-
-/// Counts a request the front door denied before any payload handler ran.
-/// The reason set is the closed [`DaemonInvocationProblem`] enum, so every
-/// key is static and bounded.
-fn observe_front_door_denial(problem: DaemonInvocationProblem) {
-    match problem {
-        DaemonInvocationProblem::InvalidRequest => {
-            metrics::gauge!("daemon.service.invocation.denied.invalid_request").increment(1.0);
-        }
-        DaemonInvocationProblem::UnsupportedRevision => {
-            metrics::gauge!("daemon.service.invocation.denied.unsupported_revision").increment(1.0);
-        }
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            metrics::gauge!("daemon.service.invocation.denied.not_authorized").increment(1.0);
-        }
-        DaemonInvocationProblem::ResetRequired => {
-            metrics::gauge!("daemon.service.invocation.denied.reset_required").increment(1.0);
-        }
-        DaemonInvocationProblem::ApplicationContractViolation => {
-            metrics::gauge!("daemon.service.invocation.denied.contract_violation").increment(1.0);
-        }
-        DaemonInvocationProblem::Unavailable => {
-            metrics::gauge!("daemon.service.invocation.denied.unavailable").increment(1.0);
-        }
-    }
-}
-
 impl DaemonInvocationService {
     pub fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()
@@ -187,11 +141,9 @@ impl DaemonInvocationService {
     ) -> DaemonInvocationResponse {
         // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
         Box::pin(async move {
-        let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = self.request_cancellations.register(&request_id) else {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -205,7 +157,6 @@ impl DaemonInvocationService {
             (Some(token), _) => token,
             (None, Some(lease)) => lease.token(),
             (None, None) => {
-                observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -260,7 +211,6 @@ impl DaemonInvocationService {
                     },
                 );
             }
-            observe_front_door_denial(problem);
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let operation = request.operation();
@@ -289,7 +239,6 @@ impl DaemonInvocationService {
                  not admitted (project graph runtime unavailable or its \
                  activation is pending)"
             );
-            observe_front_door_denial(DaemonInvocationProblem::Unavailable);
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,

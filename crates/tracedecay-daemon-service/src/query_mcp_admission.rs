@@ -65,42 +65,13 @@ pub enum QueryMcpAdmissionUnavailableV1 {
     Revoked,
 }
 
-/// Tallies one admission refusal against its exact policy reason. The reason
-/// set is the closed [`QueryMcpAdmissionUnavailableV1`] enum, so every gauge
-/// key stays compile-time static.
-fn record_query_admission_refusal(reason: QueryMcpAdmissionUnavailableV1) {
-    match reason {
-        QueryMcpAdmissionUnavailableV1::Unauthenticated => {
-            metrics::gauge!("daemon.query_admission.refused.unauthenticated").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::InvalidGrant => {
-            metrics::gauge!("daemon.query_admission.refused.invalid_grant").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::CapabilityMismatch => {
-            metrics::gauge!("daemon.query_admission.refused.capability_mismatch").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::ScopeMismatch => {
-            metrics::gauge!("daemon.query_admission.refused.scope_mismatch").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::AuthorizationStale => {
-            metrics::gauge!("daemon.query_admission.refused.authorization_stale").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::Expired => {
-            metrics::gauge!("daemon.query_admission.refused.expired").increment(1.0);
-        }
-        QueryMcpAdmissionUnavailableV1::Revoked => {
-            metrics::gauge!("daemon.query_admission.refused.revoked").increment(1.0);
-        }
-    }
-}
-
 pub fn admit_query_mcp_read(
     identity: Option<&LocalProfileIdentityAuthorityV1>,
     project_id: &ProjectId,
     scope: &ResolvedScope,
     route_registered: Arc<AtomicBool>,
 ) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
-    let admission = match identity {
+    match identity {
         Some(identity) => admit_query_mcp_read_at(
             identity.brain_id(),
             identity.profile_id(),
@@ -110,14 +81,7 @@ pub fn admit_query_mcp_read(
             route_registered,
         ),
         None => Err(QueryMcpAdmissionUnavailableV1::Unauthenticated),
-    };
-    match &admission {
-        Ok(_) => {
-            metrics::gauge!("daemon.query_admission.admitted").increment(1.0);
-        }
-        Err(reason) => record_query_admission_refusal(*reason),
     }
-    admission
 }
 
 impl QueryMcpReadAdmissionProviderV1 {
@@ -266,15 +230,7 @@ impl QueryMcpReadAdmissionV1 {
         scope: &ResolvedScope,
         supplied: Option<&code_search::CodeIndexSearchAuthorityV1>,
     ) -> Result<code_search::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1> {
-        let authorized =
-            self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros());
-        match &authorized {
-            Ok(_) => {
-                metrics::gauge!("daemon.query_admission.authorized").increment(1.0);
-            }
-            Err(reason) => record_query_admission_refusal(*reason),
-        }
-        authorized
+        self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
     #[tracing::instrument(name = "daemon.query_mcp.authorize", level = "trace", skip_all)]

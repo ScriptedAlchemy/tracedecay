@@ -45,7 +45,7 @@ const PROOF_MAX_WORKERS: usize = 8;
 /// publication release the staged bulk rows before this proof runs.
 ///
 /// Returns the digest and the number of canonical bytes it hashed. The byte
-/// count is what the verify gauge reports and what a verified-generation
+/// count is what the verify outcome event reports and what a verified-generation
 /// marker records, so a later marker hit can report the same magnitude of work
 /// it avoided.
 ///

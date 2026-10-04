@@ -512,27 +512,6 @@ pub enum AutomationEffectAdmission {
     PreAdmissionProblem(ApplicationProblemEnvelope),
 }
 
-/// Bounded admission-decision census: every automation-effect admission,
-/// including a root refusal before prepare, settles into exactly one of
-/// these outcomes, so a run that never executed is diagnosable from
-/// counters instead of log archaeology.
-pub fn observe_admission_decision(admission: &AutomationEffectAdmission) {
-    match admission {
-        AutomationEffectAdmission::Execute(_) => {
-            metrics::gauge!("daemon.effect_admission.admitted_total").increment(1.0);
-        }
-        AutomationEffectAdmission::Replay(_) => {
-            metrics::gauge!("daemon.effect_admission.replayed_total").increment(1.0);
-        }
-        AutomationEffectAdmission::Conflict => {
-            metrics::gauge!("daemon.effect_admission.refused.conflict_total").increment(1.0);
-        }
-        AutomationEffectAdmission::PreAdmissionProblem(_) => {
-            metrics::gauge!("daemon.effect_admission.refused.pre_admission_total").increment(1.0);
-        }
-    }
-}
-
 pub fn pinned_automation_configuration_digest(
     revision: &ConfigurationRevisionId,
     behavior: &ManifestDigest,
@@ -1219,7 +1198,6 @@ impl AutomationEffectAuthority {
             )
             .map_err(contract_error)?;
             let admission = AutomationEffectAdmission::PreAdmissionProblem(envelope);
-            observe_admission_decision(&admission);
             return Ok(admission);
         }
         let reserve_path = journal_path.clone();
@@ -1317,7 +1295,6 @@ impl AutomationEffectAuthority {
                     finalize_terminal_housekeeping(&dashboard_root, &authority.journal_path)
                         .await?;
                     let admission = AutomationEffectAdmission::Replay(Box::new(terminal));
-                    observe_admission_decision(&admission);
                     return Ok(admission);
                 }
                 let recovery_cancellation = cancellation.clone();
@@ -1375,7 +1352,6 @@ impl AutomationEffectAuthority {
                 terminal,
             )),
         }?;
-        observe_admission_decision(&admission);
         Ok(admission)
     }
 

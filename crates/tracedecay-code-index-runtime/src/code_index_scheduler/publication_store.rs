@@ -13,6 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
 use same_file::Handle;
@@ -62,10 +63,6 @@ use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
-
-static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-
-static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 struct SealedGraphBuildAdmissionV1(DaemonCodeIndexPublicationStoreV1);
 
@@ -370,55 +367,6 @@ impl Drop for DecodeLeaseV1<'_> {
     }
 }
 
-struct GenerationDecodeObservationV1;
-
-impl GenerationDecodeObservationV1 {
-    fn enter() -> Self {
-        let active = CODE_INDEX_GENERATION_DECODES_ACTIVE
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        metrics::gauge!("code_index.generation.decode.attempts_total").increment((1_u64) as f64);
-        metrics::gauge!("code_index.generation.decode.active").set(active as f64);
-        Self
-    }
-}
-
-impl Drop for GenerationDecodeObservationV1 {
-    fn drop(&mut self) {
-        let _ = CODE_INDEX_GENERATION_DECODES_ACTIVE.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |active| active.checked_sub(1),
-        );
-        metrics::gauge!("code_index.generation.decode.active")
-            .set((CODE_INDEX_GENERATION_DECODES_ACTIVE.load(Ordering::Relaxed)) as f64);
-    }
-}
-
-struct GenerationDecodeWaitObservationV1;
-
-impl GenerationDecodeWaitObservationV1 {
-    fn enter() -> Self {
-        let waiters = CODE_INDEX_GENERATION_DECODE_WAITERS
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        metrics::gauge!("code_index.generation.decode.waiters").set(waiters as f64);
-        Self
-    }
-}
-
-impl Drop for GenerationDecodeWaitObservationV1 {
-    fn drop(&mut self) {
-        let _ = CODE_INDEX_GENERATION_DECODE_WAITERS.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |waiters| waiters.checked_sub(1),
-        );
-        metrics::gauge!("code_index.generation.decode.waiters")
-            .set((CODE_INDEX_GENERATION_DECODE_WAITERS.load(Ordering::Relaxed)) as f64);
-    }
-}
-
 /// Test-only occupation of the active decode barrier. See
 /// [`DaemonCodeIndexPublicationStoreV1::hold_active_decode`].
 #[cfg(test)]
@@ -495,27 +443,7 @@ pub(super) struct GenerationDecodeBudgetV1 {
     pub(super) worktree_id: WorktreeId,
 }
 
-fn publish_graph_build_bound_gauges(bound: &CodeGraphBuildBoundV1) {
-    metrics::gauge!("daemon.code_index.graph_build.bound.decode_window_bytes")
-        .set(bound.decode_window_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.resolution_file_bytes")
-        .set(bound.resolution_file_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.binding_bytes")
-        .set(bound.binding_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.bound_set_bytes")
-        .set(bound.bound_set_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.derived_bytes")
-        .set(bound.derived_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.emit_batch_bytes")
-        .set(bound.emit_batch_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.emit_spill_bytes")
-        .set(bound.emit_spill_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.emit_window_bytes")
-        .set(bound.emit_window_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.store_bytes")
-        .set(bound.store_bytes as f64);
-    metrics::gauge!("daemon.code_index.graph_build.bound.peak_bytes")
-        .set((bound.peak_bytes()) as f64);
+fn log_graph_build_bound(bound: &CodeGraphBuildBoundV1) {
     tracing::info!(
         event = "code_index_graph_build_bound",
         resolve_bytes = bound.resolve_bytes(),
@@ -2000,7 +1928,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 // Another caller already owns this O(store) decode. Park on it
                 // rather than starting a second sweep over the same bytes.
 
-                let _waiting = GenerationDecodeWaitObservationV1::enter();
                 let _parked = {
                     let _span =
                         tracing::trace_span!("code_index.generation.decode.singleflight_wait")
@@ -2071,7 +1998,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
 
-        let _decode = GenerationDecodeObservationV1::enter();
         let expected_digest = ManifestDigest::new(entry.state_digest.clone()).map_err(|error| {
             Self::corruption(format!(
                 "durable code-generation digest is not canonical: {error}"
@@ -2085,8 +2011,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
         })?;
 
-        metrics::gauge!("code_index.generation.decode.bytes_total")
-            .increment(entry.size_bytes as f64);
         let decoded = {
             let _span = tracing::trace_span!("code_index.generation.decode.file_read").entered();
             self.decode_generation_file(
@@ -2169,7 +2093,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 state.active_epoch = state.active_epoch.wrapping_add(1);
             }
             self.active_encoded_bytes.store(0, Ordering::Release);
-            metrics::gauge!("daemon.code_index.generation.decode.bytes").set((0_u64) as f64);
             released
         };
         drop(released);
@@ -2377,7 +2300,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 #[cfg(test)]
                 self.cache.active_waiters.fetch_add(1, Ordering::AcqRel);
 
-                let _waiting = GenerationDecodeWaitObservationV1::enter();
                 let parked = {
                     let _span =
                         tracing::trace_span!("code_index.generation.decode.singleflight_wait")
@@ -2464,7 +2386,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
 
-        let _decode = GenerationDecodeObservationV1::enter();
         let expected_digest =
             ManifestDigest::new(pointer.state_digest.clone()).map_err(|error| {
                 Self::corruption(format!(
@@ -2479,8 +2400,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
         })?;
 
-        metrics::gauge!("code_index.generation.decode.bytes_total")
-            .increment((metadata.len()) as f64);
         let decoded = {
             let _span = tracing::trace_span!("code_index.generation.decode.file_read").entered();
             self.decode_generation_file(&mut file, metadata.len(), &expected_digest, lifetime_lock)
@@ -2510,11 +2429,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let encoded_bytes = metadata.len();
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
-        metrics::gauge!("daemon.code_index.generation.decode.bytes").set(encoded_bytes as f64);
-        if let Some(peak_growth) = generation.decode_peak_growth_bytes() {
-            metrics::gauge!("daemon.code_index.generation.decode.peak_growth_bytes")
-                .set(peak_growth as f64);
-        }
         Ok(Some(Arc::new(generation)))
     }
 
@@ -2546,7 +2460,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
         bound: tracedecay_code_index::production::CodeGraphBuildBoundV1,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
-        publish_graph_build_bound_gauges(&bound);
+        log_graph_build_bound(&bound);
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };
@@ -3154,22 +3068,6 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             }
         }
 
-        {
-            metrics::gauge!("code_index.generation.publish.encoded_file_segment_bytes")
-                .set((self.seal_encoded_segment_bytes.load(Ordering::Relaxed)) as f64);
-            metrics::gauge!("code_index.generation.publish.existing_file_segment_bytes_read").set(
-                (self
-                    .seal_existing_segment_bytes_read
-                    .load(Ordering::Relaxed)) as f64,
-            );
-            metrics::gauge!("code_index.generation.publish.evidence_pages")
-                .set((self.seal_evidence_page_count.load(Ordering::Relaxed)) as f64);
-            metrics::gauge!("code_index.generation.publish.evidence_durable_transactions").set(
-                (self
-                    .seal_evidence_durable_transaction_count
-                    .load(Ordering::Relaxed)) as f64,
-            );
-        }
         let manifest_publication = (|| {
             {
                 let _span =
@@ -3191,8 +3089,6 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 Self::state_digest_file(&temporary.path)
             }?;
 
-            metrics::gauge!("code_index.generation.publish.digest_bytes")
-                .set((generation_size.saturating_add(referenced_segment_bytes)) as f64);
             let generation_file = format!(
                 "generation-{}.json",
                 sha256_hex_suffix(&state_digest).unwrap_or(&state_digest)

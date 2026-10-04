@@ -269,7 +269,6 @@ impl HookAdmissionCommitV1 {
         // A compaction republished every staged frame through a synced
         // replacement before it bumped the generation.
         if state.generation != self.generation || state.synced_through >= self.end {
-            metrics::gauge!("hooks.admission.commit.shared").increment(1);
             return Ok(());
         }
         let through = self.log.written.load(Ordering::Acquire);
@@ -406,11 +405,6 @@ impl HookAdmissionLedgerV1 {
             dropped_overflow_records,
             truncated_tail_bytes,
         };
-        metrics::gauge!("hooks.admission.live_records").set(report.live_records);
-        metrics::gauge!("hooks.admission.pending_work").set(report.pending_work);
-        metrics::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);
-        metrics::gauge!("hooks.admission.open.dropped_overflow")
-            .set(report.dropped_overflow_records);
         Ok((ledger, report))
     }
 
@@ -456,7 +450,6 @@ impl HookAdmissionLedgerV1 {
             } else if existing.digest == digest {
                 return self.stage_duplicate(identity, existing.order, work);
             } else {
-                metrics::gauge!("hooks.admission.decision.conflict").increment(1);
                 let work_completed = self.completed_work.contains(&identity);
                 return Ok(self.staged(
                     HookAdmissionDecisionV1::Conflict,
@@ -483,7 +476,6 @@ impl HookAdmissionLedgerV1 {
             ),
             &mut frames,
         )?;
-        metrics::gauge!("hooks.admission.append.bytes").set((frames.len()) as f64);
         self.append(&frames)?;
         let order = self.next_order;
         self.next_order = self.next_order.saturating_add(1);
@@ -498,7 +490,6 @@ impl HookAdmissionLedgerV1 {
         if let Some((work, _)) = work {
             self.insert_pending_work(identity, work.clone())?;
         }
-        metrics::gauge!("hooks.admission.decision.admitted").increment(1);
         self.compact_if_sparse()?;
         Ok(self.staged(HookAdmissionDecisionV1::Admitted, order, false))
     }
@@ -569,8 +560,6 @@ impl HookAdmissionLedgerV1 {
         if removed > 0 {
             self.rewrite()?;
         }
-        metrics::gauge!("hooks.admission.expired.removed").increment(removed);
-        metrics::gauge!("hooks.admission.live_records").set((self.entries.len()) as f64);
         Ok(removed)
     }
 
@@ -660,7 +649,6 @@ impl HookAdmissionLedgerV1 {
         order: u64,
         work: Option<(&HookEventEnvelopeV2, Vec<u8>)>,
     ) -> Result<HookAdmissionStagedV1, HookAdmissionLedgerError> {
-        metrics::gauge!("hooks.admission.decision.exact_duplicate").increment(1);
         let work_completed = self.completed_work.contains(&identity);
         if let Some((work, encoded)) = work
             && !work_completed
@@ -771,7 +759,6 @@ impl HookAdmissionLedgerV1 {
         self.entries.remove(identity);
         self.completed_work.remove(identity);
         if self.pending_work.contains_key(identity) {
-            metrics::gauge!("hooks.admission.pending_work.dropped").increment(1);
             tracing::debug!(
                 event = "hook_admission_pending_work_dropped",
                 host = self.host.hook_key(),
@@ -860,7 +847,6 @@ impl HookAdmissionLedgerV1 {
             }
         }
         self.next_order = ordered.len() as u64;
-        metrics::gauge!("hooks.admission.rewrite.bytes").set((bytes.len()) as f64);
         let path = log_path(&self.root);
         let mut state = self
             .log
@@ -1053,10 +1039,7 @@ fn acquire_writer_lock(root: &Path) -> Result<FileLease, HookAdmissionLedgerErro
         .map_err(|_| HookAdmissionLedgerError::Io)?;
     match file.try_lock() {
         Ok(()) => Ok(FileLease::held(file, "hooks.admission.writer")),
-        Err(std::fs::TryLockError::WouldBlock) => {
-            metrics::gauge!("hooks.admission.lock.contended").increment(1);
-            Err(HookAdmissionLedgerError::Busy)
-        }
+        Err(std::fs::TryLockError::WouldBlock) => Err(HookAdmissionLedgerError::Busy),
         Err(std::fs::TryLockError::Error(_)) => Err(HookAdmissionLedgerError::Io),
     }
 }

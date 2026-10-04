@@ -155,13 +155,14 @@ unauthorized external action after completing independent, authorized work.
   checks, and production-behavior tests. Do not block work when it is absent
   or stale.
 - Limits are symptoms, not knobs. For a deadline, admission, memory, or backoff
-  failure, measure the operation (the workspace's `tracing` spans and
-  `metrics` gauges are the instrumentation surface) and fix mis-sized work
+  failure, measure the operation (the workspace's `tracing` spans are the
+  instrumentation surface, and `TRACEDECAY_SPAN_TIMINGS=1` logs their close
+  timings) and fix mis-sized work
   such as N+1 queries, unbatched writes, or accidental serialization. Change a
   budget only when measurement shows the cost is irreducible, in its own
   commit with the evidence. Remove investigative overrides before merge.
-  `tracing` events are the always-compiled operator log surface, `metrics`
-  gauges are the measurement surface, and `eprintln!` scaffolds never merge.
+  `tracing` events are the always-compiled operator log surface, `tracing`
+  spans are the measurement surface, and `eprintln!` scaffolds never merge.
 - Reuse canonical TraceDecay authorities and maintained libraries first.
   Custom parsers, cursors, caches, retries, transports, registries, schedulers,
   crypto/auth/policy stores, or filesystem durability layers require a concrete

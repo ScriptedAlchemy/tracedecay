@@ -603,9 +603,6 @@ fn map_topology_error(error: GitTopologyProjectionError) -> GitQueryError {
 /// Build an envelope, folding query-level truncation into the coverage.
 fn envelope<T>(value: T, mut coverage: GitCoverageV1, truncated: bool) -> GitQueryEnvelopeV1<T> {
     if truncated {
-        // Bound-hit results across every query kind: a rising count means
-        // callers routinely outgrow `max_entries`, not that reads failed.
-        metrics::gauge!("usecases.git.truncated_results").increment(1.0);
         coverage.record(GitDegradationV1::TruncatedOutput);
     }
     GitQueryEnvelopeV1 {

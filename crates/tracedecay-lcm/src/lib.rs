@@ -19,7 +19,6 @@ pub mod extraction;
 pub mod gc;
 pub mod hermes;
 mod maintenance;
-mod metrics;
 pub mod payload;
 pub mod query;
 pub mod raw;

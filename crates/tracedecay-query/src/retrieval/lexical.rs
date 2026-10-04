@@ -123,11 +123,6 @@ pub(crate) fn admit_candidate_sources<S>(
         admitted_documents = next;
         admitted.push(source);
     }
-    metrics::gauge!("query.lane.lexical.candidate_sources_total").increment(total as f64);
-    metrics::gauge!("query.lane.lexical.candidate_sources_pruned")
-        .increment(((total - admitted.len()) as u64) as f64);
-    metrics::gauge!("query.lane.lexical.candidate_documents_admitted")
-        .set(admitted_documents as f64);
     admitted
 }
 
@@ -692,13 +687,7 @@ where
             },
             outcome => outcome,
         };
-        crate::observe::record_lane(
-            "query.lane.lexical.candidates",
-            "query.lane.lexical.examined",
-            "query.lane.lexical.results",
-            "query.lane.lexical.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.lexical.residency", &outcome);
         Ok(outcome)
     }
 }

@@ -153,43 +153,20 @@ pub type CodeIndexBuildProgressSlotV1 = Arc<RwLock<CodeIndexBuildProgressSlotSta
 pub(super) struct GenerationTextControlV1 {
     execution: DaemonCodeIndexControlV1,
     retirement_epoch: Arc<AtomicU64>,
-
-    shutting_down: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy)]
-enum GenerationTextCancellationSourceV1 {
-    Shutdown,
-    Superseded,
 }
 
 impl GenerationTextControlV1 {
     pub(super) fn new(shutting_down: Arc<AtomicBool>) -> Self {
         let retirement_epoch = Arc::new(AtomicU64::new(0));
-        let execution = DaemonCodeIndexControlV1::new(
-            Arc::clone(&retirement_epoch),
-            Arc::clone(&shutting_down),
-        );
+        let execution = DaemonCodeIndexControlV1::new(Arc::clone(&retirement_epoch), shutting_down);
         Self {
             execution,
             retirement_epoch,
-
-            shutting_down,
         }
     }
 
     pub(super) fn retire(&self) {
         DaemonCodeIndexControlV1::advance(&self.retirement_epoch);
-    }
-
-    fn cancellation_source(&self) -> Option<GenerationTextCancellationSourceV1> {
-        if self.shutting_down.load(Ordering::Acquire) {
-            Some(GenerationTextCancellationSourceV1::Shutdown)
-        } else if self.execution.is_cancelled() {
-            Some(GenerationTextCancellationSourceV1::Superseded)
-        } else {
-            None
-        }
     }
 }
 
@@ -242,47 +219,13 @@ impl CodeIndexBuildProgressSlotStateV1 {
         mut snapshot: CodeIndexBuildProgressV1,
     ) -> bool {
         if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
-            metrics::gauge!("query.artifact.progress.rejected_stale_total").increment(1.0);
             return false;
         }
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 
-        let published_phase = snapshot.phase;
         self.snapshot = Some(Arc::new(snapshot));
 
-        {
-            metrics::gauge!("query.artifact.progress.publication_total").increment(1.0);
-            match published_phase {
-                CodeIndexBuildPhaseV1::SourceScan => {
-                    metrics::gauge!("query.artifact.progress.phase.source_scan_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::RelationalPreparation => {
-                    metrics::gauge!("query.artifact.progress.phase.preparation_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::BulkCommit => {
-                    metrics::gauge!("query.artifact.progress.phase.bulk_commit_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::IndexBuild => {
-                    metrics::gauge!("query.artifact.progress.phase.index_build_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::Verification => {
-                    metrics::gauge!("query.artifact.progress.phase.verification_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::GraphPublication => {
-                    metrics::gauge!("query.artifact.progress.phase.graph_publication_total")
-                        .increment(1.0);
-                }
-                CodeIndexBuildPhaseV1::Ready => {
-                    metrics::gauge!("query.artifact.progress.phase.ready_total").increment(1.0);
-                }
-            }
-        }
         true
     }
 
@@ -325,10 +268,7 @@ pub(super) fn try_publish_build_progress(
 ) -> bool {
     match slot.try_write() {
         Ok(mut slot) => slot.publish(generation_id, owner_epoch, snapshot),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            metrics::gauge!("query.artifact.progress.skipped_busy_total").increment(1.0);
-            false
-        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
         Err(std::sync::TryLockError::Poisoned(poisoned)) => {
             poisoned
                 .into_inner()
@@ -1203,10 +1143,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self,
         preferred: NonZeroU64,
         minimum: NonZeroU64,
-    ) -> Result<(u64, u64, u64), RetrievalPortError> {
+    ) -> Result<(u64, u64), RetrievalPortError> {
         let admission_watermark = self.resident_memory.admission_watermark_bytes();
         let headroom = self.resident_memory.headroom_below(admission_watermark);
-        let observed_bytes = headroom.observed_bytes;
         let watermark_headroom = self
             .resident_memory
             .snapshot()
@@ -1221,7 +1160,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             self.resident_memory
                 .wait_for_headroom(minimum.get(), admission_watermark);
         })?;
-        Ok((observed_bytes, watermark_headroom, admitted_bytes))
+        Ok((watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1249,7 +1188,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (observed_bytes, watermark_headroom, admitted_bytes) =
+        let (watermark_headroom, admitted_bytes) =
             match self.text_artifact_admission(preferred, minimum) {
                 Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
                     let released = self
@@ -1278,13 +1217,6 @@ impl DaemonCodeTextArtifactStoreV1 {
             )
         })?;
         let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
-        metrics::gauge!("query.artifact.admission.observed_resident_bytes")
-            .set(observed_bytes as f64);
-        metrics::gauge!("query.artifact.admission.requested_growth_bytes")
-            .set(preferred.get() as f64);
-        metrics::gauge!("query.artifact.admission.admitted_growth_bytes")
-            .set(admitted.get() as f64);
-        metrics::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
         let mut reservation = self
             .resident_memory
             .reserve(
@@ -1583,8 +1515,6 @@ impl DaemonCodeTextArtifactStoreV1 {
                     sha256_private_file_and_size(staging_path, control)
                 }?;
 
-                metrics::gauge!("query.artifact.store.digest_bytes")
-                    .set(artifact_size_bytes as f64);
                 let descriptor = DurableCodeTextArtifactDescriptorV1 {
                     generation_id: generation_id.clone(),
                     artifact_file: format!(
@@ -2589,13 +2519,6 @@ impl LatestCodeTextGenerationV1 {
                 completed_lexical_units,
                 clone_peak_scratch_memory_bytes: None,
             });
-
-            {
-                metrics::gauge!("query.artifact.progress.committed_pages")
-                    .set(progress.next_page_ordinal as f64);
-                metrics::gauge!("query.artifact.progress.committed_lexical_units")
-                    .set(completed_lexical_units as f64);
-            }
         }
         let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
             state.rates_and_eta(total_lexical_units);
@@ -2708,7 +2631,6 @@ impl LatestCodeTextGenerationV1 {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let Some(current) = slot.snapshot() else {
-                    metrics::gauge!("query.artifact.progress.no_snapshot_total").increment(1.0);
                     return;
                 };
                 let mut snapshot = current.as_ref().clone();
@@ -2763,7 +2685,6 @@ impl LatestCodeTextGenerationV1 {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let Some(current) = slot.snapshot() else {
-                    metrics::gauge!("query.artifact.progress.no_snapshot_total").increment(1.0);
                     return;
                 };
                 let mut snapshot = current.as_ref().clone();
@@ -2827,19 +2748,6 @@ impl LatestCodeTextGenerationV1 {
                 other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
             })?;
         let result = self.advance_text_serving_inner(maximum_work, control);
-        if matches!(&result, Err(RetrievalPortError::Cancelled)) {
-            match self.text_control.cancellation_source() {
-                Some(GenerationTextCancellationSourceV1::Shutdown) => {
-                    metrics::gauge!("query.artifact.cancelled.shutdown_total").increment(1.0);
-                }
-                Some(GenerationTextCancellationSourceV1::Superseded) => {
-                    metrics::gauge!("query.artifact.cancelled.superseded_total").increment(1.0);
-                }
-                None => {
-                    metrics::gauge!("query.artifact.cancelled.external_total").increment(1.0);
-                }
-            }
-        }
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,
@@ -3026,7 +2934,6 @@ impl LatestCodeTextGenerationV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
             return Ok(None);
         };
-        metrics::gauge!("query.artifact.shared_adoptions_total").increment(1.0);
         let ready_progress =
             self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
         self.install_artifact_owners(reader, reader_reservation)?;
@@ -3181,13 +3088,6 @@ impl LatestCodeTextGenerationV1 {
             preferred_build_memory_budget,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;
-        let (source_batch_pages, source_batch_bytes, _) =
-            text_artifact_source_batch_limits(build_memory_budget);
-        metrics::gauge!("query.artifact.preferred_build_memory_budget_bytes")
-            .set(preferred_build_memory_budget as f64);
-        metrics::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget as f64);
-        metrics::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages as f64);
-        metrics::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes as f64);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(
@@ -3391,8 +3291,6 @@ impl LatestCodeTextGenerationV1 {
             )
             .map_err(map_sealed_page_source_error)?;
 
-            let completed_lexical_units_before =
-                artifact_build.source.completed_lexical_units().ok();
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
             let mut durable_progress = None;
             let mut commit_latency_micros = None;
@@ -3400,8 +3298,6 @@ impl LatestCodeTextGenerationV1 {
             let admitted = {
                 let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
                 source.next_page_batch_if(control, bounds, |pages| {
-                    metrics::gauge!("query.artifact.batch.offered_pages_total")
-                        .increment((u64::try_from(pages.len()).unwrap_or(u64::MAX)) as f64);
                     let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
                         CodeLexicalArtifactErrorV1::Contract(
                             "text-artifact batch page count exceeds u64".to_owned(),
@@ -3427,9 +3323,6 @@ impl LatestCodeTextGenerationV1 {
                             let accepted = prepared.accepted_prefix();
                             let accepted_pages = &pages[..accepted.get()];
 
-                            metrics::gauge!("query.artifact.batch.accepted_pages_total").increment(
-                                (u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX)) as f64,
-                            );
                             let batch_pages =
                                 u64::try_from(accepted_pages.len()).map_err(|_| {
                                     CodeLexicalArtifactErrorV1::Contract(
@@ -3473,7 +3366,6 @@ impl LatestCodeTextGenerationV1 {
             let admitted = match admitted {
                 Ok(Ok(admitted)) => admitted,
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
-                    metrics::gauge!("query.artifact.batch.refusal_total").increment(1.0);
                     checkpoint_text_artifact_control(control)?;
                     if let Some((previous_page_records, tightened_page_records)) =
                         artifact_build.source.tighten_page_record_bound()
@@ -3530,17 +3422,6 @@ impl LatestCodeTextGenerationV1 {
                             u64::try_from(clone_scratch_bytes).unwrap_or(u64::MAX),
                         );
 
-                    if let (Some(before), Ok(after)) = (
-                        completed_lexical_units_before,
-                        artifact_build.source.completed_lexical_units(),
-                    ) {
-                        metrics::gauge!("query.artifact.batch.committed_lexical_units_total")
-                            .increment(after.saturating_sub(before) as f64);
-                    }
-                    if let Some(latency_micros) = commit_latency_micros {
-                        metrics::gauge!("query.artifact.progress.latest_commit_latency_micros")
-                            .set(latency_micros as f64);
-                    }
                     remaining = remaining.checked_sub(page_count).ok_or_else(|| {
                         RetrievalPortError::Contract(
                             "accepted text-artifact batch exceeded its work budget".to_owned(),

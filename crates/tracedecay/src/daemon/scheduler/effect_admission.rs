@@ -45,7 +45,6 @@ pub(super) fn log_scheduler_pre_admission_problem(
         scheduler_pre_admission_gate_key(project_path, task),
         condition,
     ) {
-        metrics::gauge!("daemon.effect_admission.pre_admission_problem_repeats").increment(1.0);
         return;
     }
     let mut fields = super::scheduler_project_task_fields(project_path, task);
@@ -98,8 +97,7 @@ fn log_scheduler_schedule_skip(
     reason: tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1,
 ) {
     // Not-due/disabled tasks never reach durable admission; without this
-    // counter a silent schedule skip is indistinguishable from a lost tick.
-    metrics::gauge!("daemon.effect_admission.deferred_total").increment(1.0);
+    // event a silent schedule skip is indistinguishable from a lost tick.
     let mut fields = super::scheduler_project_task_fields(project_path, task);
     fields.extend([
         ("outcome", "skipped".to_owned()),

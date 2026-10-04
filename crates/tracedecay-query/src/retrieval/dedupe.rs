@@ -102,7 +102,6 @@ impl DeterministicDedupe {
             }
             index = end;
         }
-        metrics::gauge!("query.dedupe.candidates").set((candidates.len()) as f64);
         Ok((candidates, decisions))
     }
 
@@ -193,7 +192,6 @@ impl DeterministicDedupe {
                 None => survivors.push(candidate),
             }
         }
-        metrics::gauge!("query.dedupe.candidates").set((survivors.len()) as f64);
         Ok((survivors, decisions))
     }
 }

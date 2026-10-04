@@ -31,9 +31,7 @@ impl GitWatcher {
         project_root: &Path,
         config: &SyncConfig,
     ) -> GitWatcherAdmission {
-        let admission = self.ensure_watching_admission(project_root, config).await;
-        record_admission_outcome(admission);
-        admission
+        self.ensure_watching_admission(project_root, config).await
     }
 
     /// Admission body behind [`Self::ensure_watching_with_config`], separated
@@ -150,8 +148,6 @@ impl GitWatcher {
                     WorktreeRegistration::Capacity => return GitWatcherAdmission::Capacity,
                     WorktreeRegistration::Retired => {
                         projects.remove(&common_dir);
-                        metrics::gauge!("daemon.git.watch.repositories.watched")
-                            .set((projects.len()) as f64);
                         drop(admission);
                         join_retired_repository_state(&state).await;
                         drop(projects);
@@ -176,7 +172,6 @@ impl GitWatcher {
             let handle = tokio::spawn(supervise_repository(inner, Arc::clone(&state)));
             state.retain_task(handle);
             projects.insert(common_dir.clone(), Arc::clone(&state));
-            metrics::gauge!("daemon.git.watch.repositories.watched").set((projects.len()) as f64);
             #[cfg(test)]
             self.inner.lifecycle_receipts.record_repository();
             log_daemon_event(
@@ -216,7 +211,6 @@ impl GitWatcher {
     }
 
     async fn retry_identity_discovery(&self, project_root: PathBuf, config: SyncConfig) {
-        let _retry_owner = IdentityRetryGaugeGuard::enter();
         let mut backoff = Duration::from_millis(500);
         loop {
             log_daemon_event(
@@ -231,7 +225,6 @@ impl GitWatcher {
                 () = self.inner.cancellation.cancelled() => break,
                 () = tokio::time::sleep(backoff) => {}
             }
-            metrics::gauge!("daemon.git.watch.identity_retry.attempts_total").increment(1.0);
             match self
                 .ensure_watching_with_config(&project_root, &config)
                 .await
@@ -250,52 +243,5 @@ impl GitWatcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         retries.remove(&project_root);
-    }
-}
-
-/// Bounded typed admission counters. Refusals are first-class evidence: a
-/// profile must separate capacity pressure from identity-discovery churn and
-/// shutdown races without recording repository paths.
-fn record_admission_outcome(admission: GitWatcherAdmission) {
-    match admission {
-        GitWatcherAdmission::Ready => {
-            metrics::gauge!("daemon.git.watch.admission.ready_total").increment(1.0);
-        }
-        GitWatcherAdmission::Disabled => {
-            metrics::gauge!("daemon.git.watch.admission.disabled_total").increment(1.0);
-        }
-        GitWatcherAdmission::LinkedWorktreeDisabled => {
-            metrics::gauge!("daemon.git.watch.admission.linked_worktree_disabled_total")
-                .increment(1.0);
-        }
-        GitWatcherAdmission::ShuttingDown => {
-            metrics::gauge!("daemon.git.watch.admission.shutting_down_total").increment(1.0);
-        }
-        GitWatcherAdmission::Capacity => {
-            metrics::gauge!("daemon.git.watch.admission.capacity_total").increment(1.0);
-        }
-        GitWatcherAdmission::NotRepository => {
-            metrics::gauge!("daemon.git.watch.admission.not_repository_total").increment(1.0);
-        }
-        GitWatcherAdmission::IdentityUnavailable => {
-            metrics::gauge!("daemon.git.watch.admission.identity_unavailable_total").increment(1.0);
-        }
-    }
-}
-
-/// RAII gauge for live single-flight identity-retry owners so cancellation,
-/// panic, or definitive admission can never leak the count.
-struct IdentityRetryGaugeGuard;
-
-impl IdentityRetryGaugeGuard {
-    fn enter() -> Self {
-        metrics::gauge!("daemon.git.watch.identity_retry.active").increment(1.0);
-        Self
-    }
-}
-
-impl Drop for IdentityRetryGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.git.watch.identity_retry.active").decrement(1.0);
     }
 }

@@ -29,11 +29,10 @@ use super::{
     MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
     TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_TRANSACTION_FILE,
     TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifact_staging_root, code_text_artifacts_root,
-    durable_generation_index_digest, generation_file_digest, observe_cancel,
-    open_file_sha256_hex_cancellable, path_still_names_open_file, read_active_pointer,
-    read_optional_active_pointer, regular_file_exists,
-    retain_bounded_generation_index_with_text_head, sha256_file_component, storage,
-    validate_durable_generation_index, validate_sealed_generation_identity,
+    durable_generation_index_digest, generation_file_digest, open_file_sha256_hex_cancellable,
+    path_still_names_open_file, read_active_pointer, read_optional_active_pointer,
+    regular_file_exists, retain_bounded_generation_index_with_text_head, sha256_file_component,
+    storage, validate_durable_generation_index, validate_sealed_generation_identity,
     validate_text_artifact_descriptor,
 };
 
@@ -231,7 +230,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
-    if observe_cancel(is_cancelled) {
+    if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     // An unpublished store (`None`) has no durable index and no resumable
@@ -286,7 +285,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     // missing.
     let mut inventory = BTreeMap::new();
     for descriptor in referenced.values() {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         verify_completed_text_artifact(
@@ -334,7 +333,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         let mut entries = std::fs::read_dir(directory).map_err(storage)?;
         while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
             remaining -= 1;
-            if observe_cancel(is_cancelled) {
+            if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             let Some(entry) = entries.next() else {
@@ -631,7 +630,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
     ),
     CodeGenerationRetentionErrorV1,
 > {
-    if observe_cancel(is_cancelled) {
+    if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     let deleted_artifacts = plan.collectable_text_artifacts.clone();
@@ -648,11 +647,11 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
     };
     persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, &transaction)?;
     let result = (|| {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         stage_collectable_text_artifacts_cancellable(store_root, &transaction, is_cancelled)?;
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         if read_optional_active_pointer(store_root)? != transaction.active_pointer {
@@ -661,7 +660,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
                     .to_owned(),
             ));
         }
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         receipt_store::write_receipt(
@@ -818,7 +817,7 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
         &transaction.receipt.receipt_digest,
     )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        if observe_cancel(is_cancelled) {
+        if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         validate_text_artifact_candidate(candidate)?;
@@ -851,7 +850,7 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                         )));
                     }
                 }
-                if observe_cancel(is_cancelled) {
+                if is_cancelled() {
                     return Err(CodeGenerationRetentionErrorV1::Cancelled);
                 }
                 Ok(())

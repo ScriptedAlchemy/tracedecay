@@ -5,19 +5,12 @@
 //! typed set, never an unbounded message.
 
 use axum::http::StatusCode;
-
-use axum::http::header;
 use axum::response::Response;
 use tracedecay_api::read_model::DashboardFreshnessStateV1;
 
 #[inline(always)]
 pub(crate) fn record_error_class(class: &'static str) {
     tracing::trace!(name: "dashboard_api.http.error_class", value = ?class);
-}
-
-#[inline(always)]
-pub(crate) fn record_response_bytes(len: usize) {
-    metrics::gauge!("dashboard_api.http.response_bytes").set(len as f64);
 }
 
 #[inline(always)]
@@ -44,36 +37,17 @@ pub(crate) fn record_status_class(status: StatusCode) {
 
 #[inline(always)]
 pub(crate) fn observe_response(response: &Response) {
-    {
-        record_status_class(response.status());
-        if let Some(len) = response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            record_response_bytes(len);
-        }
-    }
-}
-
-/// Strata is the largest structure payload (up to `STRATA_MAX_FILES` rows);
-/// its serialized size tracks this element count, which is free to observe.
-#[inline(always)]
-pub(crate) fn record_strata_files(len: usize) {
-    metrics::gauge!("dashboard_api.graph.strata_files").set(len as f64);
+    record_status_class(response.status());
 }
 
 #[inline(always)]
 pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
-    {
-        let class = match state {
-            DashboardFreshnessStateV1::Fresh => "fresh",
-            DashboardFreshnessStateV1::Stale => "stale",
-            DashboardFreshnessStateV1::Unknown => "unknown",
-            DashboardFreshnessStateV1::Absent => "absent",
-            DashboardFreshnessStateV1::Unsupported => "unsupported",
-        };
-        tracing::trace!(name: "dashboard_api.freshness.state", value = ?class);
-    }
+    let class = match state {
+        DashboardFreshnessStateV1::Fresh => "fresh",
+        DashboardFreshnessStateV1::Stale => "stale",
+        DashboardFreshnessStateV1::Unknown => "unknown",
+        DashboardFreshnessStateV1::Absent => "absent",
+        DashboardFreshnessStateV1::Unsupported => "unsupported",
+    };
+    tracing::trace!(name: "dashboard_api.freshness.state", value = ?class);
 }

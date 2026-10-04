@@ -127,7 +127,6 @@ pub(super) fn commit_records(
     }
     let synced = lock.synced_through(identity)?;
     if synced.is_some_and(|synced| synced >= end) {
-        metrics::gauge!("hooks.spool.commit.shared").increment(1);
         return Ok(());
     }
     let written = records.metadata().map_err(|_| HookSpoolError::Io)?.len();

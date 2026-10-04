@@ -222,16 +222,6 @@ where
                 },
             )
             .map_err(storage_problem)?;
-        // Idempotent replays are the interesting half of this decision: a
-        // rising replay share means callers are re-adjudicating settled pairs.
-        match &outcome {
-            WorkDuplicateAdjudicationAppendOutcomeV1::Appended(_) => {
-                metrics::gauge!("application.work.duplicate.adjudicate.appended").increment(1.0);
-            }
-            WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(_) => {
-                metrics::gauge!("application.work.duplicate.adjudicate.replayed").increment(1.0);
-            }
-        }
         Ok(outcome)
     }
 
@@ -301,36 +291,13 @@ where
                 &attempts,
             )
             .map_err(storage_problem)?;
-        let read = classify_complete_attempt_relations(
+        Ok(classify_complete_attempt_relations(
             &authority,
             request.work_generation,
             request.topology_generation,
             attempts,
             receipts,
-        );
-        // Bounded per-reason counters: classification refusals are typed
-        // product states, and each reason implicates a different authority
-        // (missing pair matrix, conflicting receipts, unresolved verdicts).
-        match &read {
-            WorkDuplicateAttemptClassificationReadV1::Complete { .. } => {
-                metrics::gauge!("application.work.duplicate.classify.complete").increment(1.0);
-            }
-            WorkDuplicateAttemptClassificationReadV1::Unavailable { reason } => match reason {
-                WorkDuplicateClassificationUnavailableReasonV1::MissingPair => {
-                    metrics::gauge!("application.work.duplicate.classify.missing_pair")
-                        .increment(1.0);
-                }
-                WorkDuplicateClassificationUnavailableReasonV1::ConflictingPair => {
-                    metrics::gauge!("application.work.duplicate.classify.conflicting_pair")
-                        .increment(1.0);
-                }
-                WorkDuplicateClassificationUnavailableReasonV1::UnresolvedVerdict => {
-                    metrics::gauge!("application.work.duplicate.classify.unresolved_verdict")
-                        .increment(1.0);
-                }
-            },
-        }
-        Ok(read)
+        ))
     }
 }
 

@@ -692,7 +692,6 @@ fn validate_receipt(
         || receipt.cancellation_token_id != request.cancellation().token_id
         || receipt.execution.effective_deadline != *request.deadline()
     {
-        metrics::gauge!("daemon.retained.lcm.authority.receipt_invalid").increment(1.0);
         return Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the LCM authority execution receipt did not match the admitted request",
         ));
@@ -702,41 +701,25 @@ fn validate_receipt(
 
 fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
-        LcmAuthorityOutcome::Denied => {
-            metrics::gauge!("daemon.retained.lcm.authority.denied").increment(1.0);
-            RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
-        }
-        LcmAuthorityOutcome::Cancelled => {
-            metrics::gauge!("daemon.retained.lcm.authority.cancelled").increment(1.0);
-            RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_contracts::CancellationStage::DuringRead,
-            )
-        }
-        LcmAuthorityOutcome::TimedOut => {
-            metrics::gauge!("daemon.retained.lcm.authority.timed_out").increment(1.0);
-            RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_contracts::CancellationStage::DuringRead,
-            )
-        }
-        LcmAuthorityOutcome::Ready => {
-            metrics::gauge!("daemon.retained.lcm.authority.unavailable").increment(1.0);
-            RetainedSurfaceExecutionErrorV1::unavailable(
-                "the LCM authority reported ready without the expected payload",
-            )
-        }
+        LcmAuthorityOutcome::Denied => RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
+        LcmAuthorityOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_contracts::CancellationStage::DuringRead,
+        ),
+        LcmAuthorityOutcome::Ready => RetainedSurfaceExecutionErrorV1::unavailable(
+            "the LCM authority reported ready without the expected payload",
+        ),
         LcmAuthorityOutcome::Unavailable { reason } => {
-            metrics::gauge!("daemon.retained.lcm.authority.unavailable").increment(1.0);
             RetainedSurfaceExecutionErrorV1::unavailable(format!(
                 "the LCM authority is unavailable: {}",
                 lcm_unavailable_reason(reason)
             ))
         }
-        LcmAuthorityOutcome::Failed { diagnostic } => {
-            metrics::gauge!("daemon.retained.lcm.authority.unavailable").increment(1.0);
-            RetainedSurfaceExecutionErrorV1::unavailable(format!(
-                "the LCM authority failed: {diagnostic}"
-            ))
-        }
+        LcmAuthorityOutcome::Failed { diagnostic } => RetainedSurfaceExecutionErrorV1::unavailable(
+            format!("the LCM authority failed: {diagnostic}"),
+        ),
     }
 }
 

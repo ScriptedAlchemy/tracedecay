@@ -87,7 +87,6 @@ struct SessionTemporalRefreshWorkerTelemetry {
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
-    depths_published: bool,
     /// The worker went idle with no dirty flag and no queued request, and
     /// nothing has requeued work since.
     quiescent: bool,
@@ -114,7 +113,6 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
-            depths_published: true,
             quiescent: false,
             convergence_epoch: 0,
             converged_at_unix_micros: None,
@@ -213,19 +211,11 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn take_dirty(&self) -> bool {
-        let dirty = self.dirty.swap(false, Ordering::AcqRel);
-        if dirty {
-            metrics::gauge!("session_temporal_refresh_projection_dirty").increment(-1.0);
-        }
-        dirty
+        self.dirty.swap(false, Ordering::AcqRel)
     }
 
     pub fn take_historical_dirty(&self) -> bool {
-        let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
-        if dirty {
-            metrics::gauge!("session_temporal_refresh_history_dirty").increment(-1.0);
-        }
-        dirty
+        self.historical_dirty.swap(false, Ordering::AcqRel)
     }
 
     pub fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
@@ -350,16 +340,12 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn requeue_projection(&self) {
-        if !self.dirty.swap(true, Ordering::AcqRel) {
-            metrics::gauge!("session_temporal_refresh_projection_dirty").increment(1.0);
-        }
+        self.dirty.swap(true, Ordering::AcqRel);
         self.mark_converging();
     }
 
     pub fn wake_history(&self) {
-        if !self.historical_dirty.swap(true, Ordering::AcqRel) {
-            metrics::gauge!("session_temporal_refresh_history_dirty").increment(1.0);
-        }
+        self.historical_dirty.swap(true, Ordering::AcqRel);
         self.mark_converging();
         self.wake.notify_one();
     }
@@ -402,15 +388,11 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn mark_worker_busy(&self) {
-        if !self.busy.swap(true, Ordering::AcqRel) {
-            metrics::gauge!("session_temporal_refresh_workers_busy").increment(1.0);
-        }
+        self.busy.swap(true, Ordering::AcqRel);
     }
 
     pub fn mark_worker_idle(&self) {
-        if self.busy.swap(false, Ordering::AcqRel) {
-            metrics::gauge!("session_temporal_refresh_workers_busy").increment(-1.0);
-        }
+        self.busy.swap(false, Ordering::AcqRel);
     }
 
     pub fn clear_worker_instrumentation(&self) {
@@ -443,13 +425,7 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn update_history_retry_state(&self, pending: bool) {
-        if self.history_retry_pending.swap(pending, Ordering::AcqRel) != pending {
-            metrics::gauge!("session_temporal_refresh_history_retrying").increment(if pending {
-                1.0
-            } else {
-                -1.0
-            });
-        }
+        self.history_retry_pending.swap(pending, Ordering::AcqRel);
     }
 
     pub fn mark_running(&self) {
@@ -479,23 +455,6 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
-        match outcome {
-            SessionHistoricalIngestOutcome::Complete => {
-                metrics::gauge!("session_temporal_refresh_history_complete").increment(1.0);
-            }
-            SessionHistoricalIngestOutcome::Pending { .. } => {
-                metrics::gauge!("session_temporal_refresh_history_pending").increment(1.0);
-            }
-            SessionHistoricalIngestOutcome::Retryable { .. } => {
-                metrics::gauge!("session_temporal_refresh_history_retryable").increment(1.0);
-            }
-            SessionHistoricalIngestOutcome::Blocked { .. } => {
-                metrics::gauge!("session_temporal_refresh_history_blocked").increment(1.0);
-            }
-            SessionHistoricalIngestOutcome::Cancelled => {
-                metrics::gauge!("session_temporal_refresh_history_cancelled").increment(1.0);
-            }
-        }
         let state = match outcome {
             SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
             SessionHistoricalIngestOutcome::Pending { .. } => {
@@ -558,10 +517,6 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if telemetry.depths_published {
-            metrics::gauge!("session_temporal_refresh_durable_depth")
-                .increment(bounded_depth(backlog) - bounded_depth(telemetry.durable_backlog));
-        }
         telemetry.durable_backlog = backlog;
     }
 
@@ -570,16 +525,11 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let previous = telemetry.durable_backlog;
         telemetry.durable_backlog = durable_backlog;
         telemetry.last_pass_made_progress = made_progress;
         if made_progress {
             let micros = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
             telemetry.last_progress_at_unix_micros = Some(micros);
-        }
-        if telemetry.depths_published {
-            metrics::gauge!("session_temporal_refresh_durable_depth")
-                .increment(bounded_depth(durable_backlog) - bounded_depth(previous));
         }
     }
 
@@ -588,10 +538,6 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if telemetry.depths_published {
-            metrics::gauge!("session_temporal_refresh_queue_depth")
-                .increment(bounded_depth(backlog) - bounded_depth(telemetry.queued_backlog));
-        }
         telemetry.queued_backlog = backlog;
     }
 
@@ -709,26 +655,10 @@ impl SessionTemporalRefreshWakeState {
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.completion_control.cancel();
             self.clear_worker_instrumentation();
-            self.clear_depth_instrumentation();
             self.mark_stopped();
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
         }
-    }
-
-    fn clear_depth_instrumentation(&self) {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !telemetry.depths_published {
-            return;
-        }
-        metrics::gauge!("session_temporal_refresh_queue_depth")
-            .increment(-bounded_depth(telemetry.queued_backlog));
-        metrics::gauge!("session_temporal_refresh_durable_depth")
-            .increment(-bounded_depth(telemetry.durable_backlog));
-        telemetry.depths_published = false;
     }
 
     pub fn completion_control(&self) -> ExecutionControl {
@@ -754,7 +684,6 @@ impl SessionTemporalRefreshWakeState {
 impl Drop for SessionTemporalRefreshWakeState {
     fn drop(&mut self) {
         self.clear_worker_instrumentation();
-        self.clear_depth_instrumentation();
     }
 }
 
@@ -795,10 +724,6 @@ fn convergence_status(
         epoch: telemetry.convergence_epoch,
         converged_at_unix_micros: telemetry.converged_at_unix_micros,
     }
-}
-
-fn bounded_depth(depth: usize) -> f64 {
-    depth.min(u32::MAX as usize) as f64
 }
 
 pub(crate) struct TerminalAttemptGuard<'a> {

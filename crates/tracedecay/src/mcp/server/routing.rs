@@ -23,22 +23,6 @@ use tracedecay_global_db::RegisteredGlobalDb;
 pub(crate) struct SelectedProjectResponseLease {
     _guard: tokio::sync::OwnedRwLockReadGuard<()>,
     revoked: tracedecay_runtime_core::cancellation::CancellationToken,
-    _active: ResponseLeaseGaugeGuard,
-}
-
-struct ResponseLeaseGaugeGuard;
-
-impl ResponseLeaseGaugeGuard {
-    fn enter() -> Self {
-        metrics::gauge!("mcp.server.response_leases_active").increment(1.0);
-        Self
-    }
-}
-
-impl Drop for ResponseLeaseGaugeGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("mcp.server.response_leases_active").decrement(1.0);
-    }
 }
 
 impl SelectedProjectResponseLease {
@@ -49,7 +33,6 @@ impl SelectedProjectResponseLease {
         Self {
             _guard: guard,
             revoked,
-            _active: ResponseLeaseGaugeGuard::enter(),
         }
     }
 

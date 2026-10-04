@@ -392,8 +392,6 @@ pub(super) fn load(
     if looks_like_test(target_path, &target_metadata.simple_name) {
         affected_tests.insert(target_path.to_owned());
     }
-    metrics::gauge!("edits.rename.evidence_edges_total")
-        .increment((all_revision_edges.len() as u64) as f64);
     let graph_revision = {
         let _span = tracing::trace_span!("edits.rename.evidence_digest").entered();
         {

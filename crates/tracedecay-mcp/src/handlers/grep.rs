@@ -157,9 +157,6 @@ pub fn render_grep(
         let _span = tracing::trace_span!("mcp.search.grep.render").entered();
         render::finalize(response_handle_root, args, value, || render_grep_md(result))
     };
-    // Grep aggregates more raw content than any other search tool; the encoded
-    // payload size explains transport pressure that timing alone cannot.
-    metrics::gauge!("mcp.search.grep.response_bytes").set((text.len()) as f64);
     Ok(text_tool_result(&text, Vec::new()))
 }
 

@@ -44,29 +44,7 @@ pub async fn resolve_watch_identity(
     project_root: PathBuf,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> WatchIdentityResolution {
-    let resolution = discover_watch_identity(project_root, cancellation).await;
-    record_identity_resolution(&resolution);
-    resolution
-}
-
-/// Bounded typed discovery-outcome counters. `Unknown` (a bounded git
-/// timeout) drives the admission backoff retry owner, so its rate versus
-/// `resolved` separates discovery churn from healthy admission cost.
-fn record_identity_resolution(resolution: &WatchIdentityResolution) {
-    match resolution {
-        WatchIdentityResolution::Ready(_) => {
-            metrics::gauge!("daemon.git.watch.identity.resolved_total").increment(1.0);
-        }
-        WatchIdentityResolution::Cancelled => {
-            metrics::gauge!("daemon.git.watch.identity.cancelled_total").increment(1.0);
-        }
-        WatchIdentityResolution::NotRepository => {
-            metrics::gauge!("daemon.git.watch.identity.not_repository_total").increment(1.0);
-        }
-        WatchIdentityResolution::Unknown => {
-            metrics::gauge!("daemon.git.watch.identity.unknown_total").increment(1.0);
-        }
-    }
+    discover_watch_identity(project_root, cancellation).await
 }
 
 async fn discover_watch_identity(

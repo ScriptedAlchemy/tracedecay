@@ -12,7 +12,7 @@ use super::lifecycle::{
     DaemonLifecycle, DaemonShutdownClaim,
 };
 use super::owners::{
-    DrainingGauge, ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
+    ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
 };
 use tracedecay_domain::errors::Result;
@@ -172,9 +172,6 @@ pub struct DaemonShutdownReceipt {
 
 impl DaemonShutdownReceipt {
     fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
-        // Coordinator-level failures never reach the per-phase counters, so
-        // they are recorded here or the waste is invisible to profiling.
-        metrics::gauge!("daemon.shutdown.coordinator.failed_total").increment(1.0);
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -184,7 +181,6 @@ impl DaemonShutdownReceipt {
     }
 
     fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
-        metrics::gauge!("daemon.shutdown.coordinator.timed_out_total").increment(1.0);
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
@@ -432,7 +428,6 @@ async fn run_daemon_shutdown(
     let (in_flight, clients) = {
         use tracing::Instrument as _;
         async {
-            let _draining = DrainingGauge::arm("daemon.shutdown.draining.clients");
             let in_flight = loop {
                 tokio::select! {
                     receipt = &mut background_shutdown, if background_receipt.is_none() => {
@@ -473,14 +468,6 @@ async fn run_daemon_shutdown(
         client_drain_started,
         client_drain_deadline,
     );
-    // Forced vs graceful: graceful means in-flight client work idled out
-    // cooperatively before the drain deadline; forced means the deadline
-    // expired and the abort/join path did the draining.
-    if in_flight.is_clean() {
-        metrics::gauge!("daemon.shutdown.client_drain.graceful_total").increment(1.0);
-    } else {
-        metrics::gauge!("daemon.shutdown.client_drain.forced_total").increment(1.0);
-    }
     // Background-task drain: resolve the non-terminal ShutdownOwner phases
     // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
@@ -489,7 +476,6 @@ async fn run_daemon_shutdown(
     let mut background = {
         use tracing::Instrument as _;
         async {
-            let _draining = DrainingGauge::arm("daemon.shutdown.draining.background");
             match background_receipt {
                 Some(receipt) => receipt,
                 None => background_shutdown.await,
@@ -519,7 +505,6 @@ async fn run_daemon_shutdown(
     let project_servers = {
         use tracing::Instrument as _;
         async {
-            let _draining = DrainingGauge::arm("daemon.shutdown.draining.project_servers");
             // The drain gets its phase deadline, so it reaches its own bounded
             // join and reports one outcome *per named server*. The outer sleep is
             // only the backstop for a drain that ignores its deadline; it fires
@@ -558,7 +543,6 @@ async fn run_daemon_shutdown(
         let receipt = {
             use tracing::Instrument as _;
             {
-                let _draining = DrainingGauge::arm("daemon.shutdown.draining.store_close");
                 prepare_shutdown_owner_phases(plan.terminal_owner_phases)
                     .join(store_close_deadline)
                     .instrument(tracing::trace_span!("daemon.shutdown.store_close"))
@@ -582,25 +566,12 @@ async fn run_daemon_shutdown(
         ShutdownReceipt::timed_out(store_close_deadline, "memory_graph_reconciliation")
     };
     background.extend(terminal);
-    let receipt = DaemonShutdownReceipt {
+    DaemonShutdownReceipt {
         in_flight,
         clients,
         background,
         project_servers,
-    };
-    // Graceful means every lane drained cooperatively inside its budget;
-    // anything else, a timed-out owner, a forced client abort, a failed or
-    // timed-out project server, makes this attempt a forced shutdown.
-    if receipt.in_flight.is_clean()
-        && receipt.clients.is_clean()
-        && receipt.background.unfinished().is_empty()
-        && receipt.project_servers.is_clean()
-    {
-        metrics::gauge!("daemon.shutdown.outcome.graceful_total").increment(1.0);
-    } else {
-        metrics::gauge!("daemon.shutdown.outcome.forced_total").increment(1.0);
     }
-    receipt
 }
 
 #[tracing::instrument(

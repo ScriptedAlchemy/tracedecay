@@ -737,20 +737,16 @@ impl PersistentWriter {
             return Ok(self.unavailable());
         }
 
-        let priority = request.envelope().metadata.priority;
         self.telemetry.offered();
-        crate::observe::record_writer_offered(priority);
         let permit = match self.admission.reserve(&request.envelope().metadata) {
             Ok(permit) => permit,
             Err(scope) => {
                 self.telemetry.shed();
-                crate::observe::record_writer_shed(priority);
                 return Ok(settlement::saturation(&request, scope));
             }
         };
         let bytes = request.envelope().metadata.admission_bytes;
         self.telemetry.admitted(bytes);
-        crate::observe::record_writer_admitted(priority);
         let (reply, response) = oneshot::channel();
         let accepted = AcceptedRequest::new(request.clone(), probe, authority, reply, permit);
         let send_result = {
@@ -772,7 +768,6 @@ impl PersistentWriter {
         if let Err((accepted, saturated)) = send_result {
             self.telemetry.released(1, bytes);
             let outcome = if saturated {
-                crate::observe::record_writer_shed(priority);
                 settlement::saturation(
                     &request,
                     tracedecay_store::SaturationScopeV1::ShardOperations,

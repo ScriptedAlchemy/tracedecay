@@ -305,7 +305,6 @@ impl CatalogSnapshotBuilderV1 {
             executable_schemas: executable_schemas.values().collect(),
             profiles: profiles.values().collect(),
         })?;
-        crate::observe::snapshot_entries(capabilities.len(), bindings.len(), profiles.len());
 
         Ok(CatalogSnapshotV1 {
             digest,
@@ -392,15 +391,13 @@ impl CatalogSnapshotV1 {
         protocol_revision: u32,
         negotiated_features: &BTreeSet<FeatureId>,
     ) -> Option<&CapabilityManifestV1> {
-        let resolved = self.resolve_binding_capability(
+        self.resolve_binding_capability(
             profile_id,
             surface,
             operation,
             protocol_revision,
             negotiated_features,
-        );
-        crate::observe::binding_resolution(resolved.is_some());
-        resolved
+        )
     }
 
     fn resolve_binding_capability(
@@ -505,7 +502,6 @@ impl CatalogSnapshotV1 {
                 left.operation().as_str().cmp(right.operation().as_str())
             });
         }
-        crate::observe::visible_bindings_published(visible.len());
         visible
     }
 }

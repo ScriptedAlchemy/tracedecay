@@ -540,7 +540,6 @@ pub async fn run_observation_retention(
     mode: RetentionMode,
     now: UtcMicros,
 ) -> Result<ObservationRetentionReport> {
-    crate::observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
     let freelist_before = pragma_u64(&reader, "freelist_count").await?;
     let page_count_before = pragma_u64(&reader, "page_count").await?;

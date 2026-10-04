@@ -56,14 +56,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                             ));
                         }
 
-                        metrics::gauge!("daemon.store.project_graph.mount_reuse_total")
-                            .increment(1.0);
                         return Ok(database);
                     }
                     true
                 }
                 Some(super::ProjectRuntimeOwnerStateV1::Opening) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -76,14 +73,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | super::ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(state.unavailable_route_error());
                 }
                 None => false,
             }
         };
         if !writable {
-            let _mount_observation = super::StoreMountObservationV1::enter();
             let shard_id = StoreShardIdV1::project(
                 self.identity.brain_id().clone(),
                 self.identity.profile_id().clone(),
@@ -132,7 +127,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 });
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {

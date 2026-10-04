@@ -15,7 +15,6 @@ pub struct ReadSnapshot {
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
-        metrics::gauge!("runtime_core.db.snapshots_active").increment(1.0);
         Self {
             runtime: Arc::new(runtime),
         }
@@ -33,12 +32,6 @@ impl ReadSnapshot {
         .await
         .map_err(join_error)??;
         Ok(Rows::from_exact(rows))
-    }
-}
-
-impl Drop for ReadSnapshot {
-    fn drop(&mut self) {
-        metrics::gauge!("runtime_core.db.snapshots_active").decrement(1.0);
     }
 }
 

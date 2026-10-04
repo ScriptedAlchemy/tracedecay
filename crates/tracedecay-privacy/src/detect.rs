@@ -558,13 +558,6 @@ pub(crate) fn redact_sensitive_values(
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
-    if !findings.is_empty() {
-        metrics::gauge!("runtime_core.privacy.redactions").increment(findings.len() as f64);
-    }
-    if !quarantine_findings.is_empty() {
-        metrics::gauge!("runtime_core.privacy.quarantines")
-            .increment(quarantine_findings.len() as f64);
-    }
     patterns
         .checked(DetectionResult {
             payload,
@@ -711,9 +704,6 @@ pub(super) fn redact_text(
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
-    // One aggregate counter per scanned value; a span here would put probe
-    // overhead on every string of every hydrated payload.
-    metrics::gauge!("runtime_core.privacy.rules_evaluated").increment(patterns.len() as f64);
     let mut candidates = Vec::new();
     for (pattern, ranges) in patterns.matched_ranges(text) {
         let (detector, confidence, replacement) = pattern_metadata(pattern.kind());

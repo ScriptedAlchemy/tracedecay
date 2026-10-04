@@ -148,14 +148,6 @@ fn cgroup_v2_memory_ceiling_v1(
     })
 }
 
-fn effective_memory_bytes_v1(total_memory_bytes: u64, cgroup_limit: Option<u64>) -> u64 {
-    match cgroup_limit {
-        Some(cgroup_limit) if total_memory_bytes == 0 => cgroup_limit,
-        Some(cgroup_limit) => total_memory_bytes.min(cgroup_limit),
-        None => total_memory_bytes,
-    }
-}
-
 struct ResidentMemoryAuthorityV1 {
     limit_bytes: NonZeroU64,
     /// `memory.high` when it sits strictly below the hard admission ceiling.
@@ -236,25 +228,11 @@ fn read_resident_memory_authority_v1() -> ResidentMemoryAuthorityV1 {
     let total_memory_bytes = physical_memory_bytes_v1().unwrap_or(0);
     let proc_self_cgroup = Path::new(PROC_SELF_CGROUP_V1);
     let cgroup_root = Path::new(CGROUP_V2_ROOT_V1);
-    let cgroup = cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root);
-    let service_ceiling = cgroup.and_then(cgroup_service_ceiling_bytes);
-    let effective_memory_bytes = effective_memory_bytes_v1(total_memory_bytes, service_ceiling);
-    let authority = resident_memory_authority_v1(
+    resident_memory_authority_v1(
         total_memory_bytes,
-        cgroup,
+        cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root),
         process_resident_memory_limit_override_v1(),
-    );
-    metrics::gauge!("resident_memory.system_total_bytes").set(total_memory_bytes as f64);
-    metrics::gauge!("resident_memory.effective_total_bytes").set(effective_memory_bytes as f64);
-    if let Some(high_bytes) = cgroup.and_then(|ceiling| ceiling.high_bytes) {
-        metrics::gauge!("resident_memory.cgroup_high_bytes").set(high_bytes as f64);
-    }
-    if let Some(service_ceiling) = service_ceiling {
-        metrics::gauge!("resident_memory.cgroup_limit_bytes").set(service_ceiling as f64);
-    }
-    metrics::gauge!("resident_memory.admission_limit_bytes")
-        .set(authority.limit_bytes.get() as f64);
-    authority
+    )
 }
 
 /// Fraction of the configured limit, in permille, at or above which *measured*
@@ -566,9 +544,8 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 
 /// The measured side of the memory accounting loop.
 ///
-/// One dedicated reader samples the process (`/proc/self/status` on Linux),
-/// publishes the `daemon.process.resident_bytes` gauge, and feeds this cell
-/// the unreclaimable bytes. Admission re-measures through the same sampler;
+/// One dedicated reader samples the process (`/proc/self/status` on Linux)
+/// and feeds this cell the unreclaimable bytes. Admission re-measures through the same sampler;
 /// there is no second parser or publisher.
 ///
 /// Every request refused for memory, by any authority on this cell, waits on
@@ -702,7 +679,6 @@ impl ResidentMemoryPressureV1 {
             return self.state();
         }
         let sample = (self.sampler)();
-        metrics::gauge!("daemon.memory.checkpoint_samples_total").increment(1.0);
         let interval = u64::try_from(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros())
             .unwrap_or(u64::MAX);
         self.next_checkpoint_sample_micros.store(
@@ -711,7 +687,6 @@ impl ResidentMemoryPressureV1 {
         );
         if let Some(sample) = sample {
             self.publish_observation(sample.admission_bytes());
-            self.publish_over_budget_gauge();
         }
         self.state()
     }
@@ -720,7 +695,6 @@ impl ResidentMemoryPressureV1 {
     fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
         let sample = (self.sampler)()?;
         self.publish_observation(sample.admission_bytes());
-        self.publish_over_budget_gauge();
         Some(self.state())
     }
 
@@ -769,14 +743,12 @@ impl ResidentMemoryPressureV1 {
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
-        self.publish_over_budget_gauge();
         self.state()
     }
 
     fn publish_observation(&self, observed_bytes: u64) {
         self.observed_bytes.store(observed_bytes, Ordering::Release);
         self.observed.store(true, Ordering::Release);
-        metrics::gauge!("daemon.memory.observed_resident_bytes").set(observed_bytes as f64);
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
         } else if observed_bytes <= self.low_watermark_bytes
@@ -831,12 +803,6 @@ impl ResidentMemoryPressureV1 {
         if settled {
             self.note_headroom();
         }
-    }
-
-    fn publish_over_budget_gauge(&self) {
-        metrics::gauge!("daemon.memory.over_budget").set(f64::from(u8::from(
-            self.over_budget.load(Ordering::Acquire),
-        )));
     }
 
     #[must_use]
@@ -899,7 +865,6 @@ impl ResidentMemoryPressureV1 {
         for reclaimer in reclaimers {
             released_bytes = released_bytes.saturating_add(reclaimer(request));
         }
-        metrics::gauge!("daemon.memory.pressure_released_bytes").set(released_bytes as f64);
         released_bytes
     }
 
@@ -1017,14 +982,12 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
         None => glibc_trim(),
     };
     let after_bytes = sampled_process_resident_bytes_v1();
-    let trim = ProcessAllocatorTrimV1 {
+
+    ProcessAllocatorTrimV1 {
         trimmed,
         before_bytes,
         after_bytes,
-    };
-    metrics::gauge!("daemon.memory.allocator_trim_released_bytes")
-        .set((trim.released_bytes()) as f64);
-    trim
+    }
 }
 
 fn glibc_trim() -> bool {
@@ -1491,15 +1454,12 @@ impl ProcessResidentMemoryV1 {
             .checked_add(requested_bytes.get())
             .filter(|next_used| *next_used <= self.limit_bytes.get());
         let Some(next_used) = next_used else {
-            metrics::gauge!("runtime_core.resident.refusals").increment(1.0);
             let failure = self.admission_failure_from_used(state.used_bytes, requested_bytes);
             drop(state);
             return Err(self.refused(failure));
         };
         state.used_bytes = next_used;
         *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
-        metrics::gauge!("runtime_core.resident.reservations").increment(1.0);
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         Ok(ProcessSharedMemoryReservationV1 {
             authority: Arc::clone(self),
             component,
@@ -1602,8 +1562,6 @@ impl ProcessResidentMemoryV1 {
         }
         state.used_bytes = next_used;
         *state.charges.entry(key.clone()).or_default() += requested_bytes.get();
-        metrics::gauge!("runtime_core.resident.reservations").increment(1.0);
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         Some(ResidentMemoryReservationV1 {
             authority: Arc::clone(self),
             key: key.clone(),
@@ -1660,8 +1618,6 @@ impl ProcessResidentMemoryV1 {
         {
             return None;
         }
-        metrics::gauge!("daemon.memory.admission_refused").increment(1.0);
-        metrics::gauge!("runtime_core.resident.refusals").increment(1.0);
         Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
             observed_bytes,
             limit_bytes: self.pressure.limit_bytes(),
@@ -1672,7 +1628,6 @@ impl ProcessResidentMemoryV1 {
     }
 
     fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
-        metrics::gauge!("runtime_core.resident.refusals").increment(1.0);
         self.admission_failure_from_used(self.lock_state().used_bytes, requested_bytes)
     }
 
@@ -1706,7 +1661,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= released_bytes;
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= released_bytes;
             if *charge == 0 {
@@ -1759,7 +1713,6 @@ impl ProcessResidentMemoryV1 {
         }
         let released_bytes = reserved_bytes - measured_bytes;
         state.used_bytes -= released_bytes;
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if measured_bytes > 0 {
             let mut to = from.clone();
             to.component = to_component;
@@ -1775,8 +1728,6 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= reserved_bytes;
-        metrics::gauge!("runtime_core.resident.reservations").decrement(1.0);
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         if let Some(charge) = state.charges.get_mut(key) {
             *charge -= reserved_bytes;
             if *charge == 0 {
@@ -1810,7 +1761,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         self.ledger_released(state);
         Ok(())
     }
@@ -1827,8 +1777,6 @@ impl ProcessResidentMemoryV1 {
                 state.process_shared_charges.remove(&component);
             }
         }
-        metrics::gauge!("runtime_core.resident.reservations").decrement(1.0);
-        metrics::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
         self.ledger_released(state);
     }
 }

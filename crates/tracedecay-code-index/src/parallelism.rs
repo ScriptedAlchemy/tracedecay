@@ -550,22 +550,6 @@ fn compare_installed_plan(
     }
 }
 
-fn record_plan(plan: CodeIndexWorkerPlanV1) {
-    metrics::gauge!("code_index_workers_requested").set(plan.requested_workers as f64);
-    metrics::gauge!("code_index_workers_effective").set(plan.effective_workers as f64);
-    metrics::gauge!("code_index_workers_memory_safe").set(plan.memory_safe_workers as f64);
-    metrics::gauge!("code_index_workers_memory_headroom_bytes")
-        .set(plan.memory_headroom_bytes as f64);
-    metrics::gauge!("code_index_workers_limiting_reason").set(match plan.limiting_reason {
-        CodeIndexWorkerLimitingReasonV1::AutomaticAllCores => 1,
-        CodeIndexWorkerLimitingReasonV1::AutomaticHalfCores => 2,
-        CodeIndexWorkerLimitingReasonV1::ResidentMemory => 3,
-        CodeIndexWorkerLimitingReasonV1::ConfiguredExact => 4,
-        CodeIndexWorkerLimitingReasonV1::EnvironmentOverride => 5,
-    });
-    metrics::gauge!("code_index_workers_reservation_bytes").set(plan.reservation_bytes as f64);
-}
-
 /// Install the process-resident plan before the first code-index build.
 /// Repeating the byte-identical plan is idempotent and returns the same
 /// installed authority; a second owner asking for a different process-wide
@@ -586,7 +570,6 @@ pub fn install_worker_plan(
         && installed.0.plan.configured == configured
         && installed.0.plan.environment_override_workers == environment_override_workers
     {
-        record_plan(installed.0.plan);
         return Ok(installed.0.installed_plan());
     }
     let requested = worker_plan_from(
@@ -597,7 +580,6 @@ pub fn install_worker_plan(
     )?;
     if let Some(existing) = WORKER_RUNTIME.get() {
         compare_installed_plan(&existing.0.plan, &requested)?;
-        record_plan(existing.0.plan);
         return Ok(existing.0.installed_plan());
     }
     let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
@@ -607,7 +589,6 @@ pub fn install_worker_plan(
         .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
             message: "worker runtime installation did not settle".to_owned(),
         })?;
-    record_plan(requested);
     Ok(installed)
 }
 
@@ -785,7 +766,6 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    metrics::gauge!("code_index_worker_count").set((indexing_workers()) as f64);
     #[cfg(test)]
     if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {

@@ -310,24 +310,13 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         tokio::task::spawn_blocking(move || {
             let mut progress = {
-                                   let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
-                                   {
-                let progress = build_progress
+                let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
+                build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .snapshot()
-                    .map(|snapshot| snapshot.as_ref().clone());
-
-                if let Some(progress) = progress.as_ref() {
-                    let age_micros = now_micros()
-                        .0
-                        .saturating_sub(progress.last_progress_micros)
-                        .max(0);
-                    metrics::gauge!("daemon.code_index.dashboard.progress_age_micros").set((u64::try_from(age_micros).unwrap_or(u64::MAX)) as f64);
-                }
-                progress
-                }
-                               };
+                    .map(|snapshot| snapshot.as_ref().clone())
+            };
             let refresh_in_flight = reconcile_in_progress.running()
                 || pending_wake.lock()
                     .micros

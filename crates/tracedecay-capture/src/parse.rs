@@ -176,14 +176,12 @@ pub fn parse_observation_record_v1(
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
-    let parsed = parse_observation_record(
+    parse_observation_record(
         record,
         source_range,
         ordering_domain,
         ParseLimits::default_policy(),
-    );
-    record_decode_outcome(parsed.is_ok());
-    parsed
+    )
 }
 
 /// Decodes one bounded native JSON record, consumes that decoded value in a
@@ -225,9 +223,7 @@ pub fn prepare_observation_record_v1(
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
-    let prepared = prepare_observation_record(record, source_range, ordering_domain);
-    record_decode_outcome(prepared.is_ok());
-    prepared
+    prepare_observation_record(record, source_range, ordering_domain)
 }
 
 #[tracing::instrument(name = "capture.parse.prepare_record", level = "trace", skip_all)]
@@ -339,25 +335,9 @@ fn parse_observation_record(
     })
 }
 
-/// Decode-phase entry/failure tally shared by every host record pipeline.
-/// Refused records are counted too: corpus-scale waste hides in lines that are
-/// read and rejected, which success-only counters never show.
-fn record_decode_outcome(decoded: bool) {
-    if decoded {
-        metrics::gauge!("capture.parse.records").increment(1.0);
-    } else {
-        metrics::gauge!("capture.parse.failures").increment(1.0);
-    }
-}
-
 fn record_digest(record: &[u8]) -> [u8; 32] {
-    // Cumulative decoded bytes across every host pipeline, not a last-record
-    // sample, corpus-scale throughput is the quantity being compared.
-    metrics::gauge!("capture.parse.record_bytes").increment((record.len()) as f64);
-    {
-        let _span = tracing::trace_span!("capture.parse.record_digest").entered();
-        Sha256::digest(record).into()
-    }
+    let _span = tracing::trace_span!("capture.parse.record_digest").entered();
+    Sha256::digest(record).into()
 }
 
 pub(crate) fn canonical_u64_i64(value: Option<&Value>) -> Option<u64> {

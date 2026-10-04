@@ -212,7 +212,6 @@ impl RegisteredGlobalDb {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        crate::observe::record_transaction_rows(u64::try_from(events.len()).unwrap_or(u64::MAX));
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1214,9 +1213,6 @@ async fn settle_prepared_owner_facts(
             Some(ObservabilityOwnerEmissionWriteOutcomeV1::Settled { analytics_event_id });
     }
     insert_settled_outbox_rows(transaction, &rows).await?;
-    if !rows.is_empty() {
-        crate::observe::record_transaction_rows(rows.len() as u64);
-    }
     Ok(())
 }
 

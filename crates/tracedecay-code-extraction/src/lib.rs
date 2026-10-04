@@ -323,38 +323,33 @@ pub trait LanguageExtractor: Send + Sync {
     /// document. A grammar that fails to load or parse yields an artifact
     /// carrying only that error.
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || {
-                let started = Instant::now();
-                let parsed_source = self.prepare_parse_source(source);
-                match ts_provider::parse_extractor_source(
-                    &self.retained_grammar_key(file_path),
-                    self.language_name(),
-                    &parsed_source,
-                ) {
-                    Ok(tree) => {
-                        self.extract_parsed_artifact(
-                            file_path,
-                            source,
-                            &parsed_source,
-                            &tree,
-                            ParsedExtractionScope::FullDocument,
-                        )
-                        .artifact
-                    }
-                    Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
-                        nodes: Vec::new(),
-                        edges: Vec::new(),
-                        unresolved_refs: Vec::new(),
-                        errors: vec![error],
-                        duration_ms: started.elapsed().as_millis() as u64,
-                    }),
+        crate::observe::measure_extract_file(|| {
+            let started = Instant::now();
+            let parsed_source = self.prepare_parse_source(source);
+            match ts_provider::parse_extractor_source(
+                &self.retained_grammar_key(file_path),
+                self.language_name(),
+                &parsed_source,
+            ) {
+                Ok(tree) => {
+                    self.extract_parsed_artifact(
+                        file_path,
+                        source,
+                        &parsed_source,
+                        &tree,
+                        ParsedExtractionScope::FullDocument,
+                    )
+                    .artifact
                 }
-            },
-            crate::observe::ExtractOutputCounts::from_artifact,
-        )
+                Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    unresolved_refs: Vec::new(),
+                    errors: vec![error],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }),
+            }
+        })
     }
 }
 
@@ -499,15 +494,11 @@ impl LanguageRegistry {
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let extractor = path.rsplit('.').next().and_then(|ext| {
+        path.rsplit('.').next().and_then(|ext| {
             self.by_extension
                 .get(ext)
                 .map(|&index| self.extractors[index].as_ref())
-        });
-        if extractor.is_none() {
-            crate::observe::record_dispatch_no_extractor();
-        }
-        extractor
+        })
     }
 
     /// Whether `path` is a configuration document rather than code.

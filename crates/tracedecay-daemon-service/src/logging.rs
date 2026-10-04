@@ -175,29 +175,48 @@ impl StderrTracingDefault {
 ///
 /// An explicit `RUST_LOG` is operator intent and outranks `default`, including
 /// for hooks: `Silent` only decides what happens in its absence.
+///
+/// `TRACEDECAY_SPAN_TIMINGS=1` also logs a `close` line with `time.busy` and
+/// `time.idle` for every span `RUST_LOG` enables.
 pub fn install_stderr_tracing(default: StderrTracingDefault) {
-    install_stderr_tracing_filter(StderrTracingFilter::parse(
-        std::env::var("RUST_LOG").ok().as_deref(),
-        default.level(),
-    ));
-}
-
-fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
+    let filter =
+        StderrTracingFilter::parse(std::env::var("RUST_LOG").ok().as_deref(), default.level());
     if let Some(diagnostic) = filter.diagnostic() {
         eprintln!("{diagnostic}");
     }
+    let span_timings = std::env::var_os(SPAN_TIMINGS_ENV).is_some_and(|value| value == "1");
+    let layer = stderr_tracing_layer(filter, span_timings, std::io::stderr);
+    let _ = tracing_subscriber::registry().with(layer).try_init();
+}
+
+const SPAN_TIMINGS_ENV: &str = "TRACEDECAY_SPAN_TIMINGS";
+
+fn stderr_tracing_layer<S, W>(
+    filter: StderrTracingFilter,
+    span_timings: bool,
+    writer: W,
+) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + 'static,
+{
+    let span_events = if span_timings {
+        tracing_subscriber::fmt::format::FmtSpan::CLOSE
+    } else {
+        tracing_subscriber::fmt::format::FmtSpan::NONE
+    };
     let max_level = filter.max_level();
-    let layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
+    tracing_subscriber::fmt::layer()
+        .with_writer(writer)
         .with_target(true)
+        .with_span_events(span_events)
         .compact()
         .with_filter(
             tracing_subscriber::filter::filter_fn(move |metadata| {
                 filter.level_for_target(metadata.target()) >= *metadata.level()
             })
             .with_max_level_hint(max_level),
-        );
-    let _ = tracing_subscriber::registry().with(layer).try_init();
+        )
 }
 
 /// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
@@ -371,6 +390,49 @@ mod stderr_tracing_tests {
 
     fn parse_for_hook(env_value: Option<&str>) -> StderrTracingFilter {
         StderrTracingFilter::parse(env_value, StderrTracingDefault::Silent.level())
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn log_one_span(span_timings: bool) -> String {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let layer =
+            super::stderr_tracing_layer(parse(Some("tracedecay=debug")), span_timings, move || {
+                writer.clone()
+            });
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            let _span = tracing::debug_span!(target: "tracedecay::probe", "probe_span").entered();
+        });
+        String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn span_timings_log_busy_and_idle_on_close() {
+        let output = log_one_span(true);
+        assert!(output.contains("probe_span"), "{output}");
+        assert!(output.contains("close"), "{output}");
+        assert!(output.contains("time.busy="), "{output}");
+        assert!(output.contains("time.idle="), "{output}");
+    }
+
+    #[test]
+    fn spans_stay_silent_without_span_timings() {
+        assert_eq!(log_one_span(false), "");
     }
 
     #[test]

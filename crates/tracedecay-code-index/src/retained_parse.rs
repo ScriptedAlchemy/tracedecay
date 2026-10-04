@@ -836,18 +836,12 @@ fn record_success(
         match extraction.disposition {
             ParsedExtractionDisposition::FullDocument => {
                 stats.full_extractions = stats.full_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.full_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::ChangedRegions => {
                 stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.incremental_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::Reset { .. } => {
                 stats.reset_extractions = stats.reset_extractions.saturating_add(1);
-
-                metrics::gauge!("code_index.collect.reset_extraction_total").increment(1.0);
             }
         }
         stats.visited_top_level_nodes = stats
@@ -856,10 +850,6 @@ fn record_success(
         stats.extracted_bytes = stats
             .extracted_bytes
             .saturating_add(extraction.metrics.visited_bytes as u64);
-    }
-    crate::observe::add_parse_bytes(report.metrics.source_bytes as u64);
-    if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
-        crate::observe::add_reused_parses(1);
     }
 }
 

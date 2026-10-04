@@ -222,7 +222,7 @@ pub(super) fn compact_file_evidence(
         .first()
         .map(|row| row.evidence.prior_generation.clone());
     let indexed = per_file.into_iter().enumerate().collect::<Vec<_>>();
-    let persisted = collect_bounded_ordered(&indexed, |(file, inputs), _worker| {
+    let persisted = collect_bounded_ordered(&indexed, |(file, inputs)| {
         inputs.compact(&rows[*file], prior_generation.as_ref(), current_generation)
     })?;
     Ok((prior_generation, persisted))

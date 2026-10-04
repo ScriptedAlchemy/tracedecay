@@ -140,7 +140,6 @@ impl ProcessBackgroundCpuV1 {
             return None;
         }
         state.active_units += 1;
-        record_state(&state, self.width);
         Some(BackgroundCpuPermitV1 {
             authority: Arc::clone(self),
             units: 1,
@@ -243,7 +242,6 @@ impl ProcessBackgroundCpuV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.waiters.push_back(Arc::clone(&waiter));
-        record_state(&state, self.width);
         loop {
             let is_front = state
                 .waiters
@@ -252,7 +250,6 @@ impl ProcessBackgroundCpuV1 {
             if is_front && state.active_units.saturating_add(waiter.units) <= self.width.get() {
                 state.waiters.pop_front();
                 state.active_units += waiter.units;
-                record_state(&state, self.width);
                 self.available.notify_all();
                 return;
             }
@@ -272,11 +269,9 @@ impl ProcessBackgroundCpuV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.waiters.push_back(Arc::clone(&waiter));
-        record_state(&state, self.width);
         loop {
             if cancellation.load(Ordering::Acquire) {
                 state.waiters.retain(|queued| !Arc::ptr_eq(queued, &waiter));
-                record_state(&state, self.width);
                 self.available.notify_all();
                 return false;
             }
@@ -287,7 +282,6 @@ impl ProcessBackgroundCpuV1 {
             if is_front && state.active_units.saturating_add(waiter.units) <= self.width.get() {
                 state.waiters.pop_front();
                 state.active_units += waiter.units;
-                record_state(&state, self.width);
                 self.available.notify_all();
                 return true;
             }
@@ -305,16 +299,8 @@ impl ProcessBackgroundCpuV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert!(state.active_units >= units);
         state.active_units = state.active_units.saturating_sub(units);
-        record_state(&state, self.width);
         self.available.notify_all();
     }
-}
-
-fn record_state(state: &BackgroundCpuStateV1, width: NonZeroUsize) {
-    metrics::gauge!("runtime_core.background_cpu.width").set((width.get()) as f64);
-    metrics::gauge!("runtime_core.background_cpu.active_units").set(state.active_units as f64);
-    metrics::gauge!("runtime_core.background_cpu.waiting_work_units")
-        .set((waiting_units(state)) as f64);
 }
 
 fn waiting_units(state: &BackgroundCpuStateV1) -> usize {

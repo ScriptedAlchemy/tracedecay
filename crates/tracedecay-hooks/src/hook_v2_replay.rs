@@ -181,7 +181,6 @@ where
         let outcomes = spool.acknowledge_many(&acknowledgements, now)?;
         for (record, outcome) in expired.iter().zip(outcomes) {
             if outcome? {
-                metrics::gauge!("hooks.replay.expired").increment(1.0);
                 log_tombstone(host, record, HookReplayTombstoneReasonV1::Expired);
                 pass.tombstoned = pass.tombstoned.saturating_add(1);
             }
@@ -191,7 +190,6 @@ where
     let Some(binding) = binding.filter(|binding| binding.project_id == project_id) else {
         // Without a current binding for this project nothing can be
         // reauthorized. Records stay durable and pending; a later pass retries.
-        metrics::gauge!("hooks.replay.binding_unavailable").increment(1.0);
         pass.binding_unavailable = true;
         return Ok(pass);
     };
@@ -203,11 +201,9 @@ where
             u16::try_from(batch.records.len()).map_err(|_| HookSpoolError::ReplayBatchExceeded)?;
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             spool.release_replay_claim(batch.claim_id)?;
-            metrics::gauge!("hooks.replay.retained").increment(f64::from(record_count));
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
         }
-        metrics::gauge!("hooks.replay.batch_events").set(f64::from(record_count));
         replay_batches.push((batch.records, record_count));
     }
 
@@ -279,7 +275,6 @@ where
                 settled.push((record, ReplaySettlement::Tombstone(reason)));
             }
             ReplayCompletion::Retained(count) => {
-                metrics::gauge!("hooks.replay.retained").increment(f64::from(count));
                 pass.retained = pass.retained.saturating_add(count);
             }
         }
@@ -299,23 +294,12 @@ where
         }
         match settlement {
             ReplaySettlement::Committed => {
-                metrics::gauge!("hooks.replay.delivered").increment(1.0);
                 pass.committed = pass.committed.saturating_add(1);
             }
             ReplaySettlement::ExactDuplicate => {
-                metrics::gauge!("hooks.replay.duplicate").increment(1.0);
                 pass.duplicates = pass.duplicates.saturating_add(1);
             }
             ReplaySettlement::Tombstone(reason) => {
-                match reason {
-                    HookReplayTombstoneReasonV1::Expired => {
-                        metrics::gauge!("hooks.replay.expired").increment(1.0);
-                    }
-                    HookReplayTombstoneReasonV1::BindingStale
-                    | HookReplayTombstoneReasonV1::IdentityConflict => {
-                        metrics::gauge!("hooks.replay.refused").increment(1.0);
-                    }
-                }
                 log_tombstone(host, &record, reason);
                 pass.tombstoned = pass.tombstoned.saturating_add(1);
             }

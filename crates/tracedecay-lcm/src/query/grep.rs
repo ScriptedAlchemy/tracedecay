@@ -92,7 +92,6 @@ pub async fn grep(
     sort_hits(&mut hits, request.sort);
     let capped_sessions = rerank_grep_hits(&mut hits, request.sort, request.scope);
     hits.truncate(limit);
-    crate::metrics::record_lcm_grep(hits.len(), query_plan.requires_like_fallback);
     Ok(LcmGrepOutcome {
         hits,
         capped_sessions,
@@ -199,7 +198,7 @@ fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
 
 // Raw vs summary evaluation are separate labels because they run different
 // FTS tables and joins; the LIKE fallbacks stay inclusive children of the
-// same label (the `like_fallback` gauge attributes pages to that plan).
+// same label.
 #[tracing::instrument(name = "sessions.lcm.grep.raw", level = "trace", skip_all)]
 pub(super) async fn raw_grep_hits(
     conn: &(impl QueryExecutor + ?Sized),

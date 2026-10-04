@@ -96,7 +96,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         session_id: &SessionId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<GraphWatermark> {
-        crate::support::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -227,7 +226,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        crate::support::record_snapshot_admissions(1);
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -361,7 +359,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
             }
         }
-        crate::support::record_output_sessions(u64::try_from(recovered).unwrap_or(u64::MAX));
         let snapshot = self
             .read_snapshot()
             .await
@@ -1094,7 +1091,6 @@ async fn introduced_occurrence_relations(
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
         );
         if settled_instant >= first_instant {
-            record_relation_reconstruction();
             return Ok(None);
         }
     }
@@ -1190,11 +1186,6 @@ async fn latest_occurrence(
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         .map(|row| decode_occurrence(&row))
         .transpose()
-}
-
-#[inline(always)]
-fn record_relation_reconstruction() {
-    metrics::gauge!("session_temporal.relations.full_reconstructions").increment(1.0);
 }
 
 /// Logical copies a candidate generation introduced, or every copy of the
@@ -1297,7 +1288,6 @@ pub(crate) async fn candidate_session_relation_projection(
     ) {
         Ok(base) => base,
         Err(SessionRelationError::NotFound) => {
-            record_relation_reconstruction();
             return reconstruct().await;
         }
         Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),

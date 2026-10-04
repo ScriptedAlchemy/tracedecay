@@ -1092,7 +1092,7 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
 pub(super) fn restore_file_pages(
     pages: Vec<PersistedFileGenerationArtifactsV1>,
 ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
-    let authorities = collect_bounded_ordered(&pages, |page, _worker| {
+    let authorities = collect_bounded_ordered(&pages, |page| {
         let _span = tracing::trace_span!("code_index.sealed_decode.file_page").entered();
         ExactExtractionAuthorityV1::restore(&page.artifacts.chunks)
             .map_err(CodeIndexProductionErrorV1::Chunk)

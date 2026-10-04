@@ -765,7 +765,6 @@ impl RegisteredGlobalDb {
                 reason,
             ));
         }
-        crate::observe::record_transaction_rows(1);
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
@@ -953,7 +952,6 @@ impl RegisteredGlobalDb {
         project_id: &str,
     ) -> tracedecay_domain::errors::Result<ProjectAliasRecord> {
         const OPERATION: &str = "upsert project alias";
-        crate::observe::record_transaction_rows(1);
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let transaction = self
             .begin_write_transaction()
@@ -1025,7 +1023,6 @@ impl RegisteredGlobalDb {
         upsert: StoreInstanceUpsert,
     ) -> tracedecay_domain::errors::Result<StoreInstanceRecord> {
         const OPERATION: &str = "upsert store instance";
-        crate::observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1105,7 +1102,6 @@ impl RegisteredGlobalDb {
         upsert: GraphScopeUpsert,
     ) -> tracedecay_domain::errors::Result<GraphScopeRecord> {
         const OPERATION: &str = "upsert graph scope";
-        crate::observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1182,7 +1178,6 @@ impl RegisteredGlobalDb {
         upsert: StoreArtifactUpsert,
     ) -> tracedecay_domain::errors::Result<StoreArtifactRecord> {
         const OPERATION: &str = "upsert store artifact";
-        crate::observe::record_transaction_rows(1);
         let transaction = self
             .begin_write_transaction()
             .await
@@ -1771,9 +1766,6 @@ impl RegisteredGlobalDb {
         if project_ids.is_empty() {
             return Ok(0);
         }
-        crate::observe::record_transaction_rows(
-            u64::try_from(project_ids.len()).unwrap_or(u64::MAX),
-        );
         let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_ids.chunks(CHUNK) {
@@ -1807,7 +1799,6 @@ impl RegisteredGlobalDb {
         project_path: &Path,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "delete registered project ledger row";
-        crate::observe::record_transaction_rows(1);
         let transaction = self.begin_write_transaction().await?;
         let deleted = transaction
             .execute(
@@ -1838,9 +1829,6 @@ impl RegisteredGlobalDb {
         if project_paths.is_empty() {
             return Ok(0);
         }
-        crate::observe::record_transaction_rows(
-            u64::try_from(project_paths.len()).unwrap_or(u64::MAX),
-        );
         let transaction = self.begin_write_transaction().await?;
         let mut total = 0_usize;
         for chunk in project_paths.chunks(CHUNK) {
@@ -2055,9 +2043,6 @@ impl RegisteredGlobalDb {
         plan: &RegistryReapPlan,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "apply registry reap";
-        crate::observe::record_transaction_rows(
-            u64::try_from(plan.reapable.len()).unwrap_or(u64::MAX),
-        );
         let transaction = self
             .begin_write_transaction()
             .await

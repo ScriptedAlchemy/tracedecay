@@ -590,8 +590,6 @@ pub async fn build_storage_report_page_from_registered_global_db(
     })
     .await
     .map_err(|error| report_error("join storage directory page", error))??;
-    metrics::gauge!("maintenance.storage_report.directory_entries_scanned_total")
-        .increment(directory_page.entries_scanned as f64);
     let project_ids = directory_page
         .directories
         .iter()
@@ -701,6 +699,7 @@ async fn project_storage_report_page(
 struct ProjectDirectoryPage {
     directories: Vec<(String, PathBuf)>,
     next_cursor: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     entries_scanned: usize,
 }
 

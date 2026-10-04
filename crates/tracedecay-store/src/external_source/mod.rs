@@ -1576,9 +1576,7 @@ pub fn apply_source_projection(
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
-    let outcome = reduce_source_projection(current.clone(), pending, projection);
-    crate::observe::record_source_projection_outcome(&outcome);
-    outcome
+    reduce_source_projection(current.clone(), pending, projection)
 }
 
 /// Applies a projection while consuming the writer actor's verified state.
@@ -1595,9 +1593,7 @@ pub fn apply_source_projection_owned(
     pending: &SourcePendingProjectionV1,
     projection: SourceProjectionCommitV1,
 ) -> SourceStoreResult<SourceProjectionApplyOutcomeV1> {
-    let outcome = reduce_source_projection(current, pending, projection);
-    crate::observe::record_source_projection_outcome(&outcome);
-    outcome
+    reduce_source_projection(current, pending, projection)
 }
 
 #[tracing::instrument(

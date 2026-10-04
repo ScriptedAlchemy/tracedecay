@@ -489,8 +489,6 @@ fn run_combined_review_for_retrieval_inner<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CombinedReviewDispatch>> + Send + 'a>>
 {
     Box::pin(async move {
-        let _run = super::scheduler_metrics::RunningGuard::enter();
-        let _duration = super::scheduler_metrics::DurationGuard::run();
         let AutomationTaskIo { backend, retrieval } = io;
         let CombinedReviewPublication {
             ledger: ledger_publication,

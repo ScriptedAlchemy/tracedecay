@@ -70,7 +70,6 @@ flate2 = "1"
 base64 = "0.22"
 hex = "0.4"
 ignore = "0.4"
-metrics.workspace = true
 rayon = "1"
 regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }

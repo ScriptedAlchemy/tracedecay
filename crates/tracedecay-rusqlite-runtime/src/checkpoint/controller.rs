@@ -192,21 +192,10 @@ impl WriterCheckpointController {
         let report = match self.driver.checkpoint(mode) {
             Ok(report) => report,
             Err(error) => {
-                crate::observe::record_checkpoint_error(
-                    checkpoint_attribution(mode),
-                    started.elapsed(),
-                );
                 return Err(CheckpointError::Driver(error));
             }
         };
         let elapsed = started.elapsed();
-        crate::observe::record_checkpoint(
-            checkpoint_attribution(mode),
-            elapsed,
-            report.complete(),
-            wal_bytes,
-            report.checkpointed_frames,
-        );
         let (decision, hard_drain_required) = checkpoint_decision(
             report,
             mode,
@@ -269,12 +258,4 @@ pub(super) fn checkpoint_decision(
         },
         hard_drain_required,
     )
-}
-
-fn checkpoint_attribution(mode: CheckpointMode) -> crate::observe::CheckpointAttribution {
-    match mode {
-        CheckpointMode::Passive => crate::observe::CheckpointAttribution::Passive,
-        CheckpointMode::Restart => crate::observe::CheckpointAttribution::Restart,
-        CheckpointMode::Truncate => crate::observe::CheckpointAttribution::Truncate,
-    }
 }

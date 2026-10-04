@@ -138,10 +138,8 @@ impl GitWatcherShutdownOutcome {
             return;
         };
         let kind = if error.is_cancelled() {
-            metrics::gauge!("daemon.git.watch.task_failures.cancelled_total").increment(1.0);
             GitWatcherTaskFailureKind::Cancelled
         } else {
-            metrics::gauge!("daemon.git.watch.task_failures.panicked_total").increment(1.0);
             GitWatcherTaskFailureKind::Panicked
         };
         log_daemon_event(
@@ -155,7 +153,6 @@ impl GitWatcherShutdownOutcome {
     }
 
     fn record_timeout(&mut self, owner: GitWatcherTaskOwner) {
-        metrics::gauge!("daemon.git.watch.task_failures.timed_out_total").increment(1.0);
         log_daemon_event(
             "git_watch_task_join_failed",
             &[
@@ -221,7 +218,6 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         let mut projects = inner.projects.lock().await;
         projects.drain().map(|(_, state)| state).collect()
     };
-    metrics::gauge!("daemon.git.watch.repositories.watched").set((0_u64) as f64);
     for state in states {
         state.retire();
         if let Some(handle) = state.take_task() {
@@ -266,11 +262,6 @@ pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
         if let Some(state) = removed {
             retired.push(state);
         }
-    }
-    if !retired.is_empty() {
-        metrics::gauge!("daemon.git.watch.repositories.retired_total")
-            .increment((retired.len()) as f64);
-        metrics::gauge!("daemon.git.watch.repositories.watched").set((projects.len()) as f64);
     }
     drop(projects);
     for state in retired {

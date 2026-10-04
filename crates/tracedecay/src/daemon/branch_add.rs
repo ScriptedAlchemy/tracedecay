@@ -12,8 +12,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 use tracedecay_runtime_core::branch::{
-    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-    prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
+    BranchAddOutcome, BranchTrackingPreparation, prepare_branch_tracking_in_layout,
+    rollback_prepared_branch_tracking,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -201,7 +201,7 @@ async fn activate_and_track_manual_branch(
                 )
                 .await;
                 if let (Err(error), Some(prepared)) = (&tracked, prepared.as_deref()) {
-                    match rollback_prepared_branch_tracking(&data_root, prepared).map_err(
+                    rollback_prepared_branch_tracking(&data_root, prepared).map_err(
                         |rollback| {
                             TraceDecayError::project_route(
                                 BRANCH_TRACKING_FAILED,
@@ -211,10 +211,7 @@ async fn activate_and_track_manual_branch(
                                 ),
                             )
                         },
-                    )? {
-                        PreparedBranchRollbackOutcome::RolledBack
-                        | PreparedBranchRollbackOutcome::NoMatch => {}
-                    }
+                    )?;
                 }
                 tracked
             }

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
@@ -130,37 +129,6 @@ pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
 /// provisioned database behind, and startup remounts every discovered
 /// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = crate::MAX_REGISTERED_REMOTE_NODES;
-
-static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-
-/// RAII observation of one full (non-reuse) session-store mount attempt.
-///
-/// Entering counts the attempt; dropping restores the in-flight gauge on
-/// every exit path, so failed, denied, or cancelled mounts cannot leak it.
-pub(crate) struct StoreMountObservationV1;
-
-impl StoreMountObservationV1 {
-    pub fn enter() -> Self {
-        let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        metrics::gauge!("daemon.session_registry.mount.attempts_total").increment(1.0);
-        metrics::gauge!("daemon.session_registry.mount.in_flight").set(in_flight as f64);
-        Self
-    }
-}
-
-impl Drop for StoreMountObservationV1 {
-    fn drop(&mut self) {
-        let _ = SESSION_STORE_MOUNTS_IN_FLIGHT.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |in_flight| in_flight.checked_sub(1),
-        );
-        metrics::gauge!("daemon.session_registry.mount.in_flight")
-            .set((SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed)) as f64);
-    }
-}
 
 struct SessionGraphOwnerV1 {
     graph: GraphDbOwnerAttachmentV1,
@@ -2743,7 +2711,6 @@ async fn open_runtime_with_presence(
     let locator = match match_result {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
         LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
             return Err(session_registry_error(
                 operation,
                 format!(
@@ -2793,13 +2760,10 @@ async fn open_runtime_with_presence(
     .await
     {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
-        StoreRuntimeOpenResult::Failed(failure) => {
-            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
-            Err(registry_open_error(
-                "open registered session runtime",
-                failure,
-            ))
-        }
+        StoreRuntimeOpenResult::Failed(failure) => Err(registry_open_error(
+            "open registered session runtime",
+            failure,
+        )),
     }
 }
 

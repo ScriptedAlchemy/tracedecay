@@ -429,7 +429,7 @@ pub(super) fn resolve_edit(
     // indexing pool before the selection reads them in order.
     collect_bounded_ordered(
         &candidates.iter().copied().collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             files[file_index].artifacts();
             Ok::<_, CodeIndexProductionErrorV1>(())
         },
@@ -470,7 +470,7 @@ pub(super) fn resolve_edit(
             .filter(|file_index| !selected.contains(file_index))
             .copied()
             .collect::<Vec<_>>(),
-        |&file_index, _worker| {
+        |&file_index| {
             let parent_key = parent_key_of_path
                 .get(files[file_index].logical_path())
                 .ok_or_else(|| contract("a carried file has no parent segment"))?;
@@ -486,7 +486,6 @@ pub(super) fn resolve_edit(
     .into_iter()
     .flatten()
     .collect::<BTreeSet<_>>();
-    metrics::gauge!("code_index.sparse.dependents_repointed").set(dependents.len() as f64);
     let moved = selected_references(files, Some(&selection))
         .map(|(_, reference)| site(reference))
         .chain(
@@ -496,12 +495,6 @@ pub(super) fn resolve_edit(
         )
         .collect::<HashSet<_>>();
     let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
-    metrics::gauge!("code_index.sparse.references_resolved").set(
-        selection
-            .iter()
-            .map(|(_, picks)| picks.len())
-            .sum::<usize>() as f64,
-    );
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.

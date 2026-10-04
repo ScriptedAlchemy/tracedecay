@@ -45,7 +45,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 
 mod authorities;
 mod discovery_queue;
-mod observe;
 mod projection_drain;
 mod replay;
 mod runtime;
@@ -682,7 +681,6 @@ impl<'a> HostAdmissionFacade<'a> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
-        crate::observe::admission_capture_frames(requests.len());
         let provider = first.provider().to_owned();
         let scope = first.scope().clone();
         self.authorities.validate_scope(&scope)?;
@@ -806,7 +804,6 @@ impl<'a> HostAdmissionFacade<'a> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        crate::observe::admission_persist_frames(writes.len());
         self.authorities.validate_scope(scope)?;
         for write in &writes {
             if write.observation().source().provider().as_str() != provider

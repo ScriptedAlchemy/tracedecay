@@ -41,7 +41,6 @@ impl DeterministicDiversity {
         policy: &DiversityPolicy,
         candidates: Vec<FusedCandidate>,
     ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
-        let candidate_count = candidates.len();
         let enabled = [
             policy.per_source_namespace,
             policy.per_source_instance,
@@ -71,9 +70,6 @@ impl DeterministicDiversity {
                 final_ordinal: ordinal as u32,
             })
             .collect::<Vec<_>>();
-        metrics::gauge!("query.diversity.candidates").set(candidate_count as f64);
-        metrics::gauge!("query.diversity.results").set((ranked.len()) as f64);
-        metrics::gauge!("query.diversity.capped").set((decisions.len()) as f64);
         Ok((ranked, decisions))
     }
 }

@@ -155,7 +155,6 @@ pub async fn register_project_store(
     let registration_root = primary_root.as_deref().unwrap_or(project_root);
 
     if cached_registration_is_current(global_db, project_id, &digest, registration_root).await? {
-        metrics::gauge!("lifecycle.register_project_store.cached_total").increment(1.0);
         return Ok(());
     }
 
@@ -163,7 +162,6 @@ pub async fn register_project_store(
     // Re-check under the write lock: a concurrent writable open may have
     // just registered the same digest while we were computing ours.
     if cached_registration_is_current(global_db, project_id, &digest, registration_root).await? {
-        metrics::gauge!("lifecycle.register_project_store.cached_total").increment(1.0);
         return Ok(());
     }
 
@@ -308,7 +306,6 @@ pub async fn register_project_store(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_id.to_string(), digest);
-    metrics::gauge!("lifecycle.register_project_store.write_total").increment(1.0);
     Ok(())
 }
 

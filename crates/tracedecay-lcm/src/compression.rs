@@ -376,7 +376,7 @@ pub async fn compress(
     request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    let response = compress_inner(
+    compress_inner(
         conn,
         scope,
         publisher,
@@ -386,13 +386,7 @@ pub async fn compress(
         None,
     )
     .await
-    .map(|bounded| bounded.response);
-    // A failed compression discarded its ingest writes, assembled backlog,
-    // and summary drafts; success-only gauges would hide exactly that waste.
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
-    response
+    .map(|bounded| bounded.response)
 }
 
 /// Runs canonical compression over one bounded retained-session raw page.
@@ -409,7 +403,7 @@ pub async fn compress_retained_page(
     payload_rollback: &mut payload::PayloadFileRollback,
     guard: RetainedCompressionGuard,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-    let response = compress_inner(
+    compress_inner(
         conn,
         scope,
         publisher,
@@ -418,11 +412,7 @@ pub async fn compress_retained_page(
         payload_rollback,
         Some(guard),
     )
-    .await;
-    if response.is_err() {
-        crate::metrics::record_lcm_compress_failed();
-    }
-    response
+    .await
 }
 
 async fn compress_inner(
@@ -452,7 +442,7 @@ async fn compress_inner(
         )
         .await?;
         return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response: record_compression_gauges(compression_response(
+            response: compression_response(
                 "ok",
                 reason,
                 Vec::new(),
@@ -460,7 +450,7 @@ async fn compress_inner(
                 frontier,
                 None,
                 assembly_token_cap,
-            )),
+            ),
             rows_scanned: 0,
             bytes_scanned: 0,
             has_more: false,
@@ -499,7 +489,7 @@ async fn compress_inner(
             assembly_token_cap,
         );
         return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response: record_compression_gauges(response),
+            response,
             rows_scanned: 0,
             bytes_scanned: 0,
             has_more: false,
@@ -516,20 +506,11 @@ async fn compress_inner(
     )
     .await?;
     Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-        response: record_compression_gauges(response),
+        response,
         rows_scanned,
         bytes_scanned,
         has_more,
     })
-}
-
-fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
-    crate::metrics::record_lcm_compression(
-        response.summary_nodes_created,
-        response.compression_attempts,
-        response.replay_token_estimate,
-    );
-    response
 }
 
 async fn compress_in_transaction(

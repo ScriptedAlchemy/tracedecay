@@ -76,10 +76,7 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
         let state = match read_source_edit_candidate(root, Path::new(relative))? {
-            Some(bytes) => {
-                metrics::gauge!("usecases.edit.digest_bytes").increment(bytes.len() as f64);
-                Some(hash_source_edit_content(&bytes)?)
-            }
+            Some(bytes) => Some(hash_source_edit_content(&bytes)?),
             None => None,
         };
         states.push((relative, state));

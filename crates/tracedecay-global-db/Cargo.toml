@@ -23,7 +23,6 @@ futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"
 hmac = { version = "0.13.0", features = ["zeroize"] }
-metrics.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -362,12 +362,6 @@ fn collect_eligible_messages_jsonl(
         .unwrap_or(u64::MAX)
         .saturating_add(skipped_oversized_entries);
 
-    crate::runtime::pipeline_metrics::record_discovery_files(
-        files_considered,
-        u64::try_from(paths.len()).unwrap_or(u64::MAX),
-        bytes_charged,
-    );
-    crate::runtime::pipeline_metrics::record_sweep_outcome(truncated.is_none());
     FileDiscoveryReport {
         paths,
         truncated,

@@ -7,8 +7,6 @@
 
 #![forbid(unsafe_code)]
 
-mod observe;
-
 pub mod analyzer;
 pub mod configuration;
 pub mod curation;

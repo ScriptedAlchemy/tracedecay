@@ -49,9 +49,17 @@ separate activity and is performed only when separately requested.
 
 Stable and beta release archives compile only the `production` feature profile.
 
-Instrumentation is unconditional: `tracing` spans and `metrics` gauges ship in
-every binary and are live wherever a subscriber or recorder is installed. There
+Instrumentation is unconditional. `tracing` spans ship in every binary. There
 is no profiler feature lane and no profiler HTTP or MCP surface.
+
+Span timings come from the shipped `tracedecay` binary. Enable spans with
+`RUST_LOG` and set `TRACEDECAY_SPAN_TIMINGS=1`. Each enabled span then logs a
+`close` line to stderr with `time.busy` and `time.idle`. Most spans are
+`trace` level.
+
+```sh
+RUST_LOG=tracedecay=trace TRACEDECAY_SPAN_TIMINGS=1 tracedecay <command>
+```
 
 CPU attribution is external tooling, not a shipped feature: attach `perf
 record -g -p <daemon pid>` while a lane runs, or attach `samply` when a

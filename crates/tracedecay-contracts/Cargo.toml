@@ -8,7 +8,6 @@ description = "Transport-neutral application contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
-metrics.workspace = true
 schemars.workspace = true
 getrandom = "0.2"
 hex = "0.4"

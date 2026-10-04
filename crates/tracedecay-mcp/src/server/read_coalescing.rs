@@ -64,7 +64,6 @@ struct ReadFollowerWaitGuard {
 impl ReadFollowerWaitGuard {
     fn enter(active: Arc<AtomicU64>) -> Self {
         active.fetch_add(1, Ordering::AcqRel);
-        metrics::gauge!("mcp.server.read_coalescing.followers_active").increment(1.0);
         Self { active }
     }
 }
@@ -72,7 +71,6 @@ impl ReadFollowerWaitGuard {
 impl Drop for ReadFollowerWaitGuard {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
-        metrics::gauge!("mcp.server.read_coalescing.followers_active").decrement(1.0);
     }
 }
 

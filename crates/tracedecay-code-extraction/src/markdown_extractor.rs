@@ -660,12 +660,9 @@ impl crate::LanguageExtractor for MarkdownExtractor {
     /// extractor-owned parse performs, so the own-parser path stays distinct
     /// from the supplied-tree path.
     fn extract_artifact(&self, file_path: &str, source: &str) -> crate::ExtractionArtifactV1 {
-        crate::observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || crate::ExtractionArtifactV1::from_result(Self::extract_markdown(file_path, source)),
-            crate::observe::ExtractOutputCounts::from_artifact,
-        )
+        crate::observe::measure_extract_file(|| {
+            crate::ExtractionArtifactV1::from_result(Self::extract_markdown(file_path, source))
+        })
     }
 
     fn extract_parsed_artifact_prepared(

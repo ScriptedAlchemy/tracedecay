@@ -580,7 +580,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            metrics::gauge!("daemon.store.profile_authority.mount_reuse_total").increment(1.0);
             return lease;
         }
         let _mount = self.profile_database_mount.lock().await;
@@ -599,11 +598,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            metrics::gauge!("daemon.store.profile_authority.mount_reuse_total").increment(1.0);
             return lease;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -661,7 +658,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            metrics::gauge!("daemon.store.profile_sessions.mount_reuse_total").increment(1.0);
             return lease;
         }
         let _mount = self.profile_sessions_mount.lock().await;
@@ -678,11 +674,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            metrics::gauge!("daemon.store.profile_sessions.mount_reuse_total").increment(1.0);
             return lease;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -869,11 +863,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(database) = existing {
-            metrics::gauge!("daemon.store.profile_memory.mount_reuse_total").increment(1.0);
             return database;
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_memory(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -954,12 +946,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         provision_if_new: bool,
     ) -> Result<RemoteSqliteStorageV1> {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
-            super::RemoteNodeOwnerAdmissionV1::Existing(database) => {
-                metrics::gauge!("daemon.store.remote_node.mount_reuse_total").increment(1.0);
-                (database, false, true)
-            }
+            super::RemoteNodeOwnerAdmissionV1::Existing(database) => (database, false, true),
             super::RemoteNodeOwnerAdmissionV1::Opening(mut admission) => {
-                let _mount_observation = super::StoreMountObservationV1::enter();
                 let shard_id = StoreShardIdV1::remote_node(
                     self.identity.brain_id().clone(),
                     self.identity.profile_id().clone(),
@@ -1425,8 +1413,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             match mounted.get(&project_id) {
                 Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.sessions.as_ref() {
-                        metrics::gauge!("daemon.store.project_sessions.mount_reuse_total")
-                            .increment(1.0);
                         return self.issue_session_owner_lease(
                             owner,
                             SessionRelationScope::project_sessions(project_id.clone()),
@@ -1435,7 +1421,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true
                 }
                 Some(ProjectRuntimeOwnerStateV1::Opening) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -1448,7 +1433,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(state.unavailable_route_error());
                 }
                 None => false,
@@ -1481,7 +1465,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ));
                 };
 
-                metrics::gauge!("daemon.store.project_sessions.mount_reuse_total").increment(1.0);
                 return self.issue_session_owner_lease(
                     owner,
                     SessionRelationScope::project_sessions(project_id.clone()),
@@ -1489,7 +1472,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         };
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -1701,32 +1683,24 @@ impl DaemonSessionRuntimeRegistryV1 {
                         Ok((true, None))
                     }
                 }
-                Some(ProjectRuntimeOwnerStateV1::Opening) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
-                    Err(TraceDecayError::project_route(
-                        "project_runtime_opening",
-                        true,
-                        "Project runtime is already opening",
-                    ))
-                }
+                Some(ProjectRuntimeOwnerStateV1::Opening) => Err(TraceDecayError::project_route(
+                    "project_runtime_opening",
+                    true,
+                    "Project runtime is already opening",
+                )),
                 Some(
                     state @ (ProjectRuntimeOwnerStateV1::Retiring
                     | ProjectRuntimeOwnerStateV1::ReplacingSessions
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_)),
-                ) => {
-                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
-                    Err(state.unavailable_route_error())
-                }
+                ) => Err(state.unavailable_route_error()),
                 None => Ok((false, None)),
             }
         }?;
         if let Some(database) = existing {
-            metrics::gauge!("daemon.store.project_memory.mount_reuse_total").increment(1.0);
             return Ok(database);
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
         } else {
@@ -1822,11 +1796,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         }?;
         if let Some(database) = existing {
-            metrics::gauge!("daemon.store.project_memory.mount_reuse_total").increment(1.0);
             return Ok(database);
         }
 
-        let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),

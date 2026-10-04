@@ -237,7 +237,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
     let mut required = BTreeSet::new();
     while let Some(row) = rows
         .next()
@@ -251,10 +250,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         let anchor_json = row
             .get::<String>(1)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        record_assertion_history_row(
-            u64::try_from(observation_json.len().saturating_add(anchor_json.len()))
-                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?,
-        );
         let observation: tracedecay_domain::DurableObservationV1 =
             serde_json::from_str(&observation_json)
                 .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
@@ -324,7 +319,6 @@ pub(super) async fn validate_canonical_assertion_completeness(
         )
         .await
         .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    record_assertion_validation_probe();
     while let Some(row) = rows
         .next()
         .await
@@ -995,7 +989,6 @@ async fn fold_coverage_rows(
         let mut after = (0_i64, 0_i64);
         loop {
             checkpoint_relation_rebuild_control(control)?;
-            record_coverage_query_probe();
             let mut page = conn
                 .query(
                     &sql,
@@ -1022,10 +1015,6 @@ async fn fold_coverage_rows(
                     row.get::<i64>(1)
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                     row.get::<i64>(2)
-                        .map_err(|error| storage(PERSIST_OPERATION, error))?,
-                );
-                record_coverage_row(
-                    u64::try_from(encoded.len())
                         .map_err(|error| storage(PERSIST_OPERATION, error))?,
                 );
                 match rows {
@@ -1210,33 +1199,6 @@ pub(crate) async fn base_projection_coverage(
         current: component(10)?,
         fts: component(12)?,
     })
-}
-
-#[inline(always)]
-fn record_assertion_validation_probe() {
-    metrics::gauge!("session_temporal.activation.assertion_query_probes").increment(1.0);
-}
-
-#[inline(always)]
-fn record_assertion_history_row(bytes: u64) {
-    {
-        metrics::gauge!("session_temporal.activation.history_rows").increment(1.0);
-        metrics::gauge!("session_temporal.activation.history_row_payload_bytes")
-            .increment(bytes as f64);
-    }
-}
-
-#[inline(always)]
-fn record_coverage_query_probe() {
-    metrics::gauge!("session_temporal.coverage.query_probes").increment(1.0);
-}
-
-#[inline(always)]
-fn record_coverage_row(bytes: u64) {
-    {
-        metrics::gauge!("session_temporal.coverage.rows").increment(1.0);
-        metrics::gauge!("session_temporal.coverage.row_payload_bytes").increment(bytes as f64);
-    }
 }
 
 fn copy_encoding(copy: &LogicalCopyRelation) -> SessionStoreResult<Vec<u8>> {

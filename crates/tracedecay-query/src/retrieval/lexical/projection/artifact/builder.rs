@@ -849,133 +849,6 @@ impl PersistedFinalizationPhaseV1 {
     }
 }
 
-struct FinalizationWakeMetricsV1 {
-    rows: usize,
-}
-
-struct FinalizationTransactionMetricsV1 {
-    committed: bool,
-}
-
-impl FinalizationTransactionMetricsV1 {
-    #[inline(always)]
-    const fn new() -> Self {
-        Self { committed: false }
-    }
-
-    #[inline(always)]
-    fn mark_committed(&mut self) {
-        {
-            self.committed = true;
-        }
-    }
-}
-
-impl Drop for FinalizationTransactionMetricsV1 {
-    fn drop(&mut self) {
-        if !self.committed {
-            // Dropping an uncommitted rusqlite transaction rolls it back.
-            metrics::gauge!("query.artifact.finalization.rollback_total").increment(1.0);
-        }
-    }
-}
-
-impl FinalizationWakeMetricsV1 {
-    #[inline(always)]
-    fn new() -> Self {
-        Self { rows: 0 }
-    }
-
-    #[inline(always)]
-    fn digest_pass(&self, pass: PersistedFinalizationPhaseV1) {
-        match pass {
-            PersistedFinalizationPhaseV1::Statistics => {
-                metrics::gauge!("query.artifact.finalization.statistics_wakes_total")
-                    .increment(1.0);
-            }
-            PersistedFinalizationPhaseV1::Indexes => {
-                metrics::gauge!("query.artifact.finalization.index_wakes_total").increment(1.0);
-            }
-            PersistedFinalizationPhaseV1::Digest => {
-                metrics::gauge!("query.artifact.finalization.digest_pass.authenticated_total")
-                    .increment(1.0);
-            }
-        };
-    }
-
-    #[inline(always)]
-    fn phase(&self, phase: FinalizationSectionV1) {
-        match phase {
-            FinalizationSectionV1::SourcePages => {
-                metrics::gauge!("query.artifact.finalization.phase.source_pages_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::DocumentIntegrity => {
-                metrics::gauge!("query.artifact.finalization.phase.document_integrity_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::Rows => {
-                metrics::gauge!("query.artifact.finalization.phase.rows_total").increment(1.0);
-            }
-            FinalizationSectionV1::TermPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.term_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::ExactPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.exact_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::NgramPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.ngram_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneOccurrences => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_occurrences_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneExactPostings => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_exact_postings_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneBodyPayloads => {
-                metrics::gauge!("query.artifact.finalization.phase.clone_body_payloads_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::CloneFingerprintPostings => {
-                metrics::gauge!(
-                    "query.artifact.finalization.phase.clone_fingerprint_postings_total"
-                )
-                .increment(1.0);
-            }
-            FinalizationSectionV1::FieldStatistics => {
-                metrics::gauge!("query.artifact.finalization.phase.field_stats_total")
-                    .increment(1.0);
-            }
-            FinalizationSectionV1::Vocabulary => {
-                metrics::gauge!("query.artifact.finalization.phase.vocabulary_total")
-                    .increment(1.0);
-            }
-        };
-    }
-
-    #[inline(always)]
-    fn probe(&self) {
-        metrics::gauge!("query.artifact.finalization.section_probes_total").increment(1.0);
-    }
-
-    #[inline(always)]
-    fn add_rows(&mut self, rows: usize) {
-        self.rows = self.rows.saturating_add(rows);
-    }
-}
-
-impl Drop for FinalizationWakeMetricsV1 {
-    fn drop(&mut self) {
-        metrics::gauge!("query.artifact.finalization.wakes_total").increment(1.0);
-        metrics::gauge!("query.artifact.finalization.rows_total").increment(self.rows as f64);
-    }
-}
-
 /// Stable identity of the private staging authority, captured from an exact
 /// no-follow file handle rather than mutable path metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1261,8 +1134,6 @@ impl CodeLexicalArtifactBuilderV1 {
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
         set_triggers_enabled(&connection, true)?;
-        metrics::gauge!("query.artifact.carry.pages_carried")
-            .increment(carried.carried_pages as f64);
         tracing::debug!(
             pages = carried.pages,
             re_encoded_pages = carried.re_encoded_pages,
@@ -1427,12 +1298,8 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[VerifiedSealedLexicalPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = (|| {
-            let prepared = self.prepare_pages(pages, control)?;
-            self.append_prepared_pages_inner(&prepared, control)
-        })();
-        record_batch_outcome(&result);
-        result
+        let prepared = self.prepare_pages(pages, control)?;
+        self.append_prepared_pages(&prepared, control)
     }
 
     /// Prepare the fresh suffix of one ordered source batch outside SQLite.
@@ -1451,7 +1318,6 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             &prepared,
         )?;
-        record_prepared_batch_metrics(&prepared);
         Ok(prepared)
     }
 
@@ -1471,7 +1337,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let memory_prefix = self.largest_admissible_page_prefix(pages)?;
         if memory_prefix == 0 {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
             admit_page_batch_within_memory_budget(
                 &self.metadata,
                 self.fixed_ledger_charge_bytes,
@@ -1497,7 +1362,6 @@ impl CodeLexicalArtifactBuilderV1 {
                         .to_owned(),
                 )
             })?;
-            record_batch_prefix_limit(exceeded.limit);
             return Err(batch_limit(
                 exceeded.limit,
                 exceeded.required,
@@ -1513,12 +1377,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact admissible source prefix was empty".to_owned(),
             )
         })?;
-        if let Some(exceeded) = exact_limit {
-            record_batch_prefix_limit(exceeded.limit);
-        } else if memory_prefix < pages.len() {
-            record_batch_prefix_limit(CodeLexicalArtifactBatchLimitV1::Memory);
-        }
-        record_prepared_batch_metrics(&prepared);
         Ok(PreparedCodeLexicalArtifactBatchV1 {
             accepted_prefix,
             prepared_pages: prepared,
@@ -1548,7 +1406,6 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
 
-        metrics::gauge!("query.artifact.batch.admission_total").increment(1.0);
         let (current, fresh_start) = {
             let _span = tracing::trace_span!("query.artifact.batch.admission").entered();
             {
@@ -1630,16 +1487,6 @@ impl CodeLexicalArtifactBuilderV1 {
         pages: &[PreparedCodeLexicalArtifactPageV1],
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-        let result = self.append_prepared_pages_inner(pages, control);
-        record_batch_outcome(&result);
-        result
-    }
-
-    fn append_prepared_pages_inner(
-        &mut self,
-        pages: &[PreparedCodeLexicalArtifactPageV1],
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
         if read_receipt_with_control(&self.connection, control)?.is_some() {
@@ -1654,7 +1501,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let current = progress(&self.connection, control)?;
         if pages.is_empty() {
-            record_artifact_progress(&current);
             return Ok(current);
         }
         validate_prepared_page_batch(&current, pages)?;
@@ -1704,7 +1550,6 @@ impl CodeLexicalArtifactBuilderV1 {
                         let _span = tracing::trace_span!("query.artifact.batch.rows").entered();
                         append_prepared_rows(&transaction, pages, control)
                     }?;
-                    record_batch_row_metrics(pages);
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.postings").entered();
                         append_prepared_postings(
@@ -1715,7 +1560,6 @@ impl CodeLexicalArtifactBuilderV1 {
                             control,
                         )
                     }?;
-                    record_batch_posting_metrics(pages);
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.receipts").entered();
                         {
@@ -1725,26 +1569,20 @@ impl CodeLexicalArtifactBuilderV1 {
                             Ok::<(), CodeLexicalArtifactErrorV1>(())
                         }
                     }?;
-                    record_batch_receipt_metrics(pages);
                     checkpoint(control)
                 })();
                 if let Err(error) = mutation {
-                    metrics::gauge!("query.artifact.batch.rollbacks_total").increment(1.0);
                     {
                         let _span = tracing::trace_span!("query.artifact.batch.rollback").entered();
                         transaction.rollback().map_err(sqlite_error)
                     }?;
                     return Err(error);
                 }
-                metrics::gauge!("query.artifact.batch.commit_attempts_total").increment(1.0);
-                let commit = {
+
+                {
                     let _span = tracing::trace_span!("query.artifact.batch.commit").entered();
                     transaction.commit().map_err(sqlite_error)
-                };
-                if commit.is_ok() {
-                    metrics::gauge!("query.artifact.batch.commit_succeeded_total").increment(1.0);
                 }
-                commit
             }
         })?;
         // Do not observe cancellation between durable COMMIT and publishing
@@ -1752,14 +1590,6 @@ impl CodeLexicalArtifactBuilderV1 {
         // cursor once the whole batch has committed.
         let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
 
-        metrics::gauge!("query.artifact.batch.committed_pages_total").increment(pages.len() as f64);
-        metrics::gauge!("query.artifact.batch.committed_chunks_total").increment(
-            pages
-                .iter()
-                .fold(0u64, |total, page| total.saturating_add(page.chunk_count))
-                as f64,
-        );
-        record_artifact_progress(&progress);
         Ok(progress)
     }
 
@@ -1817,7 +1647,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization work budget must be non-zero".to_owned(),
             ));
         }
-        let mut wake_metrics = FinalizationWakeMetricsV1::new();
         checkpoint(control)?;
         self.verify_path_binding()?;
         verify_artifact_state_metadata(
@@ -1862,7 +1691,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 ));
             };
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             verify_staged_source_chain(&transaction, source, control)?;
             // The sorted pass and the count aggregation are the heaviest
             // sorter statements in finalization; run them under the same
@@ -1888,7 +1716,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 )?,
             )?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: CodeLexicalArtifactFinalizationPhaseV1::IndexBuild,
                 completed_sections: 0,
@@ -1899,14 +1727,12 @@ impl CodeLexicalArtifactBuilderV1 {
         }
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let mut state = load_finalization_state(&transaction)?.ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact finalization marker disappeared".to_owned(),
             )
         })?;
         validate_finalization_state(&state)?;
-        wake_metrics.digest_pass(state.phase);
         ensure_content_epoch(&transaction, state.content_epoch)?;
         if source.is_some_and(|source| &state.source_state_digest != source.source_state_digest()) {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1929,7 +1755,7 @@ impl CodeLexicalArtifactBuilderV1 {
             })??;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: 0,
@@ -1947,11 +1773,8 @@ impl CodeLexicalArtifactBuilderV1 {
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
             let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
             let section_name = section.name();
-            wake_metrics.phase(section);
-            wake_metrics.probe();
             let rows =
                 advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
-            wake_metrics.add_rows(rows);
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
@@ -2001,7 +1824,7 @@ impl CodeLexicalArtifactBuilderV1 {
         if state.section_ordinal < section_count {
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
-            commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+            commit_finalization_transaction(transaction)?;
             let step = CodeLexicalArtifactFinalizationStepV1::Pending {
                 phase: state.phase.public(),
                 completed_sections: u64::try_from(state.completed_sections.len())
@@ -2024,7 +1847,7 @@ impl CodeLexicalArtifactBuilderV1 {
         // of the content alone, which is what lets worktrees share one file.
         // A crash before the seal commits repeats this rewrite on resume.
         store_finalization_state(&transaction, &state)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        commit_finalization_transaction(transaction)?;
         {
             let _span =
                 tracing::trace_span!("query.artifact.finalization.canonical_layout").entered();
@@ -2032,7 +1855,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }?;
         checkpoint(control)?;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let sections = state.completed_sections;
         let summary = CodeLexicalSourceSummaryV1::of_staged_pages(
             &transaction,
@@ -2074,7 +1896,7 @@ impl CodeLexicalArtifactBuilderV1 {
             )
             .map_err(sqlite_error)?;
         checkpoint(control)?;
-        commit_finalization_transaction(transaction, &mut transaction_metrics)?;
+        commit_finalization_transaction(transaction)?;
         self.canonicalize_sealed_header()?;
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
@@ -2187,8 +2009,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )?;
             crate::observe::Residency::Warm.record("query.artifact.residency");
-            metrics::gauge!("query.artifact.pages").set((receipt.page_count()) as f64);
-            metrics::gauge!("query.artifact.bytes").set((receipt.file_size_bytes()) as f64);
             return Ok(receipt);
         }
         Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -4902,7 +4722,6 @@ fn merge_wake_fits_memory_temp_store(
         .query_row(staged_runs, [], |row| row.get(0))
         .map_err(sqlite_error)?;
     let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-    metrics::gauge!("query.artifact.finalization.merge.staged_run_bytes").set(staged_bytes as f64);
     Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 
@@ -6859,159 +6678,21 @@ fn verify_source_receipt(
 }
 
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
-    {
-        match step {
-            CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
-                metrics::gauge!("query.artifact.finalization.outcome.pending_total").increment(1.0);
-                crate::observe::Residency::Rebuilding.record("query.artifact.residency");
-                metrics::gauge!("query.artifact.rows").set((*completed_rows) as f64);
-            }
-            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
-                metrics::gauge!("query.artifact.finalization.outcome.ready_total").increment(1.0);
-                crate::observe::Residency::Warm.record("query.artifact.residency");
-                metrics::gauge!("query.artifact.pages").set((receipt.page_count()) as f64);
-                metrics::gauge!("query.artifact.bytes").set((receipt.file_size_bytes()) as f64);
-            }
+    match step {
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {
+            crate::observe::Residency::Rebuilding.record("query.artifact.residency");
         }
-    }
-}
-
-fn record_batch_outcome(
-    result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
-) {
-    {
-        match result {
-            Ok(_) => {
-                metrics::gauge!("query.artifact.batch.outcome.committed_total").increment(1.0);
-            }
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {
-                metrics::gauge!("query.artifact.batch.outcome.interrupted_total").increment(1.0);
-            }
-            Err(_) => {
-                metrics::gauge!("query.artifact.batch.outcome.failed_total").increment(1.0);
-            }
+        CodeLexicalArtifactFinalizationStepV1::Ready(_) => {
+            crate::observe::Residency::Warm.record("query.artifact.residency");
         }
-    }
-}
-
-fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    if crate::observe::observing() {
-        let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        let source_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::source_retained_bytes)
-            .sum::<usize>();
-        let prepared_bytes = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes)
-            .sum::<usize>();
-        let effective_workers =
-            tracedecay_code_index::parallelism::indexing_workers().min(pages.len());
-        let mut scratch = pages
-            .iter()
-            .map(PreparedCodeLexicalArtifactPageV1::preparation_scratch_bytes)
-            .collect::<Vec<_>>();
-        scratch.sort_unstable_by(|left, right| right.cmp(left));
-        let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
-        metrics::gauge!("query.artifact.batch.prepared_pages_total")
-            .increment((pages.len() as u64) as f64);
-        metrics::gauge!("query.artifact.batch.prepared_documents_total")
-            .increment(documents as f64);
-        metrics::gauge!("query.artifact.batch.source_bytes_total").increment(source_bytes as f64);
-        metrics::gauge!("query.artifact.batch.prepared_bytes_total")
-            .increment(prepared_bytes as f64);
-        metrics::gauge!("query.artifact.batch.active_scratch_bytes_total")
-            .increment(active_scratch as f64);
-        metrics::gauge!("query.artifact.batch.effective_workers").set(effective_workers as f64);
-    }
-}
-
-fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    if crate::observe::observing() {
-        let relational_postings = pages
-            .iter()
-            .flat_map(|page| &page.documents)
-            .map(|document| document.term_postings.len() + document.exact_postings.len())
-            .sum::<usize>();
-        let ngram_shards = pages
-            .iter()
-            .map(|page| page.ngram_shards.len())
-            .sum::<usize>();
-        let ngram_documents = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.cardinality)
-            .sum::<u64>();
-        let ngram_bytes = pages
-            .iter()
-            .flat_map(|page| &page.ngram_shards)
-            .map(|shard| shard.documents.len())
-            .sum::<usize>();
-        metrics::gauge!("query.artifact.batch.posting_rows_total")
-            .increment(relational_postings as f64);
-        metrics::gauge!("query.artifact.batch.ngram_shard_rows_total")
-            .increment(ngram_shards as f64);
-        metrics::gauge!("query.artifact.batch.ngram_documents_total")
-            .increment(ngram_documents as f64);
-        metrics::gauge!("query.artifact.batch.ngram_bytes_total").increment(ngram_bytes as f64);
-    }
-}
-
-fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
-        let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-        metrics::gauge!("query.artifact.batch.document_rows_total").increment(rows as f64);
-    }
-}
-
-fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    {
-        metrics::gauge!("query.artifact.batch.receipt_rows_total")
-            .increment((pages.len() as u64) as f64);
-    }
-}
-
-fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
-    {
-        match limit {
-            CodeLexicalArtifactBatchLimitV1::Memory => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.memory_total").increment(1.0);
-            }
-            CodeLexicalArtifactBatchLimitV1::PreparedRows => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total")
-                    .increment(1.0);
-            }
-            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
-                metrics::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
-                    .increment(1.0);
-            }
-        }
-    }
-}
-
-fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
-    {
-        metrics::gauge!("query.artifact.pages").set(progress.next_page_ordinal as f64);
-        metrics::gauge!("query.artifact.rows").set(progress.completed_chunks as f64);
-        metrics::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes as f64);
     }
 }
 
 fn commit_finalization_transaction(
     transaction: Transaction<'_>,
-    metrics: &mut FinalizationTransactionMetricsV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    metrics::gauge!("query.artifact.finalization.commit_attempts_total").increment(1.0);
-    let result = {
-        let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
-        transaction.commit().map_err(sqlite_error)
-    };
-    if result.is_ok() {
-        metrics.mark_committed();
-
-        metrics::gauge!("query.artifact.finalization.commit_succeeded_total").increment(1.0);
-    }
-    result
+    let _span = tracing::trace_span!("query.artifact.finalization.commit").entered();
+    transaction.commit().map_err(sqlite_error)
 }
 
 #[tracing::instrument(

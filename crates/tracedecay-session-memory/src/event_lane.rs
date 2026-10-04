@@ -343,16 +343,6 @@ pub async fn publish(
     };
     let bus = live_bus();
     let _ = bus.send(record);
-    observe_publish(bus.len(), bus.receiver_count());
-}
-
-/// Live activity bus state after one publish: queued records not yet seen by
-/// the slowest subscriber, and the current subscriber count. Keys are static
-/// capability names; every gauge is emitted through the `metrics` facade.
-#[inline]
-fn observe_publish(queue_depth: usize, subscribers: usize) {
-    metrics::gauge!("usecases.event_lane.queue_depth").set(queue_depth as f64);
-    metrics::gauge!("usecases.event_lane.subscribers").set(subscribers as f64);
 }
 
 pub async fn replay_after(

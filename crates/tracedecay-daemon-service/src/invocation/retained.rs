@@ -98,7 +98,6 @@ pub(super) async fn execute_retained_application(
     let outcome = tokio::select! {
         outcome = &mut execution => outcome,
         () = request_cancellation.cancelled() => {
-            metrics::gauge!("daemon.service.retained.cancelled_total").increment(1.0);
             cancellation_signal.cancel(now_micros());
             execution.await
         }

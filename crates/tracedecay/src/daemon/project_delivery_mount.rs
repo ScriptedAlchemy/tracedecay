@@ -32,15 +32,8 @@ pub(super) async fn ensure_project_delivery_settlement(
             configuration_policy_digest.clone(),
         )
         .await
-        .map_err(|error| {
-            // Fail-closed mount outcome; successes are already counted by the
-            // enclosing measure span.
-            metrics::gauge!("daemon.project.mount.failed").increment(1.0);
-            TraceDecayError::Config {
-                message: format!(
-                    "project-open observability producer registration failed: {error}"
-                ),
-            }
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open observability producer registration failed: {error}"),
         })?;
     Ok(configuration_policy_digest)
 }

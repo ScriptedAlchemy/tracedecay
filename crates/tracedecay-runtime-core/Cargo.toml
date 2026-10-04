@@ -20,7 +20,6 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = ["dep:tracing-subscriber"]
 
 [dependencies]
-metrics.workspace = true
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }

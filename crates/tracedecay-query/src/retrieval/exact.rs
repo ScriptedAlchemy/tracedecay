@@ -818,13 +818,7 @@ where
             },
             outcome => outcome,
         };
-        crate::observe::record_lane(
-            "query.lane.exact.candidates",
-            "query.lane.exact.examined",
-            "query.lane.exact.results",
-            "query.lane.exact.residency",
-            &outcome,
-        );
+        crate::observe::record_lane("query.lane.exact.residency", &outcome);
         Ok(outcome)
     }
 }

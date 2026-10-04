@@ -493,10 +493,6 @@ where
         stats.spans_written = written.spans_changed;
         stats.commits_attributed = written.commits_changed;
     }
-    crate::runtime::pipeline_metrics::record_git_backfill(
-        stats.sessions_scanned,
-        stats.spans_written,
-    );
     Ok(stats)
 }
 

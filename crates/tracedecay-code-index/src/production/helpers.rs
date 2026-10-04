@@ -484,11 +484,6 @@ where
 {
     let workers = crate::parallelism::indexing_workers().max(1);
 
-    metrics::gauge!("code_index.seal.resolve.effective_workers").set(workers as f64);
-    if crate::observe::observing() {
-        metrics::gauge!("code_index.seal.resolve.unresolved_references")
-            .set(selected_references(files, selection).count() as f64);
-    }
     let modules = {
         let _span = tracing::trace_span!("code_index.seal.module_index").entered();
         ResolutionModulesV1::new(files)

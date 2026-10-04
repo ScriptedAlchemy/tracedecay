@@ -174,23 +174,6 @@ impl HookReplaySweepV1 {
     }
 }
 
-/// The sweep gauge is RAII so the consumer task's `abort()` at project close
-/// cannot leave a phantom in-flight sweep behind.
-struct HookReplaySweepObservation;
-
-impl HookReplaySweepObservation {
-    fn begin() -> Self {
-        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(1.0);
-        Self
-    }
-}
-
-impl Drop for HookReplaySweepObservation {
-    fn drop(&mut self) {
-        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(-1.0);
-    }
-}
-
 #[tracing::instrument(name = "daemon.hook_replay.sweep", level = "trace", skip_all)]
 async fn drain_all_hosts(
     graph: &tracedecay_project::project::TraceDecay,
@@ -199,7 +182,6 @@ async fn drain_all_hosts(
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> HookReplaySweepV1 {
-    let _sweep = HookReplaySweepObservation::begin();
     let mut sweep = HookReplaySweepV1::default();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());

@@ -107,8 +107,6 @@ pub(super) fn carry_interactive_catalog(
         parent_hidden_relations,
         &parent_delta_relations[..],
     ]);
-    metrics::gauge!("code_graph.catalog.carry.rows_compared")
-        .increment((entity_ids.len() + relation_ids.len()) as f64);
 
     let mut layer = CatalogLayerScan::new(&rows);
     let changed_entities = {
@@ -141,8 +139,6 @@ pub(super) fn carry_interactive_catalog(
         }
         changed
     };
-    metrics::gauge!("code_graph.catalog.carry.rows_changed")
-        .increment((changed_entities.len() + changed_relations.len()) as f64);
 
     {
         let _span = tracing::trace_span!("code_graph.catalog.carry.apply").entered();

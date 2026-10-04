@@ -355,7 +355,6 @@ impl SparseBuildV1<'_> {
             return Ok(Err(CodeIndexColdBuildReasonV1::MovesGoMethodSets));
         }
         lexical_page_source::checkpoint(control)?;
-        metrics::gauge!("code_index.sparse.edited_files").set(edited.len() as f64);
 
         let generation_id = manifest.generation_id.clone();
         let parent_id = parent.manifest().generation_id.clone();
@@ -491,7 +490,6 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-        metrics::gauge!("code_index.sparse.segments_written").set(segments.len() as f64);
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);
@@ -519,7 +517,7 @@ impl SparseBuildV1<'_> {
         rows: &[&'s SanitizedCodeFileV1],
         manifest: &CodeGenerationManifestV1,
     ) -> Result<Vec<EditedFileV1<'s>>, CodeIndexProductionErrorV1> {
-        let extracted = collect_bounded_ordered(rows, |file, worker| {
+        let extracted = collect_bounded_ordered(rows, |file| {
             lexical_page_source::checkpoint(self.control)?;
             let before = parent.decode_parent_file(&file.logical_path)?;
             let (reuse_key, after, clone_stats) = extract_file(
@@ -537,7 +535,6 @@ impl SparseBuildV1<'_> {
                 Some(&before.artifacts.clone_bodies),
                 self.captured_files,
                 self.control,
-                worker,
             )?;
             let stale_invalidations = before.stale_clone_bindings(&after);
             Ok::<_, CodeIndexProductionErrorV1>((

@@ -461,10 +461,6 @@ async fn collect_over_budget_store_findings(
         over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
     };
 
-    // Items-processed for the over-budget sweep: how many mounted stores this
-    // pass actually sampled, so the sweep span divides into per-store cost.
-    metrics::gauge!("daemon.doctor.telemetry_stores_total")
-        .increment((telemetry_ports.len() as u64) as f64);
     let mut reads = BTreeMap::new();
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {

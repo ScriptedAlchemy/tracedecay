@@ -919,9 +919,7 @@ impl DaemonGitHubStackRuntimeV1 {
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
-        let outcome = self.preflight_via_circuit(request, cancellation);
-        record_stack_preflight_outcome(&outcome);
-        outcome
+        self.preflight_via_circuit(request, cancellation)
     }
 
     fn preflight_via_circuit(
@@ -1187,47 +1185,6 @@ impl Drop for DaemonGitHubStackRuntimeV1 {
             && let Some(task) = task.take()
         {
             task.abort();
-        }
-    }
-}
-
-/// Tallies one GitHub-stack preflight against its exact typed outcome. The
-/// outcome set is the closed [`NativeIntegrationPreflightOutcomeV1`] enum plus
-/// one coordinator-error bucket, so every gauge key stays compile-time static
-/// and fail-closed dispositions are recorded alongside previews.
-fn record_stack_preflight_outcome(
-    outcome: &Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
-) {
-    match outcome {
-        Ok(NativeIntegrationPreflightOutcomeV1::Preview(_)) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.preview").increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::Partial) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.partial").increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::Stale) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.stale").increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::Denied) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.denied").increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::Unavailable) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.unavailable").increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::ResetRequired) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.reset_required")
-                .increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::DurabilityUncertain) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.durability_uncertain")
-                .increment(1.0);
-        }
-        Ok(NativeIntegrationPreflightOutcomeV1::Cancelled) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.cancelled").increment(1.0);
-        }
-        Err(_) => {
-            metrics::gauge!("daemon.native_integration.stack_preflight.coordinator_error")
-                .increment(1.0);
         }
     }
 }

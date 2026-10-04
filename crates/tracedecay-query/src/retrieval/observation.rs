@@ -289,8 +289,6 @@ pub fn observe_composition(
         },
     };
 
-    metrics::gauge!("query.observation.lanes").set((lanes.len()) as f64);
-    metrics::gauge!("query.observation.results").set((output.ranked_candidates.len()) as f64);
     RetrievalPipelineObservationV1 {
         planner,
         retrievers,

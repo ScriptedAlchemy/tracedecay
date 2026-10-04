@@ -4,7 +4,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use tracedecay_domain::WorkflowRunStatus;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
@@ -204,19 +203,13 @@ where
         fan_out_plans: Vec<tracedecay_domain::WorkflowFanOutPlanV1>,
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
-        // One bounded refusal counter across the three pinned digests: any
-        // stale digest means runs are being started against a drifted
-        // policy/configuration/catalog environment.
         if definition.pinned_policy_digest() != &admission.policy_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
         if definition.pinned_configuration_digest() != &admission.configuration_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::ConfigurationDigestMismatch);
         }
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
-            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
         let event = WorkflowRunEvent::admitted_with_fan_out(
@@ -234,7 +227,6 @@ where
                 event,
             })?
             .into_projection();
-        observe_run_status_entered(&projection);
         Ok(projection)
     }
 
@@ -258,27 +250,8 @@ where
                 event,
             })?
             .into_projection();
-        observe_run_status_entered(&next);
-        Ok(next)
-    }
-}
 
-/// Counts every durably appended run transition on a bounded static gauge
-/// key for the status it entered, so failed and cancelled runs are recorded
-/// with the same weight as completed ones. The run's wall lifetime spans
-/// daemon restarts through the journal, so a per-transition counter, not an
-/// in-process RAII lifetime, is the truthful application-layer record.
-fn observe_run_status_entered(projection: &WorkflowRunProjection) {
-    {
-        let entered = match projection.status() {
-            WorkflowRunStatus::Running => "application.workflow.run.status.running",
-            WorkflowRunStatus::Paused => "application.workflow.run.status.paused",
-            WorkflowRunStatus::Cancelling => "application.workflow.run.status.cancelling",
-            WorkflowRunStatus::Completed => "application.workflow.run.status.completed",
-            WorkflowRunStatus::Failed => "application.workflow.run.status.failed",
-            WorkflowRunStatus::Cancelled => "application.workflow.run.status.cancelled",
-        };
-        metrics::gauge!(entered).increment(1.0);
+        Ok(next)
     }
 }
 
@@ -340,15 +313,13 @@ impl WorkflowArtifactPayload {
     ) -> Result<Self, WorkflowArtifactStoreError> {
         // The decode/verify phase of artifact hydration and persistence: a
         // canonical framed SHA-256 over up to 4 MiB, distinct from the store
-        // I/O around it. The bytes gauge sizes what the digest walked.
+        // I/O around it.
         {
             let _span = tracing::trace_span!("application.workflow.artifact.verify").entered();
             {
                 if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
                     return Err(WorkflowArtifactStoreError::Oversized);
                 }
-                metrics::gauge!("application.workflow.artifact.verify.bytes")
-                    .set((bytes.len() as u64) as f64);
                 if bytes.len() as u64 != artifact.byte_length()
                     || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
                 {

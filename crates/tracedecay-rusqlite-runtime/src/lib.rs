@@ -14,7 +14,6 @@ pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_c
 pub mod exact_sql;
 pub mod handoff;
 mod ledger;
-mod observe;
 /// Canonical schema for the runtime writer ledger installed in registered
 /// SQLite stores.
 pub mod runtime_ledger {

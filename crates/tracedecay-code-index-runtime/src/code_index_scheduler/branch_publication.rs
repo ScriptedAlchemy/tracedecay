@@ -9,9 +9,7 @@ use tracedecay_contracts::code_index_freshness::{
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::branch::{
-    BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
-};
+use tracedecay_runtime_core::branch::{BranchAddOutcome, BranchTrackingPreparation};
 use tracedecay_runtime_core::branch_meta::{
     BranchGraphSourceDraftV1, BranchGraphSourcePublicationV1, BranchGraphSourcePublishOutcomeV1,
     BranchGraphSourceRollbackOutcomeV1,
@@ -616,7 +614,7 @@ impl BranchPublicationContextV1 {
             return Ok(());
         }
         if let Some(prepared) = prepared {
-            match tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(
+            tracedecay_runtime_core::branch::rollback_prepared_branch_tracking(
                 &self.data_root,
                 prepared,
             )
@@ -626,10 +624,7 @@ impl BranchPublicationContextV1 {
                     true,
                     format!("branch publication failed: {cause}; branch rollback failed: {error}"),
                 )
-            })? {
-                PreparedBranchRollbackOutcome::RolledBack
-                | PreparedBranchRollbackOutcome::NoMatch => {}
-            }
+            })?;
         }
         Ok(())
     }

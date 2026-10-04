@@ -1876,12 +1876,9 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
     }
 
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || TypeScriptExtractor::extract_typescript_artifact(file_path, source),
-            crate::observe::ExtractOutputCounts::from_artifact,
-        )
+        crate::observe::measure_extract_file(|| {
+            TypeScriptExtractor::extract_typescript_artifact(file_path, source)
+        })
     }
 
     fn extract_parsed_artifact_prepared(

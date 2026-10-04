@@ -991,7 +991,6 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
     where
         E: VersionedTokenEstimator + Sync,
     {
-        metrics::gauge!("session_temporal.execution").increment(1u32);
         let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
         let authenticator =
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
@@ -1049,7 +1048,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> RegisteredGlobalDbSessionTemporalExe
     where
         E: VersionedTokenEstimator + Sync,
     {
-        metrics::gauge!("session_temporal.execution").increment(1u32);
         let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
         let authenticator =
             SessionTemporalCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)

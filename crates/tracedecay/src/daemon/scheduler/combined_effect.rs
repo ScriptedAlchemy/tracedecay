@@ -318,7 +318,7 @@ fn run_combined_scheduler_effect_inner<'a>(
     first_error: &'a mut Option<tracedecay_domain::errors::TraceDecayError>,
 ) -> Pin<Box<dyn Future<Output = CombinedEffectOutcome> + Send + 'a>> {
     Box::pin(async move {
-        let outcome = match admission {
+        match admission {
             CombinedEffectAdmission::Conflict => {
                 super::log_scheduler_admission_conflict(
                     automation_context.project_root(),
@@ -451,19 +451,7 @@ fn run_combined_scheduler_effect_inner<'a>(
                 )
                 .await
             }
-        };
-        match outcome {
-            CombinedEffectOutcome::Completed => {
-                metrics::gauge!("daemon.scheduler.combined_effect.completed_total").increment(1.0);
-            }
-            CombinedEffectOutcome::Handled => {
-                metrics::gauge!("daemon.scheduler.combined_effect.handled_total").increment(1.0);
-            }
-            CombinedEffectOutcome::Deferred => {
-                metrics::gauge!("daemon.scheduler.combined_effect.deferred_total").increment(1.0);
-            }
         }
-        outcome
     })
 }
 

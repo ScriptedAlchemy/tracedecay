@@ -73,7 +73,6 @@ where
         let _span = tracing::trace_span!("api.http.serialize").entered();
         serde_json::to_string(&event).map_err(|_| HttpAdapterError::EventEncoding)
     }?;
-    crate::observe::record_response_bytes(data.len());
     Ok(encoded.data(data))
 }
 

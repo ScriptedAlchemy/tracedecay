@@ -82,7 +82,6 @@ pub async fn prepare_reserved_automation_effect_recovery(
     })??;
     if indexed.is_empty() {
         let report = reset_report(reset_journals);
-        observe_recovery_report(&report);
         return Ok(AutomationEffectRecoveryPreparation::Complete(report));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(
@@ -351,23 +350,8 @@ where
             }
         }
     }
-    observe_recovery_report(&report);
-    Ok(report)
-}
 
-fn observe_recovery_report(report: &AutomationEffectRecoveryReport) {
-    metrics::gauge!("daemon.automation.effect.reconcile.inspected_total")
-        .increment(report.inspected as f64);
-    metrics::gauge!("daemon.automation.effect.reconcile.terminal_total")
-        .increment(report.already_terminal as f64);
-    metrics::gauge!("daemon.automation.effect.reconcile.partial_total")
-        .increment(report.partial_effects as f64);
-    metrics::gauge!("daemon.automation.effect.reconcile.reset_total")
-        .increment(report.reset_required as f64);
-    metrics::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
-        .increment(report.indeterminate as f64);
-    metrics::gauge!("daemon.automation.effect.reconcile.deferred_total")
-        .increment(report.deferred as f64);
+    Ok(report)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

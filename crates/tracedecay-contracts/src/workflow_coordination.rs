@@ -1211,8 +1211,6 @@ where
                     // expired lifetime, double redemption), and refusals must be
                     // recorded with the same weight as successes.
                     TaskHandoffConsumeOutcome::Consumed { frontier } => {
-                        metrics::gauge!("application.workflow.handoff.redeem.consumed")
-                            .increment(1.0);
                         let frontier_digest = frontier
                             .digest()
                             .map_err(|_| TaskHandoffError::InvalidFrontier)?;
@@ -1223,26 +1221,12 @@ where
                             redeemed_at: consumed_at,
                         })
                     }
-                    TaskHandoffConsumeOutcome::Missing => {
-                        metrics::gauge!("application.workflow.handoff.redeem.missing")
-                            .increment(1.0);
-                        Err(TaskHandoffError::Missing)
-                    }
+                    TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
                     TaskHandoffConsumeOutcome::ScopeMismatch => {
-                        metrics::gauge!("application.workflow.handoff.redeem.scope_mismatch")
-                            .increment(1.0);
                         Err(TaskHandoffError::ScopeMismatch)
                     }
-                    TaskHandoffConsumeOutcome::Expired => {
-                        metrics::gauge!("application.workflow.handoff.redeem.expired")
-                            .increment(1.0);
-                        Err(TaskHandoffError::Expired)
-                    }
-                    TaskHandoffConsumeOutcome::Replay => {
-                        metrics::gauge!("application.workflow.handoff.redeem.replay")
-                            .increment(1.0);
-                        Err(TaskHandoffError::Replay)
-                    }
+                    TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
+                    TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
                 }
             }
         }

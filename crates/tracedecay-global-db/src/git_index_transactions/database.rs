@@ -71,7 +71,6 @@ impl GitMutationDatabase<'_> {
     pub(crate) async fn begin_write(
         &self,
     ) -> tracedecay_domain::errors::Result<GitMutationWriteTransaction<'_>> {
-        crate::observe::record_transaction_rows(1);
         match self {
             Self::Registered(db) => db
                 .begin_write_transaction()

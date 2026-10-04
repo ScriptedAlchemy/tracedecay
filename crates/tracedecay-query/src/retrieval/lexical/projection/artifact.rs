@@ -217,10 +217,9 @@ pub(super) enum BuilderDurabilityV1 {
 /// authority: the connection thread occupies one admitted worker and SQLite
 /// may use only the memory-backed remainder. Corpus-wide CREATE INDEX runs use
 /// in-memory temporary b-trees only when the same budget holds their modeled
-/// reservation; otherwise they spill to files. The modeled-reservation gauge
-/// reports the caller plus effective helpers at the canonical 128 MiB worker
-/// charge; it is a subset of the scheduler's existing admission, not another
-/// cache or a second memory authority.
+/// reservation; otherwise they spill to files. The modeled
+/// reservation is a subset of the scheduler's existing admission, not
+/// another cache or a second memory authority.
 fn open_builder_connection(
     path: &Path,
     durability: BuilderDurabilityV1,
@@ -281,13 +280,6 @@ fn open_builder_connection(
             "SQLite granted {effective_sorter_workers} lexical sorter workers above the canonical {requested_sorter_workers} auxiliary-worker bound"
         )));
     }
-    metrics::gauge!("query.artifact.sqlite_sorter_workers.requested")
-        .set(requested_sorter_workers as f64);
-    metrics::gauge!("query.artifact.sqlite_sorter_workers.effective")
-        .set(effective_sorter_workers as f64);
-    let modeled_reservation_bytes = tracedecay_code_index::parallelism::worker_reservation_bytes(
-        effective_sorter_workers.saturating_add(1),
-    );
     // SQLite disables sorter helpers when temporary b-trees are memory-only.
     // FILE still uses the admitted page cache while allowing parallel PMA
     // generation and merge for corpus-wide CREATE INDEX statements.
@@ -299,10 +291,6 @@ fn open_builder_connection(
             if temp_store_file { "FILE" } else { "MEMORY" },
         )
         .map_err(sqlite_error)?;
-    metrics::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes")
-        .set(modeled_reservation_bytes as f64);
-    metrics::gauge!("query.artifact.sqlite_sorter.temp_store_file")
-        .set((u64::from(temp_store_file)) as f64);
     Ok(connection)
 }
 
@@ -400,7 +388,6 @@ fn with_builder_sorter_cpu_admission<T>(
     operation: impl FnOnce() -> T,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
     let admitted_units = builder_sorter_cpu_units(connection)?;
-    metrics::gauge!("query.artifact.sqlite_sorter.admitted_cpu_units").set(admitted_units as f64);
     Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
 }
 

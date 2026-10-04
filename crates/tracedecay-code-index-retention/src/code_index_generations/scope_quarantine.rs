@@ -236,7 +236,6 @@ impl ScopeQuarantineAuthority {
             }
         }
         self.source_handles.clear();
-        crate::observe::retention_scopes_quarantined(scopes.len());
         Ok(())
     }
 
@@ -302,7 +301,6 @@ impl ScopeQuarantineAuthority {
                 }
             }
         }
-        crate::observe::retention_scopes_restored(scopes.len());
         self.remove_empty_stage()
     }
 
@@ -337,7 +335,6 @@ impl ScopeQuarantineAuthority {
                 if let Some(stage) = self.stage.as_ref() {
                     sync_directory(stage).map_err(storage)?;
                 }
-                crate::observe::retention_scopes_deleted(1);
             }
         }
         self.remove_empty_stage()

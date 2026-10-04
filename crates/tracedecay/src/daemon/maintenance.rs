@@ -539,7 +539,7 @@ impl MaintenanceCoordinator {
                 }
                 collect_idle_installed_worker_heaps();
                 request_idle_thread_collection_v1();
-                record_process_resident_memory_gauge(&log);
+                sample_process_resident_memory(&log);
             }),
         )
         .await;
@@ -628,7 +628,6 @@ impl MaintenanceCoordinator {
             return MaintenanceTickOutcome::Retry;
         };
         let Some(_background_cpu) = background_cpu.try_acquire() else {
-            metrics::gauge!("daemon.maintenance.background_cpu_deferred_total").increment(1.0);
             return MaintenanceTickOutcome::Retry;
         };
         administration
@@ -950,30 +949,24 @@ impl MaintenanceCoordinator {
     }
 }
 
-/// Samples this process's resident set, republishes it as metrics gauges, and
-/// feeds its admission bytes to the resident-memory admission authority.
+/// Samples this process's resident set and feeds its admission bytes to the
+/// resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
 /// a 2026-08 incident; the dedicated sampler closes that gap on a short
-/// cadence. Publishing the same sample to
+/// cadence. Publishing the sample to
 /// [`process_resident_memory_pressure_v1`](tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1)
 /// closes the loop: admission stops trusting its reservation model once the
-/// measurement says the process is over budget. The unreclaimable gauge stays
-/// the anonymous set; admission and the over-budget log use the pressure
-/// state, which also counts cgroup committed bytes.
+/// measurement says the process is over budget. Admission and the over-budget
+/// log use the pressure state, which also counts cgroup committed bytes.
 #[cfg(target_os = "linux")]
-fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
+fn sample_process_resident_memory(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
 
     let pressure = tracedecay_runtime_core::resident_memory::process_resident_memory_pressure_v1();
-    let Some((sample, state)) = pressure.sample_and_publish() else {
+    let Some((_, state)) = pressure.sample_and_publish() else {
         return;
     };
-    metrics::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes as f64);
-    // The gauge keeps its name: admission may publish the larger cgroup
-    // committed figure, which is not this process's unreclaimable set.
-    metrics::gauge!("daemon.process.unreclaimable_resident_bytes")
-        .set(sample.unreclaimable_bytes as f64);
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log
@@ -1042,7 +1035,7 @@ fn sweep_resident_owners() -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn record_process_resident_memory_gauge(_log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {}
+fn sample_process_resident_memory(_log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {}
 
 type ResidentMemorySampleV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -1341,7 +1334,7 @@ mod tests {
         );
     }
 
-    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide gauge, so a test that
+    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide counter, so a test that
     /// observes absolute readings must not overlap another test that runs a
     /// maintenance loop. Every test that starts `run_maintenance_loop` holds
     /// this lock for the whole lifetime of its loop.
@@ -1402,7 +1395,7 @@ mod tests {
         assert_eq!(
             maintenance_futures_active(),
             baseline,
-            "cancellation must drop the lifecycle guard and clear the active gauge"
+            "cancellation must drop the lifecycle guard and clear the active count"
         );
     }
 
