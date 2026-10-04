@@ -2155,14 +2155,13 @@ where
                     let _span =
                         tracing::trace_span!("code_index.build.assemble.graph_outputs").entered();
                     {
-                        let (edges, abstentions, implementor_gaps) =
-                            collect_edge_evidence(&staged.files)?;
+                        let (edges, abstentions, gaps) = collect_edge_evidence(&staged.files)?;
                         let mut unresolved = resolution_outputs::unresolved_calls_for_edges(
                             &staged.files,
                             &edges,
                             &|| Ok(()),
                         )?;
-                        unresolved.extend(implementor_gaps);
+                        unresolved.extend(gaps);
                         unresolved.sort();
                         unresolved.dedup();
                         Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))

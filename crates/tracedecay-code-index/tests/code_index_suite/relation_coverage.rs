@@ -327,3 +327,54 @@ fn a_crlf_cargo_manifest_names_its_crate_for_cross_crate_calls() {
     );
     assert!(!graph.callers_partial("lib/src/lib.rs::helper"));
 }
+
+#[test]
+fn a_type_path_call_with_two_inherent_candidates_makes_both_callers_partial() {
+    let graph = sealed_graph_of(&[
+        (
+            "rs/src/lib.rs",
+            "mod unix;\nmod windows;\n\npub struct Clock;\n\npub fn now() -> u64 {\n    Clock::tick()\n}\n",
+        ),
+        (
+            "rs/src/unix.rs",
+            "use crate::Clock;\n\n#[cfg(unix)]\nimpl Clock {\n    pub fn tick() -> u64 {\n        1\n    }\n}\n",
+        ),
+        (
+            "rs/src/windows.rs",
+            "use crate::Clock;\n\n#[cfg(windows)]\nimpl Clock {\n    pub fn tick() -> u64 {\n        2\n    }\n}\n",
+        ),
+    ]);
+
+    for target in [
+        "rs/src/unix.rs::Clock::tick",
+        "rs/src/windows.rs::Clock::tick",
+    ] {
+        assert_eq!(graph.callers(target), Vec::<String>::new(), "{target}");
+        assert!(graph.callers_partial(target), "{target} callers partial");
+    }
+    assert!(graph.callees_partial("rs/src/lib.rs::now"));
+}
+
+#[test]
+fn a_same_file_call_with_two_candidates_makes_both_callers_partial() {
+    let graph = sealed_graph_of(&[(
+        "rb/units.rb",
+        "def scale(x)\n  3\nend\n\ndef scale(x)\n  1\nend\n\ndef total\n  scale(1)\nend\n",
+    )]);
+
+    let scales = graph
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.qualified_name == "rb/units.rb::scale")
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scales.len(), 2);
+    let caller_gaps = graph
+        .reader
+        .unresolved_caller_gaps(&scales, None, Arc::new(NeverCancelled))
+        .expect("unresolved caller probe");
+    assert!(!caller_gaps.is_empty());
+    assert!(graph.callees_partial("rb/units.rb::total"));
+}

@@ -2411,9 +2411,10 @@ fn resolve_file_references(
                     });
                 }
             }
-            // Java overloads the call's arguments cannot tell apart (equal
-            // arity, a variadic tail) stay a disclosed caller gap.
-            candidates if candidates.is_empty() || language == "java" => {
+            // No candidate, or several the file cannot choose between: the
+            // reference is retained, and cross-file resolution binds it or
+            // discloses it as a caller gap.
+            _ => {
                 if let Some(candidate) = cross_file_reference_candidate(
                     source,
                     offsets,
@@ -2436,9 +2437,6 @@ fn resolve_file_references(
                     retained.push(candidate);
                 }
             }
-            // Same-file ambiguity: adding cross-file candidates can only make
-            // it more ambiguous, so the reference stays unresolved.
-            _ => {}
         }
     }
     // The parser may describe one invocation both as a receiver expression
@@ -5288,7 +5286,14 @@ pub fn real_symbol() {}
             &[],
         );
         assert!(resolved.is_empty());
-        assert!(retained.is_empty());
+        assert_eq!(
+            retained
+                .iter()
+                .map(|reference| reference.reference_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Base"],
+            "an ambiguous bare name stays a retained reference, not a silent drop"
+        );
     }
 
     #[test]

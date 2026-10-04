@@ -494,7 +494,7 @@ pub(super) fn resolve_edit(
                 .flat_map(|(_, before, _)| before.artifacts.unresolved_references.iter().map(site)),
         )
         .collect::<HashSet<_>>();
-    let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
+    let resolution = resolve_selected_cross_file_references(files, by_name, &selection)?;
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.
@@ -521,7 +521,7 @@ pub(super) fn resolve_edit(
         })
         .collect::<HashMap<_, _>>();
     let mut result = BTreeMap::<usize, ResolvedFileV1>::new();
-    for edge in resolved {
+    for edge in resolution.edges {
         let owner = owner_of
             .get(&edge.from_occurrence)
             .ok_or_else(|| contract("a re-resolved edge leaves a file the edit did not select"))?;
@@ -617,7 +617,7 @@ pub(super) fn resolve_edit(
         &|| Ok(()),
     )
     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    for call in rederived {
+    for call in rederived.into_iter().chain(resolution.gaps) {
         let owner = owner_of
             .get(&call.from_occurrence)
             .ok_or_else(|| contract("a re-derived call limitation leaves the selection"))?;
