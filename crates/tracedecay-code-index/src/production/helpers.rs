@@ -311,6 +311,7 @@ type EdgeEvidenceV1 = (
     Vec<CanonicalRelationEdgeV1>,
     Vec<CodeIndexEdgeAbstentionV1>,
     Vec<CodeIndexUnresolvedReferenceV1>,
+    u64,
 );
 
 /// `files`' edge evidence resolved whole, with the interfaces whose
@@ -327,9 +328,10 @@ where
     let CrossFileResolutionV1 {
         edges,
         implementor_gaps,
+        ambiguous_name_drops,
     } = resolve_cross_file_references(files)?;
     let (edges, abstentions) = edge_evidence(files, edges);
-    Ok((edges, abstentions, implementor_gaps))
+    Ok((edges, abstentions, implementor_gaps, ambiguous_name_drops))
 }
 
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
@@ -396,18 +398,17 @@ pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
 
 /// Resolves only `selection`'s references against the whole file set whose
 /// symbols `by_simple_name` indexes. Each reference binds exactly as
-/// [`resolve_cross_file_references`] binds it; the result is the edges those
-/// references contribute.
+/// [`resolve_cross_file_references`] binds it.
 #[tracing::instrument(name = "code_index.seal.resolve_selected", level = "trace", skip_all)]
 pub(crate) fn resolve_selected_cross_file_references<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
     selection: &ReferenceSelectionV1,
-) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
-    resolve_references(files, by_simple_name, Some(selection)).map(|resolution| resolution.edges)
+    resolve_references(files, by_simple_name, Some(selection))
 }
 
 /// A whole-set resolution: the cross-file edges, and one row per interface
@@ -415,6 +416,7 @@ where
 pub(crate) struct CrossFileResolutionV1 {
     pub(crate) edges: Vec<CanonicalRelationEdgeV1>,
     pub(crate) implementor_gaps: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(crate) ambiguous_name_drops: u64,
 }
 
 /// `selection`'s references, or every retained reference, as `(file index,
@@ -501,6 +503,9 @@ where
         };
         resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
     })?;
+    let ambiguous_name_drops = per_file
+        .iter()
+        .fold(0_u64, |total, (_, drops)| total.saturating_add(*drops));
     // Satisfaction needs every Go method set, so only a whole-set pass
     // decides it, and only a file set with Go types builds the module index.
     let satisfaction = if selection.is_none()
@@ -516,11 +521,11 @@ where
     let mut edges = Vec::with_capacity(
         per_file
             .iter()
-            .map(Vec::len)
+            .map(|(file_edges, _)| file_edges.len())
             .sum::<usize>()
             .saturating_add(satisfaction.edges.len()),
     );
-    for file_edges in per_file {
+    for (file_edges, _) in per_file {
         edges.extend(file_edges);
     }
     edges.extend(satisfaction.edges);
@@ -534,6 +539,7 @@ where
     Ok(CrossFileResolutionV1 {
         edges,
         implementor_gaps: satisfaction.gaps,
+        ambiguous_name_drops,
     })
 }
 
@@ -683,7 +689,7 @@ fn resolve_one_file_cross_file_references<T>(
     modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     picks: Option<&[usize]>,
-) -> Vec<CanonicalRelationEdgeV1>
+) -> (Vec<CanonicalRelationEdgeV1>, u64)
 where
     T: ResolutionFileV1,
 {
@@ -692,6 +698,7 @@ where
     let same_file_binds = is_module_import_language(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
+    let mut ambiguous_name_drops = 0_u64;
     let references = &files[index].as_ref().artifacts.unresolved_references;
     let every = picks.is_none().then(|| references.iter());
     let picked = picks.into_iter().flatten().map(|&pick| &references[pick]);
@@ -702,17 +709,29 @@ where
             reference.kind,
             reference.argument_count,
         );
-        let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
+        let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
         } else {
             let resolved = {
                 let _span =
                     tracing::trace_span!("code_index.seal.reference_candidate_lookup").entered();
-                resolve_cross_file_reference(files, by_simple_name, modules, index, reference)
+                let mut ambiguous = false;
+                let resolved = resolve_cross_file_reference(
+                    files,
+                    by_simple_name,
+                    modules,
+                    index,
+                    reference,
+                    &mut ambiguous,
+                );
+                (resolved, ambiguous)
             };
             resolved_references.insert(cache_key, resolved.clone());
             resolved
         };
+        if ambiguous {
+            ambiguous_name_drops = ambiguous_name_drops.saturating_add(1);
+        }
         let Some((target_index, targets)) = resolved else {
             continue;
         };
@@ -727,7 +746,7 @@ where
             evidence_span: reference.evidence_span,
         }));
     }
-    edges
+    (edges, ambiguous_name_drops)
 }
 
 #[cfg(test)]
@@ -742,7 +761,7 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
 
 type ResolvedReferenceCacheV1<'a> = HashMap<
     (usize, &'a str, RelationEdgeKindV1, Option<u32>),
-    Option<(usize, Vec<SymbolOccurrenceId>)>,
+    (Option<(usize, Vec<SymbolOccurrenceId>)>, bool),
 >;
 
 fn resolve_cross_file_reference<T>(
@@ -751,6 +770,7 @@ fn resolve_cross_file_reference<T>(
     modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
+    ambiguous: &mut bool,
 ) -> Option<(usize, Vec<SymbolOccurrenceId>)>
 where
     T: ResolutionFileV1,
@@ -943,7 +963,10 @@ where
                 .collect::<Vec<_>>();
             match inherent.as_slice() {
                 [_] => inherent,
-                _ => return None,
+                _ => {
+                    *ambiguous = true;
+                    return None;
+                }
             }
         }
     };
