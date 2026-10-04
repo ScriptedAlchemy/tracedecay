@@ -844,9 +844,10 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
 
 /// One streamed message commits once per durability boundary.
 ///
-/// Capture commits source presence, the observation, and its external-source
-/// receipt before the host is acknowledged. The drain commits the
-/// external-source replay and the observation projection. The temporal
+/// Capture commits source presence, the observation, its external-source
+/// receipt, and the message's Git evidence span before the host is
+/// acknowledged. The drain commits the external-source replay, the
+/// observation projection, and the Git evidence convergence. The temporal
 /// refresh commits its operation, the projected batch, the pending relation
 /// receipt the native graph write recovers from, and the activation that
 /// settles that receipt.
@@ -895,7 +896,7 @@ async fn streamed_message_commits_once_per_durability_boundary() {
         "most messages must land within one log generation: {measured:?}"
     );
     assert!(
-        measured.iter().all(|commits| *commits == (3, 2, 4)),
+        measured.iter().all(|commits| *commits == (4, 3, 4)),
         "one streamed message must commit once per durability boundary: {measured:?}"
     );
 }
