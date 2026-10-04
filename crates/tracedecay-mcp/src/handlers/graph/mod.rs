@@ -72,17 +72,26 @@ pub(crate) fn node_not_found_result(
     let max_distance = (query.chars().count() / 3).clamp(1, 3);
     let nearest = RefCell::new(BTreeMap::<(usize, String), SymbolOccurrenceId>::new());
     graph.find_symbols(
-        &|candidate, _, metadata| {
-            let names = metadata.map_or([None, None], |metadata| {
-                [
-                    Some(metadata.simple_name.as_str()),
-                    Some(metadata.qualified_name.as_str()),
-                ]
-            });
-            let distance = std::iter::once(candidate.as_str())
-                .chain(names.into_iter().flatten())
-                .filter_map(|text| edit_distance_within(query, text, max_distance))
-                .min();
+        &|candidate, binding, metadata| {
+            // Only symbols `symbol_location` can render; unbound edge targets
+            // carry neither extraction metadata nor a logical file.
+            let Some(metadata) = metadata else {
+                return false;
+            };
+            if binding
+                .and_then(|binding| binding.logical_path.as_ref())
+                .is_none()
+            {
+                return false;
+            }
+            let distance = [
+                candidate.as_str(),
+                metadata.simple_name.as_str(),
+                metadata.qualified_name.as_str(),
+            ]
+            .into_iter()
+            .filter_map(|text| edit_distance_within(query, text, max_distance))
+            .min();
             if let Some(distance) = distance {
                 let mut nearest = nearest.borrow_mut();
                 nearest.insert((distance, candidate.as_str().to_owned()), candidate.clone());
