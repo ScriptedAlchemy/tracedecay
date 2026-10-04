@@ -329,6 +329,7 @@ where
                 coverage: search_coverage(&coverage),
                 code_generation: complete.code_generation,
                 results,
+                query_route: Some(lexical_routing::query_route(&complete.lexical_routes)),
                 lexical_routes,
                 lexical_anchors,
                 scope_prefix: scope_prefix.map(str::to_owned),
@@ -528,6 +529,12 @@ fn render_search_md(value: &Value) -> String {
         md.blank()
             .heading(3, "Availability")
             .line(&format!("Search unavailable: {reason}."));
+    }
+    if let Some(route) = value
+        .get("query_route")
+        .and_then(|route| serde_json::from_value(route.clone()).ok())
+    {
+        md.blank().line(&lexical_routing::query_route_line(&route));
     }
     lexical_routing::append_routes_md(&mut md, value);
     append_coverage_md(&mut md, value);

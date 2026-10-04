@@ -17,6 +17,8 @@ use tracedecay_domain::{
 use crate::code_index_freshness::{CodeIndexConvergenceParkedV1, CodeIndexStalenessStateV1};
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
+use super::search_surface::SearchQueryRouteV1;
+
 pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
 pub const MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1: usize = 256;
 pub const MAX_REDUNDANCY_WORK_V1: u32 = 10_000;
@@ -59,7 +61,8 @@ pub struct ContextSurfaceRequestV1 {
     /// (`snake_case`, `camelCase`, `a::b`) are anchored after these.
     pub lexical_anchors: Option<Vec<String>>,
     /// Add a symbol-name lexical route for the identifier-shaped words of the
-    /// task text.
+    /// task text. Omitted, it runs when the task is name-shaped; true forces
+    /// it, false suppresses it. `query_route` reports the decision.
     pub prefer_symbol: Option<bool>,
 }
 
@@ -402,6 +405,10 @@ pub struct ContextResultV1 {
     /// identifier the task names; empty when there are neither.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexical_anchors: Vec<ContextLexicalAnchorV1>,
+    /// Which lane the task's shape selected, and its margin; absent when no
+    /// code generation answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_route: Option<SearchQueryRouteV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,
     /// Neighbors of `symbols`, ranked before the `max_nodes` cut: best edge
     /// kind to a selected symbol (calls, implements, extends, `type_of`,
@@ -917,6 +924,7 @@ mod tests {
             code_generation: Some("generation.test".to_owned()),
             search_matches: vec![],
             lexical_anchors: vec![],
+            query_route: None,
             symbols: vec![],
             related_symbols: vec![],
             related_omission: None,

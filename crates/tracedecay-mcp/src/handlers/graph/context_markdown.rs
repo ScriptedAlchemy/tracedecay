@@ -31,7 +31,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::context_support::{context_markdown_lane_preview, insert_context_memory_section};
-use super::lexical_routing::matched_anchor_line;
+use super::lexical_routing::{matched_anchor_line, query_route_line};
 use super::search::append_coverage_md;
 use super::search_evidence::append_verified_graph_evidence_md;
 
@@ -55,6 +55,11 @@ pub(crate) fn render_context(
         append_context_search_matches(&mut output, &result.search_matches);
     }
     append_context_lexical_anchors(&mut output, &result.lexical_anchors);
+    if let Some(route) = &result.query_route {
+        output.push('\n');
+        output.push_str(&query_route_line(route));
+        output.push('\n');
+    }
     insert_context_memory_section(
         &mut output,
         &result.memory_matches,

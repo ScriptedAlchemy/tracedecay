@@ -302,7 +302,7 @@ where
         .map_or(5, |value| value.clamp(1, 20) as usize);
     let lexical_routing = lexical_routing::routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
-        request.prefer_symbol.unwrap_or(false),
+        request.prefer_symbol,
     )?
     .with_task_identifiers(task);
     let requested_anchors: Vec<String> = lexical_routing
@@ -533,6 +533,9 @@ where
         code_generation,
         search_matches,
         lexical_anchors,
+        query_route: complete
+            .as_ref()
+            .map(|complete| lexical_routing::query_route(&complete.lexical_routes)),
         symbols,
         related_symbols,
         related_omission: projection.related_omission,

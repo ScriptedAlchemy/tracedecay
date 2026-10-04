@@ -2,6 +2,9 @@
 //!
 //! The strict query always runs first. Caller anchors, preferred-symbol lookup,
 //! identifier splitting, and configured aliases are visible additive routes.
+//! The preferred-symbol route runs when the query's shape clears the name
+//! gate (see [`classify_query_shape`]) unless the caller decides explicitly;
+//! the decision and its margin ride the receipt.
 //! Each route is ranked through the ordinary lexical lane against the same
 //! pinned generation, then merged into the single lexical lane input that
 //! composition admits. Strict hits retain precedence without alternative-score
@@ -233,11 +236,100 @@ fn normalized_query_parts(mut parts: LexicalQueryPartsV1) -> LexicalQueryPartsV1
     parts
 }
 
+/// Whether the preferred-symbol route runs: decided by the query's shape
+/// unless the caller states it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SymbolRoutePreferenceV1 {
+    #[default]
+    ByQueryShape,
+    Always,
+    Never,
+}
+
+impl From<bool> for SymbolRoutePreferenceV1 {
+    fn from(prefer_symbol: bool) -> Self {
+        if prefer_symbol {
+            Self::Always
+        } else {
+            Self::Never
+        }
+    }
+}
+
+impl From<Option<bool>> for SymbolRoutePreferenceV1 {
+    fn from(prefer_symbol: Option<bool>) -> Self {
+        prefer_symbol.map_or(Self::ByQueryShape, Self::from)
+    }
+}
+
+/// The lane a query's shape selects. `Name` adds the symbol-name route to the
+/// strict query; `Prose` runs the strict query without it.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalQueryRouteV1 {
+    #[default]
+    Prose,
+    Name,
+}
+
+/// Who chose the [`LexicalQueryRouteV1`]: the query-shape gate or the caller.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalRouteDeciderV1 {
+    #[default]
+    QueryShape,
+    Caller,
+}
+
+/// The query-shape routing decision a search reports.
+///
+/// `margin_micros` is the classifier's distance from the name gate in
+/// millionths, in `[-500_000, 500_000]`: the share of content words that are
+/// identifier-shaped, minus one half. It is reported even when the caller
+/// decided the route, so evals can compare the two. It measures query shape
+/// only; it is not evidence that the corpus can answer the query.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalRouteDecisionV1 {
+    pub route: LexicalQueryRouteV1,
+    pub margin_micros: i32,
+    pub decided_by: LexicalRouteDeciderV1,
+}
+
+/// Classify a query as name-shaped or prose by the share of its content
+/// words (stoplisted and single-character words excluded) that only code
+/// would spell (see `names_identifier`), judged on the whole token and on the
+/// trailing name of a `a.b` or `a::b` spelling. The query is name-shaped when at
+/// least half its content words are identifiers, so `getUserById` and
+/// `where is parse_config called` route to the name lane while prose with one
+/// incidental identifier keeps the prose route alone. Returns the route and
+/// its margin in micros.
+pub fn classify_query_shape(query: &str) -> (LexicalQueryRouteV1, i32) {
+    let words = query_content_words(query);
+    if words.is_empty() {
+        return (LexicalQueryRouteV1::Prose, -500_000);
+    }
+    let total = words.len() as i64;
+    let names = words
+        .iter()
+        .filter(|word| {
+            names_identifier(word.raw.trim_end_matches(['.', ':'])) || names_identifier(&word.name)
+        })
+        .count() as i64;
+    let margin = ((2 * names - total) * 500_000 / total) as i32;
+    let route = if names > 0 && margin >= 0 {
+        LexicalQueryRouteV1::Name
+    } else {
+        LexicalQueryRouteV1::Prose
+    };
+    (route, margin)
+}
+
 /// Caller-controlled options for the strict query and additive lexical routes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LexicalRoutingV1 {
     pub anchors: Vec<LexicalAnchorV1>,
-    pub prefer_symbol: bool,
+    pub prefer_symbol: SymbolRoutePreferenceV1,
     pub aliases: Vec<LexicalAliasV1>,
     pub phrases: Vec<String>,
     pub proximities: Vec<LexicalProximityV1>,
@@ -248,7 +340,10 @@ impl LexicalRoutingV1 {
     /// Validate raw caller anchors: bounded count, bounded bytes, one term
     /// each, no repeats. Order is preserved because it is the caller's
     /// evidence order.
-    pub fn new(anchors: Vec<String>, prefer_symbol: bool) -> Result<Self, LexicalRouteErrorV1> {
+    pub fn new(
+        anchors: Vec<String>,
+        prefer_symbol: impl Into<SymbolRoutePreferenceV1>,
+    ) -> Result<Self, LexicalRouteErrorV1> {
         if anchors.len() > MAX_LEXICAL_ANCHORS_V1 {
             return Err(LexicalRouteErrorV1::TooManyAnchors {
                 max: MAX_LEXICAL_ANCHORS_V1,
@@ -266,7 +361,7 @@ impl LexicalRoutingV1 {
         }
         Ok(Self {
             anchors: validated,
-            prefer_symbol,
+            prefer_symbol: prefer_symbol.into(),
             aliases: Vec::new(),
             phrases: Vec::new(),
             proximities: Vec::new(),
@@ -320,7 +415,7 @@ impl LexicalRoutingV1 {
     /// lookup.
     pub fn prefer_symbol() -> Self {
         Self {
-            prefer_symbol: true,
+            prefer_symbol: SymbolRoutePreferenceV1::Always,
             ..Self::default()
         }
     }
@@ -370,6 +465,7 @@ pub struct LexicalRouteV1 {
 /// query route is always first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LexicalRoutePlanV1 {
+    decision: LexicalRouteDecisionV1,
     routes: Vec<LexicalRouteV1>,
 }
 
@@ -439,9 +535,27 @@ impl LexicalRoutePlanV1 {
                 field_filters: routing.field_filters.clone(),
             });
         }
-        if routing.prefer_symbol {
+        let (shape_route, margin_micros) = classify_query_shape(query);
+        let (wanted, decided_by) = match routing.prefer_symbol {
+            SymbolRoutePreferenceV1::ByQueryShape => {
+                (shape_route, LexicalRouteDeciderV1::QueryShape)
+            }
+            SymbolRoutePreferenceV1::Always => {
+                (LexicalQueryRouteV1::Name, LexicalRouteDeciderV1::Caller)
+            }
+            SymbolRoutePreferenceV1::Never => {
+                (LexicalQueryRouteV1::Prose, LexicalRouteDeciderV1::Caller)
+            }
+        };
+        let mut decision = LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Prose,
+            margin_micros,
+            decided_by,
+        };
+        if wanted == LexicalQueryRouteV1::Name {
             let tokens = preferred_symbol_tokens(query);
             if !tokens.is_empty() {
+                decision.route = LexicalQueryRouteV1::Name;
                 let mut whole_terms = tokens.clone();
                 whole_terms.sort();
                 whole_terms.dedup();
@@ -478,7 +592,13 @@ impl LexicalRoutePlanV1 {
                 field_filters: routing.field_filters.clone(),
             });
         }
-        Ok(Self { routes })
+        Ok(Self { decision, routes })
+    }
+
+    /// Which lane the query's shape (or the caller) selected, with the
+    /// classifier margin. `Name` only when the symbol-name route was planned.
+    pub fn decision(&self) -> LexicalRouteDecisionV1 {
+        self.decision
     }
 
     pub fn routes(&self) -> &[LexicalRouteV1] {
@@ -500,13 +620,34 @@ impl LexicalRoutePlanV1 {
 pub fn preferred_symbol_tokens(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut seen = BTreeSet::new();
+    for word in query_content_words(query) {
+        if tokens.len() >= MAX_PREFERRED_SYMBOL_TOKENS_V1 {
+            break;
+        }
+        if seen.insert(word.name.clone()) {
+            tokens.push(word.name);
+        }
+    }
+    tokens
+}
+
+/// One identifier-grammar query word that is not stoplisted: its raw
+/// spelling and the bare symbol name it normalizes to.
+struct QueryContentWordV1 {
+    raw: String,
+    name: String,
+}
+
+/// Every content word of `query` in query order, with repeats.
+fn query_content_words(query: &str) -> Vec<QueryContentWordV1> {
+    let mut words = Vec::new();
     let mut current = String::new();
     let mut flush = |current: &mut String| {
         if current.is_empty() {
             return;
         }
-        let token = std::mem::take(current);
-        let Some(name) = trailing_symbol_name(&token) else {
+        let raw = std::mem::take(current);
+        let Some(name) = trailing_symbol_name(&raw) else {
             return;
         };
         if name.chars().count() < 2
@@ -516,9 +657,8 @@ pub fn preferred_symbol_tokens(query: &str) -> Vec<String> {
         {
             return;
         }
-        if tokens.len() < MAX_PREFERRED_SYMBOL_TOKENS_V1 && seen.insert(name.to_owned()) {
-            tokens.push(name.to_owned());
-        }
+        let name = name.to_owned();
+        words.push(QueryContentWordV1 { raw, name });
     };
     for character in query.chars() {
         let continues = character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '.');
@@ -534,7 +674,7 @@ pub fn preferred_symbol_tokens(query: &str) -> Vec<String> {
         }
     }
     flush(&mut current);
-    tokens
+    words
 }
 
 /// The bare identifier a qualified token names, or `None` when no segment is
@@ -618,6 +758,9 @@ pub struct LexicalRouteReceiptV1 {
     /// Sites whose own symbol or qualified name an anchor route matched.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub declaring_sites: BTreeSet<RetrievalAnchorId>,
+    /// The planned query-shape route and its margin.
+    #[serde(default)]
+    pub decision: LexicalRouteDecisionV1,
 }
 
 impl LexicalRouteReceiptV1 {
@@ -822,6 +965,7 @@ pub fn merge_lexical_routes(
         anchors,
         dropped_sites: BTreeMap::new(),
         declaring_sites,
+        decision: LexicalRouteDecisionV1::default(),
     };
     receipt.reconcile_served(|_| None);
     let outcome = match partial_reason {

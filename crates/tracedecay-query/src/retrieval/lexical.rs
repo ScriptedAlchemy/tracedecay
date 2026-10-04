@@ -56,11 +56,12 @@ pub use self::projection::{
 };
 pub use self::routes::{
     LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
-    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalRouteErrorV1,
-    LexicalRouteKindV1, LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
-    LexicalRouteReceiptV1, LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1,
-    MAX_LEXICAL_ALIASES_V1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
-    MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
+    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalQueryRouteV1,
+    LexicalRouteDeciderV1, LexicalRouteDecisionV1, LexicalRouteErrorV1, LexicalRouteKindV1,
+    LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRouteReceiptV1,
+    LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1, MAX_LEXICAL_ALIASES_V1,
+    MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
+    SymbolRoutePreferenceV1, classify_query_shape, merge_lexical_routes, preferred_symbol_tokens,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared
