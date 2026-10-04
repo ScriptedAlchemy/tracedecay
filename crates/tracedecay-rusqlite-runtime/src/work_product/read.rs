@@ -155,16 +155,18 @@ fn read_graph(
     // lets a prepared mutation read its former head and reach the event
     // journal's authoritative compare-and-swap conflict when a later version
     // has already committed.
-    let mut visible = covered
+    let visible = covered
         .published
         .iter()
-        .filter(|version| version.observed_at <= request.observed_at);
-    let entries = |versions: Vec<&WorkProductPublishedVersionV1>| {
+        .filter(|version| version.observed_at <= request.observed_at)
+        .collect::<Vec<_>>();
+    let entries = |selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool| {
         build_entries(
             storage,
             authority,
             &covered.journal,
-            &versions,
+            &visible,
+            selected,
             request.observed_at,
         )
     };
@@ -173,44 +175,37 @@ fn read_graph(
         selection_coverage,
     };
     match &request.mode {
-        WorkGraphReadModeV1::Current => Ok(
-            match entries(visible.next_back().into_iter().collect())?.pop() {
+        WorkGraphReadModeV1::Current => {
+            let head = visible.len().checked_sub(1);
+            Ok(match entries(&|index, _| Some(index) == head)?.pop() {
                 Some(snapshot) => WorkGraphReadV1::Current {
                     authorized_scope: scope.clone(),
                     selection_coverage,
                     snapshot,
                 },
                 None => absent(selection_coverage),
-            },
-        ),
-        WorkGraphReadModeV1::AsOf { valid_at } => Ok(
-            match entries(
-                visible
-                    .rfind(|version| version.valid_at <= *valid_at)
-                    .into_iter()
-                    .collect(),
-            )?
-            .pop()
-            {
+            })
+        }
+        WorkGraphReadModeV1::AsOf { valid_at } => {
+            let as_of = visible
+                .iter()
+                .rposition(|version| version.valid_at <= *valid_at);
+            Ok(match entries(&|index, _| Some(index) == as_of)?.pop() {
                 Some(snapshot) => WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),
                     selection_coverage,
                     snapshot,
                 },
                 None => absent(selection_coverage),
-            },
-        ),
+            })
+        }
         WorkGraphReadModeV1::Evolution {
             from_valid_at,
             through_valid_at,
         } => {
-            let selected = entries(
-                visible
-                    .filter(|version| {
-                        version.valid_at >= *from_valid_at && version.valid_at <= *through_valid_at
-                    })
-                    .collect(),
-            )?;
+            let selected = entries(&|_, version| {
+                version.valid_at >= *from_valid_at && version.valid_at <= *through_valid_at
+            })?;
             Ok(WorkGraphReadV1::Evolution {
                 authorized_scope: scope.clone(),
                 selection_coverage,
@@ -221,14 +216,10 @@ fn read_graph(
             from_observed_at,
             through_observed_at,
         } => {
-            let selected = entries(
-                visible
-                    .filter(|version| {
-                        version.observed_at >= *from_observed_at
-                            && version.observed_at <= *through_observed_at
-                    })
-                    .collect(),
-            )?;
+            let selected = entries(&|_, version| {
+                version.observed_at >= *from_observed_at
+                    && version.observed_at <= *through_observed_at
+            })?;
             Ok(WorkGraphReadV1::Forensic {
                 authorized_scope: scope.clone(),
                 selection_coverage,
@@ -238,39 +229,44 @@ fn read_graph(
     }
 }
 
-/// Build one entry per selected version, each carrying the graph folded to
-/// that version and every projection derived from that same graph.
+/// Verify every visible version and build an entry for each selected one,
+/// carrying the graph folded to that version and every projection derived
+/// from that same graph.
 ///
-/// The journal is folded once, forward, and only the selected versions are
-/// projected: a point read costs one fold however long the history is, not
-/// one fold and one runtime hydration per published version.
+/// The journal is folded once, forward. Every visible verified row is checked
+/// against its event and folded graph version, so a damaged history fails the
+/// read closed, but only selected versions are cloned, hydrated, and
+/// projected: a point read costs one fold however long the history is.
 fn build_entries(
     storage: &WorkSqliteStorage,
     authority: Option<&WorkAuthority>,
     journal: &[WorkProductJournalEntryV1],
-    versions: &[&WorkProductPublishedVersionV1],
+    visible: &[&WorkProductPublishedVersionV1],
+    selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool,
     projected_at: UtcMicros,
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
     let mut fold = JournalFoldV1::new(journal);
-    versions
-        .iter()
-        .map(|version| {
-            let entry = journal
-                .iter()
-                .find(|entry| entry.sequence == version.event_sequence)
-                .ok_or(PortError::Unavailable)?;
-            let graph = fold
-                .advance_to(version.event_sequence)
-                .ok_or(PortError::Unavailable)?
-                .clone();
-            if graph.version() != version.graph_version {
-                return Err(PortError::Unavailable);
-            }
-            let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
-            let runtime = runtime_projection(storage, authority, &graph, version, projected_at)?;
-            let projections =
-                WorkProductProjectionBundleV1::from_graph(&graph, &runtime, projected_at)
-                    .map_err(|_| PortError::Unavailable)?;
+    let mut entries = Vec::new();
+    for (index, version) in visible.iter().copied().enumerate() {
+        let entry = journal
+            .iter()
+            .find(|entry| entry.sequence == version.event_sequence)
+            .ok_or(PortError::Unavailable)?;
+        let graph = fold
+            .advance_to(version.event_sequence)
+            .ok_or(PortError::Unavailable)?;
+        if graph.version() != version.graph_version {
+            return Err(PortError::Unavailable);
+        }
+        let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
+        if !selected(index, version) {
+            continue;
+        }
+        let graph = graph.clone();
+        let runtime = runtime_projection(storage, authority, &graph, version, projected_at)?;
+        let projections = WorkProductProjectionBundleV1::from_graph(&graph, &runtime, projected_at)
+            .map_err(|_| PortError::Unavailable)?;
+        entries.push(
             WorkGraphVersionEntryV1::new(
                 version.valid_at,
                 version.observed_at,
@@ -280,9 +276,10 @@ fn build_entries(
                 runtime,
                 projections,
             )
-            .map_err(|_| PortError::Unavailable)
-        })
-        .collect()
+            .map_err(|_| PortError::Unavailable)?,
+        );
+    }
+    Ok(entries)
 }
 
 /// The runtime reading this authority can actually prove for one version.

@@ -910,6 +910,54 @@ fn a_tampered_journal_without_its_verified_version_is_not_readable() {
     assert_eq!(store.count("work_product_events_v1"), 1);
 }
 
+/// A current read answers from the head, but the head is only as trustworthy
+/// as the verified history beneath it, so a corrupted earlier verified row
+/// fails the read closed rather than being skipped as history nobody asked for.
+#[test]
+fn a_corrupted_historical_verified_version_makes_the_current_read_unavailable() {
+    let store = RegisteredWorkStore::start("work-product-tampered-history");
+    let first = create(
+        &store,
+        "command.work-product.tampered-history.create",
+        UtcMicros(100),
+        vec![item("task.first", &[], 2)],
+    )
+    .expect("create the first graph version");
+    let mut second = mutation("command.work-product.tampered-history.add", UtcMicros(200));
+    second.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: first.verified_graph_version().clone(),
+    };
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.second", &[], 3),
+                mutation: second,
+            },
+        )
+        .expect("publish the head version");
+    assert!(read_current(&store).is_ok());
+
+    // Point the first verified row at an event that does not exist, through
+    // the out-of-band inspection connection. No production writer can.
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_graph_versions_v1 SET event_sequence = 99
+                 WHERE graph_version = 1",
+                [],
+            )
+            .expect("corrupt the historical verified version");
+    });
+
+    assert_eq!(
+        read_current(&store).expect_err("a broken verified history is not a readable head"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+}
+
 /// Publish `versions` graph versions, one task per version, and return the
 /// fastest of several current reads of the head.
 fn fastest_current_read_after(versions: u64) -> std::time::Duration {
