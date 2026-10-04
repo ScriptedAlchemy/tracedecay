@@ -550,7 +550,7 @@ jobs:
       - name: Install Cargo Hauler
         run: |
           echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
-          npm install --global cargo-hauler@0.14.0
+          npm install --global cargo-hauler@0.14.1
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
