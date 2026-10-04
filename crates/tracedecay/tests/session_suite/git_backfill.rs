@@ -454,12 +454,12 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
         "both sessions map to the worktree"
     );
 
-    // The frontier advances to the newest ingested message, s_main's m3.
+    // The journal counts two session rows and three messages, ending at m3.
     assert_eq!(
         db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(3)
+        Some(5)
     );
 
     // A second pass finds nothing newer than the watermark: no rescans.
@@ -503,7 +503,7 @@ async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
         db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(3),
+        Some(5),
         "the production host-admission caller must advance the durable frontier"
     );
     let hits = db
@@ -546,19 +546,18 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
     .await
     .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
     let project = repo.to_string_lossy().to_string();
-    let mut last_sequence = 0;
     for index in 0..SESSIONS {
         let started = T_BASE + index * 60;
         let session_id = format!("catch-up-{index:05}");
-        last_sequence = db
-            .seed_session_messages_for_test(
-                HostAdmissionScope::Project,
-                &session(&session_id, &project, started, started + 30),
-                &[message(&session_id, &format!("m-{index:05}"), started + 15)],
-            )
-            .await
-            .unwrap()[0];
+        db.seed_session_messages_for_test(
+            HostAdmissionScope::Project,
+            &session(&session_id, &project, started, started + 30),
+            &[message(&session_id, &format!("m-{index:05}"), started + 15)],
+        )
+        .await
+        .unwrap();
     }
+    let last_sequence = SESSIONS * 2; // One session and one message change each.
     let scope = ObservationScopeV1::Project { project_id };
 
     let first = db
@@ -631,7 +630,7 @@ async fn convergence_resumes_from_the_durable_frontier_after_restart() {
         db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(3)
+        Some(5)
     );
     let first_commit = main_shas.last().expect("first main commit");
     let first_commit_hits = db
@@ -664,14 +663,13 @@ async fn convergence_resumes_from_the_durable_frontier_after_restart() {
     )
     .await
     .unwrap_or_else(|error| panic!("restart registered sessions runtime: {error}"));
-    let late_sequence = db
-        .seed_session_messages_for_test(
-            HostAdmissionScope::Project,
-            &session("s_late", &project, T_BASE + 900, T_BASE + 950),
-            &[message("s_late", "m4", T_BASE + 940)],
-        )
-        .await
-        .unwrap()[0];
+    db.seed_session_messages_for_test(
+        HostAdmissionScope::Project,
+        &session("s_late", &project, T_BASE + 900, T_BASE + 950),
+        &[message("s_late", "m4", T_BASE + 940)],
+    )
+    .await
+    .unwrap();
 
     let pass2 = converge(&db, &git).await;
     assert_eq!(pass2.sessions_scanned, 1);
@@ -679,7 +677,7 @@ async fn convergence_resumes_from_the_durable_frontier_after_restart() {
         db.git_correlation_meta_for_test(GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(late_sequence)
+        Some(7)
     );
 
     // History fully drained: the next pass has nothing to do.
