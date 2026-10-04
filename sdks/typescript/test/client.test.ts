@@ -8,7 +8,11 @@ import {
 
 import { describe, expect, it } from "vitest";
 
-import { OPERATIONS } from "../src/operations";
+import {
+  OPERATIONS,
+  type OperationApplicationDistributionResult,
+  type PrimitiveSearchFreshnessV1,
+} from "../src/operations";
 import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
 import {
   decodeCanonicalSchema,
@@ -914,6 +918,24 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(() => similar.decodeResult({
       ...injectedReads[0]![1], freshness: { state: "invented" },
     })).toThrow();
+  });
+
+  it("validates freshness on both distribution views", () => {
+    const distribution = OPERATIONS.find(
+      (operation) => operation.transport.kind === "mcp_tool"
+        && operation.transport.toolName === "tracedecay_distribution",
+    )!;
+    for (const body of [
+      { mode: "summary", total_kinds: 0, distribution: [] },
+      { mode: "per_file", file_count: 0, total_file_count: 0, omitted_file_count: 0, files: [] },
+    ]) {
+      const result = { ...body, path_filter: "src", freshness: { state: "fresh" } };
+      const decoded = distribution.decodeResult(result) as OperationApplicationDistributionResult;
+      const freshness: PrimitiveSearchFreshnessV1 | null | undefined = decoded.freshness;
+      expect(decoded).toEqual(result);
+      expect(freshness).toEqual({ state: "fresh" });
+      expect(() => distribution.decodeResult({ ...result, freshness: { state: "invented" } })).toThrow();
+    }
   });
 
   it("preserves remote base paths and origin policy", async () => {

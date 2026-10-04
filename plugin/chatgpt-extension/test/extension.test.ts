@@ -36,7 +36,7 @@ let billingProjectId: string;
 let shippingProjectId: string;
 
 function view(result: CallToolResult): ViewState {
-  expect(result.isError ?? false).toBe(false);
+  expect(result.isError ?? false, JSON.stringify(result)).toBe(false);
   const structured = result.structuredContent;
   if (!isViewState(structured)) throw new Error(`tool returned no view state: ${JSON.stringify(result)}`);
   return structured;
@@ -97,6 +97,15 @@ beforeAll(async () => {
   fixture.initProject(shipping.root);
   bridge = new DaemonBridge({ binary: fixture.binary, profileRoot: fixture.profileRoot, env: fixture.env, cwd: fixture.home });
   client = await newClient();
+  const projects = await waitFor("registered fixture projects", async () => {
+    const state = await call("tracedecay_workspace");
+    return state.page === "projects" && state.projects.state === "ready" ? state.projects.data : null;
+  });
+  const billingProject = projects.find((project) => project.project_root === billing.root);
+  const shippingProject = projects.find((project) => project.project_root === shipping.root);
+  if (!billingProject || !shippingProject) throw new Error("fixture projects were not registered");
+  billingProjectId = billingProject.project_id;
+  shippingProjectId = shippingProject.project_id;
 });
 
 afterAll(async () => {
@@ -197,8 +206,8 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     if (state.projects.state !== "ready") throw new Error(`projects ${state.projects.state}: ${JSON.stringify(state.projects)}`);
     const roots = state.projects.data.map((project) => project.project_root).sort();
     expect(roots).toEqual([billing.root, shipping.root].sort());
-    billingProjectId = state.projects.data.find((project) => project.project_root === billing.root)!.project_id;
-    shippingProjectId = state.projects.data.find((project) => project.project_root === shipping.root)!.project_id;
+    expect(state.projects.data.find((project) => project.project_root === billing.root)!.project_id).toBe(billingProjectId);
+    expect(state.projects.data.find((project) => project.project_root === shipping.root)!.project_id).toBe(shippingProjectId);
     expect(billingProjectId).toMatch(/^proj_/u);
     expect(shippingProjectId).not.toBe(billingProjectId);
   });
@@ -248,7 +257,10 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
   });
 
   it("decodes freshness on graph reads through the generated SDK and live MCP transport", async () => {
-    const search = await call("tracedecay_search_code", { project_id: billingProjectId, query: "outstandingTotal" });
+    const search = await waitFor("freshness fixture search", async () => {
+      const state = await call("tracedecay_search_code", { project_id: billingProjectId, query: "outstandingTotal" });
+      return state.page === "search" && state.results.state === "ready" ? state : null;
+    });
     if (search.page !== "search" || search.results.state !== "ready") throw new Error(JSON.stringify(search));
     const node = search.results.data.hits.find((hit) => hit.name === "outstandingTotal");
     expect(node).toBeDefined();
@@ -267,6 +279,10 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
       expect(rename).not.toHaveProperty("error");
       const files = await sdk.operations.files({});
       expect(files.freshness).toMatchObject({ state: "fresh" });
+      for (const summary of [true, false]) {
+        const distribution = await sdk.operations.distribution({ summary });
+        expect(distribution.freshness).toMatchObject({ state: "fresh" });
+      }
     } finally {
       await session.close();
     }

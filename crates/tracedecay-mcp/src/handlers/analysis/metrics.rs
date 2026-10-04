@@ -430,6 +430,7 @@ pub(super) async fn compute_distribution(
     Ok(graph_tool_completion(
         GraphToolResultV1::Distribution(DistributionResultV1 {
             path_filter: path_prefix.map(str::to_owned),
+            freshness: None,
             view,
         }),
         Vec::new(),

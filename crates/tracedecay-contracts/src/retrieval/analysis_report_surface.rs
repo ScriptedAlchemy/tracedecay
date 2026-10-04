@@ -409,6 +409,9 @@ pub enum DistributionViewV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct DistributionResultV1 {
     pub path_filter: Option<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
     #[serde(flatten)]
     pub view: DistributionViewV1,
 }

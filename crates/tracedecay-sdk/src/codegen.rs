@@ -551,11 +551,21 @@ fn render_schema_type_at(
             if variants.is_empty() {
                 return Err(format!("{keyword} must contain at least one schema").into());
             }
-            return variants
+            let union = variants
                 .iter()
                 .map(|variant| render_schema_type_at(variant, names))
                 .collect::<Result<Vec<_>, _>>()
-                .map(|variants| variants.join(" | "));
+                .map(|variants| variants.join(" | "))?;
+            // Flattened tagged views also constrain fields beside the union.
+            // Those fields apply to every variant, just as the decoder enforces.
+            return if object.contains_key("properties") {
+                Ok(format!(
+                    "({union}) & {}",
+                    render_object_type(object, names)?
+                ))
+            } else {
+                Ok(union)
+            };
         }
     }
     if let Some(parts) = object.get("allOf").and_then(Value::as_array) {
