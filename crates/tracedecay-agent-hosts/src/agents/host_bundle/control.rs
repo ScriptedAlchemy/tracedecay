@@ -207,6 +207,18 @@ pub(super) fn validate_receipt(
     Ok(())
 }
 
+/// Hermes carries exactly one user-profile binding; every other host must
+/// carry none. Admission fails closed on any other count.
+pub(super) fn validate_hermes_profile_bindings(
+    host: HostKindV1,
+    bindings: u8,
+) -> Result<(), HostBundleError> {
+    if bindings != u8::from(host == HostKindV1::Hermes) {
+        return Err(HostBundleError::InvalidHermesProfileBinding);
+    }
+    Ok(())
+}
+
 pub(super) fn validate_component_set_request(
     component_set: &HostComponentSetV1,
     request: &HostComponentSetExecutionRequestV1,
@@ -221,16 +233,10 @@ pub(super) fn validate_component_set_request(
     if !request.lifecycle.explicit_confirmation {
         return Err(HostBundleError::ConfirmationRequired);
     }
-    match component_set.host {
-        HostKindV1::Hermes if request.lifecycle.hermes_profile_bindings != 1 => {
-            return Err(HostBundleError::InvalidHermesProfileBinding);
-        }
-        HostKindV1::Hermes => {}
-        _ if request.lifecycle.hermes_profile_bindings != 0 => {
-            return Err(HostBundleError::InvalidHermesProfileBinding);
-        }
-        _ => {}
-    }
+    validate_hermes_profile_bindings(
+        component_set.host,
+        request.lifecycle.hermes_profile_bindings,
+    )?;
 
     let mut expected = request.lifecycle.expected_components.clone();
     let mut actual = Vec::with_capacity(component_set.components.len());
