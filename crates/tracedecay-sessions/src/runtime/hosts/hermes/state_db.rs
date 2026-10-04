@@ -657,6 +657,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         |bounded| {
             let locations = user_turn_locations(bounded, source);
             let profile = source.profile.clone();
+            let transcript_path = source.state_db.to_string_lossy().into_owned();
             let fallback_provenance = "session_cwd";
             move |row: &HermesRow| {
                 locations
@@ -666,6 +667,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
                         location_path: None,
                         profile: profile.clone(),
                         location_provenance: Some(fallback_provenance),
+                        transcript_path: Some(transcript_path.clone()),
                     })
             }
         },

@@ -61,7 +61,7 @@ fn request(
         &encoded_frame,
         range,
         ObservationOrderingDomainV1::FileBytes,
-        |native| claude_normalize(&native, session_id, record_id.clone(), range),
+        |native| claude_normalize(&native, session_id, None, record_id.clone(), range),
     )
     .unwrap();
     CaptureObservationRequest::new(

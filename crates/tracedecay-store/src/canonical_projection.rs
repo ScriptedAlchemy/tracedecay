@@ -116,11 +116,19 @@ fn derive_canonical_projection_for(
     }
 
     let mut projected = canonical_message_fields_for(rendering, &envelope)?;
-    let session_fields = if envelope.provider().as_str() == "claude" {
-        None
-    } else {
-        canonical_session_fields(&envelope)
-    };
+    // A Claude row keeps its project id as its path, so the Session fact's
+    // other fields stay masked off the row; only the transcript it was read
+    // from is evidence the row should answer.
+    let session_fields = canonical_session_fields(&envelope).map(|fields| {
+        if envelope.provider().as_str() == "claude" {
+            CanonicalSessionFields {
+                transcript_path: fields.transcript_path,
+                ..Default::default()
+            }
+        } else {
+            fields
+        }
+    });
     let primary_message_id =
         canonical_compatibility_message_fields(&envelope, session_fields.as_ref(), &mut projected)?;
     let workflow_facts = canonical_workflow_facts(&envelope)?;
@@ -282,6 +290,7 @@ fn canonical_session_message_record(
     }
 }
 
+#[derive(Default)]
 struct CanonicalSessionFields {
     project_path: Option<String>,
     location_path: Option<String>,

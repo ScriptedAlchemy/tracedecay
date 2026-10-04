@@ -125,19 +125,23 @@ pub fn normalize_codex_observation(
     )
 }
 
+/// The rollout context in effect for one record: where the session projects,
+/// which file it was read from, and the model its turn runs under.
 #[derive(Clone, Copy)]
-pub struct CodexObservationLocation<'a> {
+pub struct CodexObservationContext<'a> {
     pub project_path: Option<&'a Path>,
     pub location_path: Option<&'a Path>,
+    pub transcript_path: Option<&'a Path>,
+    pub model: Option<&'a str>,
 }
 
-pub fn normalize_codex_observation_with_location(
+pub fn normalize_codex_observation_with_context(
     native: &Value,
     session_id: &str,
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: CodexObservationLocation<'_>,
+    context: CodexObservationContext<'_>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     normalize_codex_observation_inner(
         native,
@@ -145,7 +149,7 @@ pub fn normalize_codex_observation_with_location(
         native_thread_id,
         stable_record_id,
         range,
-        Some(location),
+        Some(context),
     )
 }
 
@@ -158,7 +162,7 @@ fn normalize_codex_observation_inner(
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: Option<CodexObservationLocation<'_>>,
+    context: Option<CodexObservationContext<'_>>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     normalize_codex_record(
         native,
@@ -166,7 +170,7 @@ fn normalize_codex_observation_inner(
         native_thread_id,
         stable_record_id,
         range,
-        location,
+        context,
     )
 }
 
@@ -178,7 +182,7 @@ fn normalize_codex_record(
     native_thread_id: Option<&str>,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
-    location: Option<CodexObservationLocation<'_>>,
+    context: Option<CodexObservationContext<'_>>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let native_kind = native
         .get("type")
@@ -218,15 +222,17 @@ fn normalize_codex_record(
         relations = append_codex_session_meta_agent_relations(relations, payload, native_thread_id);
     }
     let mut facts = Vec::new();
-    if let Some(location) = location {
+    if let Some(context) = context {
         facts.push(CanonicalObservationFactV1::Session {
-            project_path: location
+            project_path: context
                 .project_path
                 .map(|path| path.to_string_lossy().into_owned()),
-            location_path: location
+            location_path: context
                 .location_path
                 .map(|path| path.to_string_lossy().into_owned()),
-            transcript_path: None,
+            transcript_path: context
+                .transcript_path
+                .map(|path| path.to_string_lossy().into_owned()),
             title: None,
             started_at: None,
             ended_at: None,
@@ -256,9 +262,19 @@ fn normalize_codex_record(
             native_kind: "turn_context".to_string(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
-        "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
+        "event_msg" => append_codex_event_facts(
+            payload,
+            timestamp,
+            context.and_then(|context| context.model),
+            &mut facts,
+        ),
         "response_item" => {
-            append_codex_response_item_facts(payload, timestamp, &mut facts);
+            append_codex_response_item_facts(
+                payload,
+                timestamp,
+                context.and_then(|context| context.model),
+                &mut facts,
+            );
         }
         "compacted" => {
             facts.push(CanonicalObservationFactV1::Compaction {
@@ -359,6 +375,7 @@ fn append_codex_session_meta_agent_relations(
 fn append_codex_event_facts(
     payload: &Value,
     timestamp: Option<i64>,
+    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
@@ -375,7 +392,8 @@ fn append_codex_event_facts(
                     model: payload
                         .get("model")
                         .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .map(str::to_string)
+                        .or_else(|| context_model.map(str::to_string)),
                     timestamp,
                 });
             }
@@ -419,7 +437,8 @@ fn append_codex_event_facts(
                     .get("model")
                     .or_else(|| payload.get("model"))
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(str::to_string)
+                    .or_else(|| context_model.map(str::to_string)),
                 timestamp,
             });
         }
@@ -809,6 +828,7 @@ fn append_codex_update_plan_lifecycle_fact(
 fn append_codex_response_item_facts(
     payload: &Value,
     timestamp: Option<i64>,
+    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let Some(item_kind) = payload.get("type").and_then(Value::as_str) else {
@@ -842,7 +862,8 @@ fn append_codex_response_item_facts(
                     model: payload
                         .get("model")
                         .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .map(str::to_string)
+                        .or_else(|| context_model.map(str::to_string)),
                     timestamp,
                 });
             }
@@ -1028,7 +1049,7 @@ mod provider_usage_tests {
         ProviderUsageModelV1, ProviderUsageScopeV1,
     };
 
-    use super::{CodexObservationLocation, normalize_codex_observation_with_location};
+    use super::{CodexObservationContext, normalize_codex_observation_with_context};
 
     #[test]
     fn canonical_payload_uses_only_bound_source_location() {
@@ -1045,21 +1066,26 @@ mod provider_usage_tests {
                 }
             }
         });
-        let canonical = normalize_codex_observation_with_location(
+        let canonical = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: Some(Path::new("/redacted/project")),
                 location_path: Some(Path::new("/redacted/project")),
+                transcript_path: Some(Path::new("/redacted/project/rollout.jsonl")),
+                model: Some("gpt-5.5"),
             },
         )
         .unwrap();
 
         let encoded = serde_json::to_value(canonical).unwrap();
-        assert!(encoded["facts"][0].get("transcript_path").is_none());
+        assert_eq!(
+            encoded["facts"][0]["transcript_path"].as_str(),
+            Some("/redacted/project/rollout.jsonl")
+        );
         assert!(encoded["relations"].get("turn_id").is_none());
         assert_eq!(encoded["facts"][1]["model"]["state"], "unknown");
     }
@@ -1089,15 +1115,17 @@ mod provider_usage_tests {
                 }
             }
         });
-        let envelope = normalize_codex_observation_with_location(
+        let envelope = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: None,
                 location_path: None,
+                transcript_path: None,
+                model: None,
             },
         )
         .unwrap();
@@ -1151,15 +1179,17 @@ mod provider_usage_tests {
                 }
             }
         });
-        let envelope = normalize_codex_observation_with_location(
+        let envelope = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread.fixture"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: None,
                 location_path: None,
+                transcript_path: None,
+                model: None,
             },
         )
         .unwrap();
@@ -1211,15 +1241,17 @@ mod provider_usage_tests {
                 }
             }
         });
-        let envelope = normalize_codex_observation_with_location(
+        let envelope = normalize_codex_observation_with_context(
             &native,
             "session.fixture",
             Some("thread-1"),
             ObservationId::new("record.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
-            CodexObservationLocation {
+            CodexObservationContext {
                 project_path: None,
                 location_path: None,
+                transcript_path: None,
+                model: Some("gpt-ctx"),
             },
         )
         .unwrap();

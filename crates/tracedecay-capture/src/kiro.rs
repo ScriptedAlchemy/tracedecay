@@ -17,6 +17,7 @@ pub struct KiroSnapshotMessage<'a> {
     pub text: &'a str,
     pub kind: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub transcript_path: Option<&'a str>,
 }
 
 /// Shapes only the Kiro fields evidenced by checked-in transcript fixtures.
@@ -52,6 +53,12 @@ fn snapshot_kiro_record(message: KiroSnapshotMessage<'_>) -> Value {
     }
     if let Some(model) = message.model {
         fields.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    if let Some(transcript_path) = message.transcript_path {
+        fields.insert(
+            "transcript_path".to_string(),
+            Value::String(transcript_path.to_string()),
+        );
     }
     Value::Object(fields)
 }

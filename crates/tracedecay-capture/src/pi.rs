@@ -70,15 +70,17 @@ pub fn native_record_id(
 pub fn normalize_observation(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_pi_entry(native, session_id, range)
+    normalize_pi_entry(native, session_id, transcript_path, range)
 }
 
 #[tracing::instrument(name = "capture.pi.normalize", level = "trace", skip_all)]
 fn normalize_pi_entry(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let kind = native
@@ -102,7 +104,12 @@ fn normalize_pi_entry(
             relations =
                 relations.with_parent_session_id(SessionId::new(parent).map_err(|_| invalid())?);
         }
-        facts.push(session_fact(Some(header.cwd), None, timestamp));
+        facts.push(session_fact(
+            Some(header.cwd),
+            transcript_path.map(str::to_owned),
+            None,
+            timestamp,
+        ));
         (
             native_record_id(session_id, HEADER_RECORD_ID)?,
             kind.to_owned(),
@@ -110,6 +117,17 @@ fn normalize_pi_entry(
     } else {
         let entry_id = non_empty_str(native, "id").ok_or_else(invalid)?;
         let stable_record_id = native_record_id(session_id, entry_id)?;
+        // The `session` header and `session_info` records carry richer Session
+        // facts but are skipped as non-conversational; the transcript path must
+        // ride the conversational records or it never reaches the row.
+        if kind != "session_info"
+            && let Some(transcript_path) = transcript_path
+        {
+            facts.insert(
+                0,
+                session_fact(None, Some(transcript_path.to_owned()), None, None),
+            );
+        }
         if let Some(parent_id) = native.get("parentId").and_then(Value::as_str) {
             relations = relations.with_parent_message_id(native_record_id(session_id, parent_id)?);
         }
@@ -143,7 +161,12 @@ fn normalize_pi_entry(
             }
             "session_info" => {
                 let title = non_empty_str(native, "name").map(str::to_owned);
-                facts.push(session_fact(None, title, None));
+                facts.push(session_fact(
+                    None,
+                    transcript_path.map(str::to_owned),
+                    title,
+                    None,
+                ));
                 kind.to_owned()
             }
             other => {
@@ -172,13 +195,14 @@ fn normalize_pi_entry(
 
 fn session_fact(
     project_path: Option<String>,
+    transcript_path: Option<String>,
     title: Option<String>,
     started_at: Option<i64>,
 ) -> CanonicalObservationFactV1 {
     CanonicalObservationFactV1::Session {
         project_path,
         location_path: None,
-        transcript_path: None,
+        transcript_path,
         title,
         started_at,
         ended_at: None,

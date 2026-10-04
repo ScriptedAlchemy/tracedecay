@@ -36,6 +36,7 @@ pub(crate) fn canonical_envelope(native: &Value, session_id: &str, start: u64, e
     let envelope = normalize(
         native,
         session_id,
+        None,
         record_id(native, session_id, start),
         range,
     )

@@ -1178,7 +1178,7 @@ async fn wal_reuse_updates_existing_parts_without_changing_file_headers() {
     );
 }
 
-const RETAINED_PROJECT_PAYLOAD: &str = r#"{"message":{"id":"msg_ses_project","role":"user","sessionID":"ses_project","time":{"created":1}},"parts":[{"id":"part_ses_project","text":"secret-ses_project","type":"text"}]}"#;
+const RETAINED_PROJECT_PAYLOAD: &str = r#"{"message":{"id":"msg_ses_project","role":"user","sessionID":"ses_project","time":{"created":1}},"parts":[{"id":"part_ses_project","text":"secret-ses_project","type":"text"}],"transcript_path":"{transcript}"}"#;
 
 #[tokio::test]
 async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
@@ -1236,7 +1236,10 @@ async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
     .unwrap();
     assert_eq!(page.records.len(), 1);
     let payload = String::from_utf8(page.records[0].payload.clone()).unwrap();
-    assert_eq!(payload, RETAINED_PROJECT_PAYLOAD);
+    let transcript = serde_json::to_string(&source.source_path).unwrap();
+    let expected =
+        RETAINED_PROJECT_PAYLOAD.replace("{transcript}", &transcript[1..transcript.len() - 1]);
+    assert_eq!(payload, expected);
     assert!(!payload.contains("foreign-secret") && page.records[0].session_id == "ses_project");
 }
 

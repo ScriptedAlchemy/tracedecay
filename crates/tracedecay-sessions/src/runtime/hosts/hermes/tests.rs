@@ -146,6 +146,7 @@ fn fixture_projection() -> HermesProjectionMetadata {
         location_path: None,
         profile: Some("fixture".to_string()),
         location_provenance: None,
+        transcript_path: None,
     }
 }
 

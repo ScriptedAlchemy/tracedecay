@@ -257,31 +257,40 @@ pub fn canonical_snapshot_envelope(
         .unwrap_or(CanonicalMessageRoleV1::Unknown);
     let timestamp = native.get("timestamp").and_then(Value::as_i64);
     let mut facts = Vec::new();
-    if let Some(location) = native.get("location").filter(|location| {
+    let location = native.get("location").filter(|location| {
         location
             .get("path")
             .and_then(Value::as_str)
             .is_some_and(|path| !path.is_empty())
-    }) {
+    });
+    let transcript_path = native
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty());
+    if location.is_some() || transcript_path.is_some() {
         // `project_path` stays unset on purpose: session routing keeps its
         // scope-derived fallback, only the location metadata is projected.
         facts.push(CanonicalObservationFactV1::Session {
             project_path: None,
-            location_path: location
-                .get("path")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            transcript_path: None,
+            location_path: location.and_then(|location| {
+                location
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            transcript_path: transcript_path.map(str::to_string),
             title: None,
             started_at: None,
             ended_at: None,
             source: None,
             native_source: None,
             profile: None,
-            location_provenance: location
-                .get("provenance")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            location_provenance: location.and_then(|location| {
+                location
+                    .get("provenance")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
         });
     }
     if let Some(text) = native.get("text").cloned() {

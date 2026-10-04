@@ -19,7 +19,8 @@ use crate::restart_atomicity::{
     open_project_session_db, set_projection_failure,
 };
 use crate::support::{
-    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+    assert_metadata_path_eq, assert_path_text_eq, create_git_repo_with_linked_worktree,
+    init_git_repo, setup,
 };
 
 pub(super) fn vscode_storage_root(
@@ -218,7 +219,7 @@ async fn cline_like_task_location_projects_session_metadata() {
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        write_task(
+        let api_history = write_task(
             &vscode_storage_root(&home, extension_id),
             &project,
             &format!("{provider}-location"),
@@ -235,6 +236,13 @@ async fn cline_like_task_location_projects_session_metadata() {
             .get_session(provider, &format!("{provider}-location"))
             .await
             .unwrap();
+        assert_path_text_eq(
+            session
+                .transcript_path
+                .as_deref()
+                .expect("session transcript path"),
+            &api_history,
+        );
         let metadata: serde_json::Value =
             serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
         assert_metadata_path_eq(&metadata[cwd_key.as_str()], &project);

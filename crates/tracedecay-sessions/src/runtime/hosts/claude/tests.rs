@@ -225,7 +225,7 @@ fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-golden-session", 0)?;
-            canonical::normalize(&native, "claude-golden-session", stable, range)
+            canonical::normalize(&native, "claude-golden-session", None, stable, range)
         },
     )
     .unwrap();
@@ -282,7 +282,7 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-mixed-session", 0)?;
-            canonical::normalize(&native, "claude-mixed-session", stable, range)
+            canonical::normalize(&native, "claude-mixed-session", None, stable, range)
         },
     )
     .unwrap();
@@ -365,7 +365,7 @@ fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-workflow-lookalike", 0)?;
-            canonical::normalize(&native, "claude-workflow-lookalike", stable, range)
+            canonical::normalize(&native, "claude-workflow-lookalike", None, stable, range)
         },
     )
     .expect("Claude workflow lookalike must still normalize as an assistant message");
@@ -449,7 +449,7 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         |native| {
             let stable = canonical::stable_record_id(&native, "claude-task-session", 0)?;
-            canonical::normalize(&native, "claude-task-session", stable, range)
+            canonical::normalize(&native, "claude-task-session", None, stable, range)
         },
     )
     .unwrap();

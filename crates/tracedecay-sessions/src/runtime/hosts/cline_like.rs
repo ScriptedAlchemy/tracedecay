@@ -866,6 +866,14 @@ fn snapshot_native_payload(
         payload.remove("model");
     } else {
         insert_snapshot_location(&mut payload, metadata, CLINE_LIKE_LOCATION_KEYS);
+        // Only the api-history stream is the session transcript: usage rows
+        // replay the ui_messages file, which holds no conversation of its own.
+        if let Some(source_path) = &message.source_path {
+            payload.insert(
+                "transcript_path".to_string(),
+                Value::String(source_path.clone()),
+            );
+        }
         if let Some(tool_names) = &message.tool_names {
             payload.insert("tool_names".to_string(), Value::String(tool_names.clone()));
         }
