@@ -625,6 +625,10 @@ pub struct PrimitiveNotFoundV1 {
     pub reason_code: String,
     pub node_id: String,
     pub message: String,
+    /// Nearest served symbols by edit distance to the requested id, by id,
+    /// simple name, or qualified name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<PrimitiveSymbolLocationV1>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
