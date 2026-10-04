@@ -299,7 +299,7 @@ pub struct LexicalRouteDecisionV1 {
 /// Classify a query as name-shaped or prose by the share of its content
 /// words (stoplisted and single-character words excluded) that only code
 /// would spell (see `names_identifier`), judged on the whole token and on the
-/// trailing name of a `a.b` or `a::b` spelling; `Widget.render` counts too. The query is name-shaped when at
+/// trailing name of a `a.b` or `a::b` spelling. The query is name-shaped when at
 /// least half its content words are identifiers, so `getUserById` and
 /// `where is parse_config called` route to the name lane while prose with one
 /// incidental identifier keeps the prose route alone. Returns the route and
@@ -313,8 +313,7 @@ pub fn classify_query_shape(query: &str) -> (LexicalQueryRouteV1, i32) {
     let names = words
         .iter()
         .filter(|word| {
-            let raw = word.raw.trim_end_matches(['.', ':']);
-            names_identifier(raw) || names_dotted_member(raw) || names_identifier(&word.name)
+            names_identifier(word.raw.trim_end_matches(['.', ':'])) || names_identifier(&word.name)
         })
         .count() as i64;
     let margin = ((2 * names - total) * 500_000 / total) as i32;
@@ -324,15 +323,6 @@ pub fn classify_query_shape(query: &str) -> (LexicalQueryRouteV1, i32) {
         LexicalQueryRouteV1::Prose
     };
     (route, margin)
-}
-
-/// `Widget.render`-style member access: two or more dot-joined identifiers
-/// of at least two characters each, so `e.g` stays prose.
-fn names_dotted_member(token: &str) -> bool {
-    token.contains('.')
-        && token
-            .split('.')
-            .all(|segment| segment.len() >= 2 && is_identifier_token(segment))
 }
 
 /// Caller-controlled options for the strict query and additive lexical routes.

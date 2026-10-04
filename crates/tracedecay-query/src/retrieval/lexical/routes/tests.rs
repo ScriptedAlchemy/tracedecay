@@ -1186,7 +1186,6 @@ fn query_shape_gate_routes_name_shaped_queries_and_reports_its_margin() {
         ("getUserById", LexicalQueryRouteV1::Name, 500_000),
         ("Foo::bar", LexicalQueryRouteV1::Name, 500_000),
         ("users.getUserById", LexicalQueryRouteV1::Name, 500_000),
-        ("Widget.render", LexicalQueryRouteV1::Name, 500_000),
         (
             "userService.getUserById session",
             LexicalQueryRouteV1::Name,
