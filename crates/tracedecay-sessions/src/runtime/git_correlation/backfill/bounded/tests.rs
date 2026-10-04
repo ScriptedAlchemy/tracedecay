@@ -1175,6 +1175,131 @@ async fn revisit_restores_the_capture_window_a_fold_unioned() {
     );
 }
 
+/// An observation landing inside the folded window extends the capture-only
+/// window, not the unioned one. The merge that persists it must keep the
+/// grown snapshot, or a later revisit restores bounds the capture evidence
+/// already moved past.
+#[tokio::test]
+async fn folded_span_keeps_capture_growth_through_revisit() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    // A later branchless observation lands inside the folded window but past
+    // the capture-only tail: the unioned window does not move, the snapshot
+    // grows to (active_at, active_at + 10).
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at + 10,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        spans[0].capture_window,
+        Some(crate::runtime::git_correlation::CaptureWindow {
+            first_ts: active_at,
+            last_ts: active_at + 10,
+            event_count: 2,
+        }),
+        "the merge keeps the capture growth for a later revisit: {spans:#?}"
+    );
+    drop(view);
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts, spans[0].event_count),
+        (active_at, active_at + 10, 2),
+        "the restore keeps activity captured after the inference: {spans:#?}"
+    );
+}
+
 /// A fresh project has never recorded Git evidence. Reporting that as a
 /// retryable unavailability put every fresh project's ingest into an endless
 /// retry loop.

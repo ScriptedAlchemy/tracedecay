@@ -300,6 +300,14 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
         existing.first_ts = existing.first_ts.min(incoming.first_ts);
         existing.last_ts = existing.last_ts.max(incoming.last_ts);
         existing.event_count = existing.event_count.max(incoming.event_count);
+        existing.capture_window = match (existing.capture_window, incoming.capture_window) {
+            (Some(a), Some(b)) => Some(super::CaptureWindow {
+                first_ts: a.first_ts.min(b.first_ts),
+                last_ts: a.last_ts.max(b.last_ts),
+                event_count: a.event_count.max(b.event_count),
+            }),
+            (a, b) => a.or(b),
+        };
         return *existing != previous;
     } else {
         spans.push(incoming.clone());
