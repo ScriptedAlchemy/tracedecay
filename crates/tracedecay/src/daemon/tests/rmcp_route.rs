@@ -117,19 +117,36 @@ async fn rmcp_route_fixture_with_projects(
                 tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
             )
             .expect("install portable route profile worker plan");
-        let server = Box::pin(super::super::portable_project_server_for_request(
-            DaemonLifecycle::default(),
-            store_administration.clone(),
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            invocation,
-            super::super::http_application::DaemonHttpApplicationRegistry::default(),
-            &handshake,
-            super::super::ProjectServerRequirement::Core,
-            None,
-        ))
+        let gates = Arc::new(tokio::sync::Mutex::new(
+            super::super::ProjectOpenGates::default(),
+        ));
+        let applications = super::super::http_application::DaemonHttpApplicationRegistry::default();
+        // The unix arm's `engine.project_server` awaits warm-up internally;
+        // the portable route answers `project_warming` while it opens, so the
+        // direct drive retries it the way production clients do.
+        let server = tokio::time::timeout(PHASE_TIMEOUT, async {
+            loop {
+                match Box::pin(super::super::portable_project_server_for_request(
+                    DaemonLifecycle::default(),
+                    store_administration.clone(),
+                    gates.clone(),
+                    invocation.clone(),
+                    applications.clone(),
+                    &handshake,
+                    super::super::ProjectServerRequirement::Core,
+                    None,
+                ))
+                .await
+                {
+                    Err(error) if super::super::error_is_project_warming(&error) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    outcome => break outcome,
+                }
+            }
+        })
         .await
+        .expect("portable project server out of warm-up")
         .expect("open portable production project server");
         (store_administration, server)
     };

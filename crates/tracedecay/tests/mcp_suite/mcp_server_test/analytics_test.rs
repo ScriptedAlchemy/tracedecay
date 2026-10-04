@@ -214,9 +214,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     );
 
     server.ledger_writes_settled().await;
-    let project_id = fixture
-        .project_root
-        .canonicalize()
+    let project_id = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();

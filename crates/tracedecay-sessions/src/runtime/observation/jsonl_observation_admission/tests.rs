@@ -96,7 +96,7 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
         b"{\"type\":\"event_msg\"}\n{\"type\":\"turn_context\"}\n",
     )
     .expect("JSONL fixture");
-    spin_until_jsonl_change_settled(&path);
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let (first, _) =
@@ -108,8 +108,16 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
             .await
             .expect("second shared consumer");
 
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    if settled {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly reads its own page.
+    if !settled {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
     assert_eq!(
         first
             .frames
@@ -154,7 +162,7 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let temp = tempfile::TempDir::new().expect("temp directory");
     let path = temp.path().join("concurrent.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
-    spin_until_jsonl_change_settled(&path);
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let first_path = path.clone();
@@ -172,8 +180,16 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let (first, first_hit) = first.expect("first concurrent page");
     let (second, second_hit) = second.expect("second concurrent page");
 
-    assert_ne!(first_hit, second_hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    if settled {
+        assert_ne!(first_hit, second_hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+    // Without a stat witness the shared identity never settles: each
+    // consumer's key is unique, so both honestly read the file.
+    if !settled {
+        assert!(!first_hit && !second_hit);
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
 }
 
 #[tokio::test]
@@ -412,7 +428,7 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
     let temp = tempfile::TempDir::new().expect("temp directory");
     let pinned_path = temp.path().join("pinned.jsonl");
     std::fs::write(&pinned_path, b"{}\n").expect("pinned JSONL fixture");
-    spin_until_jsonl_change_settled(&pinned_path);
+    let settled = spin_until_jsonl_change_settled(&pinned_path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
     let (pinned, initial_hit) = super::shared_jsonl_page(
         &pinned_path,
@@ -442,8 +458,16 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
     )
     .await
     .expect("replayed pinned page");
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    if settled {
+        assert!(hit);
+        assert!(std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replayed read honestly misses.
+    if !settled {
+        assert!(!hit);
+        assert!(!std::sync::Arc::ptr_eq(&pinned, &replayed));
+    }
 }
 
 #[tokio::test]
@@ -478,7 +502,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         .expect("append fixture");
     file.write_all(b"{\"type\":\"event_msg\"}\n")
         .expect("append JSONL frame");
-    spin_until_jsonl_change_settled(&path);
+    let settled = spin_until_jsonl_change_settled(&path);
 
     let (exact, first_hit) = super::shared_jsonl_page_with_cancellation(
         &path,
@@ -503,8 +527,16 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
     )
     .await
     .expect("replayed exact append page");
-    assert!(replay_hit);
-    assert!(Arc::ptr_eq(&exact, &replayed));
+    if settled {
+        assert!(replay_hit);
+        assert!(Arc::ptr_eq(&exact, &replayed));
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // replay honestly rebuilds its own page.
+    if !settled {
+        assert!(!replay_hit);
+        assert!(!Arc::ptr_eq(&exact, &replayed));
+    }
     assert!(!Arc::ptr_eq(&prefetched, &exact));
 }
 
@@ -1812,7 +1844,7 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     // capacity is the degraded fallback of one entry.
     super::install_test_shared_jsonl_preparation_authority();
     let (_temp, path, _) = rollout_fixture();
-    spin_until_jsonl_change_settled(&path);
+    let settled = spin_until_jsonl_change_settled(&path);
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
     let before = crate::runtime::hosts::codex::session_meta_read_count_for_test(&path);
@@ -1824,11 +1856,22 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
         .await
         .expect("second profile consumer");
 
-    assert_eq!(
-        crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
-        1,
-        "canonical path+native identity must share one bounded prefix decode"
-    );
+    if settled {
+        assert_eq!(
+            crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
+            1,
+            "canonical path+native identity must share one bounded prefix decode"
+        );
+    }
+    // Without a stat witness the shared identity never settles, so each
+    // consumer honestly decodes the prefix itself.
+    if !settled {
+        assert_eq!(
+            crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
+            2,
+            "no stat witness exists, so each consumer decodes its own prefix"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1978,7 +2021,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     let len = write_undecodable_tail_rollout(&path, &cwd);
-    spin_until_jsonl_change_settled(&path);
+    let settled = spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
     let spy = SeamSpyAdmission::default();
 
@@ -2027,7 +2070,14 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
          the one that can is not"
     );
     assert_eq!(progress.frames_persisted, 0);
-    assert!(hit);
+    if settled {
+        assert!(hit);
+    }
+    // Without a stat witness the shared identity never settles, so the
+    // retained page is honestly re-read.
+    if !settled {
+        assert!(!hit);
+    }
     assert_eq!(
         super::shared_jsonl_frame_preparations_for_test(page.file_identity),
         1,

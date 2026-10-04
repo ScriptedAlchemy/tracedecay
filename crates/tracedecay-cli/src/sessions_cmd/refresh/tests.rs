@@ -446,7 +446,10 @@ async fn project_refresh_sends_a_relative_project_path_as_the_cli_directory() {
         .await
         .unwrap();
 
-    let cli_directory = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let cli_directory = tracedecay_runtime_core::path_safety::canonical_existing_identity(
+        &std::env::current_dir().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         transport.calls()[0].arguments,
         json!({ "path": cli_directory, "format": "json" })

@@ -25,6 +25,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitCorrelationError, GitRefFilter, MAX_SESSIONS_FOR_LIMIT,
     SessionsForQuery,
 };
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
 use super::DashboardState;
 use super::analytics_api::managed_agent_label_for_session;
@@ -190,6 +191,9 @@ async fn project_sessions(
     }
     let canonical = RegisteredGlobalDb::canonical_project_key(project_root);
     let opened = project_root.to_string_lossy().into_owned();
+    // Sessions persist `project_path` through `durable_project_path_key`, so
+    // the comparison must run in the same folded identity the store wrote.
+    let stored_path = durable_project_path_key(&opened);
     let connection = db.read_connection();
     let rows = query_rows(
         &connection,
@@ -229,13 +233,15 @@ async fn project_sessions(
          JOIN sessions s
            ON s.session_id = c.session_id
           AND (c.provider = '' OR s.provider = c.provider)
-         WHERE s.project_key IN (?1, ?2, ?4) OR s.project_path IN (?1, ?2)
+         WHERE s.project_key IN (?1, ?2, ?4) OR s.project_path IN (?5, ?6)
          ORDER BY s.provider, s.session_id",
         params![
             canonical,
-            opened,
+            opened.clone(),
             Value::Array(pairs.to_vec()).to_string(),
-            project_id
+            project_id,
+            stored_path,
+            opened
         ],
     )
     .await

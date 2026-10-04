@@ -18,13 +18,15 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 mod error;
 pub use error::GitCorrelationError;
+mod history_changes;
+pub use history_changes::install_history_change_schema;
 
 const MIGRATION_NAME: &str = "git_correlation";
 
 /// Schema version of the Git evidence rows, convergence receipts and
 /// watermarks. A store recorded at any other version is refused with a typed
 /// reset; nothing converts an older shape.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 6;
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 7;
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so

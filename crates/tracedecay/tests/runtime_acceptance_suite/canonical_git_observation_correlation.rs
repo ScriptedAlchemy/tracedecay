@@ -185,10 +185,14 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         .unwrap();
     assert_eq!(branch_hits.len(), 1);
     assert_eq!(branch_hits[0].session_id, session_id.as_str());
-    // Worktrees are keyed in their portable `/`-separated spelling.
+    // Worktrees are keyed in their portable `/`-separated spelling of the
+    // canonical locator, not the fixture's alias (Windows 8.3 TEMP) form.
     assert_eq!(
         branch_hits[0].worktree,
-        Some(normalize_worktree(&project.to_string_lossy()))
+        Some(normalize_worktree(
+            &tracedecay_runtime_core::path_safety::canonical_root_identity(&project)
+                .to_string_lossy()
+        ))
     );
 
     let (commit_hits, _) = store

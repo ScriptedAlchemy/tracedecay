@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 /// Complete detached reconciliation admission requested by the MCP server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +64,10 @@ pub(crate) async fn execute_background_refresh_direct(
                 ),
             })?;
     let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
-    if request.graph.project_root() != canonical_root
+    // `canonicalize` spells verbatim `\\?\C:\` on Windows while a mounted
+    // graph records the plain canonical root; compare identities, not
+    // spelling.
+    if !same_canonical_path(request.graph.project_root(), &canonical_root)
         || request.graph.active_branch() != active_branch.as_deref()
     {
         return Err(TraceDecayError::Config {

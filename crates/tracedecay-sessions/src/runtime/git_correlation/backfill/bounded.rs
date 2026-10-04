@@ -166,6 +166,32 @@ where
         history_progress::read_oldest_progress(&snapshot).await?
     };
     if let Some(progress) = active_progress {
+        let mut current = snapshot.query(
+            "SELECT sequence FROM git_history_session_change WHERE provider = ?1 AND session_id = ?2",
+            params![progress.provider.as_str(), progress.session_id.as_str()],
+        ).await?;
+        let revision = current
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(current);
+        if revision != Some(progress.change_sequence) {
+            drop(snapshot);
+            let mut committed = false;
+            let interruption =
+                reset_exact_progress(session_store, &progress, control, &mut committed)
+                    .await
+                    .err();
+            return Ok(BoundedBackfillOutcome {
+                stats: BackfillStats::default(),
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                unresolved_failures: 0,
+                interruption,
+            });
+        }
         drop(snapshot);
         return Ok(
             resume_active_progress_page(session_store, progress, frontier, opts, control).await,
@@ -268,17 +294,20 @@ where
                     interruption,
                 ));
             }
-            frontier = match persist_frontier(session_store, candidate_frontier, control).await {
-                Ok(frontier) => frontier,
-                Err(interruption) => {
-                    return Ok(interrupted_outcome(
-                        stats,
-                        committed,
-                        frontier,
-                        interruption,
-                    ));
-                }
-            };
+            frontier =
+                match persist_frontier(session_store, &row.session, candidate_frontier, control)
+                    .await
+                {
+                    Ok(frontier) => frontier,
+                    Err(interruption) => {
+                        return Ok(interrupted_outcome(
+                            stats,
+                            committed,
+                            frontier,
+                            interruption,
+                        ));
+                    }
+                };
             committed = true;
         }
     }
@@ -485,6 +514,21 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
                     .await
                     .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
                 let frontier = super::advance_history_frontier(&transaction, candidate_frontier)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                let mut writer = GitEvidenceWriter::open(&transaction)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                writer
+                    .replace_backfill_session(
+                        &row.provider,
+                        &row.session_id,
+                        candidate_frontier.change_sequence,
+                    )
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                writer
+                    .finish()
                     .await
                     .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
                 control.check()?;
@@ -844,6 +888,7 @@ async fn dry_run_segment(
 
 async fn persist_frontier<S: GitCorrelationSessionStore>(
     session_store: &S,
+    row: &SessionActivityRow,
     candidate: GitHistoryIndexFrontier,
     control: &BoundedGitControl,
 ) -> Result<GitHistoryIndexFrontier, BoundedBackfillInterruption> {
@@ -854,6 +899,17 @@ async fn persist_frontier<S: GitCorrelationSessionStore>(
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;
     let persisted = super::advance_history_frontier(&transaction, candidate)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .replace_backfill_session(&row.provider, &row.session_id, candidate.change_sequence)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .finish()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;

@@ -26,11 +26,11 @@ use tracedecay_mcp::handlers::hook_runtime::{
     admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };
 
-#[cfg(unix)]
 mod spool_opener;
 mod spool_watch;
 
-#[cfg(unix)]
+#[cfg(not(unix))]
+pub(in crate::daemon) use spool_opener::PortableSpoolOpenerOwners;
 pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
 
 /// The longest a retained record or receipt waits for its next delivery

@@ -179,6 +179,27 @@ fn python_command() -> Command {
                     }
                 }
             }
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    for name in ["python.exe", "python3.exe"] {
+                        let exe = dir.join(name);
+                        if exe.is_file() {
+                            return exe;
+                        }
+                    }
+                }
+            }
+            // The pylauncher ships with every python.org install and lives
+            // on PATH as `py`; resolve it once so every spawn skips lookup.
+            if let Ok(out) = Command::new("py")
+                .args(["-3", "-c", "import sys; print(sys.executable)"])
+                .output()
+            {
+                let exe = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if out.status.success() && !exe.is_empty() {
+                    return PathBuf::from(exe);
+                }
+            }
         }
         PathBuf::from("python3")
     });

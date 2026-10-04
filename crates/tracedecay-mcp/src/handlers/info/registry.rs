@@ -21,7 +21,9 @@ use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::support::{decode_primitive_request, decode_selector_request};
 
 fn display_path(path: &Path) -> String {
-    path.display().to_string()
+    tracedecay_runtime_core::path_safety::canonical_root_identity(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn bounded_limit(limit: Option<usize>, default: usize, max: usize) -> usize {

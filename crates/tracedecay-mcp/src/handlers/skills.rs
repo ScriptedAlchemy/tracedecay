@@ -108,7 +108,7 @@ pub async fn compute_skill_list(
     Ok(graph_tool_completion(
         GraphToolResultV1::SkillList(SkillListResultV1 {
             status: AutomationReadStatusV1::Ok,
-            profile_root: profile_root.to_path_buf(),
+            profile_root: tracedecay_runtime_core::path_safety::plain_host_path(profile_root),
             count: entries.len(),
             skills: entries,
         }),
@@ -193,7 +193,7 @@ pub async fn compute_skill_view(
     Ok(graph_tool_completion(
         GraphToolResultV1::SkillView(Box::new(SkillViewResultV1 {
             status: AutomationReadStatusV1::Ok,
-            profile_root: profile_root.to_path_buf(),
+            profile_root: tracedecay_runtime_core::path_safety::plain_host_path(profile_root),
             skill,
             usage_summary,
             stale_recommendation,

@@ -221,7 +221,7 @@ impl HeadFileStamp {
             modified: metadata.modified().ok(),
             #[cfg(unix)]
             inode: (metadata.dev(), metadata.ino()),
-            changed: RewriteWitness::NATIVE.stamp(&metadata, sampled_at),
+            changed: RewriteWitness::native_path_stamp(head, &metadata, sampled_at),
         })
     }
 }

@@ -2036,6 +2036,14 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                     .id
                     .clone()
                     .map(|id| project_open_error_response(id, &error));
+            } else if let Some(response) = response.as_mut()
+                && matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+            {
+                Box::pin(attach_reset_required_stores(
+                    response,
+                    &store_administration,
+                ))
+                .await;
             }
             drop(setup_activity);
             if let Some(response) = response {
