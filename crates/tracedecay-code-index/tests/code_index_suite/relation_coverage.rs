@@ -378,3 +378,28 @@ fn a_same_file_call_with_two_candidates_makes_both_callers_partial() {
     assert!(!caller_gaps.is_empty());
     assert!(graph.callees_partial("rb/units.rb::total"));
 }
+
+#[test]
+fn a_same_file_python_call_with_two_candidates_makes_its_callees_partial() {
+    let graph = sealed_graph_of(&[(
+        "py/units.py",
+        "def scale(x):\n    return x\n\ndef scale(x):\n    return x + 1\n\ndef total():\n    return scale(1)\n",
+    )]);
+
+    assert!(graph.callees_partial("py/units.py::total"));
+}
+
+#[test]
+fn locally_ambiguous_definitions_shadow_an_imported_name() {
+    let graph = sealed_graph_of(&[
+        ("py/pkg/__init__.py", ""),
+        ("py/pkg/lib.py", "def scale(x):\n    return x * 2\n"),
+        (
+            "py/pkg/app.py",
+            "from pkg.lib import scale\n\ndef scale(x):\n    return x\n\ndef scale(x):\n    return x + 1\n\ndef total():\n    return scale(1)\n",
+        ),
+    ]);
+
+    assert_eq!(graph.callers("py/pkg/lib.py::scale"), Vec::<String>::new());
+    assert!(graph.callees_partial("py/pkg/app.py::total"));
+}

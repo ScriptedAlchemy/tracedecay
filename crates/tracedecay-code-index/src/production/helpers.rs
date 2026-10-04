@@ -772,6 +772,9 @@ fn resolve_cross_file_reference<T>(
 where
     T: ResolutionFileV1,
 {
+    if reference.ambiguous_local {
+        return Some(ReferenceResolutionV1::Ambiguous);
+    }
     let rust = &modules.rust;
     let file = files[index].as_ref();
     // These languages bind one exact module member through their own import

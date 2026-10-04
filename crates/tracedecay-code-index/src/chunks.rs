@@ -2411,11 +2411,12 @@ fn resolve_file_references(
                     });
                 }
             }
-            // No candidate, or several the file cannot choose between: the
-            // reference is retained, and cross-file resolution binds it or
-            // discloses it as a caller gap.
+            // No candidate: the reference is retained for cross-file
+            // resolution. Several the file cannot choose between: it is
+            // retained as a disclosed caller gap. Java overloads the call's
+            // arguments cannot tell apart resolve through Java's own rules.
             _ => {
-                if let Some(candidate) = cross_file_reference_candidate(
+                if let Some(mut candidate) = cross_file_reference_candidate(
                     source,
                     offsets,
                     &references_by_site,
@@ -2434,6 +2435,7 @@ fn resolve_file_references(
                         candidate.reference_name.clone(),
                     )))
                 {
+                    candidate.ambiguous_local = !compatible.is_empty() && language != "java";
                     retained.push(candidate);
                 }
             }
@@ -2536,6 +2538,7 @@ fn cross_file_reference_candidate(
             .unwrap_or(from.span),
         unmodeled_import: reference.unmodeled_import,
         argument_count: reference.argument_count,
+        ambiguous_local: false,
     })
 }
 
