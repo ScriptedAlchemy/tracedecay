@@ -165,7 +165,7 @@ pub(crate) enum ProfileOfflineAuthority {
     Lease(tracedecay_runtime_core::lifecycle_lease::LifecycleLease),
     /// The managed daemon service was quiesced; dropping or finishing this
     /// restores its prior state.
-    QuiescedDaemon(tracedecay_daemon_control::QuiescedDaemonLifecycle),
+    QuiescedDaemon(Box<tracedecay_daemon_control::QuiescedDaemonLifecycle>),
 }
 
 impl ProfileOfflineAuthority {
@@ -272,7 +272,7 @@ pub(crate) fn take_profile_offline(
             ) {
                 Ok(guard) => {
                     eprintln!("Profile is offline for {operation}.");
-                    Ok(ProfileOfflineAuthority::QuiescedDaemon(guard))
+                    Ok(ProfileOfflineAuthority::QuiescedDaemon(Box::new(guard)))
                 }
                 Err(error) => Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
