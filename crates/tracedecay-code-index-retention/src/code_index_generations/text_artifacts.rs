@@ -526,7 +526,9 @@ pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&st
 /// rewrite while `VACUUM INTO` writes it (`.staging-compacting-journal`, which
 /// a kill mid-rewrite leaves behind), and a parent-artifact carry still being
 /// copied before its rename onto the staging name (`.staging-carrying` and
-/// its `.staging-carrying-journal`). They carry the same source-generation
+/// its `.staging-carrying-journal`), and the builder's initialized sibling
+/// before atomic publication (`.staging.initializing` and its SQLite journal).
+/// They carry the same source-generation
 /// digest as their staging file and share its liveness.
 pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     let value = file_name.strip_prefix(".text-artifact-")?;
@@ -537,7 +539,9 @@ pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Op
         .or_else(|| value.strip_suffix(".staging-compacting"))
         .or_else(|| value.strip_suffix(".staging-compacting-journal"))
         .or_else(|| value.strip_suffix(".staging-carrying"))
-        .or_else(|| value.strip_suffix(".staging-carrying-journal"))?;
+        .or_else(|| value.strip_suffix(".staging-carrying-journal"))
+        .or_else(|| value.strip_suffix(".staging.initializing"))
+        .or_else(|| value.strip_suffix(".staging.initializing-journal"))?;
     is_lowercase_hex(digest, 64).then_some(digest)
 }
 
