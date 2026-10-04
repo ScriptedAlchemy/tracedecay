@@ -105,6 +105,10 @@ pub struct HotspotV1 {
     pub incoming: u64,
     pub outgoing: u64,
     pub total: u64,
+    /// Commits touching `file` in the last 90 days.
+    pub churn: u64,
+    /// Ranking key: `total * (churn + 1)`.
+    pub score: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

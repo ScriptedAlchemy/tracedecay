@@ -34,7 +34,9 @@ pub(super) fn def_hotspots(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_hotspots",
         "Hotspots",
-        "Find symbols with the highest connectivity (most incoming + outgoing edges).",
+        "Find churn-weighted hotspots: symbols ranked by `score` = `total` (incoming + outgoing \
+         edges) x (`churn` + 1), where `churn` counts commits touching the symbol's file in the \
+         last 90 days.",
         input_schema,
     )
 }
