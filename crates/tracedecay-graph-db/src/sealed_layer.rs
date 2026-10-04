@@ -290,17 +290,20 @@ impl GraphSealedBaseV1 {
     /// This base as `projection` reads it: the same stored rows, with each
     /// relation's endpoints under `projection`, which changes its frame.
     /// `engine` serves the base's proven rows; their relation lanes under
-    /// `projection` replace the index's in a new index at `index_path`, and
+    /// `projection` replace those of the index pinned in `directory`, and
     /// the row sum and digest follow from it, exactly what a cold build of
-    /// these rows under `projection` records.
+    /// these rows under `projection` records. Only the pinned files are
+    /// read, so the sibling may retire its own meanwhile.
     fn reattested(
         &self,
         projection: &GraphProjectionIdentity,
         engine: &GraphDb,
-        index_path: &Path,
+        directory: &Path,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         let base = &self.inner;
+        let index_path = directory.join(LAYERED_BASE_ROW_INDEX_FILE);
+        let entity_rows = directory.join(LAYERED_BASE_ENTITY_ROWS_FILE);
         let identity = GraphGenerationManifestIdentity::new(
             projection.clone(),
             base.identity.generation.clone(),
@@ -310,16 +313,16 @@ impl GraphSealedBaseV1 {
         )
         .stored_under(base.physical_namespace.clone())?;
         let staged = index_path.with_extension("reattested");
-        let relaned = base.index.write_relaned(&staged, |emit| {
+        let relaned = RowIndex::open(&index_path)?.write_relaned(&staged, |emit| {
             engine.read_intact(&NeverCancelled, |native| {
                 crate::generation::recovered_relation_lanes(native, &identity, check, emit)
             })
         });
         let _ = engine.hibernate_if_lazy_when_idle();
         relaned?;
-        std::fs::rename(&staged, index_path)
+        std::fs::rename(&staged, &index_path)
             .map_err(|error| layered_io("reattested row index install", error))?;
-        let index = RowIndex::open(index_path)?;
+        let index = RowIndex::open(&index_path)?;
         let row_sum = index.row_sum(check)?;
         let recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
         Ok(Self {
@@ -332,11 +335,11 @@ impl GraphSealedBaseV1 {
                 container: base.container.clone(),
                 attachment: base.attachment.clone(),
                 index,
-                entity_rows: base.entity_rows.clone(),
                 entity_row_offsets: EntityRowOffsets::open(
-                    base.entity_row_offsets.path(),
-                    &base.entity_rows,
+                    &directory.join(LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE),
+                    &entity_rows,
                 )?,
+                entity_rows,
                 identity,
             }),
         })
@@ -610,7 +613,7 @@ impl GraphLayeredRowSpill {
             self.base = self.base.reattested(
                 &identity.projection,
                 &engine,
-                &self.spill.directory().join(LAYERED_BASE_ROW_INDEX_FILE),
+                self.spill.directory(),
                 check,
             )?;
         }
