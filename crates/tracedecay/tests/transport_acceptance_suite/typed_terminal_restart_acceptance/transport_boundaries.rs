@@ -1130,8 +1130,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
         }
     };
     assert_eq!(
-        status["value"]["outcome"]["value"]["payload"]["receipt"]["state"],
-        "complete",
+        status["value"]["outcome"]["value"]["payload"]["receipt"]["state"], "complete",
         "{status}"
     );
     let cancelled = typescript_call(
@@ -1149,13 +1148,11 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     let cancelled_payload = &cancelled["value"]["outcome"]["value"]["payload"];
     assert_eq!(cancelled_payload["outcome"], "complete", "{cancelled}");
     assert_eq!(
-        cancelled_payload["receipt"]["state"],
-        "complete",
+        cancelled_payload["receipt"]["state"], "complete",
         "{cancelled}"
     );
     assert_eq!(
-        cancelled_payload["operation_id"],
-        begin_payload["operation_id"],
+        cancelled_payload["operation_id"], begin_payload["operation_id"],
         "{cancelled}"
     );
 
