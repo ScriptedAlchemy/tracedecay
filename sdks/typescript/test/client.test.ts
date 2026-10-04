@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   OPERATIONS,
+  type NativeWorktreeSurfaceResultV1,
   type OperationApplicationDistributionResult,
   type PrimitiveSearchFreshnessV1,
 } from "../src/operations";
@@ -2308,5 +2309,39 @@ describe("TraceDecayClient operation lifecycle", () => {
         expect((aborted as Error).message).toBe("the caller aborted the request");
       },
     );
+  });
+});
+
+
+describe("native worktree inspection wire", () => {
+  it("keeps the surface tag separate from the active Git operation", () => {
+    const inspection = {
+      operation: "inspection",
+      state: "inspection",
+      target: {
+        kind: "worktree",
+        project_id: "project.worktree.clean",
+        repository_id: "repository.worktree.clean",
+        worktree_id: "worktree.clean",
+      },
+      presence: "present",
+      kind: "linked",
+      worktree_id: "worktree.clean",
+      clean: "yes",
+      locked: "no",
+      holder: "no",
+      unique_data: "no",
+      operation_state: "merge",
+      observed_at: 1,
+      inspection_digest: `sha256:${"0".repeat(64)}`,
+    } satisfies NativeWorktreeSurfaceResultV1;
+    const operation = OPERATIONS.find(
+      (entry) => entry.operation === "application_worktree_cleanup_inspect",
+    );
+    expect(operation).toBeDefined();
+    expect(operation?.decodeResult({ outcome: "worktree", ...inspection })).toEqual({
+      outcome: "worktree",
+      ...inspection,
+    });
   });
 });
