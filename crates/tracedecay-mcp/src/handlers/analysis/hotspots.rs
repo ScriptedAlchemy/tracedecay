@@ -131,11 +131,10 @@ mod tests {
     use super::churn_weighted_rank;
 
     #[test]
-    fn equal_churn_keeps_degree_order() {
-        let low = churn_weighted_rank(1, 1);
-        let high = churn_weighted_rank(2, 1);
-        assert!(high > low);
+    fn churn_weighted_rank_is_degree_plus_one_times_churn_plus_one() {
+        assert_eq!(churn_weighted_rank(1, 1), 4);
+        assert_eq!(churn_weighted_rank(2, 1), 6);
         assert_eq!(churn_weighted_rank(0, 0), 1);
-        assert!(churn_weighted_rank(0, 4) > churn_weighted_rank(0, 1));
+        assert_eq!(churn_weighted_rank(0, 4), 5);
     }
 }
