@@ -684,6 +684,380 @@ async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
     );
 }
 
+/// A captured span that names a different branch contradicts the reflog
+/// inference: the inference cannot fold, so it keeps its own span rather
+/// than being dropped silently.
+#[tokio::test]
+async fn conflicting_captured_branch_keeps_the_inferred_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: Some("feature".to_owned()),
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        2,
+        "an inference the capture contradicts must keep its own span"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    for (branch, sources) in [("main", vec!["backfill"]), ("feature", vec!["ingest"])] {
+        let hits = view
+            .sessions_for(
+                &SessionsForQuery {
+                    git_ref: GitRefFilter::Branch(branch.to_owned()),
+                    since: None,
+                    until: None,
+                    limit: 10,
+                },
+                CommitRelationFilter::All,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].span_count, 1);
+        assert_eq!(hits[0].branch.as_deref(), Some(branch));
+        assert_eq!(hits[0].sources, sources);
+    }
+}
+
+/// Folding keeps the segment's own coverage: the captured span absorbs the
+/// reflog window instead of replacing it with capture-only bounds, so a
+/// time-filtered query still sees everything the inference covered.
+#[tokio::test]
+async fn folded_inference_absorbs_the_segment_window() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans: vec![crate::runtime::git_correlation::stable_backfill_span(
+                "codex",
+                "session-1",
+                Some("main"),
+                &repository.path().to_string_lossy(),
+                active_at - 50,
+                active_at + 600,
+            )],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts),
+        (active_at - 50, active_at + 600),
+        "the folded span covers the union of capture and inference evidence"
+    );
+    assert_eq!(spans[0].captured_branch(), None);
+    // A query window inside the segment but past the capture still hits.
+    let hits = view
+        .sessions_for(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Branch("main".to_owned()),
+                since: Some(active_at + 300),
+                until: None,
+                limit: 10,
+            },
+            CommitRelationFilter::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].sources, ["backfill", "ingest"]);
+}
+
+/// An inference-tagged span is bounded by its evidence window. A branchless
+/// observation beyond it does not stretch the inferred branch over time the
+/// reflog segment never covered: capture opens its own span instead.
+#[tokio::test]
+async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let apply_observation = |ts: i64| GitEvidenceBatch {
+        observations: vec![crate::runtime::git_correlation::SpanObservation {
+            provider: "codex".to_owned(),
+            session_id: "session-1".to_owned(),
+            thread_id: None,
+            branch: None,
+            worktree: repository.path().to_string_lossy().into_owned(),
+            ts,
+            source: crate::runtime::git_correlation::SpanSource::Ingest,
+        }],
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer.apply(apply_observation(active_at)).await.unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "capture and inference share one span"
+    );
+
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(apply_observation(active_at + 600))
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, _) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        spans.len(),
+        2,
+        "later branchless capture opens its own span"
+    );
+    let inferred = spans
+        .iter()
+        .find(|span| span.branch.as_deref() == Some("main"))
+        .expect("the inference stays on its evidence window");
+    assert_eq!(
+        (inferred.first_ts, inferred.last_ts),
+        (active_at, active_at),
+        "the inferred branch does not cover activity past its segment"
+    );
+    let captured = spans
+        .iter()
+        .find(|span| span.branch.is_none())
+        .expect("the later observation is captured, not inferred");
+    assert_eq!(captured.first_ts, active_at + 600);
+    assert_eq!(
+        captured.branch_provenance,
+        crate::runtime::git_correlation::BranchProvenance::Captured
+    );
+}
+
+/// Revisiting a session retracts only what the inference produced. A commit
+/// linked to the captured span by capture-side evidence survives; the
+/// records the inferred branch admitted are deleted with it.
+#[tokio::test]
+async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            observations: vec![crate::runtime::git_correlation::SpanObservation {
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                thread_id: None,
+                branch: None,
+                worktree: repository.path().to_string_lossy().into_owned(),
+                ts: active_at,
+                source: crate::runtime::git_correlation::SpanSource::Ingest,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let captured_span_id = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap()
+        .0[0]
+        .span_id
+        .clone();
+    drop(view);
+
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            commits: vec![crate::runtime::git_correlation::CommitSessionRecord {
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                provider: "codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                branch: None,
+                worktree: Some(repository.path().to_string_lossy().into_owned()),
+                committed_at: active_at,
+                span_overlap_kind: crate::runtime::git_correlation::SpanOverlapKind::Direct,
+                span_id: Some(captured_span_id),
+                relation: crate::runtime::git_correlation::CommitRelation::Produced,
+                evidence: crate::runtime::git_correlation::CommitEvidence::ToolResult,
+                confidence: 100,
+                evidence_message_id: None,
+            }],
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+
+    let plain = directory.path().join("plain directory");
+    std::fs::create_dir(&plain).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET metadata_json = ?1",
+            params![serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()}).to_string()],
+        )
+        .await
+        .unwrap();
+    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap()
+        .pass;
+    assert_eq!(revisited.backfill.sessions_scanned, 1);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "retracting inference keeps the captured span"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(spans[0].branch, None);
+    assert_eq!(spans[0].captured_branch(), None);
+    assert!(
+        commits.iter().any(|record| {
+            record.commit_sha == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                && record.evidence == crate::runtime::git_correlation::CommitEvidence::ToolResult
+        }),
+        "captured commit evidence on the surviving span must be kept: {commits:#?}"
+    );
+    assert!(
+        commits.iter().all(|record| record.branch.is_none()
+            && record.evidence != crate::runtime::git_correlation::CommitEvidence::ReflogOverlap),
+        "relations derived from the inferred branch must be retracted: {commits:#?}"
+    );
+}
+
 /// A fresh project has never recorded Git evidence. Reporting that as a
 /// retryable unavailability put every fresh project's ingest into an endless
 /// retry loop.

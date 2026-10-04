@@ -210,6 +210,12 @@ pub(super) fn transcript_spans_from_observations(
                     observation.ts,
                     merge_gap_secs,
                 )
+                // An inference-tagged span is bounded by its evidence: a
+                // later branchless observation merges only inside its
+                // window, never stretches the inferred branch over time
+                // the reflog segment did not cover.
+                && (span.branch_provenance != super::BranchProvenance::Inferred
+                    || (observation.ts >= span.first_ts && observation.ts <= span.last_ts))
         });
         let span = match existing {
             Some(existing) => {
@@ -292,9 +298,11 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
 
 /// Attributes a reflog-inferred branch to the captured spans of the same
 /// session and worktree that `inferred` overlaps, so capture and inference
-/// share one span. Captured branches are never replaced. Returns `false` when
-/// no captured span overlaps, or one already carries a different inference;
-/// the inferred span then stands on its own.
+/// share one span. Captured branches are never replaced. The overlapping
+/// spans absorb the segment's window and event count, so nothing the
+/// inference covered is dropped. Returns `false` when no captured span
+/// overlaps, or an overlapping span already names a different branch —
+/// captured or inferred — leaving the inference to stand on its own.
 pub(super) fn infer_captured_branch(
     spans: &mut [SessionGitSpan],
     inferred: &SessionGitSpan,
@@ -311,10 +319,9 @@ pub(super) fn infer_captured_branch(
         })
         .collect::<Vec<_>>();
     if overlapping.is_empty()
-        || overlapping.iter().any(|span| {
-            span.branch_provenance == super::BranchProvenance::Inferred
-                && span.branch != inferred.branch
-        })
+        || overlapping
+            .iter()
+            .any(|span| span.branch.is_some() && span.branch != inferred.branch)
     {
         return false;
     }
@@ -323,6 +330,9 @@ pub(super) fn infer_captured_branch(
             span.branch.clone_from(&inferred.branch);
             span.branch_provenance = super::BranchProvenance::Inferred;
         }
+        span.first_ts = span.first_ts.min(inferred.first_ts);
+        span.last_ts = span.last_ts.max(inferred.last_ts);
+        span.event_count = span.event_count.max(inferred.event_count);
     }
     true
 }

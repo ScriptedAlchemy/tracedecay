@@ -202,14 +202,14 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         }
         let (spans, commits) =
             load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
-        let mut retracted = BTreeSet::new();
+        let mut cleared = BTreeSet::new();
         for span in spans.values().filter(|span| {
             span.provider == provider && span.branch_provenance == super::BranchProvenance::Inferred
         }) {
-            retracted.insert(span.span_id.clone());
             if span.source == super::SpanSource::Backfill {
                 continue;
             }
+            cleared.insert(span.span_id.clone());
             let mut captured = span.clone();
             captured.branch = None;
             captured.branch_provenance = super::BranchProvenance::Captured;
@@ -231,13 +231,24 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             self.change_digest
                 .push(serde_json::to_string(&("delete_span", span_id))?);
         }
+        // A relation dies with the evidence it was derived from: every record
+        // on a removed inferred span goes, and so does any record the
+        // inference itself produced (a branchless ReflogOverlap, or the
+        // TimeOverlap the inferred branch admitted). Captured evidence linked
+        // to a surviving captured span stays — the span keeps its identity,
+        // only its inferred branch is cleared.
         for record in commits.values().filter(|record| {
             record.provider == provider
                 && (record.evidence == super::CommitEvidence::ReflogOverlap
-                    || record
-                        .span_id
-                        .as_ref()
-                        .is_some_and(|id| retracted.contains(id)))
+                    || record.span_id.as_ref().is_some_and(|id| {
+                        removed.contains(id)
+                            || (cleared.contains(id)
+                                && matches!(
+                                    record.evidence,
+                                    super::CommitEvidence::ReflogOverlap
+                                        | super::CommitEvidence::TimeOverlap
+                                ))
+                    }))
         }) {
             self.transaction
                 .execute(
