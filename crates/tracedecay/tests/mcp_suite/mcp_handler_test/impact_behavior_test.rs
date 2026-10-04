@@ -174,6 +174,38 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
         "an unknown seed reports not-found like tracedecay_node: {unknown}"
     );
 
+    let misspelled = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_impact",
+        json!({ "node_id": "calee", "format": "json" }),
+    )
+    .await;
+    let misspelled_text = misspelled
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("impact response missing text: {misspelled}"));
+    assert_eq!(
+        serde_json::from_str::<Value>(misspelled_text).expect("not-found JSON"),
+        json!({
+            "freshness": {"state": "fresh"},
+            "status": "not_found",
+            "reason_code": "node_not_found",
+            "node_id": "calee",
+            "message": "Node not found: calee",
+            "suggestions": [{
+                "node_id": ids["callee"],
+                "name": "callee",
+                "qualified_name": "src/lib.rs::callee",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "start_line": 3,
+                "end_line": 5,
+                "unavailable_fields": ["attrs_start_line"]
+            }]
+        }),
+        "a misspelled seed suggests the symbol it names: {misspelled}"
+    );
+
     assert_refused(
         &server,
         json!({ "node_id": "   ", "format": "json" }),
