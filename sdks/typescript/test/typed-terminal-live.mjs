@@ -1,11 +1,12 @@
 // Invoked by the physical-daemon transport journey after building this SDK.
 import { readFileSync } from "node:fs";
-import {
+import { pathToFileURL } from "node:url";
+const {
   createClient,
   TraceDecayPartialEffectError,
   TraceDecayProblemError,
   TraceDecayResetRequiredError,
-} from "../dist/index.js";
+} = await import(pathToFileURL(process.argv[2]).href);
 
 const { connection, operation, request, deadlineMicros, allowSuccess = false } = JSON.parse(readFileSync(0, "utf8"));
 const client = createClient(connection);
