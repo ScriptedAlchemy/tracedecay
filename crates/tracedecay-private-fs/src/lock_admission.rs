@@ -26,8 +26,8 @@ pub fn lock_shared_until(file: &File, deadline: Instant) -> Result<(), LockAdmis
 
 /// The deadline bounds waiting on contention, not the caller's own latency:
 /// the lock is always attempted once, so a caller descheduled past its
-/// deadline still takes a free lock, and only a holder that outlasts the
-/// deadline times out.
+/// deadline still takes a free lock. Once contended, every retry happens
+/// before the deadline, so a holder that outlasts the deadline times out.
 fn admit_until(
     file: &File,
     deadline: Instant,
@@ -42,6 +42,9 @@ fn admit_until(
                     return Err(LockAdmissionError::TimedOut);
                 }
                 std::thread::sleep(remaining.min(LOCK_POLL_INTERVAL));
+                if Instant::now() >= deadline {
+                    return Err(LockAdmissionError::TimedOut);
+                }
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(LockAdmissionError::Io(error)),
         }
@@ -100,5 +103,24 @@ mod tests {
 
         holder.unlock().unwrap();
         assert!(lock_until(&waiter, Instant::now()).is_ok());
+    }
+
+    #[test]
+    fn a_holder_releasing_after_the_deadline_never_admits_a_contended_waiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = open(&dir.path().join("admission.lock"));
+        let deadline = Instant::now() + Duration::from_millis(5);
+        let released_after_deadline = |_: &File| {
+            if Instant::now() < deadline {
+                Err(std::fs::TryLockError::WouldBlock)
+            } else {
+                Ok(())
+            }
+        };
+
+        assert!(matches!(
+            admit_until(&file, deadline, released_after_deadline),
+            Err(LockAdmissionError::TimedOut)
+        ));
     }
 }
