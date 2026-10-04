@@ -169,6 +169,11 @@ pub enum SessionRefreshBeginPlanV1 {
     /// describes the rows the begin will write so the projector can build
     /// the first batch before anything commits.
     Prepared(Box<SessionRefreshRecoveryV1>),
+    /// The begin committed durably instead of folding: a pending reset
+    /// deletes the base rows the first batch would project from, so the
+    /// operation resumes through durable recovery, which reads the
+    /// post-reset state, in the same pass.
+    Begun,
     /// An equivalent operation already exists; the request attaches to it.
     Joined,
 }
@@ -467,18 +472,51 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let session_id = request.session_id().clone();
         let coverage_request = request.coverage_request().clone();
         let refresh_key = request.refresh_key().cloned();
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        if session_reset_is_pending(&transaction, &session_id).await? {
+            // The begin deletes the base rows a folded first batch would
+            // project from, so planning here can only produce a batch the
+            // committing replay refuses. Commit the begin instead; durable
+            // recovery picks the operation up this pass and projects the
+            // post-reset state.
+            let outcome = begin_session_refresh_in_transaction(
+                &transaction,
+                request,
+                now_micros(BEGIN_REFRESH)?,
+            )
+            .await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    transaction
+                        .rollback()
+                        .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                        .await
+                        .map_err(|rollback| storage(BEGIN_REFRESH, rollback))?;
+                    return Err(error);
+                }
+            };
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            return Ok(match outcome {
+                SessionRefreshBeginTxnOutcome::Started { .. } => SessionRefreshBeginPlanV1::Begun,
+                SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
+            });
+        }
         // The begin mints a random cursor key when no active key exists, and
         // a rolled-back mint leaves the commit replay reading a different key.
         // Provisioning the shared key first makes both replays deterministic;
         // with an active key already committed this transaction writes
         // nothing and its commit appends no WAL frames.
-        let provisioning = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        ensure_active_session_cursor_key_in_transaction(&provisioning).await?;
-        provisioning
+        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+        transaction
             .commit()
             .instrument(tracing::trace_span!("session_temporal.txn.commit"))
             .await
@@ -1648,10 +1686,13 @@ async fn ensure_active_generation(
 /// activates in its place, so the refresh begun next projects every live
 /// effect against an empty base. Receipts at or below the reset generation
 /// describe the deleted rows, so base frontiers and coverage skip them.
-async fn apply_requested_reset(
-    conn: &impl crate::handle::SessionTemporalExec,
+/// Whether the session has a requested reset waiting for a begin to apply
+/// it. [`apply_requested_reset`] performs the same check; the plan path reads
+/// it first because a reset changes what the first batch must project from.
+async fn session_reset_is_pending(
+    conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
-) -> SessionStoreResult<()> {
+) -> SessionStoreResult<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM session_temporal_resets
@@ -1666,6 +1707,14 @@ async fn apply_requested_reset(
         .map_err(|error| storage(BEGIN_REFRESH, error))?
         .is_some();
     drop(rows);
+    Ok(requested)
+}
+
+async fn apply_requested_reset(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+) -> SessionStoreResult<()> {
+    let requested = session_reset_is_pending(conn, session_id).await?;
     if !requested || read_running_operation(conn, session_id).await?.is_some() {
         return Ok(());
     }

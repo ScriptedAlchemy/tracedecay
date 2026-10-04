@@ -728,6 +728,12 @@ pub async fn process_refresh_begin_requests<'a>(
                     pending,
                 });
             }
+            // A pending reset committed the begin instead of folding; the
+            // running operation joins this pass's durable recoveries.
+            Ok(SessionRefreshBeginPlanV1::Begun) => {
+                pending.disarm();
+                report.begun += 1;
+            }
             Ok(SessionRefreshBeginPlanV1::Joined) => {
                 pending.disarm();
                 report.joined += 1;
