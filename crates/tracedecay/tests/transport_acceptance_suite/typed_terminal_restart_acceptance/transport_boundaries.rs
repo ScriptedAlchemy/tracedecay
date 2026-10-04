@@ -1103,16 +1103,37 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
         .to_owned();
     assert_eq!(begin_payload["scope"], "project", "{begun}");
     refresh["handle"] = json!(handle);
-    let status = typescript_call(
-        sdk_output.path(),
-        &mount,
-        &identity,
-        "session_refresh_status",
-        &refresh,
-        None,
-        true,
+    // Establish the settled receipt the cancel must preserve: a refresh that
+    // is still running would settle a cancellation receipt instead.
+    let completion_deadline = Instant::now() + TRANSPORT_TIMEOUT;
+    let status = loop {
+        let status = typescript_call(
+            sdk_output.path(),
+            &mount,
+            &identity,
+            "session_refresh_status",
+            &refresh,
+            None,
+            true,
+        );
+        assert_eq!(status["kind"], "success", "{status}");
+        match status["value"]["outcome"]["value"]["payload"]["outcome"].as_str() {
+            Some("complete") => break status,
+            Some("running") => {
+                assert!(
+                    Instant::now() < completion_deadline,
+                    "refresh never completed: {status}"
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            _ => panic!("refresh settled without completing: {status}"),
+        }
+    };
+    assert_eq!(
+        status["value"]["outcome"]["value"]["payload"]["receipt"]["state"],
+        "complete",
+        "{status}"
     );
-    assert_eq!(status["kind"], "success", "{status}");
     let cancelled = typescript_call(
         sdk_output.path(),
         &mount,
@@ -1125,8 +1146,15 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     // A completed refresh keeps its receipt; cancel must never invent a new
     // operation or turn a completed refresh back into an active one.
     assert_eq!(cancelled["kind"], "success", "{cancelled}");
+    let cancelled_payload = &cancelled["value"]["outcome"]["value"]["payload"];
+    assert_eq!(cancelled_payload["outcome"], "complete", "{cancelled}");
     assert_eq!(
-        cancelled["value"]["outcome"]["value"]["payload"]["operation_id"],
+        cancelled_payload["receipt"]["state"],
+        "complete",
+        "{cancelled}"
+    );
+    assert_eq!(
+        cancelled_payload["operation_id"],
         begin_payload["operation_id"],
         "{cancelled}"
     );
