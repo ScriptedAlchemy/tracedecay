@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
-    ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CommitCategoryV1,
-    CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1, CommitSymbolEntryV1,
-    CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1, DiffContextResultV1,
+    ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CoChangePartnerV1,
+    CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1,
+    CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1, DiffContextResultV1,
     DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1, GitReadCompleteV1,
     GitReadPartialV1, GitReadUnavailableV1, PrAnalysisCoverageV1, PrContextCompleteV1,
     PrContextGraphPendingV1, PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1,
@@ -26,10 +26,8 @@ use tracedecay_contracts::retrieval::{
     PrSymbolPageV1, PrSymbolSelectionV1, SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
 };
 use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
-use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
-use tracedecay_runtime_core::git::GitCommandBounds;
-use tracedecay_runtime_core::git::cochange::co_change_partners;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
@@ -307,83 +305,29 @@ fn context_symbol(symbol: &CodeGraphSymbolSummaryV1) -> Result<GitContextSymbolV
     })
 }
 
-struct BlastRow {
-    name: String,
-    id: SymbolOccurrenceId,
-    is_test_marker: bool,
-    file_is_test: bool,
-    report: bool,
-}
-
-fn blast_row(symbol: &CodeGraphSymbolSummaryV1) -> Result<BlastRow> {
-    let metadata = symbol_metadata(symbol)?;
-    let path = symbol_path(symbol)?;
-    Ok(BlastRow {
-        name: metadata.simple_name.as_str().to_owned(),
-        id: symbol.occurrence.clone(),
-        is_test_marker: tracedecay_code_index::is_test_marker(metadata),
-        file_is_test: tracedecay_code_index::is_test_file(path),
-        report: matches!(
-            metadata.kind.as_str(),
-            "function"
-                | "method"
-                | "struct_method"
-                | "abstract_method"
-                | "constructor"
-                | "arrow_function"
-                | "procedure"
-        ),
-    })
-}
-
-/// Names in `rows` order that no test reaches when `complete` is true.
-///
-/// A counted symbol is reached when it lives in a test file, a test
-/// annotation points at it, or a reached symbol calls or uses it. An
-/// unfinished caller walk is `incomplete` and names nothing.
-fn blast_test_gate(
-    rows: &[BlastRow],
-    calls: &[(&str, &str)],
-    annotates: &[(&str, &str)],
-    complete: bool,
-) -> tracedecay_contracts::retrieval::TestGateV1 {
-    use tracedecay_contracts::retrieval::TestGateV1;
-    if !complete {
-        return TestGateV1::incomplete();
-    }
-    let markers = rows
-        .iter()
-        .filter(|row| row.is_test_marker)
-        .map(|row| row.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    let mut reached = rows
-        .iter()
-        .filter(|row| row.file_is_test && row.report)
-        .map(|row| row.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    for (from, to) in annotates {
-        if markers.contains(from) {
-            reached.insert(*to);
-        }
-    }
-    let mut frontier = reached.iter().copied().collect::<Vec<_>>();
-    while let Some(caller) = frontier.pop() {
-        for (from, to) in calls {
-            if *from == caller && reached.insert(*to) {
-                frontier.push(*to);
-            }
-        }
-    }
-    let untested = rows
-        .iter()
-        .filter(|row| row.report && !reached.contains(row.id.as_str()))
-        .map(|row| row.name.clone())
-        .collect::<Vec<_>>();
-    if untested.is_empty() {
-        TestGateV1::pass()
-    } else {
-        TestGateV1::fail(untested)
-    }
+async fn missing_co_change_partners(
+    project_root: &std::path::Path,
+    history: &str,
+    tree: &str,
+    changed_files: &[String],
+) -> Result<Vec<CoChangePartnerV1>> {
+    Ok(
+        tracedecay_runtime_core::git::co_change::missing_co_change_partners(
+            project_root,
+            history,
+            tree,
+            changed_files,
+        )
+        .await?
+        .into_iter()
+        .map(|partner| CoChangePartnerV1 {
+            file: partner.file,
+            partner_of: partner.partner_of,
+            co_changes: partner.co_changes as u64,
+            partner_of_changes: partner.partner_of_changes as u64,
+        })
+        .collect(),
+    )
 }
 
 fn all_symbols_in_files(
@@ -556,7 +500,6 @@ where
 
     let mut modified_symbols: Vec<GitContextSymbolV1> = Vec::new();
     let mut modified_seen: HashSet<String> = HashSet::new();
-    let mut blast: Vec<BlastRow> = Vec::new();
     let mut impacted_symbols: Vec<GitContextSymbolV1> = Vec::new();
     let mut impacted_seen: HashSet<String> = HashSet::new();
     let mut affected_tests: HashSet<String> = HashSet::new();
@@ -583,7 +526,6 @@ where
             continue;
         }
         modified_symbols.push(context_symbol(symbol)?);
-        blast.push(blast_row(symbol)?);
         modified_ids.push(symbol.occurrence.clone());
     }
 
@@ -641,7 +583,6 @@ where
             continue;
         }
         impacted_symbols.push(context_symbol(impacted_node)?);
-        blast.push(blast_row(impacted_node)?);
         let path = symbol_path(impacted_node)?;
         if has_tests(path) {
             affected_tests.insert(path.to_owned());
@@ -658,133 +599,29 @@ where
     let mut tests_sorted: Vec<String> = affected_tests.into_iter().collect();
     tests_sorted.sort();
 
+    let missing_co_change_partners = tracing::Instrument::instrument(
+        missing_co_change_partners(ctx.project_root(), "HEAD", "HEAD", &files),
+        tracing::trace_span!("mcp.git.diff_context.co_change"),
+    )
+    .await?;
+
     let touched_files = unique_file_paths(
         all_touched_files
             .iter()
             .map(String::as_str)
             .chain(files.iter().map(String::as_str)),
     );
-    let partners = if files.is_empty() {
-        Vec::new()
-    } else {
-        let project_root = ctx.project_root().to_path_buf();
-        let changed_files = files.clone();
-        blocking_git_span("co-change", move || {
-            co_change_partners(&project_root, &changed_files, &GitCommandBounds::default())
-        })
-        .await??
-        .into_iter()
-        .map(|partner| {
-            DiffContextResultV1::co_change_partner(partner.file, partner.partner, partner.together)
-        })
-        .collect()
-    };
 
-    let mut caller_edges: Vec<CanonicalRelationEdgeV1> = Vec::new();
-    let test_gate = if blast.is_empty() {
-        if impacted.complete {
-            tracedecay_contracts::retrieval::TestGateV1::pass()
-        } else {
-            tracedecay_contracts::retrieval::TestGateV1::incomplete()
-        }
-    } else {
-        let ids = blast.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
-        let edges = graph.edges_among(
-            &ids,
-            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-            PR_CONTEXT_MAX_IMPACT_EDGES,
-        )?;
-        caller_edges = edges;
-        if !impacted.complete {
-            tracedecay_contracts::retrieval::TestGateV1::incomplete()
-        } else {
-            let calls = caller_edges
-                .iter()
-                .map(|edge| (edge.from_occurrence.as_str(), edge.to_occurrence.as_str()))
-                .collect::<Vec<_>>();
-            let annotations = graph.callers_truncated(
-                &ids,
-                &[RelationEdgeKindV1::Annotates],
-                PR_CONTEXT_MAX_IMPACT_EDGES,
-            )?;
-            let annotation_count = annotations.iter().map(Vec::len).sum::<usize>();
-            if annotation_count >= PR_CONTEXT_MAX_IMPACT_EDGES {
-                tracedecay_contracts::retrieval::TestGateV1::incomplete()
-            } else {
-                for annotation in annotations.iter().flatten() {
-                    if tracedecay_code_index::is_test_marker(symbol_metadata(&annotation.neighbor)?)
-                    {
-                        blast.push(blast_row(&annotation.neighbor)?);
-                    }
-                }
-                let annotates = annotations
-                    .iter()
-                    .flatten()
-                    .map(|annotation| {
-                        (
-                            annotation.edge.from_occurrence.as_str(),
-                            annotation.edge.to_occurrence.as_str(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                blast_test_gate(&blast, &calls, &annotates, true)
-            }
-        }
-    };
-    let mut known_symbols = modified_symbols.clone();
-    known_symbols.extend(impacted_symbols.iter().cloned());
-    let signature_root = ctx.project_root().to_path_buf();
-    let signature_symbols = modified_symbols.clone();
-    let signature_edits = blocking_git_span("signature-edit", move || {
-        crate::handlers::edit_check::signature_edits(
-            &signature_root,
-            &signature_symbols,
-            &known_symbols,
-            &caller_edges,
-        )
-    })
-    .await??;
-    let budget_tokens = request.budget_tokens;
-    let mut result = DiffContextResultV1 {
+    let result = DiffContextResultV1 {
         changed_files: files,
         modified_symbols,
         impacted_symbols_count: impacted_symbols.len(),
         impacted_symbols,
         impact_complete: impacted.complete,
         affected_tests: tests_sorted,
+        missing_co_change_partners,
         freshness: None,
-        co_change_partners: partners,
-        token_budget: None,
-        test_gate,
-        signature_edits,
     };
-    if let Some(budget) = budget_tokens {
-        let shares = crate::handlers::token_budget::quotas(budget, &[30, 40, 15, 15]);
-        let sections = vec![
-            crate::handlers::token_budget::trim_section(
-                "modified_symbols",
-                &mut result.modified_symbols,
-                shares[0],
-            )?,
-            crate::handlers::token_budget::trim_section(
-                "impacted_symbols",
-                &mut result.impacted_symbols,
-                shares[1],
-            )?,
-            crate::handlers::token_budget::trim_section(
-                "affected_tests",
-                &mut result.affected_tests,
-                shares[2],
-            )?,
-            crate::handlers::token_budget::trim_section(
-                "co_change_partners",
-                &mut result.co_change_partners,
-                shares[3],
-            )?,
-        ];
-        result.impacted_symbols_count = result.impacted_symbols.len();
-        result.token_budget = Some(crate::handlers::token_budget::cut(budget, sections)?);
-    }
     Ok(graph_tool_completion(
         GraphToolResultV1::DiffContext(result),
         touched_files,
@@ -1233,6 +1070,7 @@ struct PrContextGitEvidence {
     merge_base: String,
     commits: Vec<GitCommitSubjectV1>,
     changes: Vec<GitFileChangeV1>,
+    missing_co_change_partners: Vec<CoChangePartnerV1>,
 }
 
 impl PrContextGitEvidence {
@@ -1254,6 +1092,7 @@ impl PrContextGitEvidence {
             commits: self.commits,
             files_changed: self.changes.len(),
             changes: self.changes,
+            missing_co_change_partners: self.missing_co_change_partners,
             symbols_added: 0,
             symbols_removed: 0,
             symbols_modified: 0,
@@ -1263,7 +1102,6 @@ impl PrContextGitEvidence {
             symbol_changes_coverage: coverage,
             next_cursor: None,
             freshness: None,
-            token_budget: None,
         }))
     }
 }
@@ -1338,6 +1176,14 @@ where
     });
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
+    // History up to the merge base is the evidence; the compared change set
+    // is what it is checked against, and partners must survive at head.
+    let missing_co_change_partners = tracing::Instrument::instrument(
+        missing_co_change_partners(ctx.project_root(), &merge_base, &head_oid, &changed_files),
+        tracing::trace_span!("mcp.pr_context.co_change"),
+    )
+    .await?;
+    controls.checkpoint()?;
 
     let maximum_symbols = request
         .maximum_symbols
@@ -1353,6 +1199,7 @@ where
         merge_base,
         commits,
         changes,
+        missing_co_change_partners,
     };
 
     let stage_started = std::time::Instant::now();
@@ -1401,6 +1248,7 @@ where
                 commits: evidence.commits,
                 files_changed: evidence.changes.len(),
                 changes: evidence.changes,
+                missing_co_change_partners: evidence.missing_co_change_partners,
                 symbols_added: 0,
                 symbols_modified: 0,
                 added: Vec::new(),
@@ -1425,7 +1273,6 @@ where
                 impacted_modules_coverage: unavailable_coverage,
                 verified_graph_evidence: dependency_hints::unavailable_evidence(&error),
                 freshness: None,
-                token_budget: None,
             };
             timings.total = elapsed_micros(total_started);
             tracing::info!(
@@ -1590,161 +1437,39 @@ where
     };
     controls.checkpoint()?;
     timings.symbol_page = Some(elapsed_micros(stage_started));
-    // Removed occurrences share the signed cursor's ordering with head occurrences.
-    // The graph query accepts an exclusive key even when it exists only at base.
-    enum Candidate<'a> {
-        Head(&'a CodeGraphSymbolSummaryV1),
-        Removed(&'a tracedecay_query::code_search::CodeIndexBranchSymbolV1),
-    }
-    impl Candidate<'_> {
-        fn occurrence(&self) -> &SymbolOccurrenceId {
-            match self {
-                Self::Head(symbol) => &symbol.occurrence,
-                Self::Removed(symbol) => &symbol.symbol_occurrence_id,
-            }
-        }
-    }
-    let mut candidates = symbol_page
+    let symbol_has_more = symbol_page.has_more;
+    let next_page_key = symbol_page
         .symbols
-        .iter()
-        .map(Candidate::Head)
-        .chain(
-            symbol_diff
-                .removed
-                .iter()
-                .filter(|symbol| {
-                    cursor_position
-                        .as_ref()
-                        .is_none_or(|position| symbol.symbol_occurrence_id > position.after)
-                })
-                .map(Candidate::Removed),
-        )
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.occurrence().cmp(right.occurrence()));
-    let mut symbol_has_more = symbol_page.has_more || candidates.len() > maximum_symbols;
-    candidates.truncate(maximum_symbols);
-    let shares = request
-        .budget_tokens
-        .map(|budget| crate::handlers::token_budget::quotas(budget, &[25, 15, 25, 15, 20]));
-    let mut symbol_tokens = [0_u32; 3];
-    let mut symbol_totals = [0_u32; 3];
-    let mut symbol_shown = [0_u32; 3];
-    let mut available_config_summaries = HashSet::new();
-    for candidate in &candidates {
-        match candidate {
-            Candidate::Removed(_) => symbol_totals[1] += 1,
-            Candidate::Head(symbol) => {
-                let section = if added_ids.contains(symbol.occurrence.as_str()) {
-                    0
-                } else if modified_ids.contains(symbol.occurrence.as_str()) {
-                    2
-                } else {
-                    continue;
-                };
-                let path = symbol_path(symbol)?;
-                if classify_file_role(path, &files_with_inline_tests) != GitFileRoleV1::Config
-                    || available_config_summaries.insert((section, path))
-                {
-                    symbol_totals[section] += 1;
-                }
-            }
-        }
-    }
-    let mut next_page_key = None;
+        .last()
+        .map(|symbol| symbol.occurrence.clone());
     let mut added = Vec::new();
-    let mut removed = Vec::new();
     let mut modified = Vec::new();
-    let mut nodes = Vec::new();
+    let mut nodes = Vec::with_capacity(symbol_page.symbols.len());
     let mut config_key_counts = HashMap::<(bool, String), usize>::new();
-    for candidate in candidates {
+    for symbol in symbol_page.symbols {
         controls.checkpoint()?;
-        let occurrence = candidate.occurrence().clone();
-        match candidate {
-            Candidate::Removed(symbol) => {
-                let entry = compared_symbol(symbol);
-                let cost = if shares.is_some() {
-                    crate::handlers::token_budget::estimated_tokens(&entry)?
-                } else {
-                    0
-                };
-                if shares.as_ref().is_some_and(|shares| {
-                    symbol_shown[1] > 0 && symbol_tokens[1].saturating_add(cost) > shares[1]
-                }) {
-                    symbol_has_more = true;
-                    break;
-                }
-                symbol_tokens[1] = symbol_tokens[1].saturating_add(cost);
-                symbol_shown[1] += 1;
-                removed.push(entry);
-            }
-            Candidate::Head(symbol) => {
-                let path = symbol_path(symbol)?;
-                let is_added = added_ids.contains(symbol.occurrence.as_str());
-                let is_modified = modified_ids.contains(symbol.occurrence.as_str());
-                if !is_added && !is_modified {
-                    next_page_key = Some(occurrence);
-                    continue;
-                }
-                let section = if is_added { 0 } else { 2 };
-                let config_key = (is_added, path.to_owned());
-                let config_count = config_key_counts.get(&config_key).copied().unwrap_or(0);
-                let is_config =
-                    classify_file_role(path, &files_with_inline_tests) == GitFileRoleV1::Config;
-                let entry = if is_config {
-                    PrSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
-                        file: path.to_owned(),
-                        kind: ConfigSummaryKindV1::ConfigSummary,
-                        config_keys: config_count + 1,
-                    })
-                } else {
-                    PrSymbolEntryV1::Symbol(context_symbol(symbol)?)
-                };
-                let replacing_summary = is_config && config_count > 0;
-                let prior_cost = if replacing_summary && shares.is_some() {
-                    crate::handlers::token_budget::estimated_tokens(
-                        &PrSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
-                            file: path.to_owned(),
-                            kind: ConfigSummaryKindV1::ConfigSummary,
-                            config_keys: config_count,
-                        }),
-                    )?
-                } else {
-                    0
-                };
-                let cost = if shares.is_some() {
-                    crate::handlers::token_budget::estimated_tokens(&entry)?
-                } else {
-                    0
-                };
-                let tokens = symbol_tokens[section]
-                    .saturating_sub(prior_cost)
-                    .saturating_add(cost);
-                let replacing_only_row = replacing_summary && symbol_shown[section] == 1;
-                if shares.as_ref().is_some_and(|shares| {
-                    symbol_shown[section] > 0 && !replacing_only_row && tokens > shares[section]
-                }) {
-                    symbol_has_more = true;
-                    break;
-                }
-                symbol_tokens[section] = tokens;
-                if !replacing_summary {
-                    symbol_shown[section] += 1;
-                }
-                if is_config {
-                    config_key_counts.insert(config_key, config_count + 1);
-                } else {
-                    if is_added {
-                        added.push(entry);
-                    } else {
-                        modified.push(entry);
-                    }
-                    nodes.push(symbol.clone());
-                }
-            }
+        let path = symbol_path(&symbol)?;
+        let is_added = added_ids.contains(symbol.occurrence.as_str());
+        let is_modified = modified_ids.contains(symbol.occurrence.as_str());
+        if !is_added && !is_modified {
+            continue;
         }
-        next_page_key = Some(occurrence);
+        if classify_file_role(path, &files_with_inline_tests) == GitFileRoleV1::Config {
+            *config_key_counts
+                .entry((is_added, path.to_owned()))
+                .or_default() += 1;
+            continue;
+        }
+        let entry = PrSymbolEntryV1::Symbol(context_symbol(&symbol)?);
+        if is_added {
+            added.push(entry);
+        } else {
+            modified.push(entry);
+        }
+        nodes.push(symbol);
     }
     let mut config_summaries = config_key_counts.into_iter().collect::<Vec<_>>();
+    // Added summaries sort before modified ones, then by path.
     config_summaries.sort_by(|left, right| (!left.0.0, &left.0.1).cmp(&(!right.0.0, &right.0.1)));
     for ((is_added, path), config_keys) in config_summaries {
         let summary = PrSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
@@ -1758,10 +1483,12 @@ where
             modified.push(summary);
         }
     }
-    let returned_symbols = added
-        .len()
-        .saturating_add(removed.len())
-        .saturating_add(modified.len());
+    let removed = symbol_diff
+        .removed
+        .iter()
+        .map(compared_symbol)
+        .collect::<Vec<_>>();
+    let returned_symbols = added.len().saturating_add(modified.len());
 
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
@@ -1855,7 +1582,7 @@ where
         complete: impact_complete,
         selection: PrCoverageSelectionV1::DeterministicBoundedPrefix,
     };
-    let mut result = PrContextCompleteV1 {
+    let result = PrContextCompleteV1 {
         status: GitReadCompleteV1::Complete,
         base: evidence.base,
         head: evidence.head,
@@ -1866,6 +1593,7 @@ where
         commits: evidence.commits,
         files_changed: evidence.changes.len(),
         changes: evidence.changes,
+        missing_co_change_partners: evidence.missing_co_change_partners,
         symbols_added: added.len(),
         symbols_removed: removed.len(),
         symbols_modified: modified.len(),
@@ -1896,42 +1624,7 @@ where
         impacted_modules: impacted_sorted,
         impacted_modules_coverage: bounded_coverage,
         freshness: None,
-        token_budget: None,
     };
-    if let (Some(budget), Some(shares)) = (request.budget_tokens, shares) {
-        let mut sections = ["added", "removed", "modified"]
-            .into_iter()
-            .enumerate()
-            .map(
-                |(index, section)| crate::handlers::token_budget::SectionCut {
-                    section,
-                    total: symbol_totals[index],
-                    shown: symbol_shown[index],
-                    est_tokens: symbol_tokens[index],
-                    over_ceiling: symbol_tokens[index] > shares[index],
-                },
-            )
-            .collect::<Vec<_>>();
-        sections.push(crate::handlers::token_budget::trim_section(
-            "affected_tests",
-            &mut result.affected_tests,
-            shares[3],
-        )?);
-        sections.push(crate::handlers::token_budget::trim_section(
-            "impacted_modules",
-            &mut result.impacted_modules,
-            shares[4],
-        )?);
-        if sections[3].shown < sections[3].total {
-            result.affected_tests_coverage.complete = false;
-        }
-        if sections[4].shown < sections[4].total {
-            result.impacted_modules_coverage.complete = false;
-        }
-        result.analysis_coverage.complete &=
-            result.affected_tests_coverage.complete && result.impacted_modules_coverage.complete;
-        result.token_budget = Some(crate::handlers::token_budget::cut(budget, sections)?);
-    }
     timings.assemble = Some(elapsed_micros(stage_started));
     timings.total = elapsed_micros(total_started);
     tracing::info!(
@@ -2056,48 +1749,6 @@ mod blocking_git_span_tests {
         .expect("cancelled worker joins");
         trigger.await.expect("cancellation trigger joins");
         assert!(observed.exited.load(Ordering::Acquire));
-    }
-}
-
-#[cfg(test)]
-mod blast_gate_tests {
-    use super::{BlastRow, blast_test_gate};
-    use tracedecay_domain::SymbolOccurrenceId;
-
-    fn row(name: &str, file_is_test: bool, report: bool, marker: bool) -> BlastRow {
-        BlastRow {
-            name: name.to_owned(),
-            id: SymbolOccurrenceId::new(name).expect("id"),
-            is_test_marker: marker,
-            file_is_test,
-            report,
-        }
-    }
-
-    #[test]
-    fn an_untested_caller_is_named_and_a_tested_callee_is_not() {
-        let rows = [
-            row("checks", false, true, false),
-            row("test", false, false, true),
-            row("parse", false, true, false),
-            row("save", false, true, false),
-        ];
-        let calls = [("checks", "parse"), ("save", "parse")];
-        let annotates = [("test", "checks")];
-        let gate = blast_test_gate(&rows, &calls, &annotates, true);
-        assert_eq!(gate.verdict, "fail");
-        assert_eq!(gate.exit_code, 4);
-        assert_eq!(gate.untested, ["save"]);
-
-        let covered = [("checks", "parse"), ("checks", "save")];
-        let covered_gate = blast_test_gate(&rows, &covered, &annotates, true);
-        assert_eq!(covered_gate.verdict, "pass");
-        assert_eq!(covered_gate.exit_code, 0);
-        assert!(covered_gate.untested.is_empty());
-        let unfinished = blast_test_gate(&rows, &calls, &annotates, false);
-        assert_eq!(unfinished.verdict, "incomplete");
-        assert_eq!(unfinished.exit_code, 0);
-        assert!(unfinished.untested.is_empty());
     }
 }
 

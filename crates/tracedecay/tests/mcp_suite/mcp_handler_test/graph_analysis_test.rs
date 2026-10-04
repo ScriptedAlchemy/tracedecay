@@ -4489,9 +4489,6 @@ async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
                 (Some("warming"), _, _, _)
                 | (Some("stale"), Some("ready"), _, Some("verifying"))
                 | (_, Some("pending"), _, _)
-                // The interactive catalog warms lazily after the verified
-                // snapshot lands; like "pending" it resolves to "ready".
-                | (_, Some("warming"), _, _)
                 | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
                     tokio::task::yield_now().await;
                 }
@@ -4528,6 +4525,107 @@ async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
         .and_then(|result| result["id"].as_str())
         .unwrap_or_else(|| panic!("node '{name}' not found in production generation: {payload}"))
         .to_owned()
+}
+
+/// `tracedecay_diff_context` and `tracedecay_pr_context` warn when a change
+/// edits a file but leaves out the file history says changes with it: here
+/// every schema change on `master` shipped with its migration.
+#[tokio::test]
+async fn git_context_warns_about_co_change_partners_missing_from_the_change() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("migrations")).unwrap();
+    git_with_pinned_dates(project, &["init", "-b", "master"], None);
+    for version in 0..3 {
+        fs::write(
+            project.join("src/schema.rs"),
+            format!("pub const VERSION: u32 = {version};\n"),
+        )
+        .unwrap();
+        fs::write(
+            project.join("migrations/next.sql"),
+            format!("-- schema version {version}\n"),
+        )
+        .unwrap();
+        git_with_pinned_dates(
+            project,
+            &["add", "--", "src/schema.rs", "migrations/next.sql"],
+            None,
+        );
+        git_with_pinned_dates(project, &["commit", "-m", "bump schema"], None);
+    }
+    fs::write(project.join("src/lib.rs"), "pub mod schema;\n").unwrap();
+    git_with_pinned_dates(project, &["add", "--", "src/lib.rs"], None);
+    git_with_pinned_dates(project, &["commit", "-m", "expose schema"], None);
+    git_with_pinned_dates(project, &["switch", "-c", "feature"], None);
+    fs::write(
+        project.join("src/schema.rs"),
+        "pub const VERSION: u32 = 3;\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub mod schema;\n\npub fn version() -> u32 {\n    schema::VERSION\n}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "--", "src/schema.rs", "src/lib.rs"], None);
+    git_with_pinned_dates(project, &["commit", "-m", "bump schema alone"], None);
+    let host = init_test_project(project).await;
+
+    let pr = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        pr["missing_co_change_partners"],
+        json!([{
+            "file": "migrations/next.sql",
+            "partner_of": "src/schema.rs",
+            "co_changes": 3,
+            "partner_of_changes": 3
+        }]),
+        "{pr}"
+    );
+
+    let diff = |files: Value| {
+        let host = &host;
+        async move {
+            let result = handle_tool_call(
+                host,
+                "tracedecay_diff_context",
+                json!({"files": files, "format": "json"}),
+                None,
+            )
+            .await
+            .expect("diff_context");
+            extract_json(&result.value)
+        }
+    };
+    let without_migration = diff(json!(["src/schema.rs", "src/lib.rs"])).await;
+    assert_eq!(
+        without_migration["missing_co_change_partners"],
+        json!([{
+            "file": "migrations/next.sql",
+            "partner_of": "src/schema.rs",
+            "co_changes": 3,
+            "partner_of_changes": 4
+        }]),
+        "HEAD history includes the feature commit that changed the schema alone: {without_migration}"
+    );
+    let with_migration = diff(json!([
+        "src/schema.rs",
+        "src/lib.rs",
+        "migrations/next.sql"
+    ]))
+    .await;
+    assert_eq!(
+        with_migration["missing_co_change_partners"],
+        json!([]),
+        "{with_migration}"
+    );
 }
 
 // `tracedecay_diff_context` as an agent host observes it: one production
@@ -4699,7 +4797,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols": [],
             "impact_complete": true,
             "affected_tests": [],
-            "test_gate": {"verdict": "pass", "exit_code": 0, "untested": []}
+            "missing_co_change_partners": []
         })
     );
 
@@ -4721,7 +4819,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols": [],
             "impact_complete": true,
             "affected_tests": [],
-            "test_gate": {"verdict": "pass", "exit_code": 0, "untested": []}
+            "missing_co_change_partners": []
         })
     );
 
@@ -5184,7 +5282,9 @@ fn assert_exact_hotspot(
     name: &str,
     file: &str,
     line: u64,
-    [incoming, outgoing, total, churn]: [u64; 4],
+    incoming: u64,
+    outgoing: u64,
+    total: u64,
 ) {
     let id = row["id"]
         .as_str()
@@ -5201,7 +5301,6 @@ fn assert_exact_hotspot(
             "incoming": incoming,
             "outgoing": outgoing,
             "total": total,
-            "churn": churn,
         }),
         "{row}"
     );
@@ -5222,8 +5321,8 @@ fn hotspots(payload: &Value) -> &[Value] {
 fn assert_chain_ranking(payload: &Value) {
     let rows = hotspots(payload);
     assert_eq!(rows.len(), 4, "{payload}");
-    assert_exact_hotspot(&rows[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1]);
-    assert_exact_hotspot(&rows[3], "quiet", "src/calls.ts", 1, [0, 0, 0, 1]);
+    assert_exact_hotspot(&rows[0], "mid", "src/calls.ts", 9, 1, 1, 2);
+    assert_exact_hotspot(&rows[3], "quiet", "src/calls.ts", 1, 0, 0, 0);
     let mut tied = [rows[1].clone(), rows[2].clone()];
     tied.sort_by(|left, right| {
         left["name"]
@@ -5231,8 +5330,8 @@ fn assert_chain_ranking(payload: &Value) {
             .unwrap_or("")
             .cmp(right["name"].as_str().unwrap_or(""))
     });
-    assert_exact_hotspot(&tied[0], "hub", "src/calls.ts", 13, [0, 1, 1, 1]);
-    assert_exact_hotspot(&tied[1], "leaf", "src/calls.ts", 5, [1, 0, 1, 1]);
+    assert_exact_hotspot(&tied[0], "hub", "src/calls.ts", 13, 0, 1, 1);
+    assert_exact_hotspot(&tied[1], "leaf", "src/calls.ts", 5, 1, 0, 1);
     assert!(
         rows.windows(2)
             .all(|pair| pair[0]["total"].as_u64() >= pair[1]["total"].as_u64()),
@@ -5243,7 +5342,7 @@ fn assert_chain_ranking(payload: &Value) {
 fn assert_fanout_page(payload: &Value, expected_count: usize) {
     let rows = hotspots(payload);
     assert_eq!(rows.len(), expected_count, "{payload}");
-    assert_exact_hotspot(&rows[0], "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
+    assert_exact_hotspot(&rows[0], "hub", "src/fanout.ts", 1, 101, 0, 101);
     let mut seen = Vec::new();
     for row in rows.iter().skip(1) {
         let name = row["name"]
@@ -5255,7 +5354,7 @@ fn assert_fanout_page(payload: &Value, expected_count: usize) {
             .parse()
             .unwrap_or_else(|_| panic!("caller index missing: {row}"));
         assert!(index < 101, "caller outside the fixture: {row}");
-        assert_exact_hotspot(row, name, "src/fanout.ts", index + 2, [0, 1, 1, 1]);
+        assert_exact_hotspot(row, name, "src/fanout.ts", index + 2, 0, 1, 1);
         seen.push(index);
     }
     seen.sort_unstable();
@@ -5312,7 +5411,7 @@ fn assert_clamped_truncation(payload: &Value) {
             &array[..=end]
         )
     });
-    assert_exact_hotspot(&first, "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
+    assert_exact_hotspot(&first, "hub", "src/fanout.ts", 1, 101, 0, 101);
 
     let handle = payload["handle"]
         .as_str()
@@ -5368,14 +5467,14 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let chain_one_payload = parse_body(&chain_limit_one);
     let one = hotspots(&chain_one_payload);
     assert_eq!(one.len(), 1, "{chain_one_payload}");
-    assert_exact_hotspot(&one[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1]);
+    assert_exact_hotspot(&one[0], "mid", "src/calls.ts", 9, 1, 1, 2);
     assert_savings_footer(&chain_limit_one, CHAIN_SOURCE.len());
 
     let mid_id = one[0]["id"].as_str().expect("mid occurrence id").to_owned();
     assert_eq!(
         body_text(&chain_markdown),
         format!(
-            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **churn:** 1\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
+            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
         )
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());
@@ -5409,158 +5508,11 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let fanout_one_payload = parse_body(&fanout_one);
     let fanout_top = hotspots(&fanout_one_payload);
     assert_eq!(fanout_top.len(), 1, "{fanout_one_payload}");
-    assert_exact_hotspot(&fanout_top[0], "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
+    assert_exact_hotspot(&fanout_top[0], "hub", "src/fanout.ts", 1, 101, 0, 101);
     assert_savings_footer(&fanout_one, fanout_bytes);
 
     assert_clamped_truncation(&parse_body(&fanout_capped));
     assert_savings_footer(&fanout_capped, fanout_bytes);
-}
-
-const STABLE_SOURCE: &str = "\
-export function hub(): number {\n\
-  return 1;\n\
-}\n\
-\n\
-export function a(): number {\n\
-  return hub();\n\
-}\n\
-\n\
-export function b(): number {\n\
-  return hub();\n\
-}\n\
-\n\
-export function c(): number {\n\
-  return hub();\n\
-}\n\
-";
-
-const CHURNED_SOURCE: &str = "\
-export function leaf(): number {\n\
-  return 1;\n\
-}\n\
-\n\
-export function mid(): number {\n\
-  return leaf();\n\
-}\n\
-\n\
-export function top(): number {\n\
-  return mid();\n\
-}\n\
-";
-
-fn commit_all(project: &Path, message: &str) {
-    git_run(project, &["add", "."]);
-    git_run(
-        project,
-        &[
-            "-c",
-            "user.name=TraceDecay Tests",
-            "-c",
-            "user.email=tests@tracedecay.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            message,
-        ],
-    );
-}
-
-#[tokio::test]
-async fn hotspots_weights_connectivity_by_file_churn() {
-    let dir = test_temp_dir();
-    let root = dir.path().join("project");
-    write_package(&root, "hotspots-churn");
-    fs::write(root.join("src/stable.ts"), STABLE_SOURCE).unwrap();
-    fs::write(root.join("src/churned.ts"), CHURNED_SOURCE).unwrap();
-    fs::write(
-        root.join("src/isolated.ts"),
-        "export function lonely() { return 0; }\n",
-    )
-    .unwrap();
-    git_run(&root, &["init", "--quiet"]);
-    commit_all(&root, "fixture");
-    for revision in 1..=2 {
-        let mut source = fs::read_to_string(root.join("src/churned.ts")).unwrap();
-        writeln!(source, "// revision {revision}").unwrap();
-        fs::write(root.join("src/churned.ts"), source).unwrap();
-        commit_all(&root, &format!("touch churned.ts {revision}"));
-    }
-    for revision in 1..=7 {
-        fs::write(
-            root.join("src/isolated.ts"),
-            format!("export function lonely() {{ return {revision}; }}\n"),
-        )
-        .unwrap();
-        commit_all(&root, &format!("touch isolated.ts {revision}"));
-    }
-    let host = init_test_project(&root).await;
-    let result = call_hotspots(&host, json!({"format": "json", "limit": 3})).await;
-    close_test_graph(host).await;
-
-    let payload = parse_body(&result);
-    let rows = hotspots(&payload);
-    assert_eq!(rows.len(), 3, "{payload}");
-    assert_exact_hotspot(&rows[0], "mid", "src/churned.ts", 5, [1, 1, 2, 3]);
-    assert_exact_hotspot(&rows[1], "lonely", "src/isolated.ts", 1, [0, 0, 0, 8]);
-    assert_exact_hotspot(&rows[2], "hub", "src/stable.ts", 1, [3, 0, 3, 1]);
-}
-
-#[tokio::test]
-async fn hotspots_reports_unavailable_churn_when_git_is_missing() {
-    const CHILD_ROOT: &str = "TRACEDECAY_HOTSPOTS_MISSING_GIT_PROJECT";
-    if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let root = std::path::PathBuf::from(root);
-        let harness = ProductionProjectCompositionHarnessV1::open(
-            root.parent().expect("fixture isolation root"),
-            [root.clone()],
-        )
-        .await
-        .expect("production hotspot composition without Git CLI");
-        let host = MountedProductionProject {
-            harness,
-            project_root: root,
-        };
-        wait_for_current_graph(&host).await;
-        let result = call_hotspots(&host, json!({"format": "json"})).await;
-        close_test_graph(host).await;
-        let payload = parse_body(&result);
-        assert_eq!(payload["unavailable_fields"], json!(["churn"]));
-        let rows = hotspots(&payload);
-        assert_eq!(rows.len(), 4, "{payload}");
-        assert_eq!(rows[0]["name"], "mid");
-        assert_eq!(rows[0]["total"], 2);
-        assert_eq!(rows[3]["name"], "quiet");
-        assert_eq!(rows[3]["total"], 0);
-        for row in rows {
-            assert!(row.get("churn").is_none(), "{row}");
-        }
-        return;
-    }
-    let dir = test_temp_dir();
-    let root = dir.path().join("project");
-    write_chain_project(&root);
-    git_run(&root, &["init", "--quiet"]);
-    commit_all(&root, "fixture");
-    let filter = format!(
-        "{}::hotspots_reports_unavailable_churn_when_git_is_missing",
-        module_path!().split_once("::").expect("test module path").1,
-    );
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args([filter.as_str(), "--exact", "--nocapture"])
-        .env(CHILD_ROOT, &root)
-        .env("GIT", dir.path().join("missing-git"))
-        .output()
-        .expect("run isolated missing-Git hotspot journey");
-    assert!(
-        output.status.success(),
-        "stdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-        "{output:?}"
-    );
 }
 
 // Literal `tracedecay_recursion` results from production MCP `tools/call`.
@@ -5839,106 +5791,4 @@ fn fs_write_fixture(project_root: &Path) {
     std::fs::write(project_root.join("src/direct.rs"), DIRECT_SOURCE).unwrap();
     std::fs::write(project_root.join("src/mutual.rs"), MUTUAL_SOURCE).unwrap();
     std::fs::write(project_root.join("src/noise.rs"), NOISE_SOURCE).unwrap();
-}
-
-#[tokio::test]
-async fn diff_context_gate_reaches_cross_file_inline_tests_without_covering_their_neighbors() {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        for (path, source) in [
-            ("src/lib.rs", "mod logic; mod uncovered; #[cfg(test)] mod checks;\n"),
-            ("src/logic.rs", "pub fn covered(value: u32) -> u32 { value + 1 }\n"),
-            ("src/uncovered.rs", "pub fn uncovered(value: u32) -> u32 { value + 2 }\n"),
-            ("src/checks.rs", "#[test]\nfn verifies_logic() { let observed = crate::logic::covered(4); assert_eq!(observed, 5); }\nfn untested_neighbor() -> u32 { 9 }\n"),
-        ] {
-            fs::write(project.join(path), source).unwrap();
-        }
-    }).await;
-    wait_for_current_graph(&fixture).await;
-    for (path, expected) in [
-        (
-            "src/logic.rs",
-            json!({"verdict":"pass","exit_code":0,"untested":[]}),
-        ),
-        (
-            "src/uncovered.rs",
-            json!({"verdict":"fail","exit_code":4,"untested":["uncovered"]}),
-        ),
-        (
-            "src/checks.rs",
-            json!({"verdict":"fail","exit_code":4,"untested":["untested_neighbor"]}),
-        ),
-    ] {
-        let result = call_production_tool(
-            &fixture.harness,
-            &fixture.project_root,
-            "tracedecay_diff_context",
-            json!({"files":[path],"depth":3,"format":"json"}),
-        )
-        .await
-        .expect("real diff context");
-        let result = extract_json(&result.value);
-        assert_eq!(result["impact_complete"], true, "{result}");
-        assert_eq!(result["test_gate"], expected, "{result}");
-    }
-    fixture.harness.shutdown().await;
-}
-
-#[tokio::test]
-async fn diff_context_signature_edits_keep_nested_arguments_and_exact_callers() {
-    const LOCAL: &str = "mod target;\nmod calls;\npub fn local_target(pair: (u32, u32), extra: u32) {}\npub fn first() {\n    local_target(\n        (1, 2)\n    );\n    local_target((3, 4), 5);\n}\npub fn second() { local_target((3, 4), 5); }\n";
-    const REMOTE: &str = "pub fn remote_target(pair: (u32, u32), extra: u32) {}\n";
-    const CALLERS: &str = "pub fn cross_first() {\n    crate::target::remote_target(\n        (1, 2)\n    );\n    crate::target::remote_target((3, 4), 5);\n}\npub fn cross_second() { crate::target::remote_target((3, 4), 5); }\n";
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        for (path, source) in [
-            ("src/lib.rs", LOCAL),
-            ("src/target.rs", REMOTE),
-            ("src/calls.rs", CALLERS),
-        ] {
-            fs::write(
-                project.join(path),
-                source
-                    .replace(", extra: u32", "")
-                    .replace("(3, 4), 5", "(3, 4)"),
-            )
-            .unwrap();
-        }
-        crate::support::commit_worktree(project, "one-parameter baseline");
-        for (path, source) in [
-            ("src/lib.rs", LOCAL),
-            ("src/target.rs", REMOTE),
-            ("src/calls.rs", CALLERS),
-        ] {
-            fs::write(project.join(path), source).unwrap();
-        }
-    })
-    .await;
-    git_run(&fixture.project_root, &["reset", "--soft", "HEAD^"]);
-    wait_for_current_graph(&fixture).await;
-    let response = call_production_tool(
-        &fixture.harness,
-        &fixture.project_root,
-        "tracedecay_diff_context",
-        json!({"files":["src/lib.rs", "src/target.rs"], "depth":3, "format":"json"}),
-    )
-    .await
-    .expect("real signature edit analysis");
-    let payload = extract_json(&response.value);
-    let mut edits = payload["signature_edits"]
-        .as_array()
-        .expect("signature edits")
-        .clone();
-    edits.sort_by(|left, right| left["symbol"].as_str().cmp(&right["symbol"].as_str()));
-    assert_eq!(
-        edits,
-        vec![
-            json!({"symbol":"local_target", "file":"src/lib.rs", "status":"contract_change", "old_parameters":1, "new_parameters":2,
-            "incompatible":[{"name":"first", "file":"src/lib.rs", "line":5, "arguments":1}]}),
-            json!({"symbol":"remote_target", "file":"src/target.rs", "status":"contract_change", "old_parameters":1, "new_parameters":2,
-            "incompatible":[{"name":"cross_first", "file":"src/calls.rs", "line":2, "arguments":1}]}),
-        ],
-        "{payload}"
-    );
-    fixture.harness.shutdown().await;
 }

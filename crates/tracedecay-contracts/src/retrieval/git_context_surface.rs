@@ -233,6 +233,19 @@ pub struct GitContextSymbolV1 {
     pub line: u32,
 }
 
+/// A file that historically changes with `partner_of` but is missing from the
+/// change set under review, e.g. a migration beside its schema.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoChangePartnerV1 {
+    pub file: String,
+    pub partner_of: String,
+    /// Commits that changed both `partner_of` and `file`.
+    pub co_changes: u64,
+    /// Commits that changed `partner_of`.
+    pub partner_of_changes: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiffContextResultV1 {
@@ -244,6 +257,9 @@ pub struct DiffContextResultV1 {
     /// still unexplored.
     pub impact_complete: bool,
     pub affected_tests: Vec<String>,
+    /// Files that usually change with a changed file, per bounded Git
+    /// history, but are absent from this change set.
+    pub missing_co_change_partners: Vec<CoChangePartnerV1>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
@@ -598,6 +614,9 @@ pub struct PrContextCompleteV1 {
     pub commits: Vec<GitCommitSubjectV1>,
     pub files_changed: usize,
     pub changes: Vec<GitFileChangeV1>,
+    /// Files that usually change with a changed file, per bounded Git
+    /// history, but are absent from this change set.
+    pub missing_co_change_partners: Vec<CoChangePartnerV1>,
     pub symbols_added: usize,
     pub symbols_removed: usize,
     pub symbols_modified: usize,
@@ -637,6 +656,9 @@ pub struct PrContextSymbolsUnavailableV1 {
     pub commits: Vec<GitCommitSubjectV1>,
     pub files_changed: usize,
     pub changes: Vec<GitFileChangeV1>,
+    /// Files that usually change with a changed file, per bounded Git
+    /// history, but are absent from this change set.
+    pub missing_co_change_partners: Vec<CoChangePartnerV1>,
     pub symbols_added: usize,
     pub symbols_removed: usize,
     pub symbols_modified: usize,
@@ -669,6 +691,9 @@ pub struct PrContextGraphPendingV1 {
     pub commits: Vec<GitCommitSubjectV1>,
     pub files_changed: usize,
     pub changes: Vec<GitFileChangeV1>,
+    /// Files that usually change with a changed file, per bounded Git
+    /// history, but are absent from this change set.
+    pub missing_co_change_partners: Vec<CoChangePartnerV1>,
     pub symbols_added: usize,
     pub symbols_modified: usize,
     pub added: Vec<PrSymbolEntryV1>,
