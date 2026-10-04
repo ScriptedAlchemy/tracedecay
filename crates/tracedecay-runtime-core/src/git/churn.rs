@@ -7,7 +7,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::{GitCommandBounds, bounded_git_output, try_git_program};
 use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
 
-/// Counts commits touching each exact UTF-8 Git path during the requested window.
+/// Counts commits touching each exact UTF-8 path, relative to `project_root`
+/// (which may sit below the repository root), during the requested window.
 /// Missing/unborn repositories have no history. Unreadable history and paths that
 /// cannot be represented by the graph's string identity are errors, not zero churn.
 #[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
@@ -62,6 +63,7 @@ fn read_file_churn(
             "log",
             "--format=",
             "--name-only",
+            "--relative",
             "-z",
             &format!("--since={days} days ago"),
         ],
@@ -164,6 +166,39 @@ mod tests {
             git(&["commit", "-m", "invalid path"]);
             assert!(read_file_churn(root, 90, &GitCommandBounds::default()).is_err());
         }
+    }
+
+    #[test]
+    fn subdirectory_project_keys_paths_relative_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path();
+        let project = repository.join("packages/app");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new(try_git_program().unwrap())
+                .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+                .args(args)
+                .current_dir(repository)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        };
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.ts"), "one").unwrap();
+        std::fs::write(project.join("src/util.ts"), "one").unwrap();
+        std::fs::write(repository.join("outside.ts"), "one").unwrap();
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "first"]);
+        std::fs::write(project.join("src/main.ts"), "two").unwrap();
+        std::fs::write(repository.join("outside.ts"), "two").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "second"]);
+
+        let counts = read_file_churn(&project, 90, &GitCommandBounds::default()).unwrap();
+        assert_eq!(
+            counts,
+            HashMap::from([("src/main.ts".to_owned(), 2), ("src/util.ts".to_owned(), 1)])
+        );
     }
 
     /// Report whether `directory`'s filesystem accepts a name that is not
