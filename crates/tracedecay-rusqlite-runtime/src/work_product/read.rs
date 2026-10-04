@@ -64,7 +64,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    WorkProductJournalEntryV1, WorkProductPublishedVersionV1, fold_graph, load_covered_journal,
+    JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1, load_covered_journal,
     verified_version,
 };
 use crate::work::WorkSqliteStorage;
@@ -150,30 +150,47 @@ fn read_graph(
         return Err(PortError::Unavailable);
     }
 
-    let entries = build_entries(
-        storage,
-        authority,
-        &covered.journal,
-        &covered.published,
-        request.observed_at,
-    )?;
+    // A read cannot include a version this authority had not observed at the
+    // caller's observation instant. Besides preserving forensic truth, this
+    // lets a prepared mutation read its former head and reach the event
+    // journal's authoritative compare-and-swap conflict when a later version
+    // has already committed.
+    let mut visible = covered
+        .published
+        .iter()
+        .filter(|version| version.observed_at <= request.observed_at);
+    let entries = |versions: Vec<&WorkProductPublishedVersionV1>| {
+        build_entries(
+            storage,
+            authority,
+            &covered.journal,
+            &versions,
+            request.observed_at,
+        )
+    };
     let absent = |selection_coverage| WorkGraphReadV1::Absent {
         authorized_scope: scope.clone(),
         selection_coverage,
     };
     match &request.mode {
-        WorkGraphReadModeV1::Current => Ok(match entries.into_iter().next_back() {
-            Some(snapshot) => WorkGraphReadV1::Current {
-                authorized_scope: scope.clone(),
-                selection_coverage,
-                snapshot,
+        WorkGraphReadModeV1::Current => Ok(
+            match entries(visible.next_back().into_iter().collect())?.pop() {
+                Some(snapshot) => WorkGraphReadV1::Current {
+                    authorized_scope: scope.clone(),
+                    selection_coverage,
+                    snapshot,
+                },
+                None => absent(selection_coverage),
             },
-            None => absent(selection_coverage),
-        }),
+        ),
         WorkGraphReadModeV1::AsOf { valid_at } => Ok(
-            match entries
-                .into_iter()
-                .rfind(|entry| entry.valid_at() <= *valid_at)
+            match entries(
+                visible
+                    .rfind(|version| version.valid_at <= *valid_at)
+                    .into_iter()
+                    .collect(),
+            )?
+            .pop()
             {
                 Some(snapshot) => WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),
@@ -187,12 +204,13 @@ fn read_graph(
             from_valid_at,
             through_valid_at,
         } => {
-            let selected = entries
-                .into_iter()
-                .filter(|entry| {
-                    entry.valid_at() >= *from_valid_at && entry.valid_at() <= *through_valid_at
-                })
-                .collect::<Vec<_>>();
+            let selected = entries(
+                visible
+                    .filter(|version| {
+                        version.valid_at >= *from_valid_at && version.valid_at <= *through_valid_at
+                    })
+                    .collect(),
+            )?;
             Ok(WorkGraphReadV1::Evolution {
                 authorized_scope: scope.clone(),
                 selection_coverage,
@@ -203,13 +221,14 @@ fn read_graph(
             from_observed_at,
             through_observed_at,
         } => {
-            let selected = entries
-                .into_iter()
-                .filter(|entry| {
-                    entry.observed_at() >= *from_observed_at
-                        && entry.observed_at() <= *through_observed_at
-                })
-                .collect::<Vec<_>>();
+            let selected = entries(
+                visible
+                    .filter(|version| {
+                        version.observed_at >= *from_observed_at
+                            && version.observed_at <= *through_observed_at
+                    })
+                    .collect(),
+            )?;
             Ok(WorkGraphReadV1::Forensic {
                 authorized_scope: scope.clone(),
                 selection_coverage,
@@ -219,30 +238,31 @@ fn read_graph(
     }
 }
 
-/// Build one entry per published version, each carrying the graph folded to
+/// Build one entry per selected version, each carrying the graph folded to
 /// that version and every projection derived from that same graph.
+///
+/// The journal is folded once, forward, and only the selected versions are
+/// projected: a point read costs one fold however long the history is, not
+/// one fold and one runtime hydration per published version.
 fn build_entries(
     storage: &WorkSqliteStorage,
     authority: Option<&WorkAuthority>,
     journal: &[WorkProductJournalEntryV1],
-    published: &[WorkProductPublishedVersionV1],
+    versions: &[&WorkProductPublishedVersionV1],
     projected_at: UtcMicros,
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
-    published
+    let mut fold = JournalFoldV1::new(journal);
+    versions
         .iter()
-        // A read cannot include a version this authority had not observed at
-        // the caller's observation instant. Besides preserving forensic
-        // truth, this lets a prepared mutation read its former head and reach
-        // the event journal's authoritative compare-and-swap conflict when a
-        // later version has already committed.
-        .filter(|version| version.observed_at <= projected_at)
         .map(|version| {
             let entry = journal
                 .iter()
                 .find(|entry| entry.sequence == version.event_sequence)
                 .ok_or(PortError::Unavailable)?;
-            let graph =
-                fold_graph(journal, version.event_sequence).ok_or(PortError::Unavailable)?;
+            let graph = fold
+                .advance_to(version.event_sequence)
+                .ok_or(PortError::Unavailable)?
+                .clone();
             if graph.version() != version.graph_version {
                 return Err(PortError::Unavailable);
             }
