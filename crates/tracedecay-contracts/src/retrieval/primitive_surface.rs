@@ -529,6 +529,9 @@ pub struct ImpactRadiusV1 {
     pub complete: bool,
     pub unavailable_fields: Vec<String>,
     pub nodes: Vec<ImpactNodeV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -569,6 +572,9 @@ pub struct NodeDetailsV1 {
     pub complexity_analysis: ComplexityAnalysisV1,
     pub cost_to_expand: NodeExpansionCostV1,
     pub unavailable_fields: Vec<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -578,6 +584,9 @@ pub struct PrimitiveNotFoundV1 {
     pub reason_code: String,
     pub node_id: String,
     pub message: String,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
