@@ -30,7 +30,11 @@ pub(super) fn journal_path<T>(store_root: &Path, spec: &BoundedJournalSpec<T>) -
     store_root.join(spec.file_name)
 }
 
-#[hotpath::measure(label = "code_index_retention.persist_journal")]
+#[tracing::instrument(
+    name = "code_index_retention.persist_journal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn persist_journal<T: Serialize>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,
@@ -71,7 +75,7 @@ pub(super) fn persist_journal<T: Serialize>(
 /// The byte bound is enforced from the observed size before the body is
 /// materialized, and the length is re-verified after the read so a file that
 /// changes mid-read fails closed rather than parsing a hybrid.
-#[hotpath::measure(label = "code_index_retention.load_journal")]
+#[tracing::instrument(name = "code_index_retention.load_journal", level = "trace", skip_all)]
 pub(super) fn load_journal<T: DeserializeOwned>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,

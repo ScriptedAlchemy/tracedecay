@@ -27,7 +27,6 @@ pub enum WorkflowEffectOperationV1 {
 }
 
 impl WorkflowEffectOperationV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register_definition",
@@ -82,7 +81,6 @@ impl WorkflowEffectIdentityV1 {
         Ok(identity)
     }
 
-    #[hotpath::skip]
     pub const fn operation(&self) -> WorkflowEffectOperationV1 {
         self.operation
     }
@@ -107,7 +105,6 @@ impl WorkflowEffectIdentityV1 {
         &self.input_digest
     }
 
-    #[hotpath::skip]
     pub const fn started_at(&self) -> UtcMicros {
         self.started_at
     }
@@ -505,7 +502,6 @@ impl WorkflowEffectTerminalV1 {
         &self.identity
     }
 
-    #[hotpath::skip]
     pub const fn ended_at(&self) -> UtcMicros {
         self.ended_at
     }
@@ -559,7 +555,6 @@ pub enum WorkflowEffectJournalStateV1 {
 }
 
 impl WorkflowEffectJournalStateV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BeforeEffect => "before_effect",
@@ -616,7 +611,6 @@ impl WorkflowEffectJournalRecordV1 {
         })
     }
 
-    #[hotpath::skip]
     pub const fn state(&self) -> WorkflowEffectJournalStateV1 {
         self.state
     }

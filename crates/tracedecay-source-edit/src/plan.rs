@@ -41,7 +41,7 @@ tokio::task_local! {
     static SOURCE_EDIT_APPLY_STATE: Arc<Mutex<SourceEditApplyState>>;
 }
 
-#[hotpath::measure(label = "usecases.edit.plan", future = true)]
+#[tracing::instrument(name = "usecases.edit.plan", level = "trace", skip_all)]
 pub(crate) async fn capture_source_edit_plan<T>(
     future: impl Future<Output = T>,
 ) -> (T, Vec<PlannedSourceEditFile>) {
@@ -56,7 +56,7 @@ pub(crate) async fn capture_source_edit_plan<T>(
     (result, files)
 }
 
-#[hotpath::measure(label = "usecases.edit.apply", future = true)]
+#[tracing::instrument(name = "usecases.edit.apply", level = "trace", skip_all)]
 pub(crate) async fn apply_source_edit_plan<T>(
     files: Vec<PlannedSourceEditFile>,
     future: impl Future<Output = T>,
@@ -101,7 +101,7 @@ pub fn capture_planned_source_edit(
 
 /// Admits one publication against the plan an apply is running under.
 /// Outside an apply scope every publication is admitted.
-#[hotpath::measure(label = "usecases.edit.validate")]
+#[tracing::instrument(name = "usecases.edit.validate", level = "trace", skip_all)]
 pub fn validate_planned_source_edit(
     relative_path: &str,
     expected: Option<&str>,
@@ -140,7 +140,7 @@ pub fn validate_planned_source_edit(
 /// only touched when it can be proven to hold either the preimage or the
 /// intended edit, so unaccountable content fails recovery instead of being
 /// erased.
-#[hotpath::measure(label = "edits.rollback_planned_files")]
+#[tracing::instrument(name = "edits.rollback_planned_files", level = "trace", skip_all)]
 pub fn rollback_planned_source_edit_files(
     project_root: &Path,
     files: &[PlannedSourceEditFile],
@@ -181,7 +181,7 @@ pub fn rollback_planned_source_edit_files(
 /// Code-index generations are immutable and refreshed by the daemon-owned
 /// scheduler. Crash reconciliation therefore verifies the transaction's byte
 /// authority here instead of mutating a graph store.
-#[hotpath::measure(label = "edits.commit_postimages")]
+#[tracing::instrument(name = "edits.commit_postimages", level = "trace", skip_all)]
 pub(crate) fn commit_source_edit_postimages(
     project_root: &Path,
     files: &[PlannedSourceEditFile],
@@ -202,7 +202,7 @@ pub(crate) fn commit_source_edit_postimages(
 
 /// Publish one candidate's postimage, or record it into the active preview
 /// plan when a plan capture is in scope.
-#[hotpath::measure(label = "edits.publish_planned")]
+#[tracing::instrument(name = "edits.publish_planned", level = "trace", skip_all)]
 pub fn publish_planned_source_edit(
     project_root: &Path,
     relative_path: &str,

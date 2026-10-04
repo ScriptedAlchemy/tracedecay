@@ -63,7 +63,7 @@ pub(super) async fn insert_revision_with_registry(
 }
 
 impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
-    #[hotpath::measure(future = true, label = "global_db.configuration.query")]
+    #[tracing::instrument(name = "global_db.configuration.query", level = "trace", skip_all)]
     async fn current_revision(&self) -> ConfigurationStoreResult<ConfigurationRevisionRecordV1> {
         let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
         let revision_id = current_revision_id_from_executor(&read).await?;
@@ -82,12 +82,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
             revision_id
                 .validate()
                 .map_err(ConfigurationStoreError::from)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     read_revision_from_executor(&read, &revision_id).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }
@@ -99,7 +99,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<()>> + Send {
         let plan = plan.clone();
         async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     plan.validate().map_err(ConfigurationStoreError::from)?;
                     let transaction = self
@@ -125,7 +125,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
                     )
                     .await
                 },
-                label = "global_db.configuration.persist.plan"
+                tracing::trace_span!("global_db.configuration.persist.plan"),
             )
             .await
         }
@@ -139,18 +139,22 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         let plan_id = plan_id.clone();
         async move {
             plan_id.validate().map_err(ConfigurationStoreError::from)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     read_change_plan_from_executor(&read, &plan_id).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }
     }
 
-    #[hotpath::measure(future = true, label = "global_db.configuration.persist.commit")]
+    #[tracing::instrument(
+        name = "global_db.configuration.persist.commit",
+        level = "trace",
+        skip_all
+    )]
     async fn commit(
         &self,
         commit: ConfigurationCommitV1,
@@ -177,12 +181,12 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
     ) -> impl Future<Output = ConfigurationStoreResult<Vec<ConfigurationAuditEvent>>> + Send {
         let after = after.cloned();
         async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     let read = self.db.read_snapshot().await.map_err(unavailable_store)?;
                     audit_from_transaction(&read, after.as_ref(), limit).await
                 },
-                label = "global_db.configuration.query"
+                tracing::trace_span!("global_db.configuration.query"),
             )
             .await
         }

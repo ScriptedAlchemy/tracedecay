@@ -91,7 +91,6 @@ impl OpenedDatabaseFile {
         Ok(Self { file, identity })
     }
 
-    #[hotpath::skip]
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
@@ -534,21 +533,24 @@ fn open_raw(
     path: &Path,
     mode: ConnectionMode,
 ) -> Result<(Connection, bool), ConnectionPolicyError> {
-    hotpath::measure_block!("rusqlite.connection.open", {
-        let fresh_writer = mode == ConnectionMode::Writer
-            && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
-        let flags = match mode {
-            ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
-            ConnectionMode::Writer | ConnectionMode::Maintenance => {
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-            }
-        } | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-        let connection =
-            Connection::open_with_flags(path, flags).map_err(|source| policy("open", source))?;
+    {
+        let _span = tracing::trace_span!("rusqlite.connection.open").entered();
+        {
+            let fresh_writer = mode == ConnectionMode::Writer
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
+            let flags = match mode {
+                ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
+                ConnectionMode::Writer | ConnectionMode::Maintenance => {
+                    OpenFlags::SQLITE_OPEN_READ_WRITE
+                }
+            } | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+            let connection = Connection::open_with_flags(path, flags)
+                .map_err(|source| policy("open", source))?;
 
-        Ok((connection, fresh_writer))
-    })
+            Ok((connection, fresh_writer))
+        }
+    }
 }
 
 /// Configuration is measured apart from the raw open: `journal_mode = WAL`
@@ -560,14 +562,17 @@ fn finish_open(
     mode: ConnectionMode,
     fresh_writer: bool,
 ) -> Result<Connection, ConnectionPolicyError> {
-    hotpath::measure_block!("rusqlite.connection.configure", {
-        apply_pragmas(&connection, mode, fresh_writer)?;
-        assert_compile_options(&connection)?;
-        apply_limits(&connection, mode)?;
-        connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-        install_authorizer(&connection, mode)?;
-        Ok(connection)
-    })
+    {
+        let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
+        {
+            apply_pragmas(&connection, mode, fresh_writer)?;
+            assert_compile_options(&connection)?;
+            apply_limits(&connection, mode)?;
+            connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
+            install_authorizer(&connection, mode)?;
+            Ok(connection)
+        }
+    }
 }
 
 /// Opens a verified live database in a retained, query-only SQLite read transaction.
@@ -598,21 +603,24 @@ pub fn open_verified_read_snapshot(path: &Path) -> Result<VerifiedReader, Verifi
 /// mandatory, or accept eventual main-file visibility for best-effort foreign
 /// ingestion.
 pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
-    hotpath::measure_block!("rusqlite.connection.open_immutable", {
-        let uri = immutable_health_uri(path)?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-        let connection =
-            Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-        apply_pragmas(&connection, ConnectionMode::Reader, false)?;
-        assert_compile_options(&connection)?;
-        apply_limits(&connection, ConnectionMode::Reader)?;
-        connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-        install_authorizer(&connection, ConnectionMode::Reader)?;
-        Ok(connection)
-    })
+    {
+        let _span = tracing::trace_span!("rusqlite.connection.open_immutable").entered();
+        {
+            let uri = immutable_health_uri(path)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+            let connection =
+                Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
+            apply_pragmas(&connection, ConnectionMode::Reader, false)?;
+            assert_compile_options(&connection)?;
+            apply_limits(&connection, ConnectionMode::Reader)?;
+            connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
+            install_authorizer(&connection, ConnectionMode::Reader)?;
+            Ok(connection)
+        }
+    }
 }
 
 pub fn open_verified_immutable_reader(path: &Path) -> Result<VerifiedReader, VerifiedReaderError> {
@@ -824,7 +832,7 @@ impl WriterPageCache {
             .authorizer(Some(authorize_writer))
             .map_err(|source| policy("restore writer authorizer", source))?;
         resized.map_err(|source| policy("page cache size", source))?;
-        hotpath::gauge!("rusqlite.writer.page_cache_pages").set(pages);
+        metrics::gauge!("rusqlite.writer.page_cache_pages").set(pages as f64);
         self.fitted_schema_version = Some(schema_version);
         Ok(())
     }

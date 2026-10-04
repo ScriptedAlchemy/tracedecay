@@ -39,7 +39,7 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SourceLinesRequest,
     ) -> ExtendedPrimitiveFuture<'a, SourceLinesResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let finished_at = now_observed();
                 let unavailable =
@@ -124,7 +124,7 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                     finished_at,
                 )
             },
-            label = "usecases.primitives.source_lines"
+            tracing::trace_span!("usecases.primitives.source_lines"),
         ))
     }
 }

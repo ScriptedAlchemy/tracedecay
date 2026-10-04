@@ -36,14 +36,14 @@ pub struct VerifiedHealthSnapshotV1 {
     pub skip_coverage_count: usize,
 }
 
-#[hotpath::measure(label = "usecases.graph.health_snapshot", future = true)]
+#[tracing::instrument(name = "usecases.graph.health_snapshot", level = "trace", skip_all)]
 pub async fn compute_verified_health_snapshot(
     graph: &GraphQueryManager<'_>,
     path_prefix: Option<&str>,
 ) -> Result<VerifiedHealthSnapshotV1> {
-    let inputs = hotpath::future!(
+    let inputs = tracing::Instrument::instrument(
         graph.health_inputs(path_prefix),
-        label = "usecases.graph.health.inputs"
+        tracing::trace_span!("usecases.graph.health.inputs"),
     )
     .await?;
     let adjacency = inputs.adjacency;
@@ -121,7 +121,7 @@ pub async fn compute_verified_health_snapshot(
 /// Computes the Gini coefficient for a slice of non-negative values.
 /// Returns 0.0 for empty slices, single-element slices, or all-zero slices.
 /// Result is in \[0.0, 1.0\] where 0.0 = perfect equality.
-#[hotpath::measure(label = "usecases.graph.gini")]
+#[tracing::instrument(name = "usecases.graph.gini", level = "trace", skip_all)]
 pub fn gini_coefficient(values: &[f64]) -> f64 {
     if values.len() <= 1 {
         return 0.0;
@@ -166,12 +166,12 @@ pub fn gini_label(gini: f64) -> &'static str {
 /// Computes the acyclicity score for a directed graph.
 /// Uses Tarjan's SCC algorithm. Score = 1.0 - (`edges_in_nontrivial_SCCs` / `total_edges`).
 /// Returns (score, `number_of_edges_in_cycles`).
-#[hotpath::measure(label = "usecases.graph.acyclicity")]
+#[tracing::instrument(name = "usecases.graph.acyclicity", level = "trace", skip_all)]
 pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
     let total_edges: usize = adj.values().map(HashSet::len).sum();
-    hotpath::gauge!("usecases.graph.acyclicity.edges_total").inc(total_edges as u64);
+    metrics::gauge!("usecases.graph.acyclicity.edges_total").increment(total_edges as f64);
 
     if total_edges == 0 {
         return (1.0, 0);
@@ -225,7 +225,7 @@ pub struct DepthResult {
 
 /// Computes longest dependency chains. Breaks cycles via Tarjan's SCC
 /// (collapses each SCC to a single node), then runs topo sort + DP.
-#[hotpath::measure(label = "usecases.graph.dependency_depth")]
+#[tracing::instrument(name = "usecases.graph.dependency_depth", level = "trace", skip_all)]
 pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
@@ -235,7 +235,7 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         all_nodes.extend(targets.iter().cloned());
     }
     let file_count = all_nodes.len();
-    hotpath::gauge!("usecases.graph.depth.files_total").inc(file_count as u64);
+    metrics::gauge!("usecases.graph.depth.files_total").increment(file_count as f64);
 
     if file_count == 0 {
         return DepthResult {
@@ -367,7 +367,6 @@ pub struct DsmCluster {
 
 impl DsmCluster {
     #[must_use]
-    #[hotpath::skip]
     pub const fn boundary_edges(&self) -> usize {
         self.outgoing_edges + self.incoming_edges
     }
@@ -376,7 +375,7 @@ impl DsmCluster {
 /// Groups the file adjacency by parent directory and orders clusters by
 /// cross-boundary coupling, then cluster size. This is the shared authority for
 /// both the MCP DSM tool and dashboard graph strata.
-#[hotpath::measure(label = "usecases.graph.dsm_clusters")]
+#[tracing::instrument(name = "usecases.graph.dsm_clusters", level = "trace", skip_all)]
 pub fn dsm_clusters<AdjHasher, EdgeHasher>(
     adj: &HashMap<String, HashSet<String, EdgeHasher>, AdjHasher>,
 ) -> Vec<DsmCluster>
@@ -384,7 +383,7 @@ where
     AdjHasher: BuildHasher,
     EdgeHasher: BuildHasher,
 {
-    hotpath::gauge!("usecases.graph.dsm.files_total").inc(adj.len() as u64);
+    metrics::gauge!("usecases.graph.dsm.files_total").increment((adj.len() as u64) as f64);
     let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
     for file in adj.keys() {
         let directory = file
@@ -449,7 +448,7 @@ pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
 /// Hub nodes = files with (fan\_in + fan\_out) > mean + 2\*stddev.
 /// Score = 1.0 - (1.0 / component\_count), clamped to \[0, 1\].
 /// Returns (score, component\_count\_after\_hub\_removal).
-#[hotpath::measure(label = "usecases.graph.modularity")]
+#[tracing::instrument(name = "usecases.graph.modularity", level = "trace", skip_all)]
 pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
 ) -> (f64, usize) {
@@ -461,7 +460,8 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
     }
-    hotpath::gauge!("usecases.graph.modularity.nodes_total").inc(all_nodes.len() as u64);
+    metrics::gauge!("usecases.graph.modularity.nodes_total")
+        .increment((all_nodes.len() as u64) as f64);
 
     let mut connectivity: HashMap<&str, usize> = HashMap::new();
     for node in &all_nodes {

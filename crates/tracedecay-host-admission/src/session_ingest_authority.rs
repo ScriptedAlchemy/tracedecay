@@ -151,7 +151,11 @@ where
         GlobalDbTranscriptStore::new(self.db.clone())
     }
 
-    #[hotpath::measure(label = "usecases.session_ingest.project_roots", future = true)]
+    #[tracing::instrument(
+        name = "usecases.session_ingest.project_roots",
+        level = "trace",
+        skip_all
+    )]
     async fn registered_project_roots(&self) -> Option<Vec<PathBuf>> {
         let mut roots = self.db().try_list_project_paths().await.ok()?;
         roots.extend(

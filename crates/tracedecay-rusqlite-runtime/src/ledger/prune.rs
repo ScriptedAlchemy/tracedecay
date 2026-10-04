@@ -79,7 +79,7 @@ WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
 /// or already present in an upgraded database - converges over subsequent
 /// commits instead of being tied to the single transition commit that first
 /// discovered it.
-#[hotpath::measure(label = "rusqlite.ledger.prune_superseded")]
+#[tracing::instrument(name = "rusqlite.ledger.prune_superseded", level = "trace", skip_all)]
 pub(super) fn prune_superseded(
     transaction: &impl LedgerTransaction,
     submission: &Submission<'_>,
@@ -98,6 +98,6 @@ pub(super) fn prune_superseded(
             MAX_PRUNED_ROWS_PER_COMMIT,
         ],
     )?;
-    crate::hotpath_observe::record_ledger_pruned_rows(u64::try_from(pruned).unwrap_or(u64::MAX));
+    crate::observe::record_ledger_pruned_rows(u64::try_from(pruned).unwrap_or(u64::MAX));
     Ok(pruned)
 }

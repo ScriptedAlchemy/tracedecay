@@ -21,7 +21,11 @@ use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
 use crate::sql::{SHARED_GENERATION_TABLES, live_effect_predicate};
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.validate_receipt")]
+#[tracing::instrument(
+    name = "session_temporal.projection.validate_receipt",
+    level = "trace",
+    skip_all
+)]
 pub async fn validate_final_projection_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &tracedecay_domain::SessionId,
@@ -360,7 +364,11 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
 /// Asks the next refresh of the session `observation_id` projected into to
 /// rebuild it from its first effect. The observation no longer owns its
 /// output, so occurrences derived from it cannot be extended in place.
-#[hotpath::measure(future = true, label = "session_temporal.persist.reset_request")]
+#[tracing::instrument(
+    name = "session_temporal.persist.reset_request",
+    level = "trace",
+    skip_all
+)]
 pub async fn request_session_temporal_reset(
     conn: &impl Executor,
     observation_id: &str,
@@ -381,7 +389,11 @@ pub async fn request_session_temporal_reset(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.observation_effect")]
+#[tracing::instrument(
+    name = "session_temporal.persist.observation_effect",
+    level = "trace",
+    skip_all
+)]
 pub async fn record_canonical_observation_effect(
     conn: &impl Executor,
     sequence: u64,
@@ -1061,7 +1073,11 @@ fn coverage_component_mut(
 /// plus the rows the candidate introduced, minus the row versions it
 /// superseded, with the copy component extended by the candidate's copies.
 /// Reads only the candidate's own rows and their superseded versions.
-#[hotpath::measure(future = true, label = "session_temporal.projection.coverage")]
+#[tracing::instrument(
+    name = "session_temporal.projection.coverage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn candidate_projection_coverage(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
@@ -1104,7 +1120,11 @@ pub(crate) async fn candidate_projection_coverage(
 
 /// Coverage recomputed from every row generation `generation` reads: the
 /// verifier the incremental receipt must equal byte for byte.
-#[hotpath::measure(future = true, label = "session_temporal.projection.full_coverage")]
+#[tracing::instrument(
+    name = "session_temporal.projection.full_coverage",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn full_projection_coverage(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
@@ -1194,36 +1214,29 @@ pub(crate) async fn base_projection_coverage(
 
 #[inline(always)]
 fn record_assertion_validation_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.activation.assertion_query_probes").inc(1_u64);
+    metrics::gauge!("session_temporal.activation.assertion_query_probes").increment(1.0);
 }
 
 #[inline(always)]
 fn record_assertion_history_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.activation.history_rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.activation.history_row_payload_bytes").inc(bytes);
+        metrics::gauge!("session_temporal.activation.history_rows").increment(1.0);
+        metrics::gauge!("session_temporal.activation.history_row_payload_bytes")
+            .increment(bytes as f64);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
 }
 
 #[inline(always)]
 fn record_coverage_query_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.coverage.query_probes").inc(1_u64);
+    metrics::gauge!("session_temporal.coverage.query_probes").increment(1.0);
 }
 
 #[inline(always)]
 fn record_coverage_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.coverage.rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.coverage.row_payload_bytes").inc(bytes);
+        metrics::gauge!("session_temporal.coverage.rows").increment(1.0);
+        metrics::gauge!("session_temporal.coverage.row_payload_bytes").increment(bytes as f64);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
 }
 
 fn copy_encoding(copy: &LogicalCopyRelation) -> SessionStoreResult<Vec<u8>> {

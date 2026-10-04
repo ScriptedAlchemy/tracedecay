@@ -162,7 +162,7 @@ fn normalize_codex_observation_inner(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Codex rollouts order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.codex.record_bytes").inc(range.end() - range.start());
+    metrics::gauge!("capture.codex.record_bytes").increment((range.end() - range.start()) as f64);
     let envelope = normalize_codex_record(
         native,
         session_id,
@@ -172,13 +172,13 @@ fn normalize_codex_observation_inner(
         location,
     );
     if envelope.is_err() {
-        hotpath::gauge!("capture.codex.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.codex.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// One source-record canonicalization, not a per-item walk.
-#[hotpath::measure(label = "capture.codex.normalize")]
+#[tracing::instrument(name = "capture.codex.normalize", level = "trace", skip_all)]
 fn normalize_codex_record(
     native: &Value,
     session_id: &str,

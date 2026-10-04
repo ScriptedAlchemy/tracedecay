@@ -5,7 +5,7 @@ use super::*;
 // Future lifetime so suspension inside the query executor (writer lease /
 // queue wait) is charged here rather than vanishing between poll times. The
 // decode share of this span is the nested `sessions.lcm.raw.verify_row`.
-#[hotpath::measure(label = "sessions.lcm.load_session", future = true)]
+#[tracing::instrument(name = "sessions.lcm.load_session", level = "trace", skip_all)]
 pub async fn load_session(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmLoadSessionRequest,
@@ -13,7 +13,7 @@ pub async fn load_session(
     let limit = clamp_limit(request.limit);
     let fetch_limit = limit.saturating_add(1);
     let (sql, values) = load_session_query(&request, fetch_limit);
-    let fetched = hotpath::future!(
+    let fetched = tracing::Instrument::instrument(
         async {
             let mut rows = conn.query(&sql, values).await?;
             let mut fetched = Vec::new();
@@ -22,15 +22,18 @@ pub async fn load_session(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
-    let raws = hotpath::measure_block!("sessions.lcm.hydrate.redact", {
-        fetched
-            .iter()
-            .map(raw::verified_raw_message_from_row)
-            .collect::<Result<Vec<_>, _>>()
-    })?;
+    let raws = {
+        let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
+        {
+            fetched
+                .iter()
+                .map(raw::verified_raw_message_from_row)
+                .collect::<Result<Vec<_>, _>>()
+        }
+    }?;
     let mut messages = raws
         .into_iter()
         .map(|raw| load_message_from_raw(raw, request.content_slice))
@@ -159,7 +162,7 @@ pub async fn session_providers(
 
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
-#[hotpath::measure(label = "sessions.lcm.replay_slice", future = true)]
+#[tracing::instrument(name = "sessions.lcm.replay_slice", level = "trace", skip_all)]
 pub async fn session_replay_slice(
     conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,

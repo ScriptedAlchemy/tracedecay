@@ -79,7 +79,11 @@ impl<'a> PublicProjectRegistryContext<'a> {
     }
 }
 
-#[hotpath::measure(label = "dashboard_api.project_registry.build_view")]
+#[tracing::instrument(
+    name = "dashboard_api.project_registry.build_view",
+    level = "trace",
+    skip_all
+)]
 pub fn build_project_registry_view(
     contexts: &[ProjectRegistryContext],
     active_project_id: Option<&str>,

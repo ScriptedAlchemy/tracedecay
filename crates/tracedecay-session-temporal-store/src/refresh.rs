@@ -17,6 +17,7 @@ use tracedecay_store::{
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
+use tracing::Instrument as _;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
@@ -94,17 +95,14 @@ impl SessionRefreshRecoveryV1 {
         &self.coverage_request
     }
 
-    #[hotpath::skip]
     pub const fn target_frontier(&self) -> SessionRefreshFrontierV1 {
         self.target_frontier
     }
 
-    #[hotpath::skip]
     pub const fn source_frontier(&self) -> u64 {
         self.source_frontier
     }
 
-    #[hotpath::skip]
     pub const fn candidate_generation(&self) -> SessionProjectionGenerationV1 {
         self.candidate_generation
     }
@@ -129,7 +127,6 @@ impl SessionRefreshRecoveryV1 {
         self.progress.as_ref()
     }
 
-    #[hotpath::skip]
     pub const fn restart_state(&self) -> SessionRefreshRestartStateV1 {
         self.restart_state
     }
@@ -160,16 +157,16 @@ impl SessionRefreshRecoveryV1 {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "session_temporal.txn.begin_refresh")]
+    #[tracing::instrument(name = "session_temporal.txn.begin_refresh", level = "trace", skip_all)]
     pub async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(BEGIN_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         apply_requested_reset(&transaction, request.session_id()).await?;
         let request = match read_active_generation(&transaction, request.session_id()).await? {
             Some((_, active_watermarks)) => {
@@ -184,12 +181,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_joinable_operation_by_digest(&transaction, request.session_id(), &request_digest)
                 .await?
         {
-            hotpath::measure_block!("session_temporal.txn.commit", {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(BEGIN_REFRESH, error))?
-            });
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
             return Ok(SessionRefreshBeginOrJoinReceiptV1::new(
                 existing.operation_id,
                 request.session_id().clone(),
@@ -308,12 +304,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             )
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(BEGIN_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         Ok(SessionRefreshBeginOrJoinReceiptV1::new(
             operation_id,
             request.session_id().clone(),
@@ -323,7 +318,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         ))
     }
 
-    #[hotpath::skip]
     pub async fn persist_session_refresh_projection_batch_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -340,7 +334,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         .await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_batch")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.refresh_batch",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_session_refresh_projection_batch_controlled_result(
         &self,
         progress: SessionRefreshProgressV1,
@@ -352,11 +350,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     )> {
         validate_progress_batch_identity(&progress, &batch)?;
         let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(PERSIST_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
         let binding = require_running_binding(
             &transaction,
             progress.session_id(),
@@ -387,12 +385,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 )
                 .await?;
                 checkpoint_relation_rebuild_control(&execution_control)?;
-                hotpath::measure_block!("session_temporal.txn.commit", {
-                    transaction
-                        .commit()
-                        .await
-                        .map_err(|error| storage(PERSIST_REFRESH, error))?
-                });
+                transaction
+                    .commit()
+                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                    .await
+                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
                 return Ok((existing, receipt));
             }
             if existing.committed_batches() == progress.committed_batches() {
@@ -429,26 +426,29 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(PERSIST_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
         Ok((progress, receipt))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.refresh_progress")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.refresh_progress",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
     ) -> SessionStoreResult<SessionRefreshProgressV1> {
         let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(PERSIST_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
         let binding = require_running_binding(
             &transaction,
             progress.session_id(),
@@ -461,12 +461,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             read_progress(&transaction, progress.session_id(), progress.operation_id()).await?
         {
             if progress_logically_equal(&existing, &progress) {
-                hotpath::measure_block!("session_temporal.txn.commit", {
-                    transaction
-                        .commit()
-                        .await
-                        .map_err(|error| storage(PERSIST_REFRESH, error))?
-                });
+                transaction
+                    .commit()
+                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                    .await
+                    .map_err(|error| storage(PERSIST_REFRESH, error))?;
                 return Ok(existing);
             }
             if existing.committed_batches() == progress.committed_batches() {
@@ -514,16 +513,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             progress.updated_at(),
         )
         .await?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(PERSIST_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
         Ok(progress)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_progress")]
+    #[tracing::instrument(
+        name = "session_temporal.query.refresh_progress",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_refresh_progress_result(
         &self,
         request: SessionRefreshProgressRequestV1,
@@ -535,7 +537,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         read_progress(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.txn.complete_refresh")]
+    #[tracing::instrument(
+        name = "session_temporal.txn.complete_refresh",
+        level = "trace",
+        skip_all
+    )]
     pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
@@ -555,11 +561,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
         drop(snapshot);
 
-        let preflight = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?
-        });
+        let preflight = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         let binding = require_running_binding(
             &preflight,
             request.session_id(),
@@ -572,12 +578,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 context: "refresh completion target coverage",
             });
         }
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            preflight
-                .commit()
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?
-        });
+        preflight
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
 
         let relation_projection = rebuild_candidate_session_relations(
             self.inner(),
@@ -588,22 +593,21 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
 
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_completion(&receipt, &request)?;
             checkpoint_relation_rebuild_control(&execution_control)?;
-            hotpath::measure_block!("session_temporal.txn.commit", {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(COMPLETE_REFRESH, error))?
-            });
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -678,35 +682,33 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
         checkpoint_relation_rebuild_control(&execution_control)?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.txn.fail_refresh")]
+    #[tracing::instrument(name = "session_temporal.txn.fail_refresh", level = "trace", skip_all)]
     pub async fn fail_session_refresh_result(
         &self,
         request: SessionRefreshFailureRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(FAIL_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(FAIL_REFRESH, error))?;
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_failure(&receipt, &request)?;
-            hotpath::measure_block!("session_temporal.txn.commit", {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(FAIL_REFRESH, error))?
-            });
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(FAIL_REFRESH, error))?;
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -773,35 +775,37 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             terminal_at,
         )
         .await?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(FAIL_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(FAIL_REFRESH, error))?;
         Ok(SessionRefreshReceiptV1::failed(request, terminal_at))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.txn.cancel_refresh")]
+    #[tracing::instrument(
+        name = "session_temporal.txn.cancel_refresh",
+        level = "trace",
+        skip_all
+    )]
     pub async fn cancel_session_refresh_result(
         &self,
         request: SessionRefreshCancellationRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(CANCEL_REFRESH, error))?
-        });
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(CANCEL_REFRESH, error))?;
         if let Some(receipt) =
             read_receipt(&transaction, request.session_id(), request.operation_id()).await?
         {
             require_exact_cancellation(&receipt, &request)?;
-            hotpath::measure_block!("session_temporal.txn.commit", {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| storage(CANCEL_REFRESH, error))?
-            });
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(CANCEL_REFRESH, error))?;
             return Ok(receipt);
         }
         let binding = require_running_binding(
@@ -867,16 +871,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             terminal_at,
         )
         .await?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(CANCEL_REFRESH, error))?
-        });
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(CANCEL_REFRESH, error))?;
         Ok(SessionRefreshReceiptV1::cancelled(request, terminal_at))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_receipt")]
+    #[tracing::instrument(
+        name = "session_temporal.query.refresh_receipt",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_refresh_receipt_result(
         &self,
         request: SessionRefreshReceiptRequestV1,
@@ -888,7 +895,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         read_receipt(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_recovery")]
+    #[tracing::instrument(
+        name = "session_temporal.query.refresh_recovery",
+        level = "trace",
+        skip_all
+    )]
     pub async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
@@ -901,7 +912,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(recoveries.pop())
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.refresh_running")]
+    #[tracing::instrument(
+        name = "session_temporal.query.refresh_running",
+        level = "trace",
+        skip_all
+    )]
     pub async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {

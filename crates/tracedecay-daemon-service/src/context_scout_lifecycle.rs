@@ -56,7 +56,6 @@ pub enum AuthorityRejectionV1 {
 }
 
 impl AuthorityRejectionV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ZeroHookProjectId => "zero_hook_project_id",
@@ -107,17 +106,17 @@ pub fn register_context_scout_lifecycle_authority(
     // map's population exactly.
     match registration {
         AuthorityRegistrationV1::Registered => {
-            hotpath::gauge!("daemon.context_scout.authority.registered").inc(1.0);
-            hotpath::gauge!("daemon.context_scout.authority.active").inc(1.0);
+            metrics::gauge!("daemon.context_scout.authority.registered").increment(1.0);
+            metrics::gauge!("daemon.context_scout.authority.active").increment(1.0);
         }
         AuthorityRegistrationV1::AlreadyRegistered => {
-            hotpath::gauge!("daemon.context_scout.authority.already_registered").inc(1.0);
+            metrics::gauge!("daemon.context_scout.authority.already_registered").increment(1.0);
         }
         AuthorityRegistrationV1::Conflict => {
-            hotpath::gauge!("daemon.context_scout.authority.conflict").inc(1.0);
+            metrics::gauge!("daemon.context_scout.authority.conflict").increment(1.0);
         }
         AuthorityRegistrationV1::Rejected(_) => {
-            hotpath::gauge!("daemon.context_scout.authority.rejected").inc(1.0);
+            metrics::gauge!("daemon.context_scout.authority.rejected").increment(1.0);
         }
     }
     registration
@@ -196,8 +195,8 @@ pub fn unregister_context_scout_lifecycle_authority(
         .is_some_and(|existing| existing.sessions.shares_client_with(sessions))
     {
         authorities.remove(&key);
-        hotpath::gauge!("daemon.context_scout.authority.unregistered").inc(1.0);
-        hotpath::gauge!("daemon.context_scout.authority.active").inc(-1.0);
+        metrics::gauge!("daemon.context_scout.authority.unregistered").increment(1.0);
+        metrics::gauge!("daemon.context_scout.authority.active").increment(-1.0);
         return true;
     }
     false
@@ -238,7 +237,11 @@ fn resolve_authority(
     ))
 }
 
-#[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup", future = true)]
+#[tracing::instrument(
+    name = "daemon.context_scout.lifecycle_lookup",
+    level = "trace",
+    skip_all
+)]
 pub async fn lookup_registered_context_scout_lifecycle(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -263,7 +266,11 @@ pub async fn lookup_registered_context_scout_lifecycle(
 /// envelope. The authoritative project-session shard supplies the native
 /// identity again; no hook payload or workspace path becomes durable replay
 /// identity.
-#[hotpath::measure(label = "daemon.context_scout.lifecycle_lookup_native", future = true)]
+#[tracing::instrument(
+    name = "daemon.context_scout.lifecycle_lookup_native",
+    level = "trace",
+    skip_all
+)]
 pub async fn lookup_registered_context_scout_native_session(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
@@ -358,7 +365,6 @@ pub enum ContextScoutLifecycleLookupFailureV1 {
 }
 
 impl ContextScoutLifecycleLookupFailureV1 {
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidProfileId => "invalid_profile_id",
@@ -398,7 +404,6 @@ impl ContextScoutLifecycleLookupV1 {
         }
     }
 
-    #[hotpath::skip]
     const fn is_resolved(&self) -> bool {
         matches!(self, Self::Resolved(_))
     }
@@ -429,13 +434,13 @@ async fn lookup_context_scout_lifecycle(
     .await
     {
         Ok(address) => {
-            hotpath::gauge!("daemon.context_scout.lookup.resolved").inc(1.0);
+            metrics::gauge!("daemon.context_scout.lookup.resolved").increment(1.0);
             ContextScoutLifecycleLookupV1::Resolved(Box::new(address))
         }
         Err(reason) => {
             // The bounded per-reason detail already goes to tracing; the
             // counter records only the fail-closed outcome.
-            hotpath::gauge!("daemon.context_scout.lookup.unresolved").inc(1.0);
+            metrics::gauge!("daemon.context_scout.lookup.unresolved").increment(1.0);
             tracing::debug!(
                 target: "tracedecay::context_scout_lifecycle",
                 reason = reason.as_str(),
@@ -487,29 +492,45 @@ async fn lookup_context_scout_lifecycle_inner(
 
     let limit = i64::try_from(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 + 1)
         .map_err(|_| Failure::ObservationBudgetExceeded)?;
-    let snapshot = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.snapshot", {
-        sessions.read_snapshot().await
-    })
-    .map_err(|_| Failure::SnapshotUnavailable)?;
-    let mut rows = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.query", {
-        snapshot
-            .query(
-                CONTEXT_SCOUT_LIFECYCLE_QUERY,
-                tracedecay_runtime_core::db::engine::params![session_id.as_str(), limit],
-            )
+    let snapshot = {
+        use tracing::Instrument as _;
+        sessions
+            .read_snapshot()
+            .instrument(tracing::trace_span!(
+                "daemon.context_scout.lifecycle_lookup.snapshot"
+            ))
             .await
-    })
+    }
+    .map_err(|_| Failure::SnapshotUnavailable)?;
+    let mut rows = {
+        use tracing::Instrument as _;
+        {
+            snapshot
+                .query(
+                    CONTEXT_SCOUT_LIFECYCLE_QUERY,
+                    tracedecay_runtime_core::db::engine::params![session_id.as_str(), limit],
+                )
+                .instrument(tracing::trace_span!(
+                    "daemon.context_scout.lifecycle_lookup.query"
+                ))
+                .await
+        }
+    }
     .map_err(|_| Failure::ObservationQueryFailed)?;
 
     let project_scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
     let mut count = 0usize;
-    while let Some(row) =
-        hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.rows_next", {
-            rows.next().await
-        })
-        .map_err(|_| Failure::ObservationRowUnreadable)?
+    while let Some(row) = {
+        use tracing::Instrument as _;
+        rows.next()
+            .instrument(tracing::trace_span!(
+                "daemon.context_scout.lifecycle_lookup.rows_next"
+            ))
+            .await
+    }
+    .map_err(|_| Failure::ObservationRowUnreadable)?
     {
         count = count
             .checked_add(1)
@@ -520,9 +541,11 @@ async fn lookup_context_scout_lifecycle_inner(
         let observation_json = row
             .get::<String>(0)
             .map_err(|_| Failure::ObservationRowUnreadable)?;
-        let durable = hotpath::measure_block!("daemon.context_scout.lifecycle_lookup.decode", {
+        let durable = {
+            let _span =
+                tracing::trace_span!("daemon.context_scout.lifecycle_lookup.decode").entered();
             serde_json::from_str::<DurableObservationV1>(&observation_json)
-        })
+        }
         .map_err(|_| Failure::MalformedDurableObservation)?;
         if durable.scope() != &project_scope || durable.source().session_id() != session_id {
             return Err(Failure::DurableScopeMismatch);

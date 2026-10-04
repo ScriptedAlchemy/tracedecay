@@ -53,7 +53,6 @@ impl Default for ObservatoryReadRequestV1 {
 }
 
 impl ObservatoryReadRequestV1 {
-    #[hotpath::skip]
     pub const fn since_seconds(self) -> i64 {
         self.window_days as i64 * 24 * 60 * 60
     }

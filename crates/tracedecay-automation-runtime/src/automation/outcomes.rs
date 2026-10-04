@@ -274,7 +274,7 @@ pub fn automation_outcomes_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(AUTOMATION_OUTCOMES_FILENAME)
 }
 
-#[hotpath::measure(label = "automation.outcomes.load", future = true)]
+#[tracing::instrument(name = "automation.outcomes.load", level = "trace", skip_all)]
 pub async fn load_outcomes_snapshot(dashboard_root: &Path) -> Result<AutomationOutcomesSnapshot> {
     let path = automation_outcomes_path(dashboard_root);
     let bytes = match tokio::fs::read(&path).await {

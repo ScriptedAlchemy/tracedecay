@@ -93,14 +93,13 @@ pub enum GitRepositoryIdentityOutcome {
 
 impl GitRepositoryIdentityOutcome {
     /// True when membership could not be decided.
-    #[hotpath::skip]
     pub const fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown(_))
     }
 }
 
 /// Resolve a repository identity without blocking the async executor.
-#[hotpath::measure(label = "runtime_core.git.discover")]
+#[tracing::instrument(name = "runtime_core.git.discover", level = "trace", skip_all)]
 pub async fn discover_repository_identity(
     directory: &Path,
     deadline: MonotonicDeadline,
@@ -247,17 +246,17 @@ impl Drop for RetireResolution {
 }
 
 fn resolve_identity_from_authority(path: &Path) -> IdentityResolutionResult {
-    let exists = hotpath::measure_block!(
-        "runtime_core.git.discover.control_walk",
+    let exists = {
+        let _span = tracing::trace_span!("runtime_core.git.discover.control_walk").entered();
         repository_control_may_exist(path)
-    );
+    };
     if !exists {
         return IdentityResolutionResult::Decided(GitRepositoryIdentityOutcome::NotRepository);
     }
-    hotpath::measure_block!(
-        "runtime_core.git.discover.authority",
+    {
+        let _span = tracing::trace_span!("runtime_core.git.discover.authority").entered();
         repository_identity_from_authority(path)
-    )
+    }
     .map_or(
         IdentityResolutionResult::Unreadable,
         IdentityResolutionResult::Decided,
@@ -331,7 +330,11 @@ pub async fn repository_discovery_budget(directory: &Path, deadline: Instant) {
 
 /// Await the answer a joined resolution publishes, or `None` when the
 /// resolution ended without one.
-#[hotpath::measure(label = "runtime_core.git.discover.single_flight_wait", future = true)]
+#[tracing::instrument(
+    name = "runtime_core.git.discover.single_flight_wait",
+    level = "trace",
+    skip_all
+)]
 async fn published_identity(
     published: &mut tokio::sync::watch::Receiver<Option<IdentityResolutionResult>>,
 ) -> Option<IdentityResolutionResult> {
@@ -377,7 +380,7 @@ pub fn discover_repository_identity_with_control(
 
 /// `fallback_share` guarantees the Git CLI fallback at least that long after
 /// the authority returns, extending `deadline` when the authority overran it.
-#[hotpath::measure(label = "runtime_core.git.discover_control")]
+#[tracing::instrument(name = "runtime_core.git.discover_control", level = "trace", skip_all)]
 fn discover_repository_identity_sync(
     directory: &Path,
     deadline: MonotonicDeadline,

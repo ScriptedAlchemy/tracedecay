@@ -29,7 +29,6 @@ impl<D> GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::skip]
     pub const fn new(db: D) -> Self {
         Self { db }
     }
@@ -72,7 +71,6 @@ where
         }
     }
 
-    #[hotpath::skip]
     async fn persist_batch(&self, batch: TranscriptWriteBatch) -> TranscriptStoreResult<()> {
         let (cursor_path, mut expected_offset, next_offset) = batch.into_parts();
         let cursor_key = Self::path_text(&cursor_path);
@@ -115,7 +113,11 @@ impl<D> TranscriptStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::measure(label = "usecases.transcript_store.get_parse_offset", future = true)]
+    #[tracing::instrument(
+        name = "usecases.transcript_store.get_parse_offset",
+        level = "trace",
+        skip_all
+    )]
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
@@ -125,9 +127,10 @@ where
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 
-    #[hotpath::measure(
-        label = "usecases.transcript_store.persist_transcript_batch",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.persist_transcript_batch",
+        level = "trace",
+        skip_all
     )]
     async fn persist_transcript_batch(
         &self,
@@ -141,9 +144,10 @@ impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
-    #[hotpath::measure(
-        label = "usecases.transcript_store.replace_parse_offset_pair",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.replace_parse_offset_pair",
+        level = "trace",
+        skip_all
     )]
     async fn replace_parse_offset_pair(
         &self,
@@ -161,9 +165,10 @@ where
             .map_err(|error| Self::persistence_error(first.0, error))
     }
 
-    #[hotpath::measure(
-        label = "usecases.transcript_store.advance_parse_offset",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.transcript_store.advance_parse_offset",
+        level = "trace",
+        skip_all
     )]
     async fn advance_parse_offset_monotonic(
         &self,

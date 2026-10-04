@@ -114,21 +114,16 @@ fn finish_generation_resolution_with<T>(
 fn finish_generation_resolution<T>(
     settlement: GenerationResolutionSettlementV1<T>,
 ) -> GenerationResolutionResultV1<T> {
-    finish_generation_resolution_with(settlement, |terminal| {
-        #[cfg(feature = "hotpath")]
-        match terminal {
-            GenerationResolutionTerminalV1::Ready => {
-                hotpath::gauge!("query.generation.resolve.outcome.ready_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Unavailable => {
-                hotpath::gauge!("query.generation.resolve.outcome.unavailable_total").inc(1_u64);
-            }
-            GenerationResolutionTerminalV1::Failed => {
-                hotpath::gauge!("query.generation.resolve.outcome.failed_total").inc(1_u64);
-            }
+    finish_generation_resolution_with(settlement, |terminal| match terminal {
+        GenerationResolutionTerminalV1::Ready => {
+            metrics::gauge!("query.generation.resolve.outcome.ready_total").increment(1.0);
         }
-        #[cfg(not(feature = "hotpath"))]
-        let _ = terminal;
+        GenerationResolutionTerminalV1::Unavailable => {
+            metrics::gauge!("query.generation.resolve.outcome.unavailable_total").increment(1.0);
+        }
+        GenerationResolutionTerminalV1::Failed => {
+            metrics::gauge!("query.generation.resolve.outcome.failed_total").increment(1.0);
+        }
     })
 }
 
@@ -218,7 +213,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
     }
 
-    #[hotpath::measure(future = true, label = "query.generation.resolve")]
+    #[tracing::instrument(name = "query.generation.resolve", level = "trace", skip_all)]
     pub async fn generation_for_controlled(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -226,8 +221,7 @@ impl CodeIndexSchedulerRegistryV1 {
         control: Option<super::branch_generations::BranchGenerationReadControlV1>,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
     {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("query.generation.resolve.attempts_total").inc(1_u64);
+        metrics::gauge!("query.generation.resolve.attempts_total").increment(1.0);
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             match unique_mounted_for_scope(&mounted, scope) {
@@ -272,29 +266,36 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .cloned()
             {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.generation.resolve.serving_hit_total").inc(1_u64);
+                metrics::gauge!("query.generation.resolve.serving_hit_total").increment(1.0);
                 return Ok(Some(generation));
             }
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.generation.resolve.durable_load_total").inc(1_u64);
-            let scheduler = hotpath::measure_block!("query.generation.resolve.scheduler_wait", {
-                scheduler
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            });
-            let generation = hotpath::measure_block!("query.generation.resolve.load", {
-                scheduler
-                    .generation(&generation_id)
-                    .map_err(|error| match error {
+
+            metrics::gauge!("query.generation.resolve.durable_load_total").increment(1.0);
+            let scheduler = {
+                let _span =
+                    tracing::trace_span!("query.generation.resolve.scheduler_wait").entered();
+                {
+                    scheduler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
+            };
+            let generation =
+                {
+                    let _span = tracing::trace_span!("query.generation.resolve.load").entered();
+                    {
+                        scheduler.generation(&generation_id).map_err(|error| {
+                            match error {
                         super::CodeIndexSchedulerErrorV1::Production(
                             crate::code_index::production::CodeIndexProductionErrorV1::Publication(
                                 error,
                             ),
                         ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
                         _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                    })
-            })?;
+                    }
+                        })
+                    }
+                }?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
         let settlement = match crate::ports::park_admission(
@@ -2412,7 +2413,7 @@ fn disclose_symbol_omissions<T>(
     }
 }
 
-#[hotpath::measure(label = "query.graph.relation_keys")]
+#[tracing::instrument(name = "query.graph.relation_keys", level = "trace", skip_all)]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
@@ -2506,7 +2507,7 @@ fn graph_relation_keys(
     Ok(GraphRelationKeysV1 { keys, complete })
 }
 
-#[hotpath::measure(label = "query.graph.relation_hydrate")]
+#[tracing::instrument(name = "query.graph.relation_hydrate", level = "trace", skip_all)]
 fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],

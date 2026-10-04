@@ -74,7 +74,7 @@ impl StoreDebrisCapability {
 /// once empty. Only regular files reached through the store capability without
 /// following symlinks are removed; no other directory is debris.
 #[must_use]
-#[hotpath::measure(label = "maintenance.incident_debris.sweep")]
+#[tracing::instrument(name = "maintenance.incident_debris.sweep", level = "trace", skip_all)]
 pub fn sweep_incident_debris(
     census: &[StoreCensusEntry],
     profile_root: &Path,
@@ -101,14 +101,16 @@ pub fn sweep_incident_debris(
 /// Items-removed census for the one outer sweep wall span, including the
 /// fail-closed early exits that touch nothing but report every store.
 fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSweepReport {
-    hotpath::gauge!("maintenance.incident_debris.collected_total").inc(report.collected);
-    hotpath::gauge!("maintenance.incident_debris.failed_total").inc(report.errors.len());
-    hotpath::gauge!("maintenance.incident_debris.reclaimed_bytes_total")
-        .inc(report.reclaimed_bytes);
+    metrics::gauge!("maintenance.incident_debris.collected_total")
+        .increment(report.collected as f64);
+    metrics::gauge!("maintenance.incident_debris.failed_total")
+        .increment((report.errors.len()) as f64);
+    metrics::gauge!("maintenance.incident_debris.reclaimed_bytes_total")
+        .increment(report.reclaimed_bytes as f64);
     report
 }
 
-#[hotpath::measure(label = "maintenance.incident_debris.scan")]
+#[tracing::instrument(name = "maintenance.incident_debris.scan", level = "trace", skip_all)]
 pub fn scan_incident_debris(
     entry: &StoreCensusEntry,
     profile_root: &Path,

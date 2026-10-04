@@ -89,7 +89,7 @@ pub fn stored_message_is_shipped_release_rendering(
         .is_some_and(|projection| stores(projection.message()))
 }
 
-#[hotpath::measure(label = "store.projection.derive_canonical")]
+#[tracing::instrument(name = "store.projection.derive_canonical", level = "trace", skip_all)]
 fn derive_canonical_projection_for(
     observation: &DurableObservationV1,
     rendering: CanonicalRendering,

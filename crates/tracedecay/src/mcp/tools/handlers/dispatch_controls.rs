@@ -56,7 +56,7 @@ fn admitted_control(
     Ok((deadline, cancellation))
 }
 
-#[hotpath::measure(future = true, label = "mcp.dispatch.automation_read")]
+#[tracing::instrument(name = "mcp.dispatch.automation_read", level = "trace", skip_all)]
 pub(super) async fn compute_automation_read(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,

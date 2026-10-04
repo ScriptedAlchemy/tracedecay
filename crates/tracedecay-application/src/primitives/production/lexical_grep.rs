@@ -40,7 +40,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a GrepRequestV1,
     ) -> PrimitiveFutureV1<'a, GrepResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.window.cursor.is_some() {
                     return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
@@ -175,7 +175,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     PrimitiveOutcomeV1::Completed(page)
                 }
             },
-            label = "usecases.primitives.grep"
+            tracing::trace_span!("usecases.primitives.grep"),
         ))
     }
 }

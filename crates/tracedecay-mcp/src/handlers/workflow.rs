@@ -133,7 +133,7 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 
 /// Computes `tracedecay_diagnose`: parses compiler output, maps each
 /// diagnostic to its graph symbol, and publishes the parse.
-#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
+#[tracing::instrument(name = "mcp.workflow.diagnose.total", level = "trace", skip_all)]
 pub async fn compute_diagnose(
     cg: &TraceDecay,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -151,16 +151,19 @@ pub async fn compute_diagnose(
         .max_diagnostics
         .map_or(50_usize, |v| v.min(500) as usize);
 
-    let mut diagnostics: Vec<_> = hotpath::measure_block!("mcp.workflow.diagnose.parse", {
-        parse_cargo_output(&request.cargo_output)
-            .into_iter()
-            .filter(|d| match severity_filter {
-                DiagnoseSeverityFilterV1::Error => d.severity == Severity::Error,
-                DiagnoseSeverityFilterV1::Warning => d.severity == Severity::Warning,
-                DiagnoseSeverityFilterV1::All => true,
-            })
-            .collect()
-    });
+    let mut diagnostics: Vec<_> = {
+        let _span = tracing::trace_span!("mcp.workflow.diagnose.parse").entered();
+        {
+            parse_cargo_output(&request.cargo_output)
+                .into_iter()
+                .filter(|d| match severity_filter {
+                    DiagnoseSeverityFilterV1::Error => d.severity == Severity::Error,
+                    DiagnoseSeverityFilterV1::Warning => d.severity == Severity::Warning,
+                    DiagnoseSeverityFilterV1::All => true,
+                })
+                .collect()
+        }
+    };
     let total = diagnostics.len();
     diagnostics.truncate(max_diagnostics);
 
@@ -356,7 +359,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// resolver, a direct, non-daemon server, the honest outcome is to publish
 /// nothing under a named reason rather than to guess a repository-relative
 /// path, which the projection could only refuse.
-#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.publish")]
+#[tracing::instrument(name = "mcp.workflow.diagnose.publish", level = "trace", skip_all)]
 async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
@@ -472,13 +475,10 @@ where
         .await
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Affected-test run is one select-and-execute through the injected runner."
-    )
+#[tracing::instrument(name = "mcp.workflow.affected_tests.total", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Affected-test run is one select-and-execute through the injected runner."
 )]
 async fn run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
@@ -505,12 +505,15 @@ where
         return Ok(not_run(empty_result("no changed files detected")));
     }
 
-    let graph =
-        &hotpath::future!(graph, label = "mcp.workflow.affected_tests.graph_admission").await?;
-    let test_targets = hotpath::measure_block!(
-        "mcp.workflow.affected_tests.graph",
+    let graph = &tracing::Instrument::instrument(
+        graph,
+        tracing::trace_span!("mcp.workflow.affected_tests.graph_admission"),
+    )
+    .await?;
+    let test_targets = {
+        let _span = tracing::trace_span!("mcp.workflow.affected_tests.graph").entered();
         collect_affected_test_targets(graph, &changed_paths)
-    )?;
+    }?;
 
     if test_targets.is_empty() {
         return Ok(not_run(empty_result(&format!(
@@ -588,10 +591,10 @@ where
         }
     };
 
-    let report = hotpath::measure_block!(
-        "mcp.workflow.affected_tests.parse",
+    let report = {
+        let _span = tracing::trace_span!("mcp.workflow.affected_tests.parse").entered();
         parse_libtest_output(&output.stdout)
-    );
+    };
     if let Some(test_name) = missing_requested_test(&test_names, &report) {
         let any_requested_result = test_names
             .iter()
@@ -630,17 +633,17 @@ where
         .await?;
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
-    let run = hotpath::measure_block!(
-        "mcp.workflow.affected_tests.assemble",
+    let run = {
+        let _span = tracing::trace_span!("mcp.workflow.affected_tests.assemble").entered();
         run_affected_tests_body(
             &output,
             &report,
             &test_names,
             truncated,
             &selected_targets,
-            managed.terminal(receipt)
+            managed.terminal(receipt),
         )
-    );
+    };
     Ok(graph_tool_completion(
         GraphToolResultV1::RunAffectedTests(RunAffectedTestsResultV1::Ran(Box::new(run))),
         touched_files,
@@ -731,7 +734,7 @@ impl ManagedTestRun {
     /// order: a run whose live stream terminated has its outcome recorded
     /// unless recording it failed. The receipt is published either way, so
     /// no subscriber waits on a run that already ended.
-    #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
+    #[tracing::instrument(name = "mcp.workflow.affected_tests.finish", level = "trace", skip_all)]
     pub(super) async fn finish(
         &self,
         termination: OperationTermination,
@@ -775,7 +778,7 @@ impl ManagedTestRun {
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.begin")]
+#[tracing::instrument(name = "mcp.workflow.affected_tests.begin", level = "trace", skip_all)]
 async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
@@ -825,7 +828,11 @@ async fn begin_test_run(
     Ok(run)
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.digests")]
+#[tracing::instrument(
+    name = "mcp.workflow.affected_tests.digests",
+    level = "trace",
+    skip_all
+)]
 async fn managed_test_document_content_digests(
     root: &Path,
     changed_paths: &[String],
@@ -884,7 +891,7 @@ pub(crate) fn current_head_commit_id(root: &Path) -> Option<CommitId> {
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.emit")]
+#[tracing::instrument(name = "mcp.workflow.affected_tests.emit", level = "trace", skip_all)]
 async fn emit_observed_test_results(
     emitter: &OperationEmitter,
     report: &LibtestReport,

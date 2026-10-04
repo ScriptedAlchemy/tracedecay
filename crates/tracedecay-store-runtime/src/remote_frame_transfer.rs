@@ -79,7 +79,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         )
     }
 
-    #[hotpath::measure(label = "daemon.remote.frame_transfer")]
+    #[tracing::instrument(name = "daemon.remote.frame_transfer", level = "trace", skip_all)]
     fn execute_controlled(
         &self,
         request: RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,

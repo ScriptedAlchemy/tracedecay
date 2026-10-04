@@ -10,7 +10,6 @@ pub enum SessionSyncInterruption {
 }
 
 impl SessionSyncInterruption {
-    #[hotpath::skip]
     pub const fn termination(self) -> Option<OperationTermination> {
         match self {
             Self::Cancelled => Some(OperationTermination::Cancelled),
@@ -19,7 +18,6 @@ impl SessionSyncInterruption {
         }
     }
 
-    #[hotpath::skip]
     const fn git_after_commit_reason(self) -> &'static str {
         match self {
             Self::Cancelled => "git_sync_cancelled_after_commit",
@@ -30,7 +28,6 @@ impl SessionSyncInterruption {
 }
 
 impl DaemonSessionSyncService {
-    #[hotpath::skip]
     pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -232,7 +229,6 @@ impl DaemonSessionSyncService {
         });
     }
 
-    #[hotpath::skip]
     pub(super) async fn cancel_request(
         &self,
         control: SessionSyncControlV1,
@@ -400,7 +396,6 @@ fn import_transcript_stats(
 }
 
 impl SessionSyncProjectContext {
-    #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -417,7 +412,6 @@ impl SessionSyncProjectContext {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn source_frontiers(
         &self,
         project_sessions: &RegisteredGlobalDbLeaseV1,
@@ -457,7 +451,6 @@ impl SessionSyncProjectContext {
         Ok(frontiers)
     }
 
-    #[hotpath::skip]
     async fn git_history_source_frontiers(
         &self,
         project_sessions: RegisteredGlobalDbLeaseV1,
@@ -483,7 +476,6 @@ impl SessionSyncProjectContext {
         )
     }
 
-    #[hotpath::skip]
     pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
@@ -499,7 +491,7 @@ impl SessionSyncProjectContext {
             let stats =
                 import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
             let coverage = observation.coverage.clone();
-            let source_frontiers = hotpath::future!(
+            let source_frontiers = tracing::Instrument::instrument(
                 service.persist_progress(
                     self,
                     &project_sessions,
@@ -507,7 +499,7 @@ impl SessionSyncProjectContext {
                     stats.clone(),
                     coverage.clone(),
                 ),
-                label = "daemon.session_sync.combined_frontier_persist"
+                tracing::trace_span!("daemon.session_sync.combined_frontier_persist"),
             )
             .await;
             (stats, coverage, source_frontiers)
@@ -536,7 +528,6 @@ impl SessionSyncProjectContext {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn synchronize_git(
         &self,
         service: &DaemonSessionSyncService,

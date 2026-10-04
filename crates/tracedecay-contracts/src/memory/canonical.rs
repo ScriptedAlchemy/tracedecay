@@ -98,7 +98,6 @@ pub struct MemoryFactSnapshot {
 }
 
 impl MemoryFactSnapshot {
-    #[hotpath::skip]
     pub const fn new(owner: FactOwnerV1, fact_id: FactId, projected_as_of: UtcMicros) -> Self {
         Self {
             owner,
@@ -117,7 +116,6 @@ pub struct MemoryReadCoverage {
 }
 
 impl MemoryReadCoverage {
-    #[hotpath::skip]
     pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
         Self {
             visible,
@@ -127,27 +125,22 @@ impl MemoryReadCoverage {
         }
     }
 
-    #[hotpath::skip]
     pub const fn visible(self) -> u64 {
         self.visible
     }
 
-    #[hotpath::skip]
     pub const fn hidden(self) -> u64 {
         self.hidden
     }
 
-    #[hotpath::skip]
     pub const fn unknown(self) -> u64 {
         self.unknown
     }
 
-    #[hotpath::skip]
     pub const fn redacted(self) -> u64 {
         self.redacted
     }
 
-    #[hotpath::skip]
     pub const fn is_complete(self) -> bool {
         self.hidden == 0 && self.unknown == 0 && self.redacted == 0
     }
@@ -168,7 +161,6 @@ pub struct MemoryReadResult<T> {
 }
 
 impl<T> MemoryReadResult<T> {
-    #[hotpath::skip]
     pub const fn new(
         payload: T,
         coverage: MemoryReadCoverage,
@@ -181,17 +173,14 @@ impl<T> MemoryReadResult<T> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn payload(&self) -> &T {
         &self.payload
     }
 
-    #[hotpath::skip]
     pub const fn coverage(&self) -> MemoryReadCoverage {
         self.coverage
     }
 
-    #[hotpath::skip]
     pub const fn contradiction(&self) -> &MemoryContradictionState {
         &self.contradiction
     }
@@ -320,7 +309,6 @@ pub struct MemoryFactLineageCursor {
 }
 
 impl MemoryFactLineageCursor {
-    #[hotpath::skip]
     pub const fn new(occurred_at: UtcMicros, event_id: FactEventId) -> Self {
         Self {
             occurred_at,
@@ -417,7 +405,6 @@ impl<P> MemoryApplication<P> {
         Ok(Self { owner, port })
     }
 
-    #[hotpath::skip]
     pub const fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
@@ -438,7 +425,7 @@ impl<P> MemoryApplication<P> {
 }
 
 impl<P: CommitFactPort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.commit", future = true)]
+    #[tracing::instrument(name = "application.memory.commit", level = "trace", skip_all)]
     pub async fn commit_fact(
         &self,
         command: MemoryCommitFactCommand<P::Command>,
@@ -460,7 +447,7 @@ impl<P: CommitFactPort> MemoryApplication<P> {
 }
 
 impl<P: CurrentFactsPort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.query_current", future = true)]
+    #[tracing::instrument(name = "application.memory.query_current", level = "trace", skip_all)]
     pub async fn query_current_facts(
         &self,
         query: MemoryCurrentFactsQuery<P::Query>,
@@ -503,7 +490,7 @@ impl<P: CurrentFactsPort> MemoryApplication<P> {
 }
 
 impl<P: FactAsOfPort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.query_as_of", future = true)]
+    #[tracing::instrument(name = "application.memory.query_as_of", level = "trace", skip_all)]
     pub async fn query_fact_as_of(
         &self,
         query: MemoryFactAsOfQuery<P::Query>,
@@ -535,7 +522,11 @@ impl<P: FactAsOfPort> MemoryApplication<P> {
 }
 
 impl<P: FactCurrentPort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.query_current_fact", future = true)]
+    #[tracing::instrument(
+        name = "application.memory.query_current_fact",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_fact_current(
         &self,
         query: MemoryFactCurrentQuery<P::Query>,
@@ -566,7 +557,7 @@ impl<P: FactCurrentPort> MemoryApplication<P> {
 }
 
 impl<P: FactLineagePort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.query_lineage", future = true)]
+    #[tracing::instrument(name = "application.memory.query_lineage", level = "trace", skip_all)]
     pub async fn query_fact_lineage(
         &self,
         query: MemoryFactLineageQuery<P::Query>,
@@ -609,7 +600,7 @@ impl<P: FactLineagePort> MemoryApplication<P> {
 }
 
 impl<P: RetrievalAnchorPort> MemoryApplication<P> {
-    #[hotpath::measure(label = "application.memory.get_anchor", future = true)]
+    #[tracing::instrument(name = "application.memory.get_anchor", level = "trace", skip_all)]
     pub async fn get_retrieval_anchor(
         &self,
         query: MemoryRetrievalAnchorQuery<P::Query>,

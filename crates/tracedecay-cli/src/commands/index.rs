@@ -58,7 +58,7 @@ pub(crate) async fn handle_no_command(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.init.run", future = true)]
+#[tracing::instrument(name = "cli.init.run", level = "trace", skip_all)]
 pub(crate) async fn handle_init(
     profile: &ProfileRoot,
     path: Option<String>,
@@ -517,7 +517,7 @@ mod init_bootstrap_tests {
     }
 }
 
-#[hotpath::measure(label = "cli.sync.run", future = true)]
+#[tracing::instrument(name = "cli.sync.run", level = "trace", skip_all)]
 pub(crate) async fn handle_sync(
     profile: &ProfileRoot,
     path: Option<String>,

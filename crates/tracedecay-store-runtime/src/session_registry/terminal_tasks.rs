@@ -13,7 +13,11 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Joins all registered graph blocking settlement, including Git evidence,
     /// before retained graph runtimes may be closed.
-    #[hotpath::measure(label = "daemon.session_registry.shutdown_terminal", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.shutdown_terminal",
+        level = "trace",
+        skip_all
+    )]
     pub async fn shutdown_terminal_tasks(&self) -> Result<(), String> {
         self.cancel_terminal_tasks();
         let mut failures = Vec::new();

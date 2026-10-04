@@ -273,7 +273,7 @@ async fn call_chain(
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let from = params.from.trim();
             let to = params.to.trim();
@@ -387,7 +387,7 @@ async fn call_chain(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.call_chain"
+        tracing::trace_span!("dashboard_api.graph.call_chain"),
     )
     .await
 }
@@ -397,7 +397,7 @@ async fn strata(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let graph = match admitted_graph::<StrataMeasurementV1>(
                 &state,
@@ -414,11 +414,13 @@ async fn strata(
                 .derived_snapshots
                 .strata
                 .get_or_compute(graph_generation.clone(), || async {
-                    let dependencies = match hotpath::measure_block!(
-                        "dashboard_api.graph.strata_dependencies",
+                    let match_result = {
+                        let _span = tracing::trace_span!("dashboard_api.graph.strata_dependencies")
+                            .entered();
                         GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
                             .file_dependencies()
-                    ) {
+                    };
+                    let dependencies = match match_result {
                         Ok(dependencies) => dependencies,
                         Err(error) => {
                             return Err(graph_runtime_error_response::<StrataMeasurementV1>(
@@ -429,7 +431,9 @@ async fn strata(
                     let observed_generation = graph_generation.clone();
                     let computed_generation = graph_generation.clone();
                     let snapshot = tokio::task::spawn_blocking(move || {
-                        hotpath::measure_block!("dashboard_api.graph.strata_compute", {
+                        let _span =
+                            tracing::trace_span!("dashboard_api.graph.strata_compute").entered();
+                        {
                             let adjacency = dependencies.adjacency.as_ref();
                             let depth = dependency_depth(adjacency, adjacency.len());
                             let mut files = Vec::with_capacity(adjacency.len());
@@ -474,7 +478,7 @@ async fn strata(
                                 files_examined: adjacency.len(),
                                 dependency_edges_examined: dependencies.dependency_edges,
                             })
-                        })
+                        }
                     })
                     .await
                     .map_err(|error| {
@@ -519,7 +523,7 @@ async fn strata(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.strata"
+        tracing::trace_span!("dashboard_api.graph.strata"),
     )
     .await
 }
@@ -530,7 +534,7 @@ async fn node_facts(
     RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let graph = match admitted_graph::<FactMatchesMeasurementV1>(
                 &state,
@@ -627,7 +631,7 @@ async fn node_facts(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.node_facts"
+        tracing::trace_span!("dashboard_api.graph.node_facts"),
     )
     .await
 }
@@ -638,7 +642,7 @@ async fn node_tests(
     RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let graph = match admitted_graph::<TestMapMeasurementV1>(
                 &state,
@@ -693,16 +697,20 @@ async fn node_tests(
 
             // Depth-3 caller expansion dominates test-map cost and scales with
             // fan-in, unlike the fixed-price phases around it.
-            let callers = match hotpath::measure_block!("dashboard_api.graph.test_map_impact", {
-                graph.reader.impact(
-                    std::slice::from_ref(&occurrence),
-                    &[RelationEdgeKindV1::Calls],
-                    TEST_CALLER_DEPTH as u32,
-                    STRATA_MAX_FILES,
-                    STRATA_MAX_DEPENDENCY_EDGES,
-                    Arc::clone(&graph.cancellation),
-                )
-            }) {
+            let match_result = {
+                let _span = tracing::trace_span!("dashboard_api.graph.test_map_impact").entered();
+                {
+                    graph.reader.impact(
+                        std::slice::from_ref(&occurrence),
+                        &[RelationEdgeKindV1::Calls],
+                        TEST_CALLER_DEPTH as u32,
+                        STRATA_MAX_FILES,
+                        STRATA_MAX_DEPENDENCY_EDGES,
+                        Arc::clone(&graph.cancellation),
+                    )
+                }
+            };
+            let callers = match match_result {
                 Ok(callers) => callers,
                 Err(error) => {
                     return graph_error_response::<TestMapMeasurementV1>(
@@ -805,7 +813,7 @@ async fn node_tests(
                 graph.freshness,
             )
         },
-        label = "dashboard_api.graph.node_tests"
+        tracing::trace_span!("dashboard_api.graph.node_tests"),
     )
     .await
 }
@@ -816,8 +824,7 @@ async fn node_sessions(
     RequestControl(control): RequestControl,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    hotpath::future!(
-        async move {
+    tracing::Instrument::instrument(async move {
         let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
             &state,
             &control,
@@ -895,9 +902,7 @@ async fn node_sessions(
             graph.freshness,
         )
 
-        },
-        label = "dashboard_api.graph.node_sessions"
-    )
+        }, tracing::trace_span!("dashboard_api.graph.node_sessions"))
     .await
 }
 
@@ -907,7 +912,11 @@ struct AdmittedGraphReadV1 {
     freshness: crate::graph::CodeGraphReadFreshnessV1,
 }
 
-#[hotpath::measure(label = "dashboard_api.graph_structure.admitted_read", future = true)]
+#[tracing::instrument(
+    name = "dashboard_api.graph_structure.admitted_read",
+    level = "trace",
+    skip_all
+)]
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
@@ -931,7 +940,7 @@ async fn admitted_graph<T: Serialize>(
     // Admission and projection-open are the per-request store-open cost every
     // structure route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.
-    let context = hotpath::future!(
+    let context = tracing::Instrument::instrument(
         admission.admit(crate::graph::CodeGraphReadAdmissionRequest::new(
             &operation,
             control.request_id(),
@@ -939,18 +948,18 @@ async fn admitted_graph<T: Serialize>(
             control.cancellation(),
             control.observed_at(),
         )),
-        label = "dashboard_api.graph.structure_admission"
+        tracing::trace_span!("dashboard_api.graph.structure_admission"),
     )
     .await
     .map_err(|error| graph_error_response::<T>(state, error))?;
     let cancellation = crate::graph::application_graph_cancellation(control.cancellation());
-    let verified = hotpath::future!(
+    let verified = tracing::Instrument::instrument(
         projection.open(crate::graph::CodeGraphReadRequest::new(
             &context,
             control.observed_at(),
             Arc::clone(&cancellation),
         )),
-        label = "dashboard_api.graph.structure_open"
+        tracing::trace_span!("dashboard_api.graph.structure_open"),
     )
     .await
     .map_err(|error| graph_error_response::<T>(state, error))?;

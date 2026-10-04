@@ -74,7 +74,7 @@ fn enumerate_tree_directories(
     Ok(())
 }
 
-#[hotpath::measure(label = "daemon.git.watch.plan_build")]
+#[tracing::instrument(name = "daemon.git.watch.plan_build", level = "trace", skip_all)]
 fn build_watch_plan(
     state: &WatchState,
     cancellation: &WatchCancellation,
@@ -100,7 +100,7 @@ fn build_watch_plan(
     Ok(directories.into_iter().collect())
 }
 
-#[hotpath::measure(label = "daemon.git.watch.plan", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.plan", level = "trace", skip_all)]
 pub async fn observe_watch_plan(
     state: Arc<WatchState>,
     cancellation: WatchCancellation,
@@ -122,7 +122,7 @@ pub async fn observe_watch_plan(
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.install", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.install", level = "trace", skip_all)]
 pub async fn install_watches(
     watcher: &mut notify::RecommendedWatcher,
     state: Arc<WatchState>,

@@ -70,7 +70,7 @@ const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// The one-shot tool-call and stdio-proxy clients open exactly one connection
 /// per request, so a probe connection here costs one accept per poll interval
 /// and never competes with a pooled connection budget.
-#[hotpath::measure(label = "daemon.core.ensure_connection_live", future = true)]
+#[tracing::instrument(name = "daemon.core.ensure_connection_live", level = "trace", skip_all)]
 pub(crate) async fn ensure_daemon_connection_live(
     connection: &ResolvedDaemonConnection,
     request_label: &str,
@@ -97,7 +97,7 @@ pub(crate) async fn ensure_daemon_connection_live(
     })
 }
 
-#[hotpath::measure(label = "daemon.core.next_response", future = true)]
+#[tracing::instrument(name = "daemon.core.next_response", level = "trace", skip_all)]
 pub(crate) async fn next_daemon_response_line<R>(
     reader: &mut R,
     connection: &ResolvedDaemonConnection,
@@ -234,7 +234,7 @@ pub(crate) async fn connect_with_restart_grace(
 /// Resolves endpoint authority on every retry because a daemon restart rotates
 /// both its authority epoch and authentication token, and a daemon's first
 /// start writes its record only moments before it binds.
-#[hotpath::measure(label = "daemon.core.connect_restart_grace", future = true)]
+#[tracing::instrument(name = "daemon.core.connect_restart_grace", level = "trace", skip_all)]
 async fn connect_with_restart_grace_resolving(
     mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
     grace: Duration,
@@ -282,13 +282,10 @@ fn authority_absent(error: &TraceDecayError) -> bool {
         .is_some_and(|(code, retryable, _)| code == DAEMON_AUTHORITY_UNAVAILABLE && retryable)
 }
 
-#[hotpath::measure(label = "daemon.core.call_tool", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "A tool call and its liveness poll share one client deadline and must complete as one RPC."
-    )
+#[tracing::instrument(name = "daemon.core.call_tool", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A tool call and its liveness poll share one client deadline and must complete as one RPC."
 )]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
@@ -578,7 +575,7 @@ fn project_open_retry_wait(
     }
 }
 
-#[hotpath::measure(label = "daemon.core.call_tool_retry", future = true)]
+#[tracing::instrument(name = "daemon.core.call_tool_retry", level = "trace", skip_all)]
 async fn call_tool_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -751,7 +748,7 @@ pub async fn recover_truncated_tool_payload(
         let arguments = json!({ "handle": handle, "format": "json", "offset": offset });
         let retrieved = match deadline {
             Some(deadline) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     call_default_tool_awaiting_project_open(
                         profile,
                         handshake,
@@ -759,14 +756,14 @@ pub async fn recover_truncated_tool_payload(
                         arguments,
                         deadline,
                     ),
-                    label = "cli.daemon.recovery_fetch"
+                    tracing::trace_span!("cli.daemon.recovery_fetch"),
                 )
                 .await?
             }
             None => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     call_default_tool(profile, handshake, "tracedecay_retrieve", arguments),
-                    label = "cli.daemon.recovery_fetch"
+                    tracing::trace_span!("cli.daemon.recovery_fetch"),
                 )
                 .await?
             }

@@ -5,7 +5,7 @@ use tracedecay_contracts::ApplicationResult;
 
 /// Serializes one canonical Plan 09 success or problem envelope as exactly one
 /// UTF-8 JSON line, without a transport-specific `Ok`/`Err` wrapper.
-#[hotpath::measure(label = "mcp.application_output.json_line")]
+#[tracing::instrument(name = "mcp.application_output.json_line", level = "trace", skip_all)]
 pub fn json_line<T: Serialize>(result: &ApplicationResult<T>) -> serde_json::Result<String> {
     let mut rendered = match result {
         Ok(envelope) => serde_json::to_string(envelope)?,

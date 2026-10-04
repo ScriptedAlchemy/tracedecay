@@ -36,7 +36,6 @@ impl MultiRootApplicationOperation {
         Self::Execute,
     ];
 
-    #[hotpath::skip]
     pub const fn operation_key(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "scope_set_read",
@@ -45,7 +44,6 @@ impl MultiRootApplicationOperation {
         }
     }
 
-    #[hotpath::skip]
     pub const fn operation_id(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "operation.multi_root.scope_set_read",
@@ -54,7 +52,6 @@ impl MultiRootApplicationOperation {
         }
     }
 
-    #[hotpath::skip]
     pub const fn route_path(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "/multi-root/scope-set/read",
@@ -63,7 +60,6 @@ impl MultiRootApplicationOperation {
         }
     }
 
-    #[hotpath::skip]
     pub const fn application_route_path(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "/application/multi-root/scope-set/read",
@@ -72,7 +68,6 @@ impl MultiRootApplicationOperation {
         }
     }
 
-    #[hotpath::skip]
     const fn effect(self) -> EffectClass {
         match self {
             Self::ScopeSetCompareAndSwap => EffectClass::Administrative,

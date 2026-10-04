@@ -21,7 +21,7 @@ pub(super) enum AtomicServiceWriteStep {
     ParentFsync,
 }
 
-#[hotpath::measure(label = "daemon.service.unit.write")]
+#[tracing::instrument(name = "daemon.service.unit.write", level = "trace", skip_all)]
 pub(super) fn atomic_replace_service_unit_with(
     service_path: &Path,
     unit: &str,
@@ -161,7 +161,7 @@ pub(super) fn service_unit_exists(service_path: &Path) -> Result<bool> {
     }
 }
 
-#[hotpath::measure(label = "daemon.service.unit.remove")]
+#[tracing::instrument(name = "daemon.service.unit.remove", level = "trace", skip_all)]
 pub(super) fn remove_service_unit(service_path: &Path) -> Result<()> {
     match ServicePlatform::current()? {
         ServicePlatform::WindowsTask => windows_task::delete(),

@@ -822,7 +822,7 @@ impl LaneEvidenceBinding for DiagnosticLaneEvidenceV1 {
     }
 }
 
-#[hotpath::measure(label = "query.lane.evidence")]
+#[tracing::instrument(name = "query.lane.evidence", level = "trace", skip_all)]
 pub(super) fn execute_lane<E>(
     lane: RetrieverKind,
     request: &RetrievalRequest,
@@ -835,19 +835,19 @@ where
 {
     if let Some(terminal) = control.terminal() {
         if matches!(terminal, RetrieverOutcome::Cancelled) {
-            hotpath::gauge!("query.cancel.count").inc(1u32);
+            metrics::gauge!("query.cancel.count").increment(1u32);
         }
         return Ok(terminal);
     }
     let outcome = read()?;
     if let Some(terminal) = control.terminal() {
         if matches!(terminal, RetrieverOutcome::Cancelled) {
-            hotpath::gauge!("query.cancel.count").inc(1u32);
+            metrics::gauge!("query.cancel.count").increment(1u32);
         }
         return Ok(terminal);
     }
     validate_lane_outcome(lane, request, &outcome, evidence_binding_matches)?;
-    crate::hotpath_metrics::record_lane(
+    crate::observe::record_lane(
         "query.lane.evidence.candidates",
         "query.lane.evidence.examined",
         "query.lane.evidence.results",

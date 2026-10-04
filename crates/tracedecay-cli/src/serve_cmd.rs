@@ -65,7 +65,7 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
 }
 
 /// Runs the `serve` command as a database-free proxy to the managed daemon.
-#[hotpath::measure(label = "cli.serve.proxy", future = true)]
+#[tracing::instrument(name = "cli.serve.proxy", level = "trace", skip_all)]
 pub async fn run_serve(
     profile: &ProfileRoot,
     path_arg: Option<String>,

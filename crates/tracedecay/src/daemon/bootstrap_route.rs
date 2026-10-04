@@ -30,7 +30,7 @@ fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<s
     })
 }
 
-#[hotpath::measure(label = "daemon.bootstrap.warming_catalog")]
+#[tracing::instrument(name = "daemon.bootstrap.warming_catalog", level = "trace", skip_all)]
 fn warming_bootstrap_tools_list_payload() -> Result<serde_json::Value> {
     bootstrap_tools_list_payload(None, explore_call_budget(0))
 }
@@ -39,7 +39,7 @@ pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
     warming_bootstrap_tools_list_payload().map(|_| ())
 }
 
-#[hotpath::measure(label = "daemon.bootstrap.initialize_route", future = true)]
+#[tracing::instrument(name = "daemon.bootstrap.initialize_route", level = "trace", skip_all)]
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
     first_request: &AuthenticatedFirstRequest,
@@ -161,10 +161,10 @@ pub(super) fn daemon_bootstrap_response(
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
             let budget =
                 project_node_count.map_or_else(|| explore_call_budget(0), explore_call_budget);
-            let payload = hotpath::measure_block!(
-                "daemon.bootstrap.catalog",
+            let payload = {
+                let _span = tracing::trace_span!("daemon.bootstrap.catalog").entered();
                 bootstrap_tools_list_payload(project_node_count, budget)
-            );
+            };
             match payload {
                 Ok(payload) => JsonRpcResponse::success(id, payload),
                 Err(_) => JsonRpcResponse::error(
@@ -178,7 +178,11 @@ pub(super) fn daemon_bootstrap_response(
     }
 }
 
-#[hotpath::measure(label = "daemon.bootstrap.project_node_count", future = true)]
+#[tracing::instrument(
+    name = "daemon.bootstrap.project_node_count",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn cached_project_node_count(
     store_administration: &StoreAdministration,
     handshake: &DaemonHandshake,

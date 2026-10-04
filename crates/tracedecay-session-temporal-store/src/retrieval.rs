@@ -205,7 +205,6 @@ struct SessionReadRelationAuthority<'a> {
 
 impl<'a> SessionTemporalReadPort<'a> {
     #[cfg(test)]
-    #[hotpath::skip]
     pub const fn new(read: &'a engine::Connection) -> Self {
         Self {
             read: TemporalSqlRead::engine_connection(read),
@@ -214,7 +213,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
@@ -224,7 +222,6 @@ impl<'a> SessionTemporalReadPort<'a> {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub const fn new_with_relations(
         read: &'a engine::Connection,
         scope: &'a SessionRelationScope,
@@ -237,7 +234,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered_with_relations(
         read: &'a DatabaseEngineReadSnapshot,
         scope: &'a SessionRelationScope,
@@ -250,9 +246,10 @@ impl<'a> SessionTemporalReadPort<'a> {
         }
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.query.prepare_root_candidates"
+    #[tracing::instrument(
+        name = "session_temporal.query.prepare_root_candidates",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn prepare_root_candidate_cohort(
         &self,
@@ -459,7 +456,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn candidate_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -514,7 +510,6 @@ impl<'a> SessionTemporalReadPort<'a> {
             .await
     }
 
-    #[hotpath::skip]
     async fn session_matches_filter(
         &self,
         request: &TemporalSnapshotRequest,
@@ -639,7 +634,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         Ok(true)
     }
 
-    #[hotpath::skip]
     async fn candidate_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -740,7 +734,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         Ok(matched)
     }
 
-    #[hotpath::skip]
     async fn summary_observations_match(
         &self,
         candidate: &RankingCandidate,
@@ -833,7 +826,6 @@ impl<'a> SessionTemporalReadPort<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     async fn query_root_scope_candidates(
         &self,
         snapshot_request: &TemporalSnapshotRequest,
@@ -935,7 +927,6 @@ impl<'a> SessionTemporalReadPort<'a> {
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))
     }
 
-    #[hotpath::skip]
     async fn validate_snapshot(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -1076,7 +1067,6 @@ impl<'a> SessionTemporalReadPort<'a> {
     /// per-participant `LIMIT 2` probe would have returned. Rows are still kept in
     /// a vector per key so a schema that ever admitted a duplicate raises the same
     /// "not unique" error the probe did.
-    #[hotpath::skip]
     async fn read_frozen_participant_generations(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -1166,7 +1156,7 @@ impl<'a> SessionTemporalReadPort<'a> {
         Ok(batch)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.candidates")]
+    #[tracing::instrument(name = "session_temporal.query.candidates", level = "trace", skip_all)]
     async fn produce_candidates(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1188,7 +1178,6 @@ impl<'a> SessionTemporalReadPort<'a> {
         .await
     }
 
-    #[hotpath::skip]
     async fn produce_candidates_from_request(
         &self,
         scope: &TemporalRetrievalScope,
@@ -1344,7 +1333,7 @@ impl<'a> SessionTemporalReadPort<'a> {
         Ok(PageStatus::Complete)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.query.records")]
+    #[tracing::instrument(name = "session_temporal.query.records", level = "trace", skip_all)]
     async fn produce_records(
         &self,
         scope: &TemporalRetrievalScope,

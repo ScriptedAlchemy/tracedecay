@@ -25,7 +25,6 @@ impl SnapshotReadControl {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn is_unlimited(&self) -> bool {
         self.deadline.is_none()
     }
@@ -50,14 +49,8 @@ impl SnapshotReadControl {
     }
 
     pub(super) fn copy_file(&self, source: &Path, target: &Path) -> io::Result<()> {
-        let mut source = hotpath::io!(
-            File::open(source)?,
-            label = "runtime_core.db.snapshot.copy_read"
-        );
-        let mut destination = hotpath::io!(
-            File::create(target)?,
-            label = "runtime_core.db.snapshot.copy_write"
-        );
+        let mut source = File::open(source)?;
+        let mut destination = File::create(target)?;
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             self.checkpoint()?;

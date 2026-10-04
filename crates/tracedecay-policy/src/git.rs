@@ -193,7 +193,7 @@ impl GitEffectClassifierV1 {
 }
 
 impl GitEffectClassifier for GitEffectClassifierV1 {
-    #[hotpath::measure(label = "policy.git.evaluate")]
+    #[tracing::instrument(name = "policy.git.evaluate", level = "trace", skip_all)]
     fn evaluate(&self, input: &GitEffectClassificationInputV1) -> GitEffectDecisionV1 {
         if input.policy_revision == 0
             || input.policy_digest.validate().is_err()

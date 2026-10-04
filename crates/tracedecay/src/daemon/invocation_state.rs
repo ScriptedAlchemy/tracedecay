@@ -105,7 +105,6 @@ impl DaemonInvocationState {
     /// must never win this process-wide installation by opening first. The
     /// returned receipt carries the one process background CPU authority the
     /// plan installed, already mounted into session preparation.
-    #[hotpath::skip]
     pub(super) async fn install_profile_worker_plan(
         &self,
         store_administration: &StoreAdministration,
@@ -172,7 +171,6 @@ impl DaemonInvocationState {
         Ok(installed)
     }
 
-    #[hotpath::skip]
     pub(super) async fn retire_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -184,7 +182,6 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
-    #[hotpath::skip]
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -201,7 +198,11 @@ impl DaemonInvocationState {
             })
     }
 
-    #[hotpath::measure(label = "daemon.invocation_state.project_drain", future = true)]
+    #[tracing::instrument(
+        name = "daemon.invocation_state.project_drain",
+        level = "trace",
+        skip_all
+    )]
     async fn drain_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
@@ -213,9 +214,9 @@ impl DaemonInvocationState {
         // runtime either by capacity quiescence (reopenable) or by terminal
         // remote-deletion retirement.
         if reopenable {
-            hotpath::gauge!("daemon.invocation_state.transition.quiesce_total").inc(1_u64);
+            metrics::gauge!("daemon.invocation_state.transition.quiesce_total").increment(1.0);
         } else {
-            hotpath::gauge!("daemon.invocation_state.transition.retire_total").inc(1_u64);
+            metrics::gauge!("daemon.invocation_state.transition.retire_total").increment(1.0);
         }
         let retirement_kind = if reopenable {
             "capacity-retired"
@@ -227,7 +228,8 @@ impl DaemonInvocationState {
             .retire_project_roots(project_roots)
             .await
         {
-            hotpath::gauge!("daemon.invocation_state.drain.code_index_refused_total").inc(1_u64);
+            metrics::gauge!("daemon.invocation_state.drain.code_index_refused_total")
+                .increment(1.0);
             return Err(TraceDecayError::Config {
                 message: format!(
                     "code-index workers for {retirement_kind} project '{}' did not drain",
@@ -246,8 +248,7 @@ impl DaemonInvocationState {
                     )
                     .await
                     .ok_or_else(|| {
-                        hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total")
-                            .inc(1_u64);
+                        metrics::gauge!("daemon.invocation_state.drain.owners_refused_total").increment(1.0);
                         TraceDecayError::Config {
                             message: format!(
                                 "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -267,7 +268,8 @@ impl DaemonInvocationState {
                 )
                 .await
             {
-                hotpath::gauge!("daemon.invocation_state.drain.owners_refused_total").inc(1_u64);
+                metrics::gauge!("daemon.invocation_state.drain.owners_refused_total")
+                    .increment(1.0);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "invocation runtime owners for {retirement_kind} project '{}' did not drain",
@@ -330,7 +332,6 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
-    #[hotpath::skip]
     pub(super) async fn mount_core_query_authority_for_project(
         &self,
         project_root: &Path,
@@ -354,7 +355,11 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
+    #[tracing::instrument(
+        name = "daemon.invocation_state.code_index_mount",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn mount_code_index(
         &self,
         project_id: tracedecay_domain::ProjectId,
@@ -379,7 +384,8 @@ impl DaemonInvocationState {
                 reason = "missing project-root .git control path",
                 "project root is not a git repository; code index disabled"
             );
-            hotpath::gauge!("daemon.invocation_state.code_index_mount.skipped_total").inc(1_u64);
+            metrics::gauge!("daemon.invocation_state.code_index_mount.skipped_total")
+                .increment(1.0);
             return Ok(());
         }
         let canonical_project_root = canonical_existing_identity(project_root)
@@ -398,7 +404,8 @@ impl DaemonInvocationState {
             )
             .await
             .map_err(|error| {
-                hotpath::gauge!("daemon.invocation_state.code_index_mount.failed_total").inc(1_u64);
+                metrics::gauge!("daemon.invocation_state.code_index_mount.failed_total")
+                    .increment(1.0);
                 TraceDecayError::Config {
                     message: format!("code-index scheduler could not be mounted: {error}"),
                 }
@@ -443,13 +450,14 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "Multi-root execute is one scoped dispatch across the admitted root set."
-        )
+    #[tracing::instrument(
+        name = "daemon.invocation_state.multi_root_execute",
+        level = "trace",
+        skip_all
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Multi-root execute is one scoped dispatch across the admitted root set."
     )]
     pub(super) async fn execute_multi_root_for_project(
         &self,
@@ -540,8 +548,8 @@ impl DaemonInvocationState {
         // Items-processed: the multi_root_execute span is inclusive over every
         // admitted root, so per-request root counts are what divide its wall
         // time into per-root service demand.
-        hotpath::gauge!("daemon.invocation_state.multi_root_roots_total")
-            .inc(scope_set.roots().len() as u64);
+        metrics::gauge!("daemon.invocation_state.multi_root_roots_total")
+            .increment((scope_set.roots().len() as u64) as f64);
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
@@ -944,7 +952,6 @@ impl DaemonInvocationState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub(super) async fn execute_one_multi_root_operation(
         &self,
         store_administration: &StoreAdministration,
@@ -1067,7 +1074,7 @@ impl DaemonInvocationState {
         // Counts cancel *requests*, not distinct transitions: the owner's
         // synchronous cancel side is intentionally idempotent, and a repeat
         // request after a coordinator retry is itself worth observing.
-        hotpath::gauge!("daemon.invocation_state.cancel_admissions_total").inc(1_u64);
+        metrics::gauge!("daemon.invocation_state.cancel_admissions_total").increment(1.0);
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
         // Code-index workers only observe `shutting_down` / closed admission
@@ -1077,7 +1084,7 @@ impl DaemonInvocationState {
         self.code_index_schedulers.cancel();
     }
 
-    #[hotpath::measure(label = "daemon.invocation_state.shutdown", future = true)]
+    #[tracing::instrument(name = "daemon.invocation_state.shutdown", level = "trace", skip_all)]
     pub(super) async fn shutdown(&self) -> ShutdownStatus {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
@@ -1121,7 +1128,7 @@ impl DaemonInvocationState {
         let expired = self.service.expire_all().await;
         step("invocation_service_expired");
         if !expired {
-            hotpath::gauge!("daemon.invocation_state.shutdown_incomplete_total").inc(1_u64);
+            metrics::gauge!("daemon.invocation_state.shutdown_incomplete_total").increment(1.0);
             ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
         } else if schedulers_timed_out {
             ShutdownStatus::TimedOut

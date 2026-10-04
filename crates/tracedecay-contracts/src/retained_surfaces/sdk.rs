@@ -610,7 +610,6 @@ pub enum SessionRefreshScopeV1 {
 
 impl SessionRefreshScopeV1 {
     /// Wire spelling of the selected owner, echoed in refresh results.
-    #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Project {} => "project",
@@ -685,7 +684,6 @@ pub struct SessionRefreshRequestV1 {
 }
 
 impl SessionRefreshRequestV1 {
-    #[hotpath::skip]
     pub const fn with_action(
         action: SessionRefreshActionV1,
         request: SessionRefreshActionRequestV1,
@@ -693,7 +691,6 @@ impl SessionRefreshRequestV1 {
         Self { action, request }
     }
 
-    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self.action {
             SessionRefreshActionV1::Status => RetainedSurfaceOperation::SessionRefreshStatus,
@@ -867,7 +864,6 @@ pub enum RetainedSurfaceRequestV1 {
 }
 
 impl RetainedSurfaceRequestV1 {
-    #[hotpath::skip]
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self {
             Self::FactStoreCurate(_) => RetainedSurfaceOperation::FactStoreCurate,

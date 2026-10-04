@@ -9,7 +9,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 globset = "0.4"
-hotpath.workspace = true
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: observation identities and payload digests are derived
@@ -21,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 thiserror = "2"
+tracing = "0.1"
 url = "2"
 
 [dev-dependencies]

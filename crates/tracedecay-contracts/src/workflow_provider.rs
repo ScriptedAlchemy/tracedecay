@@ -46,7 +46,6 @@ impl WorkflowProviderRegistration {
         &self.route
     }
 
-    #[hotpath::skip]
     pub const fn backend(&self) -> WorkProviderBackendV1 {
         self.backend
     }
@@ -55,7 +54,6 @@ impl WorkflowProviderRegistration {
         &self.model
     }
 
-    #[hotpath::skip]
     pub const fn priority(&self) -> u32 {
         self.priority
     }
@@ -151,12 +149,15 @@ pub struct WorkflowProviderPlacementService {
 }
 
 impl WorkflowProviderPlacementService {
-    #[hotpath::skip]
     pub const fn new(registry: WorkflowProviderRegistry) -> Self {
         Self { registry }
     }
 
-    #[hotpath::measure(label = "application.workflow.provider.place")]
+    #[tracing::instrument(
+        name = "application.workflow.provider.place",
+        level = "trace",
+        skip_all
+    )]
     pub fn place(
         &self,
         request: &WorkflowTopologyPlacementRequest,

@@ -92,7 +92,11 @@ pub fn fact_write_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> Fa
     )
 }
 
-#[hotpath::measure(label = "daemon.retained.memory.bounded_operation", future = true)]
+#[tracing::instrument(
+    name = "daemon.retained.memory.bounded_operation",
+    level = "trace",
+    skip_all
+)]
 pub async fn bounded_memory_operation<T, F>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     future: F,

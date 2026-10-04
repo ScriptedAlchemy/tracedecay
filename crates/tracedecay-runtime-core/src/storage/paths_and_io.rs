@@ -229,10 +229,7 @@ impl PrivateStoreIo {
         let mut options = fs::OpenOptions::new();
         options.append(true);
         // One canonical handle: the append file itself, no buffer wrapper.
-        let mut file = hotpath::io!(
-            Self::open_private(path, &mut options)?,
-            label = "runtime_core.storage.append_line"
-        );
+        let mut file = Self::open_private(path, &mut options)?;
         file.write_all(format!("{line}\n").as_bytes())?;
         file.flush()?;
         drop(file);
@@ -284,7 +281,7 @@ impl PrivateStoreIo {
     /// `path`. Callers that require rollback must retain and restore their prior
     /// value under their own stable serialization authority; this primitive
     /// never unlinks a destination it cannot prove it still owns.
-    #[hotpath::measure(label = "runtime_core.storage.durable_write")]
+    #[tracing::instrument(name = "runtime_core.storage.durable_write", level = "trace", skip_all)]
     pub fn write_file_atomically_durable(
         path: &Path,
         temp_path: &Path,
@@ -305,27 +302,30 @@ impl PrivateStoreIo {
             options.write(true).truncate(true);
             let mut temp = Self::open_private(temp_path, &mut options)?;
             temp.write_all(contents)?;
-            hotpath::measure_block!("runtime_core.storage.fsync_temp", temp.sync_all())
-                .inspect_err(|_| {
-                    hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
-                })?;
+            {
+                let _span = tracing::trace_span!("runtime_core.storage.fsync_temp").entered();
+                temp.sync_all()
+            }
+            .inspect_err(|_| {
+                metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
+            })?;
         }
         set_owner_private_file_mode(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
-        hotpath::measure_block!(
-            "runtime_core.storage.rename",
+        {
+            let _span = tracing::trace_span!("runtime_core.storage.rename").entered();
             crate::db::DatabaseAuthority::replace_file_atomically(
                 temp_path,
                 path,
                 "private store durable file",
             )
             .map_err(io::Error::other)
-        )
+        }
         .inspect_err(|_| {
-            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
+            metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
         })?;
-        hotpath::measure_block!(
-            "runtime_core.storage.fsync_publish",
+        {
+            let _span = tracing::trace_span!("runtime_core.storage.fsync_publish").entered();
             fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -335,9 +335,9 @@ impl PrivateStoreIo {
                     inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename)
                 })
                 .and_then(|()| sync_parent_directory(path))
-        )
+        }
         .inspect_err(|_| {
-            hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
+            metrics::gauge!("runtime_core.storage.durable_write_failures").increment(1.0);
         })?;
         Ok(())
     }
@@ -357,7 +357,7 @@ impl PrivateStoreIo {
             Self::create_dir_all(parent)?;
         }
         let bytes = fs::copy(source, target)?;
-        hotpath::gauge!("runtime_core.storage.copy_bytes").inc(bytes as f64);
+        metrics::gauge!("runtime_core.storage.copy_bytes").increment(bytes as f64);
         set_owner_private_file_mode(target)?;
         Ok(bytes)
     }

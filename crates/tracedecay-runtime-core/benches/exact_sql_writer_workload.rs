@@ -7,10 +7,6 @@ use std::time::Instant;
 use tempfile::TempDir;
 use tracedecay_runtime_core::db::engine::{TestConnection, params};
 
-#[cfg(feature = "hotpath-alloc")]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 const WRITES: usize = 256;
 const CONCURRENCY: usize = 8;
 
@@ -27,7 +23,7 @@ fn sample_blocking_workers(peak: &AtomicUsize) {
     let _ = peak;
 }
 
-#[hotpath::measure(label = "exact_sql_workload.write_ack", future = true)]
+#[tracing::instrument(name = "exact_sql_workload.write_ack", level = "trace", skip_all)]
 async fn write_ack(connection: &TestConnection, id: usize, peak: &AtomicUsize) -> u64 {
     let started = Instant::now();
     assert_eq!(
@@ -64,10 +60,6 @@ fn report(label: &str, mut samples: Vec<u64>, elapsed: std::time::Duration, peak
 }
 
 fn main() {
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("exact-sql-writer-workload")
-        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
-        .build();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

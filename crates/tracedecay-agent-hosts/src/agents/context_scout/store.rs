@@ -733,10 +733,7 @@ impl ProjectContextScoutDurableStoreV1 {
 
     /// Daemon startup convenience: construct the owned store, atomically
     /// requeue expired claims, and return a bounded ready page.
-    #[hotpath::measure(
-        label = "context_scout_store_startup",
-        impl_type = "ProjectContextScoutDurableStoreV1"
-    )]
+    #[tracing::instrument(name = "context_scout_store_startup", level = "trace", skip_all)]
     pub async fn startup_from_project_database(
         database: Database,
         project_id: [u8; 16],
@@ -754,10 +751,7 @@ impl ProjectContextScoutDurableStoreV1 {
 
     // The shared read funnel behind `recent`, `recent_for_protected_session`,
     // and `recent_project`: one static label for durable recent-state reads.
-    #[hotpath::measure(
-        label = "context_scout_store_read",
-        impl_type = "ProjectContextScoutDurableStoreV1"
-    )]
+    #[tracing::instrument(name = "context_scout_store_read", level = "trace", skip_all)]
     async fn recent_matching(
         &self,
         configuration_revision: [u8; 32],
@@ -897,10 +891,7 @@ impl ProjectContextScoutDurableStoreV1 {
         .await
     }
 
-    #[hotpath::measure(
-        label = "context_scout_persist",
-        impl_type = "ProjectContextScoutDurableStoreV1"
-    )]
+    #[tracing::instrument(name = "context_scout_persist", level = "trace", skip_all)]
     async fn update_state<T: Send>(
         &self,
         operation: &str,
@@ -1211,10 +1202,7 @@ impl ProjectContextScoutDurableStoreV1 {
         ContextScoutMutationSettlementOutcomeV1::Reconciled(Box::new(settlement))
     }
 
-    #[hotpath::measure(
-        label = "context_scout_work_snapshot",
-        impl_type = "ProjectContextScoutDurableStoreV1"
-    )]
+    #[tracing::instrument(name = "context_scout_work_snapshot", level = "trace", skip_all)]
     pub(crate) async fn work_snapshot(
         &self,
         now: UtcMicros,

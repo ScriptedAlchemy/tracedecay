@@ -441,12 +441,15 @@ pub struct NativeIntegrationService<P> {
 }
 
 impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
-    #[hotpath::skip]
     pub const fn new(port: P) -> Self {
         Self { port }
     }
 
-    #[hotpath::measure(label = "application.git.native_integration.preflight")]
+    #[tracing::instrument(
+        name = "application.git.native_integration.preflight",
+        level = "trace",
+        skip_all
+    )]
     pub fn preflight(
         &self,
         request: NativeIntegrationPreflightRequestV1,
@@ -460,7 +463,11 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(outcome)
     }
 
-    #[hotpath::measure(label = "application.git.native_integration.apply")]
+    #[tracing::instrument(
+        name = "application.git.native_integration.apply",
+        level = "trace",
+        skip_all
+    )]
     pub fn apply(
         &self,
         request: NativeIntegrationApplyRequestV1,
@@ -472,7 +479,11 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(receipt)
     }
 
-    #[hotpath::measure(label = "application.git.native_integration.status")]
+    #[tracing::instrument(
+        name = "application.git.native_integration.status",
+        level = "trace",
+        skip_all
+    )]
     pub fn status(
         &self,
         request: NativeIntegrationStatusRequestV1,
@@ -485,7 +496,11 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         Ok(status)
     }
 
-    #[hotpath::measure(label = "application.git.native_integration.cancel")]
+    #[tracing::instrument(
+        name = "application.git.native_integration.cancel",
+        level = "trace",
+        skip_all
+    )]
     pub fn cancel(
         &self,
         request: NativeIntegrationCancelRequestV1,

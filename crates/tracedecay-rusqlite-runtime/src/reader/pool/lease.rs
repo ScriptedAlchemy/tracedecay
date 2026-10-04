@@ -149,13 +149,17 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         self.checkout.retire = true;
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.begin_snapshot")]
+    #[tracing::instrument(
+        name = "rusqlite.reader_lease.begin_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub fn begin_snapshot(&mut self) -> Result<SnapshotLease<'_, E>, ReaderWorkerError> {
         self.start_snapshot()?;
         Ok(SnapshotLease { lease: self })
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.execute")]
+    #[tracing::instrument(name = "rusqlite.reader_lease.execute", level = "trace", skip_all)]
     pub(crate) fn execute_active_raw(
         &mut self,
         request: RuntimeReadRequestV1,
@@ -183,7 +187,11 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .map_err(map_worker_error)
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.exact_sql_query")]
+    #[tracing::instrument(
+        name = "rusqlite.reader_lease.exact_sql_query",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn execute_exact_sql_query(
         &mut self,
         statement: ExactSqlStatement,
@@ -196,14 +204,22 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .execute_exact_sql_query(statement)
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.begin_exact_sql_snapshot")]
+    #[tracing::instrument(
+        name = "rusqlite.reader_lease.begin_exact_sql_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn begin_exact_sql_snapshot(&mut self) -> Result<(), ExactSqlError> {
         self.start_snapshot()
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         self.checkout.worker.client.pin_exact_sql()
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.exact_sql_snapshot_query")]
+    #[tracing::instrument(
+        name = "rusqlite.reader_lease.exact_sql_snapshot_query",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn execute_active_exact_sql_query(
         &mut self,
         statement: ExactSqlStatement,
@@ -219,7 +235,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .execute_exact_sql_query(statement)
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.store_size")]
+    #[tracing::instrument(name = "rusqlite.reader_lease.store_size", level = "trace", skip_all)]
     pub(super) fn read_store_size(
         &mut self,
         reply_bound: std::time::Duration,
@@ -232,7 +248,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .map_err(map_worker_error)
     }
 
-    #[hotpath::measure(label = "rusqlite.reader_lease.table_sizes")]
+    #[tracing::instrument(name = "rusqlite.reader_lease.table_sizes", level = "trace", skip_all)]
     pub(super) fn read_table_sizes(
         &mut self,
         reply_bound: std::time::Duration,

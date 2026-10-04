@@ -29,7 +29,11 @@ use super::{
 
 /// Verify first, then produce the full immutable lifecycle plan, including
 /// receipt-derived orphan removals for update, repair, and uninstall.
-#[hotpath::measure(label = "hosts.agent.host_bundle.plan_complete")]
+#[tracing::instrument(
+    name = "hosts.agent.host_bundle.plan_complete",
+    level = "trace",
+    skip_all
+)]
 pub fn plan_verified_complete_lifecycle_mutation(
     manifest: &HostBundleManifestV1,
     request: &HostBundleLifecycleRequestV1,
@@ -614,7 +618,7 @@ pub fn dry_run_host_bundle_lifecycle_at(
     )
 }
 
-#[hotpath::measure(label = "hosts.agent.host_bundle.dry_run")]
+#[tracing::instrument(name = "hosts.agent.host_bundle.dry_run", level = "trace", skip_all)]
 pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
     artifact_root: &Path,
     lifecycle_root: &Path,
@@ -722,7 +726,11 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
 /// Read-only component-set preview for the official CLI. The registration
 /// adapter contributes the exact native-config revision, while every artifact
 /// plan is derived through the same ownership-aware planner used by apply.
-#[hotpath::measure(label = "hosts.agent.host_bundle.component_set_dry_run")]
+#[tracing::instrument(
+    name = "hosts.agent.host_bundle.component_set_dry_run",
+    level = "trace",
+    skip_all
+)]
 pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     V: HostBundleVerificationAdapterV1,
     R: HostComponentSetRegistrationV1,

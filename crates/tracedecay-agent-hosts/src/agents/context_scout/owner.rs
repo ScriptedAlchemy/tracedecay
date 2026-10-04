@@ -136,11 +136,7 @@ pub fn unregister_registered_context_scout_owner(
 }
 
 impl ProjectContextScoutOwnerV1 {
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.startup",
-        impl_type = "ProjectContextScoutOwnerV1"
-    )]
+    #[tracing::instrument(name = "hosts.agent.context_scout.startup", level = "trace", skip_all)]
     pub async fn startup(
         database: Database,
         project_id: [u8; 16],
@@ -349,10 +345,10 @@ impl ProjectContextScoutOwnerV1 {
         &self.startup
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.claim_ready",
-        impl_type = "ProjectContextScoutOwnerV1"
+    #[tracing::instrument(
+        name = "hosts.agent.context_scout.claim_ready",
+        level = "trace",
+        skip_all
     )]
     pub async fn claim_ready_guidance(
         &self,
@@ -458,10 +454,10 @@ impl ProjectContextScoutOwnerV1 {
         self.store.requeue(claim).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.record_delivery",
-        impl_type = "ProjectContextScoutOwnerV1"
+    #[tracing::instrument(
+        name = "hosts.agent.context_scout.record_delivery",
+        level = "trace",
+        skip_all
     )]
     pub async fn record_delivery(
         &self,
@@ -512,10 +508,10 @@ impl ProjectContextScoutOwnerV1 {
             .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.record_feedback",
-        impl_type = "ProjectContextScoutOwnerV1"
+    #[tracing::instrument(
+        name = "hosts.agent.context_scout.record_feedback",
+        level = "trace",
+        skip_all
     )]
     pub async fn record_feedback(
         &self,
@@ -605,10 +601,10 @@ impl ProjectContextScoutOwnerV1 {
             .await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.install_configuration",
-        impl_type = "ProjectContextScoutOwnerV1"
+    #[tracing::instrument(
+        name = "hosts.agent.context_scout.install_configuration",
+        level = "trace",
+        skip_all
     )]
     pub async fn install_configuration(
         &self,
@@ -644,10 +640,10 @@ impl ProjectContextScoutOwnerV1 {
 
     /// Installs only an admitted active/paused control transition while
     /// preserving the already-selected model authority.
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.install_state_transition",
-        impl_type = "ProjectContextScoutOwnerV1"
+    #[tracing::instrument(
+        name = "hosts.agent.context_scout.install_state_transition",
+        level = "trace",
+        skip_all
     )]
     pub async fn install_state_transition(
         &self,
@@ -676,11 +672,7 @@ impl ProjectContextScoutOwnerV1 {
         self.status_for_control(control).await
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "hosts.agent.context_scout.recent",
-        impl_type = "ProjectContextScoutOwnerV1"
-    )]
+    #[tracing::instrument(name = "hosts.agent.context_scout.recent", level = "trace", skip_all)]
     pub async fn recent(
         &self,
         protected_session_id: [u8; 32],

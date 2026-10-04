@@ -143,7 +143,6 @@ impl RetainedSurfaceOperation {
     pub const SDK_EXECUTABLE: [Self; 27] = Self::ALL;
 
     /// Additional SDK controls that cannot live in the bounds-only operation body.
-    #[hotpath::skip]
     pub const fn sdk_operation_contract(self) -> RetainedSdkOperationContractV1 {
         match self {
             Self::FactStoreCurate => RetainedSdkOperationContractV1 {
@@ -161,7 +160,6 @@ impl RetainedSurfaceOperation {
             .find(|candidate| candidate.as_str() == operation.as_str())
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FactStoreCurate => "fact_store_curate",

@@ -24,7 +24,7 @@ pub struct DaemonLspSessionClient {
 }
 
 impl DaemonLspSessionClient {
-    #[hotpath::measure(label = "daemon.client.lsp.open", future = true)]
+    #[tracing::instrument(name = "daemon.client.lsp.open", level = "trace", skip_all)]
     pub async fn open(
         invocation: DaemonInvocationClient,
         client_revision: impl Into<String>,
@@ -82,7 +82,6 @@ impl DaemonLspSessionClient {
         self.scope_set_digest.as_ref()
     }
 
-    #[hotpath::skip]
     pub async fn try_send_client_frame(
         &mut self,
         frame: &str,
@@ -119,7 +118,6 @@ impl DaemonLspSessionClient {
         }
     }
 
-    #[hotpath::skip]
     pub async fn poll_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -151,7 +149,6 @@ impl DaemonLspSessionClient {
         }
     }
 
-    #[hotpath::skip]
     pub async fn acknowledge_daemon_frame(
         &mut self,
         deadline: Deadline,
@@ -177,7 +174,6 @@ impl DaemonLspSessionClient {
         }
     }
 
-    #[hotpath::skip]
     pub async fn reconnect(
         &mut self,
         deadline: Deadline,
@@ -224,7 +220,6 @@ impl DaemonLspSessionClient {
         }
     }
 
-    #[hotpath::skip]
     pub async fn detach(
         &mut self,
         deadline: Deadline,
@@ -255,7 +250,6 @@ impl DaemonLspSessionClient {
         }
     }
 
-    #[hotpath::skip]
     async fn invoke(
         &mut self,
         request: crate::contract::DaemonInvocationRequest,

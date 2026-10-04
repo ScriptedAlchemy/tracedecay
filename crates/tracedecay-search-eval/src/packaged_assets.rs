@@ -33,7 +33,7 @@ impl PackagedEvaluatorAssets {
     }
 }
 
-#[hotpath::measure(label = "search_eval.package.materialize")]
+#[tracing::instrument(name = "search_eval.package.materialize", level = "trace", skip_all)]
 pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> {
     let workload = packaged::load_workload()?;
     let directory = tempfile::tempdir().map_err(|error| {
@@ -61,16 +61,19 @@ pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> 
         })?;
     }
     materialize_git_authority(directory.path())?;
-    hotpath::measure_block!("search_eval.package.verify", {
-        let materialized_workload =
-            load_candidate_workload(&directory.path().join(WORKLOAD_RELATIVE))?;
-        if materialized_workload != workload {
-            return Err(SearchEvalError::Contract(
-                "materialized evaluator workload differs from packaged bytes".to_owned(),
-            ));
+    {
+        let _span = tracing::trace_span!("search_eval.package.verify").entered();
+        {
+            let materialized_workload =
+                load_candidate_workload(&directory.path().join(WORKLOAD_RELATIVE))?;
+            if materialized_workload != workload {
+                return Err(SearchEvalError::Contract(
+                    "materialized evaluator workload differs from packaged bytes".to_owned(),
+                ));
+            }
+            Ok::<(), SearchEvalError>(())
         }
-        Ok::<(), SearchEvalError>(())
-    })?;
+    }?;
     Ok(PackagedEvaluatorAssets {
         root: directory.path().to_path_buf(),
         _directory: directory,

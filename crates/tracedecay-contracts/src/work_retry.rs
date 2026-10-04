@@ -303,14 +303,12 @@ pub enum WorkRetryAttemptOutcomeV1 {
 }
 
 impl WorkRetryAttemptOutcomeV1 {
-    #[hotpath::skip]
     pub const fn receipt(&self) -> &WorkRetryReceiptV1 {
         match self {
             Self::Created { receipt, .. } | Self::Replayed { receipt, .. } => receipt,
         }
     }
 
-    #[hotpath::skip]
     pub const fn attempt(&self) -> &WorkAttemptV1 {
         match self {
             Self::Created { attempt, .. } | Self::Replayed { attempt, .. } => attempt,
@@ -358,13 +356,12 @@ where
         + WorkProductAttemptAdmissionPortV1,
     E: WorkRetryEvidencePortV1,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S, evidence: E) -> Self {
         Self { storage, evidence }
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "application.work.retry")]
+    #[tracing::instrument(name = "application.work.retry", level = "trace", skip_all)]
     pub fn retry(
         &self,
         context: &RequestContext,

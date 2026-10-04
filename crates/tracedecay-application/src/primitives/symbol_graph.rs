@@ -141,7 +141,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a SymbolSearchPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("search", &request.meta, |binding| {
                     binding
@@ -217,7 +217,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.symbol_search"
+            tracing::trace_span!("usecases.primitives.symbol_search"),
         ))
     }
 
@@ -226,7 +226,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a ExactSymbolRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("exact", &request.meta, |binding| {
                     binding
@@ -301,7 +301,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.exact_symbol"
+            tracing::trace_span!("usecases.primitives.exact_symbol"),
         ))
     }
 
@@ -310,7 +310,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a SignatureSearchRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("signature", &request.meta, |binding| {
                     binding
@@ -375,7 +375,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.signature_search"
+            tracing::trace_span!("usecases.primitives.signature_search"),
         ))
     }
 
@@ -384,7 +384,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a ImplementationsRequest,
     ) -> SymbolGraphPortFuture<'a, ImplementationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("implementations", &request.meta, |binding| {
                     binding
@@ -482,7 +482,7 @@ where
                 .await;
                 with_implementation_bodies(&self.source_root, context, outcome).await
             },
-            label = "usecases.primitives.implementations"
+            tracing::trace_span!("usecases.primitives.implementations"),
         ))
     }
 
@@ -491,7 +491,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a TypeHierarchyRequest,
     ) -> SymbolGraphPortFuture<'a, TypeHierarchyRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("hierarchy", &request.meta, |binding| {
                     binding
@@ -611,7 +611,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.type_hierarchy"
+            tracing::trace_span!("usecases.primitives.type_hierarchy"),
         ))
     }
 
@@ -620,7 +620,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("callers", &request.meta, |binding| {
                     relation_parameters(binding, request)
@@ -707,7 +707,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.callers"
+            tracing::trace_span!("usecases.primitives.callers"),
         ))
     }
 
@@ -716,7 +716,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphRelationRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("callees", &request.meta, |binding| {
                     relation_parameters(binding, request)
@@ -826,7 +826,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.callees"
+            tracing::trace_span!("usecases.primitives.callees"),
         ))
     }
 
@@ -835,7 +835,7 @@ where
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphImpactPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let binding = match cursor_binding("impact", &request.meta, |binding| {
                     binding
@@ -895,7 +895,7 @@ where
                 )
                 .await
             },
-            label = "usecases.primitives.impact"
+            tracing::trace_span!("usecases.primitives.impact"),
         ))
     }
 }
@@ -908,7 +908,7 @@ struct OpenSymbolGraph {
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
-#[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
+#[tracing::instrument(name = "usecases.primitives.open_graph", level = "trace", skip_all)]
 async fn open_graph(
     port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,

@@ -1,7 +1,7 @@
 //! Automation contracts, deterministic policies, and state models.
 //!
 //! Runtime adapters and persistence remain outside this crate.
-//! Opt-in `hotpath` spans cover backend invocation and managed-skill
+//! Tracing spans cover backend invocation and managed-skill
 //! parse/validation only. Scheduler ticks, run-ledger writes, and host
 //! orchestration stay with their owning crates.
 

@@ -176,24 +176,29 @@ pub async fn ingest_for_projects(
 }
 
 /// Test seam for [`ingest_for_projects`].
-#[hotpath::measure(label = "sessions.hosts.hermes.ingest_projects", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.hermes.ingest_projects",
+    level = "trace",
+    skip_all
+)]
 pub async fn ingest_homes_for_projects(
     hermes_homes: &[PathBuf],
     destinations: &[ProjectIngestDestination<'_>],
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
     let mut budget = new_sweep_budget(None);
-    let sources = hotpath::measure_block!(
-        "sessions.hosts.hermes.discover_blocking",
+    let sources = {
+        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
         run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
-    );
+    };
     for source in sources {
         if budget.exhausted() {
             budget.defer();
             break;
         }
-        let eligible = hotpath::measure_block!(
-            "sessions.hosts.hermes.scope_profiles_blocking",
+        let eligible = {
+            let _span =
+                tracing::trace_span!("sessions.hosts.hermes.scope_profiles_blocking").entered();
             run_blocking_transcript_section(|| {
                 destinations
                     .iter()
@@ -201,7 +206,7 @@ pub async fn ingest_homes_for_projects(
                     .cloned()
                     .collect::<Vec<_>>()
             })
-        );
+        };
         if eligible.is_empty() {
             continue;
         }
@@ -276,7 +281,11 @@ pub async fn ingest_homes_capped_with_admission(
     .await
 }
 
-#[hotpath::measure(label = "sessions.hosts.hermes.ingest_project", future = true)]
+#[tracing::instrument(
+    name = "sessions.hosts.hermes.ingest_project",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     hermes_homes: &[PathBuf],
     project_root: &Path,
@@ -290,10 +299,10 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         return outcome;
     }
     let mut budget = new_sweep_budget(max_new_bytes);
-    let sources = hotpath::measure_block!(
-        "sessions.hosts.hermes.discover_blocking",
+    let sources = {
+        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
         run_blocking_transcript_section(|| candidate_state_dbs(hermes_homes, project_root))
-    );
+    };
     for source in sources {
         if cancellation.is_cancelled() {
             break;
@@ -403,7 +412,7 @@ pub async fn ingest_user_homes_capped(
     .await
 }
 
-#[hotpath::measure(label = "sessions.hosts.hermes.ingest_user", future = true)]
+#[tracing::instrument(name = "sessions.hosts.hermes.ingest_user", level = "trace", skip_all)]
 async fn ingest_user_homes_capped_with_admission(
     admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
@@ -416,10 +425,10 @@ async fn ingest_user_homes_capped_with_admission(
         return outcome;
     }
     let mut budget = new_sweep_budget(max_new_bytes);
-    let sources = hotpath::measure_block!(
-        "sessions.hosts.hermes.discover_blocking",
+    let sources = {
+        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
         run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
-    );
+    };
     for source in sources {
         if cancellation.is_cancelled() {
             break;

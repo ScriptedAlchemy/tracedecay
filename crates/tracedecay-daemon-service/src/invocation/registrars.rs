@@ -381,7 +381,6 @@ impl DaemonFeedbackPublicationTestGate {
         }
     }
 
-    #[hotpath::skip]
     async fn wait(&self) -> bool {
         let Some(publication_ready) = self
             .publication_ready
@@ -527,7 +526,6 @@ impl DaemonFeedbackRuntimeRegistrar {
 
     /// Resolve the read store from the feedback runtime mounted for this exact
     /// project root. Doctor receives no provider runtime or write authority.
-    #[hotpath::skip]
     pub async fn doctor_read_store(&self, project_root: &Path) -> Option<ProjectFeedbackStore> {
         self.service
             .feedback_runtime(Some(project_root))
@@ -536,7 +534,6 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     /// Registers feedback readers from the authoritative admission result.
-    #[hotpath::skip]
     pub async fn open_and_register(
         &self,
         database: Database,
@@ -594,7 +591,6 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn open_cycle_and_register(
         &self,
         project_root: PathBuf,
@@ -615,7 +611,6 @@ impl DaemonFeedbackRuntimeRegistrar {
         Ok(runtime)
     }
 
-    #[hotpath::skip]
     pub async fn refresh_builder(
         &self,
         project_root: &Path,
@@ -627,7 +622,6 @@ impl DaemonFeedbackRuntimeRegistrar {
         })
     }
 
-    #[hotpath::skip]
     pub async fn feedback_router(
         &self,
         project_root: &Path,
@@ -687,7 +681,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
-    #[hotpath::skip]
     pub async fn build_production(
         &self,
         project_root: &Path,
@@ -718,7 +711,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
         )?))
     }
 
-    #[hotpath::skip]
     pub async fn publish(
         &self,
         project_root: &Path,
@@ -746,7 +738,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
     /// project-open component. Each project open recomputes the same
     /// daemon-owned authority for this root, so the newest open's observation
     /// replaces a displaced incumbent instead of wedging a stale gate.
-    #[hotpath::skip]
     pub async fn publish_delivery_read(
         &self,
         project_root: &Path,
@@ -763,7 +754,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
     /// this remounts on every project open so a fresher checkout observation
     /// replaces a displaced incumbent instead of wedging a stale gate. Full
     /// advisory publication later replaces this owner under the same slot.
-    #[hotpath::skip]
     pub async fn publish_proximity_owner(
         &self,
         project_root: &Path,
@@ -830,7 +820,6 @@ impl DaemonConfigurationRuntimeRegistrar {
     /// user-profile mutation grant authority. The project configuration store
     /// is never used as a persistence sink for this setting.
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub async fn commit_profile_code_index_worker_selection(
         &self,
         project_root: &Path,
@@ -895,7 +884,6 @@ impl DaemonConfigurationRuntimeRegistrar {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -1053,7 +1041,6 @@ impl DaemonWorkRuntimeRegistrar {
         }
     }
 
-    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,
@@ -1196,7 +1183,6 @@ impl DaemonWorkRuntimeRegistrar {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn authority_matches(
         &self,
         project_root: &Path,
@@ -1247,7 +1233,6 @@ impl DaemonRetainedRuntimeRegistrar {
     /// degraded, for the life of the daemon. A matching route aliases the
     /// incumbent and stamps its own grant on it; a foreign scope or actor is
     /// still refused rather than given a second retained runtime.
-    #[hotpath::skip]
     pub async fn register(
         &self,
         project_root: PathBuf,

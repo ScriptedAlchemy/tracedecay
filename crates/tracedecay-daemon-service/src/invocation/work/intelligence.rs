@@ -22,7 +22,11 @@ use tracedecay_global_db::configuration::{
 
 use super::{RegisteredWorkRuntime, complete_work_read, preparation, work_product_problem};
 
-#[hotpath::measure(label = "daemon.service.work.generate_proposal")]
+#[tracing::instrument(
+    name = "daemon.service.work.generate_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn generate_proposal(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -56,7 +60,11 @@ pub(super) fn generate_proposal(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.execution_history")]
+#[tracing::instrument(
+    name = "daemon.service.work.execution_history",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn execution_history(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
@@ -113,7 +121,7 @@ pub(super) fn execution_history(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.experience", future = true)]
+#[tracing::instrument(name = "daemon.service.work.experience", level = "trace", skip_all)]
 pub(super) async fn experience(
     registered: &RegisteredWorkRuntime,
     request_id: String,
@@ -171,7 +179,11 @@ pub(super) async fn experience(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.compare_proposal")]
+#[tracing::instrument(
+    name = "daemon.service.work.compare_proposal",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn compare_proposal(
     registered: &RegisteredWorkRuntime,
     request_id: String,

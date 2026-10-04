@@ -533,12 +533,11 @@ impl<S> WorkAttemptService<S>
 where
     S: WorkAttemptStoragePort,
 {
-    #[hotpath::skip]
     pub const fn new(attempts: S) -> Self {
         Self { attempts }
     }
 
-    #[hotpath::measure(label = "application.work.attempt.status")]
+    #[tracing::instrument(name = "application.work.attempt.status", level = "trace", skip_all)]
     pub fn status(
         &self,
         context: &RequestContext,
@@ -563,7 +562,7 @@ where
     /// request, a cursor minted under a superseded topology generation is
     /// stale, a scope with no Work at all is the explicit `Absent` state, and
     /// an authorized scope with no attempts is an explicit zero-complete page.
-    #[hotpath::measure(label = "application.work.attempt.list")]
+    #[tracing::instrument(name = "application.work.attempt.list", level = "trace", skip_all)]
     pub fn list(
         &self,
         context: &RequestContext,
@@ -630,7 +629,11 @@ where
     /// recovery-required attempt can be cancelled before provider startup;
     /// the daemon runtime observes the durable request and produces no
     /// provider effect.
-    #[hotpath::measure(label = "application.work.attempt.request_cancellation")]
+    #[tracing::instrument(
+        name = "application.work.attempt.request_cancellation",
+        level = "trace",
+        skip_all
+    )]
     pub fn request_cancellation(
         &self,
         context: &RequestContext,
@@ -694,7 +697,7 @@ where
     /// exit, PID, or elapsed time is accepted as proof of anything.
     /// Attempts with an in-flight cancellation complete their cancellation,
     /// because the process they were cancelling is gone.
-    #[hotpath::measure(label = "application.work.attempt.resume")]
+    #[tracing::instrument(name = "application.work.attempt.resume", level = "trace", skip_all)]
     pub fn resume(
         &self,
         context: &RequestContext,
@@ -708,7 +711,8 @@ where
             .map_err(storage_problem)?;
         // Items processed by this restart-recovery sweep; the surrounding
         // measure is the sweep's one wall-time authority.
-        hotpath::gauge!("application.work.attempt.resume.open_attempts").set(open.len() as u64);
+        metrics::gauge!("application.work.attempt.resume.open_attempts")
+            .set((open.len() as u64) as f64);
         let mut recovery_required = Vec::new();
         let mut cancelled = Vec::new();
         for attempt in open {
@@ -746,7 +750,11 @@ where
 
     /// Marks negotiation success: the provider process is running under the
     /// exact admitted route.
-    #[hotpath::measure(label = "application.work.attempt.mark_running")]
+    #[tracing::instrument(
+        name = "application.work.attempt.mark_running",
+        level = "trace",
+        skip_all
+    )]
     pub fn mark_running(
         &self,
         context: &RequestContext,
@@ -792,7 +800,11 @@ where
     /// Records a typed provider-availability denial before the process ever
     /// started. This is a product state, not a transport error, and it never
     /// routes to a different provider.
-    #[hotpath::measure(label = "application.work.attempt.mark_provider_unavailable")]
+    #[tracing::instrument(
+        name = "application.work.attempt.mark_provider_unavailable",
+        level = "trace",
+        skip_all
+    )]
     pub fn mark_provider_unavailable(
         &self,
         context: &RequestContext,
@@ -814,7 +826,11 @@ where
     }
 
     /// Acknowledges a durable cancellation request from inside the runtime.
-    #[hotpath::measure(label = "application.work.attempt.acknowledge_cancellation")]
+    #[tracing::instrument(
+        name = "application.work.attempt.acknowledge_cancellation",
+        level = "trace",
+        skip_all
+    )]
     pub fn acknowledge_cancellation(
         &self,
         context: &RequestContext,
@@ -851,7 +867,11 @@ where
     }
 
     /// Escalates an acknowledged cancellation to forced termination.
-    #[hotpath::measure(label = "application.work.attempt.escalate_cancellation")]
+    #[tracing::instrument(
+        name = "application.work.attempt.escalate_cancellation",
+        level = "trace",
+        skip_all
+    )]
     pub fn escalate_cancellation(
         &self,
         context: &RequestContext,
@@ -901,7 +921,7 @@ where
         self.settle_with_artifacts(context, identity, evidence, Vec::new())
     }
 
-    #[hotpath::measure(label = "application.work.attempt.settle")]
+    #[tracing::instrument(name = "application.work.attempt.settle", level = "trace", skip_all)]
     pub fn settle_with_artifacts(
         &self,
         context: &RequestContext,
@@ -943,7 +963,11 @@ where
     }
 
     /// Fails an attempt that cannot be recovered, sealing denial evidence.
-    #[hotpath::measure(label = "application.work.attempt.fail_recovery")]
+    #[tracing::instrument(
+        name = "application.work.attempt.fail_recovery",
+        level = "trace",
+        skip_all
+    )]
     pub fn fail_recovery(
         &self,
         context: &RequestContext,
@@ -1118,7 +1142,6 @@ where
 /// per-transition decision record the flat aggregation cannot infer from
 /// entry-point call counts alone.
 fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1) {
-    #[cfg(feature = "hotpath")]
     {
         if previous.state() == next.state() {
             return;
@@ -1143,10 +1166,8 @@ fn observe_attempt_state_entered(previous: &WorkAttemptV1, next: &WorkAttemptV1)
             WorkAttemptStateV1::TimedOut => "application.work.attempt.state.timed_out",
             WorkAttemptStateV1::Cancelled => "application.work.attempt.state.cancelled",
         };
-        hotpath::gauge!(entered).inc(1u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (previous, next);
+        metrics::gauge!(entered).increment(1.0);
+    };
 }
 
 /// Refuses a caller-provided execution snapshot that does not agree with the

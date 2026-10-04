@@ -54,7 +54,7 @@ impl TraceDecayAffectedTestsPortV1 {
 }
 
 impl tracedecay_contracts::AffectedTestsRetrievalPort for TraceDecayAffectedTestsPortV1 {
-    #[hotpath::measure(label = "usecases.primitives.affected_tests")]
+    #[tracing::instrument(name = "usecases.primitives.affected_tests", level = "trace", skip_all)]
     fn affected_tests(
         &self,
         context: &RetrievalPortContext<'_>,

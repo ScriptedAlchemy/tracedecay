@@ -50,7 +50,11 @@ pub struct MountedSessionRefreshAuthorityV1<'a> {
     pub refresh: &'a dyn RetainedSessionRefreshPortV1,
 }
 
-#[hotpath::measure(label = "daemon.retained.session.refresh_admit")]
+#[tracing::instrument(
+    name = "daemon.retained.session.refresh_admit",
+    level = "trace",
+    skip_all
+)]
 pub fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
     context: &RequestContext,
@@ -63,10 +67,10 @@ pub fn admitted_session_refresh_command(
     match &admitted {
         Ok(_) => {}
         Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized) => {
-            hotpath::gauge!("daemon.retained.session.refresh_admit.denied").inc(1.0);
+            metrics::gauge!("daemon.retained.session.refresh_admit.denied").increment(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("daemon.retained.session.refresh_admit.refused").inc(1.0);
+            metrics::gauge!("daemon.retained.session.refresh_admit.refused").increment(1.0);
         }
     }
     admitted

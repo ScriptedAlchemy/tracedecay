@@ -128,7 +128,6 @@ impl RemoteSpoolKeyringV1 for UnavailableRemoteSpoolKeyringV1 {
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl DaemonSessionRuntimeRegistryV1 {
     pub async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         // `main` marks long-lived processes before any registry opens, so the
@@ -189,7 +188,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
-        let profile_runtime = hotpath::future!(
+        let profile_runtime = tracing::Instrument::instrument(
             open_runtime(
                 &registry,
                 resolver.as_ref(),
@@ -202,7 +201,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount profile authority store",
                 ),
             ),
-            label = "daemon.store.profile_authority.bootstrap_open"
+            tracing::trace_span!("daemon.store.profile_authority.bootstrap_open"),
         )
         .await?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
@@ -385,7 +384,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.mount_remote_nodes", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.mount_remote_nodes",
+        level = "trace",
+        skip_all
+    )]
     async fn mount_registered_remote_nodes(&self) -> Result<()> {
         let nodes_root = self.identity.profile_root().join("remote").join("nodes");
         if !nodes_root.exists() {
@@ -561,7 +564,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
-    #[hotpath::skip]
     pub async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
@@ -578,8 +580,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.profile_authority.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.profile_authority.mount_reuse_total").increment(1.0);
             return lease;
         }
         let _mount = self.profile_database_mount.lock().await;
@@ -598,11 +599,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.profile_authority.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.profile_authority.mount_reuse_total").increment(1.0);
             return lease;
         }
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile(
             self.identity.brain_id().clone(),
@@ -610,7 +610,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         );
         // Boxed store-open composition: keeps this mount machine (and the
         // measured wrapper embedding it by value) pointer-sized per await.
-        let runtime = hotpath::future!(
+        let runtime = tracing::Instrument::instrument(
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -623,7 +623,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount profile authority store",
                 ),
             )),
-            label = "daemon.store.profile_authority.mount_open"
+            tracing::trace_span!("daemon.store.profile_authority.mount_open"),
         )
         .await?;
         let database =
@@ -643,12 +643,10 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// The profile session store. A store held in its typed reset-required
     /// state answers that refusal instead of a client.
-    #[hotpath::skip]
     pub async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         refuse_reset_required(Box::pin(self.mount_profile_session_store()).await?)
     }
 
-    #[hotpath::skip]
     async fn mount_profile_session_store(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
@@ -663,8 +661,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.profile_sessions.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.profile_sessions.mount_reuse_total").increment(1.0);
             return lease;
         }
         let _mount = self.profile_sessions_mount.lock().await;
@@ -681,18 +678,17 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(lease) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.profile_sessions.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.profile_sessions.mount_reuse_total").increment(1.0);
             return lease;
         }
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
         let pin = Box::pin(self.profile_authority_pin("mount profile session store")).await?;
-        let runtime = hotpath::future!(
+        let runtime = tracing::Instrument::instrument(
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -705,7 +701,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount profile session store",
                 ),
             )),
-            label = "daemon.store.profile_sessions.open"
+            tracing::trace_span!("daemon.store.profile_sessions.open"),
         )
         .await?;
         let database =
@@ -722,7 +718,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
-    #[hotpath::skip]
     pub(super) async fn publish_memory_owner(
         &self,
         shard_id: StoreShardIdV1,
@@ -735,9 +730,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                 format!("{error:?}"),
             )
         })?;
-        hotpath::future!(
+        tracing::Instrument::instrument(
             tracedecay_runtime_core::db::migrations::ensure_schema_current(&database),
-            label = "daemon.session_registry.mount.schema_migrate"
+            tracing::trace_span!("daemon.session_registry.mount.schema_migrate"),
         )
         .await?;
         let database_issuer = owner.weak_lease_issuer();
@@ -858,7 +853,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Mounts the distinct profile-memory shard through this daemon's pinned
     /// profile registry. `ProfileMemory` never aliases the profile/global
     /// shard, and publication never reopens a filesystem path.
-    #[hotpath::skip]
     pub async fn profile_memory(&self) -> Result<Arc<Database>> {
         let existing = {
             let mounted = self
@@ -875,11 +869,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
         };
         if let Some(database) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.profile_memory.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.profile_memory.mount_reuse_total").increment(1.0);
             return database;
         }
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::profile_memory(
             self.identity.brain_id().clone(),
@@ -888,7 +881,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let pin = self
             .profile_authority_pin("mount profile memory store")
             .await?;
-        let runtime = hotpath::future!(
+        let runtime = tracing::Instrument::instrument(
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -901,7 +894,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount profile memory store",
                 ),
             ),
-            label = "daemon.store.profile_memory.open"
+            tracing::trace_span!("daemon.store.profile_memory.open"),
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -912,7 +905,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
-    #[hotpath::skip]
     pub async fn remote_node_storage(
         &self,
         node_id: BrainNodeId,
@@ -922,7 +914,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             .await
     }
 
-    #[hotpath::skip]
     pub async fn provision_remote_node(
         &self,
         grant: EnrollmentGrantV1,
@@ -956,7 +947,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
     }
 
-    #[hotpath::skip]
     async fn mount_remote_node_storage(
         &self,
         node_id: BrainNodeId,
@@ -965,12 +955,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Result<RemoteSqliteStorageV1> {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
             super::RemoteNodeOwnerAdmissionV1::Existing(database) => {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("daemon.store.remote_node.mount_reuse_total").inc(1_u64);
+                metrics::gauge!("daemon.store.remote_node.mount_reuse_total").increment(1.0);
                 (database, false, true)
             }
             super::RemoteNodeOwnerAdmissionV1::Opening(mut admission) => {
-                #[cfg(feature = "hotpath")]
                 let _mount_observation = super::StoreMountObservationV1::enter();
                 let shard_id = StoreShardIdV1::remote_node(
                     self.identity.brain_id().clone(),
@@ -980,7 +968,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 let pin = self
                     .profile_authority_pin("mount Remote Brain node store")
                     .await?;
-                let (runtime, existed) = hotpath::future!(
+                let (runtime, existed) = tracing::Instrument::instrument(
                     open_runtime_with_presence(
                         &self.registry,
                         self.resolver.as_ref(),
@@ -991,7 +979,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                         true,
                         "mount Remote Brain node store",
                     ),
-                    label = "daemon.store.remote_node.open"
+                    tracing::trace_span!("daemon.store.remote_node.open"),
                 )
                 .await?;
                 let owner = RemoteNodeStoreOwnerV1 {
@@ -1017,11 +1005,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             session_registry_error("attach Remote Brain node store", error.to_string())
         })?;
         if newly_mounted {
-            hotpath::measure_block!(
-                "daemon.session_registry.mount.remote_replay_recovery",
+            {
+                let _span =
+                    tracing::trace_span!("daemon.session_registry.mount.remote_replay_recovery")
+                        .entered();
                 storage
                     .recover_interrupted_replay_attempts(tracedecay_contracts::clock::now_micros())
-            )
+            }
             .map_err(|error| {
                 session_registry_error("recover interrupted Remote Brain replay", error.to_string())
             })?;
@@ -1067,10 +1057,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         let projects = self.project_owners.ready_session_projects()?;
         for project_id in projects {
-            hotpath::measure_block!(
-                "daemon.session_registry.mount.remote_promotion_reconcile",
+            {
+                let _span = tracing::trace_span!(
+                    "daemon.session_registry.mount.remote_promotion_reconcile"
+                )
+                .entered();
                 recovery.reconcile_interrupted_promotions(&project_id)
-            )
+            }
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",
@@ -1101,7 +1094,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn remote_recovery_authority(
         &self,
         node_id: &BrainNodeId,
@@ -1113,7 +1105,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
     }
 
-    #[hotpath::skip]
     pub async fn mounted_session_databases(&self) -> Vec<RegisteredGlobalDbLeaseV1> {
         let mut databases = Vec::new();
         if let Some(database) = self
@@ -1172,7 +1163,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// profile database owner and pin are released too and every store
     /// runtime no longer held is then closed: its writer runs the shutdown
     /// TRUNCATE checkpoint instead of leaving a retained WAL.
-    #[hotpath::skip]
     pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
@@ -1346,7 +1336,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// The mounted project session store for session features, `None` while
     /// it is held in its typed reset-required state.
-    #[hotpath::skip]
     pub async fn mounted_project_sessions(
         &self,
         project_id: &ProjectId,
@@ -1358,7 +1347,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// The mounted project session store for the authorities it holds
     /// besides sessions; see [`Self::project_session_store`].
-    #[hotpath::skip]
     pub async fn mounted_project_session_store(
         &self,
         project_id: &ProjectId,
@@ -1378,7 +1366,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         .ok()
     }
 
-    #[hotpath::skip]
     pub async fn project_sessions(
         &self,
         project_id: ProjectId,
@@ -1393,7 +1380,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// [`Self::project_sessions`], a store held in its typed reset-required
     /// state still serves them, so the project opens and code intelligence
     /// serves while every session feature answers the refusal.
-    #[hotpath::skip]
     pub async fn project_session_store(
         &self,
         project_id: ProjectId,
@@ -1420,7 +1406,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// The project session store. A store held in its typed reset-required
     /// state answers that refusal instead of a client.
-    #[hotpath::skip]
     pub async fn mount_registered_project_sessions(
         &self,
         project_id: ProjectId,
@@ -1428,7 +1413,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         refuse_reset_required(Box::pin(self.mount_project_session_store(project_id)).await?)
     }
 
-    #[hotpath::skip]
     async fn mount_project_session_store(
         &self,
         project_id: ProjectId,
@@ -1441,9 +1425,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             match mounted.get(&project_id) {
                 Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
                     if let Some(owner) = owners.sessions.as_ref() {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.store.project_sessions.mount_reuse_total")
-                            .inc(1_u64);
+                        metrics::gauge!("daemon.store.project_sessions.mount_reuse_total")
+                            .increment(1.0);
                         return self.issue_session_owner_lease(
                             owner,
                             SessionRelationScope::project_sessions(project_id.clone()),
@@ -1452,8 +1435,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true
                 }
                 Some(ProjectRuntimeOwnerStateV1::Opening) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -1466,8 +1448,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     return Err(state.unavailable_route_error());
                 }
                 None => false,
@@ -1499,15 +1480,15 @@ impl DaemonSessionRuntimeRegistryV1 {
                         "Project runtime is opening its session authority",
                     ));
                 };
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("daemon.store.project_sessions.mount_reuse_total").inc(1_u64);
+
+                metrics::gauge!("daemon.store.project_sessions.mount_reuse_total").increment(1.0);
                 return self.issue_session_owner_lease(
                     owner,
                     SessionRelationScope::project_sessions(project_id.clone()),
                 );
             }
         };
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
@@ -1517,7 +1498,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let pin = self
             .profile_authority_pin("mount project session store")
             .await?;
-        let runtime = hotpath::future!(
+        let runtime = tracing::Instrument::instrument(
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -1530,7 +1511,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount project session store",
                 ),
             ),
-            label = "daemon.store.project_sessions.open"
+            tracing::trace_span!("daemon.store.project_sessions.open"),
         )
         .await?;
         let database = self
@@ -1572,10 +1553,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
             .collect::<Vec<_>>();
         for recovery in recoveries {
-            hotpath::measure_block!(
-                "daemon.session_registry.mount.remote_promotion_reconcile",
+            {
+                let _span = tracing::trace_span!(
+                    "daemon.session_registry.mount.remote_promotion_reconcile"
+                )
+                .entered();
                 recovery.reconcile_interrupted_promotions(&project_id)
-            )
+            }
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",
@@ -1682,7 +1666,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// returned database remains cached so migration and live use share one
     /// writer authority.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn project_memory(
         &self,
         project_id: ProjectId,
@@ -1719,8 +1702,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     }
                 }
                 Some(ProjectRuntimeOwnerStateV1::Opening) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     Err(TraceDecayError::project_route(
                         "project_runtime_opening",
                         true,
@@ -1733,19 +1715,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_)),
                 ) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
+                    metrics::gauge!("daemon.session_registry.mount.denied_total").increment(1.0);
                     Err(state.unavailable_route_error())
                 }
                 None => Ok((false, None)),
             }
         }?;
         if let Some(database) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.project_memory.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.project_memory.mount_reuse_total").increment(1.0);
             return Ok(database);
         }
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let mut admission = match if has_entry {
             self.extend_project_runtime_owner(&project_id)
@@ -1769,7 +1749,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let pin = self
             .profile_authority_pin("mount project memory store")
             .await?;
-        let runtime = hotpath::future!(
+        let runtime = tracing::Instrument::instrument(
             open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -1782,7 +1762,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "mount project memory store",
                 ),
             ),
-            label = "daemon.store.project_memory.open"
+            tracing::trace_span!("daemon.store.project_memory.open"),
         )
         .await?;
         let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
@@ -1793,7 +1773,6 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Mounts an existing project-memory shard without initializing it or
     /// verifying its schema, and exposes only a read-only database facade.
-    #[hotpath::skip]
     pub async fn project_memory_read_only(
         &self,
         project_id: ProjectId,
@@ -1843,11 +1822,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
         }?;
         if let Some(database) = existing {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.store.project_memory.mount_reuse_total").inc(1_u64);
+            metrics::gauge!("daemon.store.project_memory.mount_reuse_total").increment(1.0);
             return Ok(database);
         }
-        #[cfg(feature = "hotpath")]
+
         let _mount_observation = super::StoreMountObservationV1::enter();
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
@@ -1857,13 +1835,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         let pin = self
             .profile_authority_pin("mount project memory store read-only")
             .await?;
-        let runtime = match hotpath::future!(
+        let runtime = match tracing::Instrument::instrument(
             self.registry.open(StoreRuntimeOpenRequest::new_read_only(
                 shard_id.clone(),
                 self.incarnation,
                 Some(pin),
             )),
-            label = "daemon.store.project_memory.open_read_only"
+            tracing::trace_span!("daemon.store.project_memory.open_read_only"),
         )
         .await
         {

@@ -205,7 +205,11 @@ fn deepest_package_dir<'a>(dirs: &'a [PathBuf], file: &Path) -> Option<&'a Path>
 
 /// Reads one `package.json` (and the tsconfigs and config files beside it) into
 /// the entry points and alias rules the walk needs.
-#[hotpath::measure(label = "code_index.unmounted_files.ts.package")]
+#[tracing::instrument(
+    name = "code_index.unmounted_files.ts.package",
+    level = "trace",
+    skip_all
+)]
 fn node_package(
     project_root: &Path,
     dir: &Path,
@@ -528,7 +532,11 @@ fn collect_config_string_literals(source: &str, node: Node<'_>, out: &mut Vec<St
 }
 
 /// Breadth-first traversal of one package's import graph from its entry points.
-#[hotpath::measure(label = "code_index.unmounted_files.ts.import_walk")]
+#[tracing::instrument(
+    name = "code_index.unmounted_files.ts.import_walk",
+    level = "trace",
+    skip_all
+)]
 fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     for entry in &package.entries {

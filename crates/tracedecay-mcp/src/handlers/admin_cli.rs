@@ -246,13 +246,10 @@ pub async fn compute_projectless_admin_cli(
     .await
 }
 
-#[hotpath::measure(label = "mcp.admin.cli.total")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Admin CLI dispatch is one subcommand match onto the owning composition-root action."
-    )
+#[tracing::instrument(name = "mcp.admin.cli.total", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Admin CLI dispatch is one subcommand match onto the owning composition-root action."
 )]
 async fn dispatch_admin_cli(
     context: AdminCliContext<'_>,
@@ -264,7 +261,7 @@ async fn dispatch_admin_cli(
             let project = context.scoped_project(scope)?;
             let provider_scope = provider_usage_scope(project)?;
             AdminCliResultV1::CostSummary(
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     cost_summary(
                         context.require_accounting_db()?,
                         context.scoped_project_sessions(project),
@@ -272,7 +269,7 @@ async fn dispatch_admin_cli(
                         project.map(TraceDecay::project_root),
                         range,
                     ),
-                    label = "mcp.admin.cli.cost"
+                    tracing::trace_span!("mcp.admin.cli.cost"),
                 )
                 .await?,
             )
@@ -701,7 +698,7 @@ fn unavailable_provider_usage_cost_summary()
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.admin.cli.session_sync")]
+#[tracing::instrument(name = "mcp.admin.cli.session_sync", level = "trace", skip_all)]
 async fn execute_session_sync(
     context: &AdminCliContext<'_>,
     command: SessionSyncCommandV1,
@@ -785,7 +782,7 @@ fn session_sync_scope(context: &AdminCliContext<'_>) -> Result<SessionSyncScopeV
     ))
 }
 
-#[hotpath::measure(future = true, label = "mcp.admin.cli.session_control")]
+#[tracing::instrument(name = "mcp.admin.cli.session_control", level = "trace", skip_all)]
 async fn control_session_sync(
     context: &AdminCliContext<'_>,
     idempotency_key: String,

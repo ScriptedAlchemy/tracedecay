@@ -71,7 +71,7 @@ pub fn run_artifact_path(
         .join(format!("{}.json", kind.as_str())))
 }
 
-#[hotpath::measure(label = "automation.run_artifact.write", future = true)]
+#[tracing::instrument(name = "automation.run_artifact.write", level = "trace", skip_all)]
 pub async fn write_run_artifact(
     dashboard_root: &Path,
     run_id: &str,
@@ -120,7 +120,7 @@ pub(crate) fn prepare_run_artifact(
     Ok((artifact, bytes))
 }
 
-#[hotpath::measure(label = "automation.run_artifact.read", future = true)]
+#[tracing::instrument(name = "automation.run_artifact.read", level = "trace", skip_all)]
 pub async fn read_run_artifact_payload(
     dashboard_root: &Path,
     run_id: &str,
@@ -160,7 +160,7 @@ pub async fn find_run_record(
     find_run_record_exact_bounded(dashboard_root, run_id).await
 }
 
-#[hotpath::measure(label = "automation.run_ledger.append", future = true)]
+#[tracing::instrument(name = "automation.run_ledger.append", level = "trace", skip_all)]
 pub async fn append_run_record(
     dashboard_root: &Path,
     record: &AutomationRunLedgerRecord,
@@ -178,7 +178,11 @@ pub async fn append_run_record(
     Ok(())
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.append_locked")]
+#[tracing::instrument(
+    name = "automation_runtime.run_ledger.append_locked",
+    level = "trace",
+    skip_all
+)]
 fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -579,7 +583,7 @@ pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File)
 /// The ledger is append-only and grows without bound, so rows are located from
 /// the tail using fixed-size scan buffers. Full JSON records are decoded only
 /// after their bounded identity projection passes the filter and dedup checks.
-#[hotpath::measure(label = "automation.run_ledger.load", future = true)]
+#[tracing::instrument(name = "automation.run_ledger.load", level = "trace", skip_all)]
 pub async fn load_run_records(
     dashboard_root: &Path,
     limit: usize,
@@ -677,7 +681,11 @@ impl AutomationRunLedgerTaskSummary {
     }
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.load_page", future = true)]
+#[tracing::instrument(
+    name = "automation_runtime.run_ledger.load_page",
+    level = "trace",
+    skip_all
+)]
 pub async fn load_run_records_page(
     dashboard_root: &Path,
     limit: usize,
@@ -728,7 +736,7 @@ pub async fn load_run_records_for_task_key(
 /// exclusive ledger lock is held. Scheduler ticks and dashboard status requests
 /// therefore rescan the ledger only after it actually changed; see
 /// `RUN_LEDGER_SUMMARY_MEMO` for the append-only invariant this relies on.
-#[hotpath::measure(label = "automation.run_ledger.task_summary", future = true)]
+#[tracing::instrument(name = "automation.run_ledger.task_summary", level = "trace", skip_all)]
 pub async fn load_run_ledger_task_summary(
     dashboard_root: &Path,
     task: AgentTaskKind,
@@ -745,7 +753,7 @@ pub async fn load_run_ledger_task_summary(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_owned();
-    hotpath::future!(
+    tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || {
             with_run_ledger_read_lock(
                 &root,
@@ -754,7 +762,7 @@ pub async fn load_run_ledger_task_summary(
                 || read_run_ledger_task_summary(&path, task, &task_key),
             )
         }),
-        label = "automation.run_ledger.task_summary.blocking"
+        tracing::trace_span!("automation.run_ledger.task_summary.blocking"),
     )
     .await
     .map_err(|error| config_error(format!("failed to join task ledger summary read: {error}")))?
@@ -820,15 +828,23 @@ fn with_run_ledger_read_lock<T>(
         }
         Err(error) => return Err(TraceDecayError::from(error)),
     }
-    let lock = hotpath::measure_block!("automation.run_ledger.read_lock.acquire", {
+    let lock = {
+        let _span = tracing::trace_span!("automation.run_ledger.read_lock.acquire").entered();
         exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)
-    })?;
+    }?;
     let result = (|| {
-        hotpath::measure_block!("automation.run_ledger.read_lock.recover", {
-            exact_publication::ensure_no_exact_append_intent(dashboard_root)
-                .map_err(TraceDecayError::from)
-        })?;
-        match hotpath::measure_block!("automation.run_ledger.read_lock.body", read()) {
+        {
+            let _span = tracing::trace_span!("automation.run_ledger.read_lock.recover").entered();
+            {
+                exact_publication::ensure_no_exact_append_intent(dashboard_root)
+                    .map_err(TraceDecayError::from)
+            }
+        }?;
+        let match_result = {
+            let _span = tracing::trace_span!("automation.run_ledger.read_lock.body").entered();
+            read()
+        };
+        match match_result {
             Err(refusal) if is_retired_schema_refusal(&refusal) => {
                 reset_retired_run_ledger(path, &refusal)?;
                 Ok(absent())
@@ -1153,7 +1169,11 @@ fn read_run_ledger_task_summary(
     }
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
+#[tracing::instrument(
+    name = "automation_runtime.run_ledger.scan_task_summary",
+    level = "trace",
+    skip_all
+)]
 fn scan_run_ledger_task_summary(
     path: &Path,
     task: AgentTaskKind,
@@ -1161,9 +1181,10 @@ fn scan_run_ledger_task_summary(
 ) -> Result<TaskSummaryScan> {
     // Visible bytes are stabilized by the committed lifecycle index consulted
     // below, which syncs only when the ledger actually grew.
-    let Some(file) = hotpath::measure_block!("automation.run_ledger.task_summary.open", {
+    let Some(file) = {
+        let _span = tracing::trace_span!("automation.run_ledger.task_summary.open").entered();
         exact_lookup::open_committed_run_ledger(path, false)
-    })?
+    }?
     else {
         return Ok(TaskSummaryScan::Summary(
             AutomationRunLedgerTaskSummary::default(),
@@ -1172,18 +1193,20 @@ fn scan_run_ledger_task_summary(
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
     // exclusive ledger lock is a sound witness of unchanged content.
-    let (file_len, tail_digest, memo_key) =
-        hotpath::measure_block!("automation.run_ledger.task_summary.memo_probe", {
+    let (file_len, tail_digest, memo_key) = {
+        let _span = tracing::trace_span!("automation.run_ledger.task_summary.memo_probe").entered();
+        {
             let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
             let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
             let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
             Ok::<_, TraceDecayError>((file_len, tail_digest, memo_key))
-        })?;
+        }
+    }?;
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
-        hotpath::gauge!("automation.run_ledger.task_summary.memo_hits").inc(1_u64);
+        metrics::gauge!("automation.run_ledger.task_summary.memo_hits").increment(1.0);
         return Ok(TaskSummaryScan::Summary(summary));
     }
-    hotpath::gauge!("automation.run_ledger.task_summary.memo_misses").inc(1_u64);
+    metrics::gauge!("automation.run_ledger.task_summary.memo_misses").increment(1.0);
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
     while let Some(line) = rows.next_span()? {
@@ -1392,7 +1415,11 @@ fn decode_task_summary(
     Ok(TaskSummaryScan::Summary(summary))
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.scan_page")]
+#[tracing::instrument(
+    name = "automation_runtime.run_ledger.scan_page",
+    level = "trace",
+    skip_all
+)]
 fn read_any_run_records_page(
     file: &std::fs::File,
     path: &Path,
@@ -1445,7 +1472,11 @@ struct FilteredRunSelection {
     effective_task_key: String,
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.scan_filtered")]
+#[tracing::instrument(
+    name = "automation_runtime.run_ledger.scan_filtered",
+    level = "trace",
+    skip_all
+)]
 fn read_filtered_run_records_two_pass(
     file: &std::fs::File,
     path: &Path,

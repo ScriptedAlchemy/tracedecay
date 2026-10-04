@@ -928,7 +928,7 @@ const fn comparison_reason(comparison: WorkFrontierComparisonV1) -> WorkProposal
 }
 
 impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
-    #[hotpath::measure(label = "policy.work_loop.evaluate")]
+    #[tracing::instrument(name = "policy.work_loop.evaluate", level = "trace", skip_all)]
     fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1 {
         if !input.is_valid() {
             return self.decision(

@@ -328,12 +328,11 @@ request runtime's workers for unbounded stretches", and names projection
 refresh as an open-ended sweep that must stay paced. Measurement contradicts
 both for the *historical* half of that sweep.
 
-Reproduce with `scripts/profile-tokio-worker-balance.sh`, which reads Hotpath's
-metrics server and needs no product code change. The numbers below are one
-60-second window on a 96-core host, `--profile perf`, features
-`production,hotpath,hotpath-mcp`, composed `RUSTFLAGS` from
-`scripts/hotpath-rustflags.sh` (`--cfg tokio_unstable` plus the workspace
-mold and unpacked-split-debuginfo flags), against an isolated
+The per-worker table below came from the Hotpath worker-balance probe, which
+has since been removed. `perf` against a daemon built with `--profile perf`
+and feature `production` still attributes the CPU, but nothing in the tree
+reproduces the per-worker view. The numbers are one 60-second window on a
+96-core host against an isolated
 profile root under `/tmp` with one registered 3,114-file corpus:
 
 ```
@@ -402,7 +401,7 @@ combined thread-name family the largest single product symbol during ingest is
 because redaction is pure CPU over transcript text, but the SQLite parser
 symbols in the same family belong to `ReadSnapshot::query`, which already uses
 `spawn_blocking` and is correctly placed. Naming the exact leaf needs a
-`#[hotpath::measure]` inside the pass or `HOTPATH_FOCUS`, not a thread filter.
+`#[tracing::instrument]` inside the pass, not a thread filter.
 
 ## Open breach: the vector-generation store violates Principle 5
 

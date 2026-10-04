@@ -374,7 +374,11 @@ pub(super) async fn reason_project_memory_facts_tx(
     .await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.search_candidates")]
+#[tracing::instrument(
+    name = "runtime_core.memory.search_candidates",
+    level = "trace",
+    skip_all
+)]
 async fn project_memory_candidates_snapshot(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -404,7 +408,7 @@ async fn project_memory_candidates_snapshot(
     finish_read_snapshot(transaction, result).await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.graph_assist")]
+#[tracing::instrument(name = "runtime_core.memory.graph_assist", level = "trace", skip_all)]
 async fn project_memory_graph_assist(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -473,7 +477,7 @@ pub(super) fn project_memory_graph_degradation(
     }
 }
 
-#[hotpath::measure(label = "runtime_core.memory.rank")]
+#[tracing::instrument(name = "runtime_core.memory.rank", level = "trace", skip_all)]
 async fn project_memory_rank_snapshot(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -497,7 +501,7 @@ async fn project_memory_rank_snapshot(
     finish_read_snapshot(transaction, result).await
 }
 
-#[hotpath::measure(label = "runtime_core.memory.search")]
+#[tracing::instrument(name = "runtime_core.memory.search", level = "trace", skip_all)]
 pub(super) async fn search_project_memory_facts(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,
@@ -515,7 +519,7 @@ pub(super) async fn search_project_memory_facts(
     Ok(page)
 }
 
-#[hotpath::measure(label = "runtime_core.memory.related")]
+#[tracing::instrument(name = "runtime_core.memory.related", level = "trace", skip_all)]
 pub(super) async fn related_project_memory_facts(
     db: &Database,
     query: &ProjectMemoryFactSearchQuery,

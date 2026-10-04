@@ -8,7 +8,7 @@ use tracedecay_contracts::CancellationSignal;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-#[hotpath::measure(label = "daemon.project.automation_recovery", future = true)]
+#[tracing::instrument(name = "daemon.project.automation_recovery", level = "trace", skip_all)]
 pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<TraceDecay>) {
     let cancellation = match CancellationSignal::active(format!(
         "cancellation.project-open.automation-effect-recovery.{}",

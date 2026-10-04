@@ -66,7 +66,11 @@ async fn pending_rewrite(
 
 impl RegisteredGlobalDb {
     /// Records that the source's current layout offers `records`.
-    #[hotpath::measure(future = true, label = "global_db.registered.source_presence.persist")]
+    #[tracing::instrument(
+        name = "global_db.registered.source_presence.persist",
+        level = "trace",
+        skip_all
+    )]
     pub async fn record_observation_source_presence(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -110,7 +114,11 @@ impl RegisteredGlobalDb {
     /// bytes before `retained_through` are the previous layout's, so the
     /// records there stay offered; every other record must be offered again
     /// before the rewrite completes.
-    #[hotpath::measure(future = true, label = "global_db.registered.source_rewrite.begin")]
+    #[tracing::instrument(
+        name = "global_db.registered.source_rewrite.begin",
+        level = "trace",
+        skip_all
+    )]
     pub async fn begin_observation_source_rewrite(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -167,7 +175,11 @@ impl RegisteredGlobalDb {
     /// Completes a pending rewrite once `generation` was read to the end of
     /// the source, retiring every record it did not offer. Returns how many
     /// observations were retired.
-    #[hotpath::measure(future = true, label = "global_db.registered.source_rewrite.complete")]
+    #[tracing::instrument(
+        name = "global_db.registered.source_rewrite.complete",
+        level = "trace",
+        skip_all
+    )]
     pub async fn complete_observation_source_rewrite(
         &self,
         source: &ObservationSourceIdentityV1,

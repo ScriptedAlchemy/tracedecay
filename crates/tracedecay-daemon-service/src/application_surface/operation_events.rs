@@ -160,7 +160,7 @@ pub(super) async fn resolve_authenticated_http_request_context(
     observed_at: UtcMicros,
     resume_token: Option<&ResumeToken>,
 ) -> Result<RequestContext, OperationEventError> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         state.authority.resolve_request_context(
             operation_id,
             &state.active_project_id,
@@ -172,7 +172,7 @@ pub(super) async fn resolve_authenticated_http_request_context(
                 resume_token,
             ),
         ),
-        label = "application_surface.http.events.resolve_context"
+        tracing::trace_span!("application_surface.http.events.resolve_context"),
     )
     .await
 }
@@ -269,9 +269,9 @@ pub(super) async fn http_operation_events_through_executor(
             );
         }
     };
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
-        label = "application_surface.http.events.invoke"
+        tracing::trace_span!("application_surface.http.events.invoke"),
     )
     .await;
     let tracedecay_contracts::ApplicationResponse::Stream(response) = (match response {
@@ -355,7 +355,7 @@ pub(super) fn operation_event_invocation_failure(
     }
 }
 
-#[hotpath::measure(label = "application_surface.http.events")]
+#[tracing::instrument(name = "application_surface.http.events", level = "trace", skip_all)]
 pub(super) async fn http_operation_events(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -456,7 +456,7 @@ pub(super) async fn http_operation_events(
         },
     )
     .await;
-    let subscription = match hotpath::future!(
+    let subscription = match tracing::Instrument::instrument(
         state.authority.subscribe(
             &operation_id,
             &context,
@@ -464,7 +464,7 @@ pub(super) async fn http_operation_events(
             next_sequence,
             query.resume_token.as_ref(),
         ),
-        label = "application_surface.http.events.subscribe"
+        tracing::trace_span!("application_surface.http.events.subscribe"),
     )
     .await
     {
@@ -603,9 +603,9 @@ pub(super) async fn http_operation_cancel_through_executor(
             );
         }
     };
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
-        label = "application_surface.http.cancel.invoke"
+        tracing::trace_span!("application_surface.http.cancel.invoke"),
     )
     .await;
     let tracedecay_contracts::ApplicationResponse::Cancellation(response) = (match response {
@@ -641,7 +641,7 @@ pub(super) async fn http_operation_cancel_through_executor(
     }
 }
 
-#[hotpath::measure(label = "application_surface.http.cancel")]
+#[tracing::instrument(name = "application_surface.http.cancel", level = "trace", skip_all)]
 pub(super) async fn http_operation_cancel(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -729,9 +729,9 @@ pub(super) async fn http_operation_cancel(
         .lock()
         .ok()
         .and_then(|active| active.get(operation_id.request_id()).cloned());
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         state.authority.cancel(&operation_id, &context, observed_at),
-        label = "application_surface.http.cancel.authority"
+        tracing::trace_span!("application_surface.http.cancel.authority"),
     )
     .await
     {

@@ -35,7 +35,6 @@ impl HostAdmissionStatus {
     /// (the runtime kernel's hook-runtime error context) and be reconstituted
     /// with [`Self::from_wire`] without anyone re-deriving it from a reason
     /// code.
-    #[hotpath::skip]
     pub const fn as_wire(self) -> &'static str {
         match self {
             Self::Supported => "supported",
@@ -51,7 +50,6 @@ impl HostAdmissionStatus {
     }
 
     /// Statuses that finish a durable replay record. Anything else stays leased.
-    #[hotpath::skip]
     pub const fn commits_replay_record(self) -> bool {
         matches!(
             self,
@@ -252,7 +250,6 @@ fn bounded_reason_code(value: &str) -> String {
 }
 
 impl HostAdmissionStatus {
-    #[hotpath::skip]
     pub const fn is_replay_progress(self) -> bool {
         matches!(
             self,

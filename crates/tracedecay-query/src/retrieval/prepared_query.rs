@@ -190,7 +190,7 @@ impl PreparedQueryV1 {
         &self.request
     }
 
-    #[hotpath::measure(label = "query.stream.prepared_page")]
+    #[tracing::instrument(name = "query.stream.prepared_page", level = "trace", skip_all)]
     pub fn paginate<T>(
         &self,
         bindings: &PreparedQueryBindingsV1,
@@ -320,7 +320,7 @@ impl PreparedQueryV1 {
             (None, None)
         };
         let page_len = end.saturating_sub(start);
-        hotpath::gauge!("query.stream.results").set(page_len);
+        metrics::gauge!("query.stream.results").set(page_len as f64);
         Ok(PreparedQueryPageV1 {
             items: materialize(candidates, start, end)?,
             total,

@@ -133,25 +133,28 @@ impl ExistingBatchState {
             }
         }
         entity_locator_keys.retain(|key, _| !entity_keys.contains_key(key));
-        let entities = hotpath::measure_block!(
-            "graph_db.mutation.existing_state.entity_records",
+        let entities = {
+            let _span =
+                tracing::trace_span!("graph_db.mutation.existing_state.entity_records").entered();
             load_requested(entity_keys, batch, |identity| {
                 load_entity(database, &batch.namespace, identity)
             })
-        )?;
-        let entity_locators = hotpath::measure_block!(
-            "graph_db.mutation.existing_state.endpoint_locators",
+        }?;
+        let entity_locators = {
+            let _span = tracing::trace_span!("graph_db.mutation.existing_state.endpoint_locators")
+                .entered();
             load_requested(entity_locator_keys, batch, |identity| {
                 load_entity_locator(database, &batch.namespace, identity)
             })
-        )?;
+        }?;
         let mut endpoints = EndpointIdentityCache::default();
-        let relations = hotpath::measure_block!(
-            "graph_db.mutation.existing_state.relation_records",
+        let relations = {
+            let _span =
+                tracing::trace_span!("graph_db.mutation.existing_state.relation_records").entered();
             load_requested(relation_keys, batch, |identity| {
                 load_relation_by_key(database, &batch.namespace, identity, &mut endpoints)
             })
-        )?;
+        }?;
         Ok(Self {
             entities,
             entity_locators,
@@ -840,7 +843,7 @@ pub(crate) fn retirement_page_record_reads() -> usize {
 /// projection per page, measured at ~9.5 s per 4,096-row page against a
 /// 3.4M-row staging release, an O(rows² / page) sweep that kept the
 /// publishing thread, and the serving seat behind it, busy for hours.
-#[hotpath::measure(label = "graph_db.projection.deletion_page")]
+#[tracing::instrument(name = "graph_db.projection.deletion_page", level = "trace", skip_all)]
 fn projection_identity_deletion_page_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -1025,33 +1028,36 @@ pub(crate) fn publication(
     }))
 }
 
-#[hotpath::measure(label = "graph_db.projection.labeled_nodes")]
+#[tracing::instrument(name = "graph_db.projection.labeled_nodes", level = "trace", skip_all)]
 pub(crate) fn labeled_projection_nodes(
     database: &GrafeoDB,
     owner_label: &str,
     label: &str,
 ) -> Result<Vec<NodeId>, GraphDbError> {
     let store = database.graph_store();
-    let candidates = hotpath::measure_block!(
-        "graph_db.projection.labeled_nodes.scan",
+    let candidates = {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
-    );
-    hotpath::gauge!("graph_db.projection.labeled_nodes.candidates").set(candidates.len());
-    let nodes = hotpath::measure_block!("graph_db.projection.labeled_nodes.filter", {
-        candidates
-            .into_iter()
-            .filter(|node| {
-                store
-                    .get_node(*node)
-                    .is_some_and(|record| has_native_label(&record, label))
-            })
-            .collect::<Vec<_>>()
-    });
-    hotpath::gauge!("graph_db.projection.labeled_nodes.results").set(nodes.len());
+    };
+    metrics::gauge!("graph_db.projection.labeled_nodes.candidates").set((candidates.len()) as f64);
+    let nodes = {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.filter").entered();
+        {
+            candidates
+                .into_iter()
+                .filter(|node| {
+                    store
+                        .get_node(*node)
+                        .is_some_and(|record| has_native_label(&record, label))
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    metrics::gauge!("graph_db.projection.labeled_nodes.results").set((nodes.len()) as f64);
     Ok(nodes)
 }
 
-#[hotpath::measure(label = "graph_db.projection.labeled_nodes")]
+#[tracing::instrument(name = "graph_db.projection.labeled_nodes", level = "trace", skip_all)]
 fn labeled_projection_nodes_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -1061,23 +1067,26 @@ fn labeled_projection_nodes_checked(
 ) -> Result<Vec<NodeId>, GraphDbError> {
     check()?;
     let store = database.graph_store();
-    hotpath::measure_block!("graph_db.projection.labeled_nodes.capacity", {
-        require_generation_capacity(
-            if label == ENTITY_LABEL {
-                "entities"
-            } else {
-                "relations"
-            },
-            nodes_with_label_count(store.as_ref(), owner_label),
-            0,
-            maximum,
-        )
-    })?;
-    let candidates = hotpath::measure_block!(
-        "graph_db.projection.labeled_nodes.scan",
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.capacity").entered();
+        {
+            require_generation_capacity(
+                if label == ENTITY_LABEL {
+                    "entities"
+                } else {
+                    "relations"
+                },
+                nodes_with_label_count(store.as_ref(), owner_label),
+                0,
+                maximum,
+            )
+        }
+    }?;
+    let candidates = {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
         nodes_with_label(store.as_ref(), owner_label)
-    );
-    hotpath::gauge!("graph_db.projection.labeled_nodes.candidates").set(candidates.len());
+    };
+    metrics::gauge!("graph_db.projection.labeled_nodes.candidates").set((candidates.len()) as f64);
     check()?;
     require_generation_capacity(
         if label == ENTITY_LABEL {
@@ -1090,23 +1099,29 @@ fn labeled_projection_nodes_checked(
         maximum,
     )?;
     let mut nodes = Vec::new();
-    hotpath::measure_block!("graph_db.projection.labeled_nodes.reserve", {
-        nodes.try_reserve_exact(candidates.len()).map_err(|_| {
-            GraphDbError::unavailable("native graph generation identity scan is too large")
-        })
-    })?;
-    hotpath::measure_block!("graph_db.projection.labeled_nodes.filter", {
-        for node in candidates {
-            check()?;
-            if store
-                .get_node(node)
-                .is_some_and(|record| has_native_label(&record, label))
-            {
-                nodes.push(node);
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.reserve").entered();
+        {
+            nodes.try_reserve_exact(candidates.len()).map_err(|_| {
+                GraphDbError::unavailable("native graph generation identity scan is too large")
+            })
+        }
+    }?;
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.filter").entered();
+        {
+            for node in candidates {
+                check()?;
+                if store
+                    .get_node(node)
+                    .is_some_and(|record| has_native_label(&record, label))
+                {
+                    nodes.push(node);
+                }
             }
         }
-    });
-    hotpath::gauge!("graph_db.projection.labeled_nodes.results").set(nodes.len());
+    };
+    metrics::gauge!("graph_db.projection.labeled_nodes.results").set((nodes.len()) as f64);
     check()?;
     Ok(nodes)
 }
@@ -1244,7 +1259,7 @@ pub(crate) fn indexed_nodes(
 /// because grafeo files one columnar node table per distinct label: a key label
 /// per entity mints one table per entity and exhausts the `u16` table id at
 /// 32,767 rows, long before a real repository graph is loaded.
-#[hotpath::measure(label = "graph_db.read.index_lookup")]
+#[tracing::instrument(name = "graph_db.read.index_lookup", level = "trace", skip_all)]
 fn unique_property_node(
     database: &GrafeoDB,
     property: &str,

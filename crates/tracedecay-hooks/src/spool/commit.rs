@@ -98,7 +98,7 @@ pub(super) fn forget_synced_extent(
 
 /// Makes the records file `identity` durable through `end`, sharing one sync
 /// with every committer whose frame was written before it.
-#[hotpath::measure(label = "hooks.spool.commit_records")]
+#[tracing::instrument(name = "hooks.spool.commit_records", level = "trace", skip_all)]
 pub(super) fn commit_records(
     root: &Path,
     identity: [u8; 32],
@@ -127,7 +127,7 @@ pub(super) fn commit_records(
     }
     let synced = lock.synced_through(identity)?;
     if synced.is_some_and(|synced| synced >= end) {
-        hotpath::gauge!("hooks.spool.commit.shared").inc(1);
+        metrics::gauge!("hooks.spool.commit.shared").increment(1);
         return Ok(());
     }
     let written = records.metadata().map_err(|_| HookSpoolError::Io)?.len();
@@ -142,8 +142,11 @@ pub(super) fn commit_records(
             transition.current_revision.length.max(end)
         })
         .min(written);
-    hotpath::measure_block!("hooks.spool.fsync.commit", sync_file_data(&path, &records))
-        .map_err(|_| HookSpoolError::Io)?;
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.commit").entered();
+        sync_file_data(&path, &records)
+    }
+    .map_err(|_| HookSpoolError::Io)?;
     if synced.is_none() {
         sync_records_directory(root)?;
     }
@@ -151,7 +154,8 @@ pub(super) fn commit_records(
 }
 
 fn sync_records_directory(root: &Path) -> Result<(), HookSpoolError> {
-    hotpath::measure_block!("hooks.spool.fsync.commit_directory", {
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.commit_directory").entered();
         sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-    })
+    }
 }

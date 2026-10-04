@@ -13,7 +13,7 @@ use tracedecay_graph_query::{
 use super::outcome::SourceEditOutcome;
 use super::port::{SourceEditGraphReadV1, SourceEditRuntime};
 
-#[hotpath::measure(label = "usecases.edit.graph_read", future = true)]
+#[tracing::instrument(name = "usecases.edit.graph_read", level = "trace", skip_all)]
 async fn admitted_graph(
     port: &dyn CodeGraphProjectionReadPort,
     context: &RequestContext,
@@ -52,7 +52,7 @@ async fn admitted_graph(
     Ok(SourceEditGraphReadV1::new(reader, Arc::clone(cancellation)))
 }
 
-#[hotpath::measure(label = "usecases.edit.dispatch", future = true)]
+#[tracing::instrument(name = "usecases.edit.dispatch", level = "trace", skip_all)]
 pub(super) async fn run_source_edit(
     graph: &SourceEditRuntime,
     port: &dyn CodeGraphProjectionReadPort,

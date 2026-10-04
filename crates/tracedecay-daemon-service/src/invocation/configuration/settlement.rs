@@ -36,15 +36,19 @@ async fn refresh_live_configuration_runtime(
     }
 }
 
-#[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.configuration.reconcile",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn reconcile_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
     receipt: &tracedecay_global_db::configuration::contracts::types::ConfigurationMutationReceipt,
     now: UtcMicros,
 ) {
-    let current = match hotpath::future!(
+    let current = match tracing::Instrument::instrument(
         registered.runtime.client().current(),
-        label = "daemon.service.configuration.reconcile_read"
+        tracing::trace_span!("daemon.service.configuration.reconcile_read"),
     )
     .await
     {
@@ -58,9 +62,9 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
-    let observed = match hotpath::future!(
+    let observed = match tracing::Instrument::instrument(
         registered.runtime.observed_runtime_configuration(),
-        label = "daemon.service.configuration.reconcile_observed"
+        tracing::trace_span!("daemon.service.configuration.reconcile_observed"),
     )
     .await
     {
@@ -111,10 +115,13 @@ pub(super) async fn reconcile_configuration_runtime(
     } else {
         revision_id.clone()
     };
-    let mut installation = hotpath::measure_block!("daemon.service.configuration.activate", {
-        tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
-            .map_err(|error| error.to_string())
-    });
+    let mut installation = {
+        let _span = tracing::trace_span!("daemon.service.configuration.activate").entered();
+        {
+            tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
+                .map_err(|error| error.to_string())
+        }
+    };
     if installation.is_ok() {
         installation = refresh_live_configuration_runtime(registered, refresh_state).await;
     }
@@ -146,7 +153,11 @@ pub(super) async fn reconcile_configuration_runtime(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.configuration.effect")]
+#[tracing::instrument(
+    name = "daemon.service.configuration.effect",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn configuration_effect(
     payload: serde_json::Value,
     mut authority: AuthorityReceipt,

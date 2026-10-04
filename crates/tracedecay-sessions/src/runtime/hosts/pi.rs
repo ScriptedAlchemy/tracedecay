@@ -214,109 +214,112 @@ impl PiSource {
         mut budget: HostScanBudget,
         convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(PiDiscoveryReport, HostScanBudget)> {
-        hotpath::measure_block!("sessions.hosts.pi.discover", {
-            let mut discovery = PiDiscoveryReport {
-                files: bound_path_list(Vec::new(), bounds),
-                failures: Vec::new(),
-                failure_count: 0,
-                scan_complete: true,
-                reached_end: true,
-            };
-            let Some(sessions_root) = self.existing_sessions_root()? else {
-                return Ok((discovery, budget));
-            };
-            let matcher = self.matcher(project_root);
-            let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
-            let mut paths = BinaryHeap::with_capacity(limit);
-            let mut has_more = false;
-            let cwd_dirs = read_entries(
-                &sessions_root,
-                EntryKind::Directory,
-                &mut discovery,
-                &mut budget,
-            )?;
-            'cwd_dirs: for cwd_dir in cwd_dirs {
-                for candidate in read_entries(
-                    &cwd_dir,
-                    EntryKind::SessionFile,
+        {
+            let _span = tracing::trace_span!("sessions.hosts.pi.discover").entered();
+            {
+                let mut discovery = PiDiscoveryReport {
+                    files: bound_path_list(Vec::new(), bounds),
+                    failures: Vec::new(),
+                    failure_count: 0,
+                    scan_complete: true,
+                    reached_end: true,
+                };
+                let Some(sessions_root) = self.existing_sessions_root()? else {
+                    return Ok((discovery, budget));
+                };
+                let matcher = self.matcher(project_root);
+                let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
+                let mut paths = BinaryHeap::with_capacity(limit);
+                let mut has_more = false;
+                let cwd_dirs = read_entries(
+                    &sessions_root,
+                    EntryKind::Directory,
                     &mut discovery,
                     &mut budget,
-                )? {
-                    if !budget.checkpoint() {
-                        discovery.scan_complete = false;
-                        discovery.reached_end = false;
-                        break 'cwd_dirs;
-                    }
-                    if frontier_path
-                        .as_ref()
-                        .is_some_and(|frontier| candidate <= *frontier)
-                    {
-                        continue;
-                    }
-                    let pending = match PendingTranscript::observe_blocking(convergence, &candidate)
-                    {
-                        Ok(Some(pending)) => pending,
-                        Ok(None) => continue,
-                        Err(TranscriptIngestError::ScanIo { source, .. }) => {
-                            discovery.record_failure(
-                                PiDiscoveryFailureKind::SessionHeaderUnavailable,
-                                &candidate,
-                                &source,
-                                &mut budget,
-                            );
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    let header = match read_session_header(&candidate) {
-                        Ok(HeaderRead::Header(header)) => header,
-                        Ok(HeaderRead::Incomplete) => {
+                )?;
+                'cwd_dirs: for cwd_dir in cwd_dirs {
+                    for candidate in read_entries(
+                        &cwd_dir,
+                        EntryKind::SessionFile,
+                        &mut discovery,
+                        &mut budget,
+                    )? {
+                        if !budget.checkpoint() {
                             discovery.scan_complete = false;
+                            discovery.reached_end = false;
+                            break 'cwd_dirs;
+                        }
+                        if frontier_path
+                            .as_ref()
+                            .is_some_and(|frontier| candidate <= *frontier)
+                        {
                             continue;
                         }
-                        Err((kind, error)) => {
-                            discovery.record_failure(kind, &candidate, &error, &mut budget);
+                        let pending =
+                            match PendingTranscript::observe_blocking(convergence, &candidate) {
+                                Ok(Some(pending)) => pending,
+                                Ok(None) => continue,
+                                Err(TranscriptIngestError::ScanIo { source, .. }) => {
+                                    discovery.record_failure(
+                                        PiDiscoveryFailureKind::SessionHeaderUnavailable,
+                                        &candidate,
+                                        &source,
+                                        &mut budget,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                        let header = match read_session_header(&candidate) {
+                            Ok(HeaderRead::Header(header)) => header,
+                            Ok(HeaderRead::Incomplete) => {
+                                discovery.scan_complete = false;
+                                continue;
+                            }
+                            Err((kind, error)) => {
+                                discovery.record_failure(kind, &candidate, &error, &mut budget);
+                                continue;
+                            }
+                        };
+                        if !budget.try_charge_input(header_charge(&header)) {
+                            discovery.scan_complete = false;
+                            discovery.reached_end = false;
+                            break 'cwd_dirs;
+                        }
+                        let cwd = Some(Path::new(&header.cwd));
+                        if !matcher.accepts(cwd) {
+                            if matcher.membership(cwd) == ProjectMembership::NoMatch {
+                                pending.finished(&candidate)?;
+                            }
                             continue;
                         }
-                    };
-                    if !budget.try_charge_input(header_charge(&header)) {
-                        discovery.scan_complete = false;
-                        discovery.reached_end = false;
-                        break 'cwd_dirs;
-                    }
-                    let cwd = Some(Path::new(&header.cwd));
-                    if !matcher.accepts(cwd) {
-                        if matcher.membership(cwd) == ProjectMembership::NoMatch {
-                            pending.finished(&candidate)?;
-                        }
-                        continue;
-                    }
-                    if paths.len() < limit {
-                        paths.push(candidate);
-                    } else {
-                        has_more = true;
-                        if paths.peek().is_some_and(|largest| candidate < *largest) {
-                            let _ = paths.pop();
+                        if paths.len() < limit {
                             paths.push(candidate);
+                        } else {
+                            has_more = true;
+                            if paths.peek().is_some_and(|largest| candidate < *largest) {
+                                let _ = paths.pop();
+                                paths.push(candidate);
+                            }
                         }
                     }
                 }
+                discovery.files = bound_path_list(
+                    paths.into_sorted_vec(),
+                    TranscriptDiscoveryBounds {
+                        max_files: limit,
+                        ..bounds
+                    },
+                );
+                if has_more {
+                    discovery.files.truncated = Some(FileDiscoveryLimit::FileCount);
+                }
+                if discovery.files.is_truncated() {
+                    discovery.reached_end = false;
+                }
+                Ok((discovery, budget))
             }
-            discovery.files = bound_path_list(
-                paths.into_sorted_vec(),
-                TranscriptDiscoveryBounds {
-                    max_files: limit,
-                    ..bounds
-                },
-            );
-            if has_more {
-                discovery.files.truncated = Some(FileDiscoveryLimit::FileCount);
-            }
-            if discovery.files.is_truncated() {
-                discovery.reached_end = false;
-            }
-            Ok((discovery, budget))
-        })
+        }
     }
 
     /// The session files for one Pi session, located through Pi's own
@@ -504,7 +507,7 @@ pub async fn capture_pi_observations(
     cancellation: &ObservationCancellation,
     convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<PiCaptureOutcome> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             let discovery_frontier = facade
                 .get_parse_offset(&scope, PI_DISCOVERY_FRONTIER_KEY)
@@ -533,7 +536,7 @@ pub async fn capture_pi_observations(
             let owned_project_root = project_root.to_path_buf();
             let owned_convergence =
                 convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
-            let (discovery, scan_budget) = hotpath::future!(
+            let (discovery, scan_budget) = tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     owned_source.discover(
                         &owned_project_root,
@@ -545,7 +548,7 @@ pub async fn capture_pi_observations(
                             .map(|(hub, consumer)| (hub, consumer.as_str())),
                     )
                 }),
-                label = "sessions.hosts.pi.discover_task"
+                tracing::trace_span!("sessions.hosts.pi.discover_task"),
             )
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
@@ -676,7 +679,7 @@ pub async fn capture_pi_observations(
             persist_coverage(facade, &scope, &outcome).await?;
             Ok(outcome)
         },
-        label = "sessions.hosts.pi.capture"
+        tracing::trace_span!("sessions.hosts.pi.capture"),
     )
     .await
 }

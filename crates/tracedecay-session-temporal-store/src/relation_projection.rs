@@ -62,7 +62,6 @@ struct CanonicalOccurrence {
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::skip]
     pub async fn active_session_summary_relations(
         &self,
         session_id: &SessionId,
@@ -87,7 +86,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok((generation, relations))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.relation_projection")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.relation_projection",
+        level = "trace",
+        skip_all
+    )]
     pub async fn apply_active_session_relation_projection(
         &self,
         session_id: &SessionId,
@@ -187,7 +190,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }))
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.persist.recover_relations")]
+    #[tracing::instrument(
+        name = "session_temporal.persist.recover_relations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
@@ -199,9 +206,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .recovered)
     }
 
-    #[hotpath::measure(
-        future = true,
-        label = "session_temporal.persist.recover_relation_page"
+    #[tracing::instrument(
+        name = "session_temporal.persist.recover_relation_page",
+        level = "trace",
+        skip_all
     )]
     pub async fn recover_pending_session_relation_projection_page(
         &self,
@@ -437,7 +445,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(())
     }
 
-    #[hotpath::skip]
     async fn active_relation_generation(
         &self,
         session_id: &SessionId,
@@ -450,7 +457,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     }
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.seed_relation")]
+#[tracing::instrument(
+    name = "session_temporal.persist.seed_relation",
+    level = "trace",
+    skip_all
+)]
 pub async fn seed_session_relation_projection(
     database: &impl SessionTemporalRegisteredDb,
     conn: &impl crate::handle::SessionTemporalQuery,
@@ -1183,8 +1194,7 @@ async fn latest_occurrence(
 
 #[inline(always)]
 fn record_relation_reconstruction() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.relations.full_reconstructions").inc(1_u64);
+    metrics::gauge!("session_temporal.relations.full_reconstructions").increment(1.0);
 }
 
 /// Logical copies a candidate generation introduced, or every copy of the

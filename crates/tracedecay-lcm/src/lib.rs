@@ -212,7 +212,6 @@ impl SessionMessageType {
         MessageTypeFilterV1::parse(value.trim()).map(Self::from)
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         self.filter().as_str()
     }
@@ -248,7 +247,6 @@ impl SessionSearchScope {
         MessageRelationshipScopeV1::parse(value.trim()).map(Self::from)
     }
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         self.relationship().as_str()
     }
@@ -268,7 +266,6 @@ pub struct GitScopeFilter {
 }
 
 impl GitScopeFilter {
-    #[hotpath::skip]
     pub const fn is_empty(&self) -> bool {
         self.branch.is_none() && self.worktree.is_none() && self.commit.is_none()
     }

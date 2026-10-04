@@ -160,7 +160,7 @@ fn compose_node_independent_definitions(
 }
 
 fn record_discovery_cache_hit() {
-    hotpath::gauge!("mcp.catalog.discovery.cache_hits").inc(1u64);
+    metrics::gauge!("mcp.catalog.discovery.cache_hits").increment(1.0);
     #[cfg(test)]
     {
         DISCOVERY_CACHE_HITS.with(|hits| hits.set(hits.get().saturating_add(1)));

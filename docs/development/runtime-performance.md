@@ -48,49 +48,15 @@ The harness does not run Cargo benchmarks. Build or Cargo benchmarking is a
 separate activity and is performed only when separately requested.
 
 Stable and beta release archives compile only the `production` feature profile.
-They do not contain Hotpath collectors, listeners, sampling, or allocator
-instrumentation. Hotpath 0.24 treats Cargo feature selection as its process-wide
-activation authority: feature-enabled gauges, futures, and instrumented locks
-can initialize collectors without a `HotpathGuard`, so an environment-only
-runtime gate cannot make one compiled binary dormant. Build a separate profiling
-binary with the required Hotpath feature lane when collecting performance
-evidence.
 
-When activated, Hotpath's metrics HTTP server defaults to port 6770 and its
-separate MCP server defaults to `http://127.0.0.1:6771/mcp`; override them with
-`HOTPATH_METRICS_PORT` and `HOTPATH_MCP_PORT`. These are profiler endpoints,
-not TraceDecay's product MCP transport.
+Instrumentation is unconditional: `tracing` spans and `metrics` gauges ship in
+every binary and are live wherever a subscriber or recorder is installed. There
+is no profiler feature lane and no profiler HTTP or MCP surface.
 
-Coding agents attach to that MCP endpoint for live interrogation
-(`profiler_status`, `functions_timing`, lock/channel/I/O lanes). Claude Code
-picks it up automatically from the repo's `.mcp.json`. Codex needs a one-time
-global registration:
-
-```sh
-codex mcp add hotpath --url http://127.0.0.1:6771/mcp
-```
-
-Both agents then talk to whichever Hotpath-enabled process currently owns the
-port; the first process wins the bind, and a second profiled process must take
-an alternate `HOTPATH_MCP_PORT` and be queried directly.
-
-The CPU feature is not a self-contained sampling executable. On Linux or
-macOS, install both `hotpath-samply` and `samply` on `PATH` before requesting
-CPU profiling. `HOTPATH_SAMPLY_WRAPPER_BIN` and `HOTPATH_SAMPLY_BIN` may point
-to explicit executable paths. The `tracedecay` CLI never starts the CPU
-sampler implicitly: the samply attach SIGSTOPs the profiled process until the
-attach completes, and a sampler failure inside that window would leave a
-headless hook or CLI invocation stopped forever. Request CPU sampling
-explicitly with `HOTPATH_REPORT` (for example `HOTPATH_REPORT=functions-cpu`),
-which overrides the CLI's default exclusion. Release archives do not bundle either external
-tool, so their absence must be reported as an unavailable CPU profiler rather
-than treated as CPU evidence.
-
-```sh
-cargo install hotpath --version 0.24.0 --locked \
-  --features hotpath-cpu --bin hotpath-samply
-cargo install samply --locked
-```
+CPU attribution is external tooling, not a shipped feature: attach `perf
+record -g -p <daemon pid>` while a lane runs, or attach `samply` when a
+flamegraph is wanted. Release archives bundle no sampler, so their absence is
+reported as an unavailable CPU profiler rather than treated as CPU evidence.
 
 `prepare` only validates and copies deterministic fixtures. It must not launch
 a daemon. Prepared data includes the checked-in project history and native
@@ -392,5 +358,5 @@ including a daemon that died during the run.
 To compare two builds, run each binary against the same `--target-repo`
 revision on the same machine. Compare the `samples.jsonl` files, not single
 runs. For CPU attribution of a lane, attach `perf record -g -p <daemon pid>`
-while the lane runs. For OS-level counters, use
-`scripts/profile-hotpath-os-counters.sh`.
+while the lane runs. For OS-level counters, read
+`/proc/<pid>/status` and `perf stat` against the daemon pid.

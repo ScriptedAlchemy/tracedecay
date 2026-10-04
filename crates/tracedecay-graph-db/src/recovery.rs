@@ -46,12 +46,12 @@ pub(crate) fn projection_mismatch(
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.recover.open")]
+#[tracing::instrument(name = "graph_db.generation.recover.open", level = "trace", skip_all)]
 pub(crate) fn open_recovered_database(
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    let recovered = hotpath::measure_block!(
-        "graph_db.generation.recover.open.engine",
+    let recovered = {
+        let _span = tracing::trace_span!("graph_db.generation.recover.open.engine").entered();
         GrafeoDB::with_config(reopen.config.clone()).map_err(|error| {
             GraphDbError::DurabilityUncertain {
                 message: format!(
@@ -59,15 +59,16 @@ pub(crate) fn open_recovered_database(
                 ),
             }
         })
-    )?;
+    }?;
     record_open_corpus_gauges(&recovered);
     if let Err(error) = validate_or_initialize_format(&recovered, reopen) {
         return close_recovered_after_error("validate recovered graph format", recovered, error);
     }
-    let state = match hotpath::measure_block!(
-        "graph_db.generation.open.state",
+    let match_result = {
+        let _span = tracing::trace_span!("graph_db.generation.open.state").entered();
         FormatState::load(&recovered)
-    ) {
+    };
+    let state = match match_result {
         Ok(state) => state,
         Err(error) => {
             return close_recovered_after_error("load recovered graph state", recovered, error);
@@ -91,10 +92,10 @@ pub(crate) fn validate_or_initialize_format(
     database: &GrafeoDB,
     validated: &ValidatedOpen,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!(
-        "graph_db.generation.open.format",
+    {
+        let _span = tracing::trace_span!("graph_db.generation.open.format").entered();
         validate_or_initialize_format_marker(database, validated)
-    )?;
+    }?;
     // The pinned grafeo fork persists the store's property-index keys in the
     // catalog section, and a sealed compact container stores each indexed
     // column's rows in value order at seal time, so a reopened store already
@@ -106,13 +107,16 @@ pub(crate) fn validate_or_initialize_format(
     // lookups in `state.rs` degrade from a hash hit to a full node scan,
     // measured at 500k entities, 64 point reads took 23.7s instead of 1.4ms,
     // and the bounded traversal 773ms instead of 2.7ms.
-    hotpath::measure_block!("graph_db.generation.open.property_indexes", {
-        for property in INDEXED_PROPERTIES {
-            if !database.has_property_index(property) {
-                database.create_property_index(property);
+    {
+        let _span = tracing::trace_span!("graph_db.generation.open.property_indexes").entered();
+        {
+            for property in INDEXED_PROPERTIES {
+                if !database.has_property_index(property) {
+                    database.create_property_index(property);
+                }
             }
         }
-    });
+    };
     Ok(())
 }
 
@@ -193,17 +197,16 @@ fn validate_or_initialize_format_marker(
 }
 
 /// Records how much corpus the engine open just hydrated, so the phase spans
-/// around it can be correlated with store size in a Hotpath report.
+/// around it can be correlated with store size in the tracing span. Both
+/// counts walk every node and edge, so they run only while TRACE is enabled.
 #[inline(always)]
 pub(crate) fn record_open_corpus_gauges(database: &GrafeoDB) {
-    #[cfg(feature = "hotpath")]
-    {
-        let store = database.graph_store();
-        hotpath::gauge!("graph_db.generation.open.nodes").set(store.node_count());
-        hotpath::gauge!("graph_db.generation.open.edges").set(store.edge_count());
+    if !tracing::level_enabled!(tracing::Level::TRACE) {
+        return;
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = database;
+    let store = database.graph_store();
+    metrics::gauge!("graph_db.generation.open.nodes").set((store.node_count()) as f64);
+    metrics::gauge!("graph_db.generation.open.edges").set((store.edge_count()) as f64);
 }
 
 /// Checkpoints sidecar-WAL history that a successful open replayed into the
@@ -240,10 +243,11 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
         return;
     }
 
-    match hotpath::measure_block!(
-        "graph_db.generation.open.wal_checkpoint",
+    let match_result = {
+        let _span = tracing::trace_span!("graph_db.generation.open.wal_checkpoint").entered();
         database.wal_checkpoint()
-    ) {
+    };
+    match match_result {
         Ok(()) => {
             let removed_segments = grafeo_storage::wal::WalRecovery::new(&sidecar)
                 .checkpoint()
@@ -320,15 +324,19 @@ fn close_recovered_after_error<T>(
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.recover.checkpoint")]
+#[tracing::instrument(
+    name = "graph_db.generation.recover.checkpoint",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn checkpoint_recovered_database(
     recovered: GrafeoDB,
     reopen: &ValidatedOpen,
 ) -> Result<RecoveredDatabase, GraphDbError> {
-    hotpath::measure_block!(
-        "graph_db.generation.recover.checkpoint.close",
+    {
+        let _span = tracing::trace_span!("graph_db.generation.recover.checkpoint.close").entered();
         recovered.close()
-    )
+    }
     .map_err(|error| GraphDbError::DurabilityUncertain {
         message: format!("Grafeo close failed while checkpointing projection quarantine: {error}"),
     })?;
@@ -374,7 +382,11 @@ pub(crate) fn requarantine_after_failed_checkpoint_verification(
     Ok((recovered, state, quarantined))
 }
 
-#[hotpath::measure(label = "graph_db.generation.open.quarantine")]
+#[tracing::instrument(
+    name = "graph_db.generation.open.quarantine",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn load_quarantined_projections(
     database: &GrafeoDB,
 ) -> Result<BTreeSet<(GraphNamespace, GraphProjectionId)>, GraphDbError> {

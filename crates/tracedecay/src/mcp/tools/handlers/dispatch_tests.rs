@@ -233,16 +233,16 @@ async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() 
 }
 
 #[test]
-fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
+fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(
-        mcp_tool_hotpath_identity("tracedecay_search"),
+        mcp_tool_bounded_identity("tracedecay_search"),
         "tracedecay_search"
     );
     assert_eq!(
-        mcp_tool_hotpath_identity("attacker-controlled-unknown-name"),
+        mcp_tool_bounded_identity("attacker-controlled-unknown-name"),
         "unknown"
     );
-    assert_eq!(mcp_tool_hotpath_identity("another-unknown-name"), "unknown");
+    assert_eq!(mcp_tool_bounded_identity("another-unknown-name"), "unknown");
 }
 
 /// The git-context reads are application operations the graph-tool owner
@@ -296,9 +296,9 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             definition.name
         );
         assert_eq!(
-            mcp_tool_hotpath_identity(&definition.name),
+            mcp_tool_bounded_identity(&definition.name),
             definition.name,
-            "{} must retain exact bounded Hotpath identity",
+            "{} must retain exact bounded tool identity",
             definition.name
         );
         let group = classify_mcp_tool_dispatch_group(&definition.name)

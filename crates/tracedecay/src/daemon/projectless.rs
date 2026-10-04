@@ -319,7 +319,7 @@ pub(super) async fn projectless_tools_call_response(
         .await
 }
 
-#[hotpath::measure(label = "mcp.tools_call.projectless", future = true)]
+#[tracing::instrument(name = "mcp.tools_call.projectless", level = "trace", skip_all)]
 async fn projectless_tools_call_response_with_connection(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
@@ -342,10 +342,10 @@ async fn projectless_tools_call_response_with_connection(
         });
     let discoverable =
         profile_owner_operation.is_some() || projectless_tool_is_discoverable(tool_name);
-    #[cfg(feature = "hotpath")]
+
     {
-        let hotpath_tool_name = if discoverable { tool_name } else { "unknown" };
-        hotpath::val!("mcp.tool.name").set(&hotpath_tool_name);
+        let bounded_tool_name = if discoverable { tool_name } else { "unknown" };
+        tracing::trace!(name: "mcp.tool.name", value = ?bounded_tool_name);
     }
     if !discoverable {
         return requires_project_error(id, tool_name, &arguments);
@@ -535,7 +535,11 @@ fn profile_executor(
     }
 }
 
-#[hotpath::measure(label = "daemon.project.projectless_retained", future = true)]
+#[tracing::instrument(
+    name = "daemon.project.projectless_retained",
+    level = "trace",
+    skip_all
+)]
 async fn projectless_profile_retained_response(
     id: serde_json::Value,
     tool_name: &str,

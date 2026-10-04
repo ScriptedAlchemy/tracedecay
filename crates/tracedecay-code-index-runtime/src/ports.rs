@@ -83,7 +83,7 @@ pub const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
 /// reconcile, reserved-control clients) this is a transparent passthrough.
 /// Daemon callers install that task-local beside their concrete lease; this
 /// function is the only park algorithm.
-#[hotpath::measure(label = "daemon.engine.admission.park", future = true)]
+#[tracing::instrument(name = "daemon.engine.admission.park", level = "trace", skip_all)]
 pub async fn park_admission<F>(future: F) -> F::Output
 where
     F: Future,

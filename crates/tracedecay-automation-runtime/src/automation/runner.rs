@@ -287,7 +287,7 @@ impl RetainedCombinedReviewRun {
 /// dashboard scheduler status stay coherent, sharing the combined request's
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
-#[hotpath::measure(label = "automation.run.combined_review", future = true)]
+#[tracing::instrument(name = "automation.run.combined_review", level = "trace", skip_all)]
 pub async fn run_combined_review_with_backend(
     cg: &AutomationProjectContext,
     config: &AutomationConfig,
@@ -448,7 +448,11 @@ fn combined_skill_writer_evidence_or_not_combined(
     }
 }
 
-#[hotpath::measure(future = true, label = "automation.run.combined_review.inner")]
+#[tracing::instrument(
+    name = "automation.run.combined_review.inner",
+    level = "trace",
+    skip_all
+)]
 async fn run_combined_review_for_retrieval(
     cg: &AutomationProjectContext,
     config: &AutomationConfig,

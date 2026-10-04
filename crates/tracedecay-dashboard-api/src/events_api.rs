@@ -489,7 +489,7 @@ impl EventStreamState {
 
     /// Poll the shared source snapshot, appending any change events.
     async fn poll_sources(&mut self, scope: &DashboardScopeV1) -> Vec<DashboardEventV1> {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             async move {
                 let mut events = Vec::new();
                 let Some(receiver) = self.source_receiver.as_mut() else {
@@ -519,7 +519,7 @@ impl EventStreamState {
                 }
                 events
             },
-            label = "dashboard_api.events.poll"
+            tracing::trace_span!("dashboard_api.events.poll"),
         )
         .await
     }
@@ -857,7 +857,7 @@ async fn send_event(
     connection_ref: Option<&str>,
     mut event: DashboardEventV1,
 ) -> Result<(), ()> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             if let Some(connection_ref) = connection_ref
                 && !delivery_settlements
@@ -880,7 +880,7 @@ async fn send_event(
             };
             tx.send(Ok(frame)).await.map_err(|_| ())
         },
-        label = "dashboard_api.events.delivery"
+        tracing::trace_span!("dashboard_api.events.delivery"),
     )
     .await
 }
@@ -994,8 +994,10 @@ fn accumulate_record(
 /// Serialize one typed event into an SSE frame, named by its stream so the
 /// client can route by `event:` without parsing the payload first.
 fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
-    let data =
-        hotpath::measure_block!("dashboard_api.http.serialize", serde_json::to_string(event))?;
+    let data = {
+        let _span = tracing::trace_span!("dashboard_api.http.serialize").entered();
+        serde_json::to_string(event)
+    }?;
     crate::observe::record_response_bytes(data.len());
     let frame = Event::default().event(event.kind.stream()).data(data);
     let resume_sequence = match &event.kind {

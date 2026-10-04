@@ -88,7 +88,7 @@ pub(super) fn missing_registered_owner_problem(
 /// Dispatches one Work invocation through the product authority and publishes
 /// a Task-family activity pulse only after a mutation committed.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.work.execute", level = "trace", skip_all)]
 pub async fn execute_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,

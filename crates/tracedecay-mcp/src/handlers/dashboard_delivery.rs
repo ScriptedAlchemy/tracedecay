@@ -41,7 +41,7 @@ impl DashboardDeliveryReadAdapter {
         Self { service }
     }
 
-    #[hotpath::measure(label = "mcp.dashboard.delivery.total")]
+    #[tracing::instrument(name = "mcp.dashboard.delivery.total", level = "trace", skip_all)]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -108,10 +108,7 @@ impl DashboardDeliveryReadAdapter {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => ProjectDeliveryReadOutcomeV1::Unavailable,
-            outcome = hotpath::future!(
-                handle.read(&context, &request, &release_control),
-                label = "mcp.dashboard.delivery.read"
-            ) => outcome,
+            outcome = tracing::Instrument::instrument(handle.read(&context, &request, &release_control), tracing::trace_span!("mcp.dashboard.delivery.read")) => outcome,
         }
     }
 }
@@ -124,7 +121,7 @@ impl Drop for GitReadCancellationGuard {
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.dashboard.delivery.head")]
+#[tracing::instrument(name = "mcp.dashboard.delivery.head", level = "trace", skip_all)]
 async fn live_expected_head_commit_id(
     control: &DashboardHttpRequestControlV1,
     project_root: &std::path::Path,
@@ -192,7 +189,11 @@ impl DashboardDeliveryReadAdapter {
     /// This is the production authority for `overlapping_edit` /
     /// `confirmed_conflict` / `divergent_shared_implementation`, the
     /// dashboard never re-joins `/api/feedback/proximity` client-side.
-    #[hotpath::measure(label = "mcp.dashboard.delivery.proximity.total")]
+    #[tracing::instrument(
+        name = "mcp.dashboard.delivery.proximity.total",
+        level = "trace",
+        skip_all
+    )]
     async fn read_proximity(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -227,10 +228,7 @@ impl DashboardDeliveryReadAdapter {
         let outcome = tokio::select! {
             biased;
             () = cancellation => return ProjectDeliveryProximityAttentionSourceV1::Unavailable,
-            outcome = hotpath::future!(
-                invoke,
-                label = "mcp.dashboard.delivery.proximity.read"
-            ) => outcome,
+            outcome = tracing::Instrument::instrument(invoke, tracing::trace_span!("mcp.dashboard.delivery.proximity.read")) => outcome,
         };
         match outcome {
             Ok(result) if result.project_id().as_str() == project.project_id => {

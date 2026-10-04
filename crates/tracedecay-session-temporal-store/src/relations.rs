@@ -200,7 +200,6 @@ impl std::fmt::Debug for SessionRelationGraphStore {
 
 impl SessionRelationGraphStore {
     #[must_use]
-    #[hotpath::skip]
     pub const fn new(database: GraphDbLeaseV1) -> Self {
         Self { database }
     }

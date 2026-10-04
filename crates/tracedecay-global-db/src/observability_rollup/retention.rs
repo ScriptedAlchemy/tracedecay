@@ -7,7 +7,11 @@ use super::{
 };
 
 impl RegisteredGlobalDb {
-    #[hotpath::measure(future = true, label = "global_db.observability_rollup.persist.prune")]
+    #[tracing::instrument(
+        name = "global_db.observability_rollup.persist.prune",
+        level = "trace",
+        skip_all
+    )]
     pub async fn prune_observability_rollups(
         &self,
         now_seconds: i64,

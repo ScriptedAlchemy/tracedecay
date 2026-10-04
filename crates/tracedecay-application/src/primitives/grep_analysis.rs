@@ -45,7 +45,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a AstGrepRequestV1,
     ) -> PrimitiveFutureV1<'a, AstGrepResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.window.cursor.is_some() {
                     return unsupported_compatibility_cursor();
@@ -192,7 +192,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                     PrimitiveOutcomeV1::Completed(page)
                 }
             },
-            label = "usecases.primitives.ast_grep"
+            tracing::trace_span!("usecases.primitives.ast_grep"),
         ))
     }
 }
@@ -205,7 +205,7 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a ComplexityRequestV1,
     ) -> PrimitiveFutureV1<'a, ComplexityResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.window.cursor.is_some() {
                     return unsupported_compatibility_cursor();
@@ -220,7 +220,7 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
                     .to_owned(),
             ))
             },
-            label = "usecases.primitives.complexity"
+            tracing::trace_span!("usecases.primitives.complexity"),
         ))
     }
 }
@@ -241,7 +241,7 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a DependencyDepthRequestV1,
     ) -> PrimitiveFutureV1<'a, DependencyDepthResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if request.window.cursor.is_some() {
                     return unsupported_compatibility_cursor();
@@ -319,7 +319,7 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                     finished_at: context.observed_at,
                 })
             },
-            label = "usecases.primitives.dependency_depth"
+            tracing::trace_span!("usecases.primitives.dependency_depth"),
         ))
     }
 }

@@ -56,9 +56,10 @@ impl HostAdmissionRuntime {
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
     ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
-        let (spool, report) = hotpath::measure_block!("usecases.admission.open", {
+        let (spool, report) = {
+            let _span = tracing::trace_span!("usecases.admission.open").entered();
             HostAdmissionSpool::open(dir, bounds)
-        })
+        }
         .map_err(|error| error.to_open_error())?;
         if !matches!(report.integrity, SpoolIntegrity::Healthy) {
             return Err(SpoolError::MetadataCorrupted.to_open_error());
@@ -80,16 +81,18 @@ impl HostAdmissionRuntime {
         &mut self,
         items: &[(&str, &[u8])],
     ) -> Vec<Result<DurableHostAdmission, HostAdmissionOutcome>> {
-        let appended = hotpath::measure_block!("usecases.admission.append_batch", {
+        let appended = {
+            let _span = tracing::trace_span!("usecases.admission.append_batch").entered();
             self.spool.append_batch(items)
-        });
+        };
         appended
             .into_iter()
             .map(|appended| {
                 let record = appended.map_err(|error| error.to_outcome())?;
-                hotpath::measure_block!("usecases.admission.schedule", {
+                {
+                    let _span = tracing::trace_span!("usecases.admission.schedule").entered();
                     self.schedule_record(&record)
-                })?;
+                }?;
                 Ok(DurableHostAdmission {
                     seq: record.seq,
                     outcome: HostAdmissionOutcome::accepted_for_replay(),

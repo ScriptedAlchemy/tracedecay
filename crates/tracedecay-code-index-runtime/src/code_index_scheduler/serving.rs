@@ -93,9 +93,7 @@ use crate::{
     },
 };
 
-use super::{
-    CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
-};
+use super::{CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, queries};
 
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
@@ -137,7 +135,7 @@ pub(super) type GenerationServingCachesV1 = (
     Arc<CodeTextProjectionStateV1>,
     Arc<AtomicBool>,
     GenerationTextControlV1,
-    Arc<ProfiledStdMutex<CodeIndexBuildProgressStateV1>>,
+    Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
     u64,
     Arc<RwLock<CodeGraphActivationStateV1>>,
 );
@@ -155,11 +153,10 @@ pub type CodeIndexBuildProgressSlotV1 = Arc<RwLock<CodeIndexBuildProgressSlotSta
 pub(super) struct GenerationTextControlV1 {
     execution: DaemonCodeIndexControlV1,
     retirement_epoch: Arc<AtomicU64>,
-    #[cfg(feature = "hotpath")]
+
     shutting_down: Arc<AtomicBool>,
 }
 
-#[cfg(feature = "hotpath")]
 #[derive(Clone, Copy)]
 enum GenerationTextCancellationSourceV1 {
     Shutdown,
@@ -176,7 +173,7 @@ impl GenerationTextControlV1 {
         Self {
             execution,
             retirement_epoch,
-            #[cfg(feature = "hotpath")]
+
             shutting_down,
         }
     }
@@ -185,7 +182,6 @@ impl GenerationTextControlV1 {
         DaemonCodeIndexControlV1::advance(&self.retirement_epoch);
     }
 
-    #[cfg(feature = "hotpath")]
     fn cancellation_source(&self) -> Option<GenerationTextCancellationSourceV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             Some(GenerationTextCancellationSourceV1::Shutdown)
@@ -246,40 +242,44 @@ impl CodeIndexBuildProgressSlotStateV1 {
         mut snapshot: CodeIndexBuildProgressV1,
     ) -> bool {
         if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.artifact.progress.rejected_stale_total").inc(1u64);
+            metrics::gauge!("query.artifact.progress.rejected_stale_total").increment(1.0);
             return false;
         }
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
-        #[cfg(feature = "hotpath")]
+
         let published_phase = snapshot.phase;
         self.snapshot = Some(Arc::new(snapshot));
-        #[cfg(feature = "hotpath")]
+
         {
-            hotpath::gauge!("query.artifact.progress.publication_total").inc(1u64);
+            metrics::gauge!("query.artifact.progress.publication_total").increment(1.0);
             match published_phase {
                 CodeIndexBuildPhaseV1::SourceScan => {
-                    hotpath::gauge!("query.artifact.progress.phase.source_scan_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.source_scan_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::RelationalPreparation => {
-                    hotpath::gauge!("query.artifact.progress.phase.preparation_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.preparation_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::BulkCommit => {
-                    hotpath::gauge!("query.artifact.progress.phase.bulk_commit_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.bulk_commit_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::IndexBuild => {
-                    hotpath::gauge!("query.artifact.progress.phase.index_build_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.index_build_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::Verification => {
-                    hotpath::gauge!("query.artifact.progress.phase.verification_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.verification_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::GraphPublication => {
-                    hotpath::gauge!("query.artifact.progress.phase.graph_publication_total")
-                        .inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.graph_publication_total")
+                        .increment(1.0);
                 }
                 CodeIndexBuildPhaseV1::Ready => {
-                    hotpath::gauge!("query.artifact.progress.phase.ready_total").inc(1u64);
+                    metrics::gauge!("query.artifact.progress.phase.ready_total").increment(1.0);
                 }
             }
         }
@@ -326,8 +326,7 @@ pub(super) fn try_publish_build_progress(
     match slot.try_write() {
         Ok(mut slot) => slot.publish(generation_id, owner_epoch, snapshot),
         Err(std::sync::TryLockError::WouldBlock) => {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.artifact.progress.skipped_busy_total").inc(1u64);
+            metrics::gauge!("query.artifact.progress.skipped_busy_total").increment(1.0);
             false
         }
         Err(std::sync::TryLockError::Poisoned(poisoned)) => {
@@ -450,7 +449,7 @@ pub struct LatestCodeTextGenerationV1 {
     pub(super) text_projection_build: Arc<CodeTextProjectionStateV1>,
     pub(super) text_projection_failed: Arc<AtomicBool>,
     pub(super) text_control: GenerationTextControlV1,
-    pub(super) text_progress_state: Arc<ProfiledStdMutex<CodeIndexBuildProgressStateV1>>,
+    pub(super) text_progress_state: Arc<std::sync::Mutex<CodeIndexBuildProgressStateV1>>,
     pub(super) text_progress_slot: CodeIndexBuildProgressSlotV1,
     /// Bounded authentication work for a cold immutable-artifact open. It is
     /// intentionally separate from durable build progress.
@@ -467,7 +466,7 @@ pub struct LatestCodeTextGenerationV1 {
     /// A cold graph-off bind authenticates the sealed source once and hands
     /// that same reader to the artifact build. The full generation is never
     /// decoded merely to discover text metadata or source layout.
-    pub(super) preopened_source: Arc<ProfiledStdMutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
+    pub(super) preopened_source: Arc<std::sync::Mutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
     pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
     /// The outgoing owner whose warm graph serves reads, stale, until this
     /// generation's own graph first warms.
@@ -758,10 +757,7 @@ pub(super) struct CodeTextArtifactBuildV1 {
 /// reopen normally runs with the slot lock released; missing or invalid
 /// rebuildable witness state falls back to corpus-wide verification under the
 /// same claim. Concurrent wakes therefore park with typed cancellation instead
-/// of blocking on the mutex for either path. This stays a plain
-/// `std::sync::Mutex` rather than `hotpath::mutex!` because
-/// `Condvar::wait_timeout` requires the exact std guard type; lock-wait and
-/// parked wait are measured with explicit spans instead.
+/// of blocking on the mutex for either path.
 pub(super) struct CodeTextProjectionStateV1 {
     slot: Mutex<CodeTextProjectionSlotV1>,
     ready: Condvar,
@@ -788,9 +784,10 @@ impl CodeTextProjectionStateV1 {
     }
 
     pub(super) fn lock_slot(&self) -> MutexGuard<'_, CodeTextProjectionSlotV1> {
-        hotpath::measure_block!("query.artifact.head_open.lock_wait", {
+        {
+            let _span = tracing::trace_span!("query.artifact.head_open.lock_wait").entered();
             self.slot.lock().unwrap_or_else(PoisonError::into_inner)
-        })
+        }
     }
 }
 
@@ -1281,13 +1278,13 @@ impl DaemonCodeTextArtifactStoreV1 {
             )
         })?;
         let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
-        hotpath::gauge!("query.artifact.admission.observed_resident_bytes")
+        metrics::gauge!("query.artifact.admission.observed_resident_bytes")
             .set(observed_bytes as f64);
-        hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
+        metrics::gauge!("query.artifact.admission.requested_growth_bytes")
             .set(preferred.get() as f64);
-        hotpath::gauge!("query.artifact.admission.admitted_growth_bytes")
+        metrics::gauge!("query.artifact.admission.admitted_growth_bytes")
             .set(admitted.get() as f64);
-        hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
+        metrics::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
         let mut reservation = self
             .resident_memory
             .reserve(
@@ -1562,100 +1559,110 @@ impl DaemonCodeTextArtifactStoreV1 {
         content_key: &ManifestDigest,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        hotpath::measure_block!("query.artifact.store.publish", {
-            let artifacts_root = code_text_artifacts_root(&self.store_root);
-            ensure_private_text_artifacts_root(&artifacts_root)?;
-            // Publication and artifact retention share this canonical store lock.
-            // Hold it from the first staging observation until pointer attachment
-            // is durable so retention cannot unlink a newly visible artifact from
-            // a plan made before the descriptor was attached.
-            checkpoint_text_artifact_control(control)?;
-            let lock = self.acquire_store_write_lock()?;
-            // The completed artifact is the project's: from the moment this
-            // publication finds or places it until its descriptor is durable,
-            // no scope's retention may collect it.
-            let _project_lock =
-                acquire_generation_segments_publication_lock(&self.store_root, &|| {
-                    checkpoint_text_artifact_control(control).is_err()
-                })
-                .map_err(text_artifact_unavailable)?;
-            let (artifact_sha256, artifact_size_bytes) = hotpath::measure_block!(
-                "query.artifact.store.state_digest",
-                sha256_private_file_and_size(staging_path, control)
-            )?;
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("query.artifact.store.digest_bytes").set(artifact_size_bytes);
-            let descriptor = DurableCodeTextArtifactDescriptorV1 {
-                generation_id: generation_id.clone(),
-                artifact_file: format!(
-                    "text-artifact-{}.bin",
-                    encode_lowercase_hex(&artifact_sha256)
-                ),
-                artifact_digest: ManifestDigest::from_sha256_bytes(&artifact_sha256)
-                    .map_err(text_artifact_unavailable)?,
-                artifact_size_bytes,
-                content_key: content_key.clone(),
-            };
-            let final_path = artifacts_root.join(&descriptor.artifact_file);
-            // A digest-derived name is not proof that an existing filesystem
-            // object contains the named bytes. A regular file that does not
-            // hash to its name is a damaged copy some worktree published: the
-            // verified staging file replaces it and its bytes are gone. A
-            // symlink or other non-regular object fails closed.
-            let existing = match final_path.symlink_metadata() {
-                Ok(_) => Some(hotpath::measure_block!(
-                    "query.artifact.store.dedupe_compare",
-                    sha256_private_file_and_size(&final_path, control)
-                )?),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(text_artifact_unavailable(error)),
-            };
-            if existing == Some((artifact_sha256, artifact_size_bytes)) {
-                retire_text_artifact_staging_family(staging_path)
+        {
+            let _span = tracing::trace_span!("query.artifact.store.publish").entered();
+            {
+                let artifacts_root = code_text_artifacts_root(&self.store_root);
+                ensure_private_text_artifacts_root(&artifacts_root)?;
+                // Publication and artifact retention share this canonical store lock.
+                // Hold it from the first staging observation until pointer attachment
+                // is durable so retention cannot unlink a newly visible artifact from
+                // a plan made before the descriptor was attached.
+                checkpoint_text_artifact_control(control)?;
+                let lock = self.acquire_store_write_lock()?;
+                // The completed artifact is the project's: from the moment this
+                // publication finds or places it until its descriptor is durable,
+                // no scope's retention may collect it.
+                let _project_lock =
+                    acquire_generation_segments_publication_lock(&self.store_root, &|| {
+                        checkpoint_text_artifact_control(control).is_err()
+                    })
                     .map_err(text_artifact_unavailable)?;
-            } else {
-                // Renaming over the damaged file unlinks it atomically.
-                if existing.is_some() {
-                    tracing::warn!(
-                        event = "code_index_shared_text_artifact_replaced",
-                        artifact = %descriptor.artifact_file,
-                        "a text artifact that did not match its content address was replaced"
-                    );
-                }
-                std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
-                clear_text_artifact_staging_sidecars(staging_path)
-                    .map_err(text_artifact_unavailable)?;
-                if let Some(staging_root) = staging_path.parent() {
-                    DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)
+                let (artifact_sha256, artifact_size_bytes) = {
+                    let _span = tracing::trace_span!("query.artifact.store.state_digest").entered();
+                    sha256_private_file_and_size(staging_path, control)
+                }?;
+
+                metrics::gauge!("query.artifact.store.digest_bytes")
+                    .set(artifact_size_bytes as f64);
+                let descriptor = DurableCodeTextArtifactDescriptorV1 {
+                    generation_id: generation_id.clone(),
+                    artifact_file: format!(
+                        "text-artifact-{}.bin",
+                        encode_lowercase_hex(&artifact_sha256)
+                    ),
+                    artifact_digest: ManifestDigest::from_sha256_bytes(&artifact_sha256)
+                        .map_err(text_artifact_unavailable)?,
+                    artifact_size_bytes,
+                    content_key: content_key.clone(),
+                };
+                let final_path = artifacts_root.join(&descriptor.artifact_file);
+                // A digest-derived name is not proof that an existing filesystem
+                // object contains the named bytes. A regular file that does not
+                // hash to its name is a damaged copy some worktree published: the
+                // verified staging file replaces it and its bytes are gone. A
+                // symlink or other non-regular object fails closed.
+                let existing = match final_path.symlink_metadata() {
+                    Ok(_) => Some({
+                        let _span =
+                            tracing::trace_span!("query.artifact.store.dedupe_compare").entered();
+                        sha256_private_file_and_size(&final_path, control)
+                    }?),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(text_artifact_unavailable(error)),
+                };
+                if existing == Some((artifact_sha256, artifact_size_bytes)) {
+                    retire_text_artifact_staging_family(staging_path)
                         .map_err(text_artifact_unavailable)?;
+                } else {
+                    // Renaming over the damaged file unlinks it atomically.
+                    if existing.is_some() {
+                        tracing::warn!(
+                            event = "code_index_shared_text_artifact_replaced",
+                            artifact = %descriptor.artifact_file,
+                            "a text artifact that did not match its content address was replaced"
+                        );
+                    }
+                    std::fs::rename(staging_path, &final_path)
+                        .map_err(text_artifact_unavailable)?;
+                    clear_text_artifact_staging_sidecars(staging_path)
+                        .map_err(text_artifact_unavailable)?;
+                    if let Some(staging_root) = staging_path.parent() {
+                        DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)
+                            .map_err(text_artifact_unavailable)?;
+                    }
                 }
+                {
+                    let _span = tracing::trace_span!("query.artifact.store.seal_fsync").entered();
+                    DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+                        .map_err(text_artifact_unavailable)
+                }?;
+                let pointer = self
+                    .publication
+                    .read_publication_pointer()
+                    .map_err(text_artifact_unavailable)?
+                    .ok_or_else(|| {
+                        RetrievalPortError::AuthorityUnavailable(
+                            "no durable publication pointer exists for text-artifact attachment"
+                                .to_owned(),
+                        )
+                    })?;
+                {
+                    let _span =
+                        tracing::trace_span!("query.artifact.store.pointer_commit").entered();
+                    {
+                        attach_verified_text_artifact_under_lock(
+                            &lock,
+                            &pointer,
+                            sealed_identity,
+                            descriptor.clone(),
+                        )
+                        .map_err(text_artifact_unavailable)
+                    }
+                }?;
+                Ok(descriptor)
             }
-            hotpath::measure_block!(
-                "query.artifact.store.seal_fsync",
-                DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
-                    .map_err(text_artifact_unavailable)
-            )?;
-            let pointer = self
-                .publication
-                .read_publication_pointer()
-                .map_err(text_artifact_unavailable)?
-                .ok_or_else(|| {
-                    RetrievalPortError::AuthorityUnavailable(
-                        "no durable publication pointer exists for text-artifact attachment"
-                            .to_owned(),
-                    )
-                })?;
-            hotpath::measure_block!("query.artifact.store.pointer_commit", {
-                attach_verified_text_artifact_under_lock(
-                    &lock,
-                    &pointer,
-                    sealed_identity,
-                    descriptor.clone(),
-                )
-                .map_err(text_artifact_unavailable)
-            })?;
-            Ok(descriptor)
-        })
+        }
     }
 }
 
@@ -2582,12 +2589,12 @@ impl LatestCodeTextGenerationV1 {
                 completed_lexical_units,
                 clone_peak_scratch_memory_bytes: None,
             });
-            #[cfg(feature = "hotpath")]
+
             {
-                hotpath::gauge!("query.artifact.progress.committed_pages")
-                    .set(progress.next_page_ordinal);
-                hotpath::gauge!("query.artifact.progress.committed_lexical_units")
-                    .set(completed_lexical_units);
+                metrics::gauge!("query.artifact.progress.committed_pages")
+                    .set(progress.next_page_ordinal as f64);
+                metrics::gauge!("query.artifact.progress.committed_lexical_units")
+                    .set(completed_lexical_units as f64);
             }
         }
         let (files_per_second, lexical_units_per_second, estimated_remaining_seconds) =
@@ -2669,13 +2676,16 @@ impl LatestCodeTextGenerationV1 {
 
     fn publish_text_progress_snapshot(&self, snapshot: CodeIndexBuildProgressV1) {
         let generation_id = &self.metadata.manifest().generation_id;
-        hotpath::measure_block!("query.artifact.progress.publish", {
-            let _ = self
-                .text_progress_slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish(generation_id, self.text_progress_owner_epoch, snapshot);
-        });
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let _ = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .publish(generation_id, self.text_progress_owner_epoch, snapshot);
+            }
+        };
     }
 
     pub(super) fn publish_text_progress_phase(
@@ -2690,33 +2700,35 @@ impl LatestCodeTextGenerationV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed_micros();
-        hotpath::measure_block!("query.artifact.progress.publish", {
-            let mut slot = self
-                .text_progress_slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(current) = slot.snapshot() else {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
-                return;
-            };
-            let mut snapshot = current.as_ref().clone();
-            snapshot.phase = phase;
-            if !phase_has_file_rate_estimate(phase) {
-                snapshot.estimated_remaining_seconds = None;
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let mut slot = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(current) = slot.snapshot() else {
+                    metrics::gauge!("query.artifact.progress.no_snapshot_total").increment(1.0);
+                    return;
+                };
+                let mut snapshot = current.as_ref().clone();
+                snapshot.phase = phase;
+                if !phase_has_file_rate_estimate(phase) {
+                    snapshot.estimated_remaining_seconds = None;
+                }
+                snapshot.current_batch_pages = current_batch_pages;
+                snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
+                snapshot.elapsed_micros = elapsed_micros;
+                // Entering a phase is not progress: every retry wake re-publishes
+                // its phase before it re-attempts the work that was refused, so
+                // clearing here erased the reason between two identical refusals
+                // and status reported `blocked_reason: null` throughout a stall.
+                // A committed boundary is the honest clear -- it builds a fresh
+                // snapshot with no blocked reason -- and only that runs after work
+                // actually landed.
+                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
             }
-            snapshot.current_batch_pages = current_batch_pages;
-            snapshot.current_batch_payload_bytes = current_batch_payload_bytes;
-            snapshot.elapsed_micros = elapsed_micros;
-            // Entering a phase is not progress: every retry wake re-publishes
-            // its phase before it re-attempts the work that was refused, so
-            // clearing here erased the reason between two identical refusals
-            // and status reported `blocked_reason: null` throughout a stall.
-            // A committed boundary is the honest clear -- it builds a fresh
-            // snapshot with no blocked reason -- and only that runs after work
-            // actually landed.
-            let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
-        });
+        };
     }
 
     /// Publish the typed reason a text-artifact wake could not advance.
@@ -2743,23 +2755,24 @@ impl LatestCodeTextGenerationV1 {
 
     fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
         let generation_id = &self.metadata.manifest().generation_id;
-        hotpath::measure_block!("query.artifact.progress.publish", {
-            let mut slot = self
-                .text_progress_slot
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(current) = slot.snapshot() else {
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("query.artifact.progress.no_snapshot_total").inc(1u64);
-                return;
-            };
-            let mut snapshot = current.as_ref().clone();
-            snapshot.blocked_reason = Some(reason);
-            let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
-        });
+        {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
+            {
+                let mut slot = self
+                    .text_progress_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(current) = slot.snapshot() else {
+                    metrics::gauge!("query.artifact.progress.no_snapshot_total").increment(1.0);
+                    return;
+                };
+                let mut snapshot = current.as_ref().clone();
+                snapshot.blocked_reason = Some(reason);
+                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+            }
+        };
     }
 
-    #[cfg(feature = "hotpath")]
     fn text_progress_phase(&self) -> Option<CodeIndexBuildPhaseV1> {
         self.text_progress_slot
             .read()
@@ -2815,16 +2828,15 @@ impl LatestCodeTextGenerationV1 {
             })?;
         let result = self.advance_text_serving_inner(maximum_work, control);
         if matches!(&result, Err(RetrievalPortError::Cancelled)) {
-            #[cfg(feature = "hotpath")]
             match self.text_control.cancellation_source() {
                 Some(GenerationTextCancellationSourceV1::Shutdown) => {
-                    hotpath::gauge!("query.artifact.cancelled.shutdown_total").inc(1_u64);
+                    metrics::gauge!("query.artifact.cancelled.shutdown_total").increment(1.0);
                 }
                 Some(GenerationTextCancellationSourceV1::Superseded) => {
-                    hotpath::gauge!("query.artifact.cancelled.superseded_total").inc(1_u64);
+                    metrics::gauge!("query.artifact.cancelled.superseded_total").increment(1.0);
                 }
                 None => {
-                    hotpath::gauge!("query.artifact.cancelled.external_total").inc(1_u64);
+                    metrics::gauge!("query.artifact.cancelled.external_total").increment(1.0);
                 }
             }
         }
@@ -3014,7 +3026,7 @@ impl LatestCodeTextGenerationV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
             return Ok(None);
         };
-        hotpath::gauge!("query.artifact.shared_adoptions_total").inc(1u64);
+        metrics::gauge!("query.artifact.shared_adoptions_total").increment(1.0);
         let ready_progress =
             self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
         self.install_artifact_owners(reader, reader_reservation)?;
@@ -3171,11 +3183,11 @@ impl LatestCodeTextGenerationV1 {
         )?;
         let (source_batch_pages, source_batch_bytes, _) =
             text_artifact_source_batch_limits(build_memory_budget);
-        hotpath::gauge!("query.artifact.preferred_build_memory_budget_bytes")
-            .set(preferred_build_memory_budget);
-        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
-        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
-        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
+        metrics::gauge!("query.artifact.preferred_build_memory_budget_bytes")
+            .set(preferred_build_memory_budget as f64);
+        metrics::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget as f64);
+        metrics::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages as f64);
+        metrics::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes as f64);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(
@@ -3298,7 +3310,11 @@ impl LatestCodeTextGenerationV1 {
     /// publication tail's reopen) run under a `HeadOpening` claim with the
     /// slot lock released, so a concurrent wake parks with typed cancellation
     /// instead of blocking on the mutex for the whole open.
-    #[hotpath::measure(label = "query.artifact.batch.scheduler_wake")]
+    #[tracing::instrument(
+        name = "query.artifact.batch.scheduler_wake",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn advance_artifact_text_serving(
         &self,
         maximum_work: usize,
@@ -3323,13 +3339,15 @@ impl LatestCodeTextGenerationV1 {
                     // Another wake owns the authenticated open. Park until the
                     // claim resolves; the bounded interval keeps this wake's
                     // own cancellation typed and prompt throughout.
-                    let (waited, _timed_out) = hotpath::measure_block!(
-                        "query.artifact.head_open.singleflight_wait",
+                    let (waited, _timed_out) = {
+                        let _span =
+                            tracing::trace_span!("query.artifact.head_open.singleflight_wait")
+                                .entered();
                         self.text_projection_build
                             .ready
                             .wait_timeout(guard, TEXT_HEAD_OPEN_CANCELLATION_CHECK_INTERVAL_V1)
                             .unwrap_or_else(PoisonError::into_inner)
-                    );
+                    };
                     drop(waited);
                     parked = true;
                 }
@@ -3342,10 +3360,10 @@ impl LatestCodeTextGenerationV1 {
             *slot = CodeTextProjectionSlotV1::HeadOpening;
             drop(slot);
             let mut claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
-            let outcome = hotpath::measure_block!(
-                "query.artifact.head_open",
+            let outcome = {
+                let _span = tracing::trace_span!("query.artifact.head_open").entered();
                 self.open_published_head_or_begin_build(control)
-            )?;
+            }?;
             match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
@@ -3372,11 +3390,9 @@ impl LatestCodeTextGenerationV1 {
                 source_batch_bytes,
             )
             .map_err(map_sealed_page_source_error)?;
-            #[cfg(feature = "hotpath")]
-            let completed_lexical_units_before = artifact_build
-                .source
-                .completed_lexical_units()
-                .map_err(map_sealed_page_source_error)?;
+
+            let completed_lexical_units_before =
+                artifact_build.source.completed_lexical_units().ok();
             self.publish_text_progress_phase(CodeIndexBuildPhaseV1::SourceScan, 0, 0);
             let mut durable_progress = None;
             let mut commit_latency_micros = None;
@@ -3384,9 +3400,8 @@ impl LatestCodeTextGenerationV1 {
             let admitted = {
                 let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
                 source.next_page_batch_if(control, bounds, |pages| {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("query.artifact.batch.offered_pages_total")
-                        .inc(u64::try_from(pages.len()).unwrap_or(u64::MAX));
+                    metrics::gauge!("query.artifact.batch.offered_pages_total")
+                        .increment((u64::try_from(pages.len()).unwrap_or(u64::MAX)) as f64);
                     let offered_batch_pages = u64::try_from(pages.len()).map_err(|_| {
                         CodeLexicalArtifactErrorV1::Contract(
                             "text-artifact batch page count exceeds u64".to_owned(),
@@ -3404,15 +3419,17 @@ impl LatestCodeTextGenerationV1 {
                         offered_batch_pages,
                         offered_payload_bytes,
                     );
-                    let (progress, accepted) =
-                        hotpath::measure_block!("query.artifact.batch.builder", {
+                    let (progress, accepted) = {
+                        let _span = tracing::trace_span!("query.artifact.batch.builder").entered();
+                        {
                             let prepared =
                                 builder.prepare_admissible_page_prefix(pages, control)?;
                             let accepted = prepared.accepted_prefix();
                             let accepted_pages = &pages[..accepted.get()];
-                            #[cfg(feature = "hotpath")]
-                            hotpath::gauge!("query.artifact.batch.accepted_pages_total")
-                                .inc(u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX));
+
+                            metrics::gauge!("query.artifact.batch.accepted_pages_total").increment(
+                                (u64::try_from(accepted_pages.len()).unwrap_or(u64::MAX)) as f64,
+                            );
                             let batch_pages =
                                 u64::try_from(accepted_pages.len()).map_err(|_| {
                                     CodeLexicalArtifactErrorV1::Contract(
@@ -3447,7 +3464,8 @@ impl LatestCodeTextGenerationV1 {
                                     .unwrap_or(u64::MAX),
                             );
                             Ok::<_, CodeLexicalArtifactErrorV1>((progress, accepted))
-                        })?;
+                        }
+                    }?;
                     durable_progress = Some(progress);
                     Ok(accepted)
                 })
@@ -3455,8 +3473,7 @@ impl LatestCodeTextGenerationV1 {
             let admitted = match admitted {
                 Ok(Ok(admitted)) => admitted,
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
+                    metrics::gauge!("query.artifact.batch.refusal_total").increment(1.0);
                     checkpoint_text_artifact_control(control)?;
                     if let Some((previous_page_records, tightened_page_records)) =
                         artifact_build.source.tighten_page_record_bound()
@@ -3493,8 +3510,9 @@ impl LatestCodeTextGenerationV1 {
                             )
                         })
                     })?;
-                    hotpath::measure_block!(
-                        "query.artifact.batch.progress_publish",
+                    {
+                        let _span =
+                            tracing::trace_span!("query.artifact.batch.progress_publish").entered();
                         self.publish_text_progress_boundary(
                             artifact_build,
                             progress,
@@ -3504,26 +3522,24 @@ impl LatestCodeTextGenerationV1 {
                             commit_latency_micros,
                             true,
                         )
-                    )?;
+                    }?;
                     self.text_progress_state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .observe_clone_scratch(
                             u64::try_from(clone_scratch_bytes).unwrap_or(u64::MAX),
                         );
-                    #[cfg(feature = "hotpath")]
-                    {
-                        let committed_lexical_units = artifact_build
-                            .source
-                            .completed_lexical_units()
-                            .map_err(map_sealed_page_source_error)?
-                            .saturating_sub(completed_lexical_units_before);
-                        hotpath::gauge!("query.artifact.batch.committed_lexical_units_total")
-                            .inc(committed_lexical_units);
-                        if let Some(latency_micros) = commit_latency_micros {
-                            hotpath::gauge!("query.artifact.progress.latest_commit_latency_micros")
-                                .set(latency_micros);
-                        }
+
+                    if let (Some(before), Ok(after)) = (
+                        completed_lexical_units_before,
+                        artifact_build.source.completed_lexical_units(),
+                    ) {
+                        metrics::gauge!("query.artifact.batch.committed_lexical_units_total")
+                            .increment(after.saturating_sub(before) as f64);
+                    }
+                    if let Some(latency_micros) = commit_latency_micros {
+                        metrics::gauge!("query.artifact.progress.latest_commit_latency_micros")
+                            .set(latency_micros as f64);
                     }
                     remaining = remaining.checked_sub(page_count).ok_or_else(|| {
                         RetrievalPortError::Contract(
@@ -3560,20 +3576,17 @@ impl LatestCodeTextGenerationV1 {
                 .builder
                 .advance_started_finalization(finalization_rows, control),
         };
-        #[cfg(feature = "hotpath")]
         let finalized = if matches!(
             self.text_progress_phase(),
             Some(CodeIndexBuildPhaseV1::Verification)
         ) {
-            hotpath::measure_block!(
-                "query.artifact.finalization.digest_verify_wake",
-                advance(artifact_build)
-            )
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.digest_verify_wake").entered();
+            advance(artifact_build)
         } else {
-            hotpath::measure_block!("query.artifact.index.build", advance(artifact_build))
+            let _span = tracing::trace_span!("query.artifact.index.build").entered();
+            advance(artifact_build)
         };
-        #[cfg(not(feature = "hotpath"))]
-        let finalized = advance(artifact_build);
         // A finalization wake is what status reports as `index_build` and
         // `verification`. Returning its refusal bare left those phases
         // indistinguishable from progress: a build stalled on resident-memory

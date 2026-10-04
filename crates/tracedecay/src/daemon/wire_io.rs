@@ -9,10 +9,10 @@ pub(super) async fn write_json_rpc_response(
     transport: &mut impl McpTransport,
     response: &tracedecay_mcp::JsonRpcResponse,
 ) -> Result<()> {
-    let payload = hotpath::measure_block!(
-        "daemon.wire.encode_response",
+    let payload = {
+        let _span = tracing::trace_span!("daemon.wire.encode_response").entered();
         serde_json::to_string(response)
-    )?;
+    }?;
     write_response_payload(transport, &payload).await?;
     Ok(())
 }
@@ -21,10 +21,10 @@ pub(super) async fn write_daemon_invocation_response(
     transport: &mut impl McpTransport,
     response: &DaemonInvocationResponse,
 ) -> Result<()> {
-    let payload = hotpath::measure_block!(
-        "daemon.wire.encode_response",
+    let payload = {
+        let _span = tracing::trace_span!("daemon.wire.encode_response").entered();
         serde_json::to_string(response)
-    )?;
+    }?;
     write_response_payload(transport, &payload).await?;
     Ok(())
 }
@@ -36,20 +36,20 @@ async fn write_response_payload(
     transport: &mut impl McpTransport,
     payload: &str,
 ) -> std::io::Result<()> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async {
             transport.write_line(payload).await?;
             transport.write_line("\n").await?;
             transport.flush().await
         },
-        label = "daemon.wire.write_response"
+        tracing::trace_span!("daemon.wire.write_response"),
     )
     .await
 }
 
 /// Read one newline-delimited frame. Oversized input gets a typed non-durable
 /// rejection and returns `Ok(None)` without retaining payload bytes.
-#[hotpath::measure(label = "daemon.wire.read_line", future = true)]
+#[tracing::instrument(name = "daemon.wire.read_line", level = "trace", skip_all)]
 pub(super) async fn read_line_handling_wire_oversized(
     transport: &mut (impl McpTransport + Send),
 ) -> Result<Option<String>> {

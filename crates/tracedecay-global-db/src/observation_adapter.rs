@@ -86,7 +86,6 @@ impl GlobalDbObservationStore {
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
     /// that the runtime write path also executes. No record content is
     /// decoded, derived, or hashed.
-    #[hotpath::skip]
     async fn record_refusal_with_coverage(
         &self,
         write: &AnchoredObservationWrite,
@@ -444,14 +443,12 @@ impl GlobalDbObservationStore {
         Ok(CursorAdvanceOutcome::Committed)
     }
 
-    #[hotpath::skip]
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
         crate::converge_projection_predecessor(&self.database).await
     }
 
-    #[hotpath::skip]
     async fn prepare_observation_persist(
         &self,
         write: AnchoredObservationWrite,
@@ -762,7 +759,6 @@ impl GlobalDbObservationStore {
     /// Persists the longest prefix of `writes` that settles in one runtime
     /// batch, returning its outcomes in input order and the writes that must
     /// be prepared again once that prefix is durable.
-    #[hotpath::skip]
     async fn persist_observation_segment(
         &self,
         writes: Vec<AnchoredObservationWrite>,
@@ -770,7 +766,7 @@ impl GlobalDbObservationStore {
         Vec<ObservationBatchPersistOutcome>,
         Vec<AnchoredObservationWrite>,
     )> {
-        crate::hotpath_observe::record_transaction_rows(1);
+        crate::observe::record_transaction_rows(1);
         let preflight = load_observation_preflight(&self.database, &writes).await?;
         let mut batch_state = ObservationBatchState::from_preflight(&preflight);
         let mut published_cursors = HashMap::<
@@ -869,14 +865,13 @@ fn record_observation_snapshot_probe() {
         target: "tracedecay::observation_snapshot_query",
         "query observation batch snapshot"
     );
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.observation_batch.snapshot_query_probes").inc(1_u64);
+
+    metrics::gauge!("global_db.observation_batch.snapshot_query_probes").increment(1.0);
 }
 
 #[inline(always)]
 fn record_observation_snapshot_row() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("global_db.observation_batch.snapshot_rows").inc(1_u64);
+    metrics::gauge!("global_db.observation_batch.snapshot_rows").increment(1.0);
 }
 
 impl ObservationPreflightSnapshot {
@@ -1053,7 +1048,11 @@ impl ObservationBatchState {
     }
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation.query.preflight")]
+#[tracing::instrument(
+    name = "global_db.observation.query.preflight",
+    level = "trace",
+    skip_all
+)]
 async fn load_observation_preflight(
     database: &Database,
     writes: &[AnchoredObservationWrite],
@@ -1595,7 +1594,6 @@ impl PreparedObservationPersist {
 }
 
 impl ObservationStore for GlobalDbObservationStore {
-    #[hotpath::skip]
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
@@ -1616,7 +1614,11 @@ impl ObservationStore for GlobalDbObservationStore {
             })
     }
 
-    #[hotpath::measure(future = true, label = "global_db.observation.persist.batch")]
+    #[tracing::instrument(
+        name = "global_db.observation.persist.batch",
+        level = "trace",
+        skip_all
+    )]
     async fn persist_observations(
         &self,
         writes: Vec<AnchoredObservationWrite>,
@@ -1643,7 +1645,6 @@ impl ObservationStore for GlobalDbObservationStore {
         .await
     }
 
-    #[hotpath::skip]
     async fn get_source_cursor(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -1652,7 +1653,6 @@ impl ObservationStore for GlobalDbObservationStore {
         read_runtime_source_cursor(&self.runtime, source, scope)
     }
 
-    #[hotpath::skip]
     async fn committed_source_cursors(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -1673,7 +1673,6 @@ impl ObservationStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -1753,7 +1752,6 @@ impl ObservationStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn get_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
@@ -1761,7 +1759,6 @@ impl ObservationStore for GlobalDbObservationStore {
         read_runtime_stored_observation(&self.runtime, observation_id)
     }
 
-    #[hotpath::skip]
     async fn replay_observations(
         &self,
         request: ObservationReplayRequest,
@@ -2505,7 +2502,6 @@ fn runtime_storage_error(
 }
 
 impl ObservationProjectionStore for GlobalDbObservationStore {
-    #[hotpath::skip]
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
@@ -2525,7 +2521,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn project_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,
@@ -2533,7 +2528,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         crate::project_observation(&self.database, observation_id).await
     }
 
-    #[hotpath::skip]
     async fn project_queued_observations(
         &self,
         max: usize,
@@ -2543,7 +2537,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
             .map(Some)
     }
 
-    #[hotpath::skip]
     async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
         match dispatch_runtime_observation_read(
             &self.runtime,
@@ -2561,7 +2554,6 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
         }
     }
 
-    #[hotpath::skip]
     async fn rebuild_projection(
         &self,
         frontier_sequence: u64,

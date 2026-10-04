@@ -25,7 +25,11 @@ const FOLD_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// the `-wal` sidecar. A `SQLite` backup would instead rewrite every page of
 /// the database into a second file, doubling both the bytes written and the
 /// peak scratch space for large families.
-#[hotpath::measure(label = "runtime_core.db.snapshot.materialize")]
+#[tracing::instrument(
+    name = "runtime_core.db.snapshot.materialize",
+    level = "trace",
+    skip_all
+)]
 pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -61,10 +65,7 @@ fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> 
 
     let interrupt = connection.get_interrupt_handle();
     let watcher_control = control.clone();
-    let (completed, completion) = hotpath::channel!(
-        mpsc::channel(),
-        label = "runtime_core.db.snapshot.fold_cancel"
-    );
+    let (completed, completion) = mpsc::channel();
     let (fold, cancellation) = thread::scope(|scope| -> io::Result<_> {
         let watcher = thread::Builder::new()
             .name("tracedecay-sqlite-wal-fold-cancel".into())

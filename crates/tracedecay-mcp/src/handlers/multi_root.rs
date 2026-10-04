@@ -26,7 +26,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 
-#[hotpath::measure(future = true, label = "mcp.dispatch.multi_root")]
+#[tracing::instrument(name = "mcp.dispatch.multi_root", level = "trace", skip_all)]
 pub async fn handle_multi_root(
     tool_name: &str,
     body: Value,
@@ -69,8 +69,8 @@ pub async fn handle_multi_root(
         map.remove("__mcp_request_id");
         map.remove("format");
     }
-    let invocation = hotpath::measure_block!(
-        "mcp.multi_root.decode",
+    let invocation = {
+        let _span = tracing::trace_span!("mcp.multi_root.decode").entered();
         match operation {
             MultiRootApplicationOperation::ScopeSetRead => {
                 let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body)
@@ -111,7 +111,7 @@ pub async fn handle_multi_root(
                 )
             }
         }
-    );
+    };
     let policy = match operation {
         MultiRootApplicationOperation::ScopeSetCompareAndSwap => {
             InvocationCancellationPolicy::AuthoritativeEffect
@@ -130,15 +130,15 @@ pub async fn handle_multi_root(
             }),
         );
     };
-    let response = hotpath::future!(
+    let response = tracing::Instrument::instrument(
         executor.invoke_controlled(invocation, deadline, cancellation, policy),
-        label = "mcp.multi_root.invoke"
+        tracing::trace_span!("mcp.multi_root.invoke"),
     )
     .await;
-    hotpath::measure_block!(
-        "mcp.multi_root.render",
+    {
+        let _span = tracing::trace_span!("mcp.multi_root.render").entered();
         render_response(operation, request_id, response)
-    )
+    }
 }
 
 /// The multi-root operation a tool name resolves to, if any.
@@ -247,7 +247,7 @@ fn problem_result(
 ) -> Result<ToolResult> {
     // Denied and failed multi-root requests are part of the serving story;
     // success-only timing would hide invalid requests and daemon refusals.
-    hotpath::gauge!("mcp.multi_root.problems_total").inc(1_u64);
+    metrics::gauge!("mcp.multi_root.problems_total").increment(1.0);
     let application =
         ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
             .map_err(|error| TraceDecayError::Config {

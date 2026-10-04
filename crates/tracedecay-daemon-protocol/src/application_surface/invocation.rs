@@ -367,7 +367,7 @@ fn daemon_invocation_request(
 /// An unreachable daemon never saw the request, so it stays a dispatch
 /// failure; every other transport failure keeps its exact stage-bearing
 /// problem and is reported to the feedback ledger for observable reads.
-#[hotpath::measure(label = "application_surface.invoke", future = true)]
+#[tracing::instrument(name = "application_surface.invoke", level = "trace", skip_all)]
 pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
     executor: &E,
     context: ApplicationInvocationContext,

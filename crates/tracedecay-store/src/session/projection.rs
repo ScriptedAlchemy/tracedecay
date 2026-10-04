@@ -26,7 +26,11 @@ pub struct SessionTemporalProjectionBatchV1 {
 }
 
 impl SessionTemporalProjectionBatchV1 {
-    #[hotpath::measure(label = "store.session.build_projection_batch")]
+    #[tracing::instrument(
+        name = "store.session.build_projection_batch",
+        level = "trace",
+        skip_all
+    )]
     pub fn new(
         session_id: SessionId,
         generation: SessionProjectionGenerationV1,
@@ -96,7 +100,6 @@ impl SessionTemporalProjectionBatchV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn generation(&self) -> SessionProjectionGenerationV1 {
         self.generation
     }
@@ -105,17 +108,14 @@ impl SessionTemporalProjectionBatchV1 {
         &self.watermarks
     }
 
-    #[hotpath::skip]
     pub const fn batch_ordinal(&self) -> u64 {
         self.batch_ordinal
     }
 
-    #[hotpath::skip]
     pub const fn source_through(&self) -> u64 {
         self.source_through
     }
 
-    #[hotpath::skip]
     pub const fn projection_through(&self) -> u64 {
         self.projection_through
     }
@@ -253,7 +253,7 @@ impl SessionTemporalProjectionBatchReceiptV1 {
                 });
             }
         }
-        crate::hotpath_observe::record_session_projection_batch_disposition(disposition);
+        crate::observe::record_session_projection_batch_disposition(disposition);
         Ok(Self {
             session_id: batch.session_id().clone(),
             generation: batch.generation(),
@@ -274,7 +274,6 @@ impl SessionTemporalProjectionBatchReceiptV1 {
         &self.session_id
     }
 
-    #[hotpath::skip]
     pub const fn generation(&self) -> SessionProjectionGenerationV1 {
         self.generation
     }
@@ -283,7 +282,6 @@ impl SessionTemporalProjectionBatchReceiptV1 {
         &self.watermarks
     }
 
-    #[hotpath::skip]
     pub const fn batch_ordinal(&self) -> u64 {
         self.batch_ordinal
     }
@@ -292,37 +290,30 @@ impl SessionTemporalProjectionBatchReceiptV1 {
         &self.batch_digest
     }
 
-    #[hotpath::skip]
     pub const fn source_through(&self) -> u64 {
         self.source_through
     }
 
-    #[hotpath::skip]
     pub const fn projection_through(&self) -> u64 {
         self.projection_through
     }
 
-    #[hotpath::skip]
     pub const fn persisted_occurrences(&self) -> usize {
         self.persisted_occurrences
     }
 
-    #[hotpath::skip]
     pub const fn persisted_copies(&self) -> usize {
         self.persisted_copies
     }
 
-    #[hotpath::skip]
     pub const fn persisted_assertions(&self) -> usize {
         self.persisted_assertions
     }
 
-    #[hotpath::skip]
     pub const fn disposition(&self) -> SessionTemporalProjectionBatchDispositionV1 {
         self.disposition
     }
 
-    #[hotpath::skip]
     pub const fn committed_at(&self) -> UtcMicros {
         self.committed_at
     }

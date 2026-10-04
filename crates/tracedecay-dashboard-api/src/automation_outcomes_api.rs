@@ -44,7 +44,7 @@ pub(crate) struct AutomationOutcomesPayloadV1 {
     error: String,
 }
 
-#[hotpath::measure(label = "dashboard_api.outcomes.read", future = true)]
+#[tracing::instrument(name = "dashboard_api.outcomes.read", level = "trace", skip_all)]
 pub async fn outcomes(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,

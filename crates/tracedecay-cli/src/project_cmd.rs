@@ -20,7 +20,7 @@ use crate::commands::{
 
 const MAX_LIMIT: usize = 1_000;
 
-#[hotpath::measure(label = "cli.projects.dispatch", future = true)]
+#[tracing::instrument(name = "cli.projects.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_projects_action(
     profile: &ProfileRoot,
     action: ProjectsAction,
@@ -83,7 +83,7 @@ pub(crate) async fn handle_projects_action(
 /// supervisor bounds the stop) and restored afterward. The preview runs
 /// through the daemon like every other read-only `projects` subcommand and
 /// never stops the service.
-#[hotpath::measure(label = "cli.projects.forget", future = true)]
+#[tracing::instrument(name = "cli.projects.forget", level = "trace", skip_all)]
 async fn handle_projects_forget(
     profile: &ProfileRoot,
     selector: &str,
@@ -240,7 +240,7 @@ fn bounded_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_LIMIT)
 }
 
-#[hotpath::measure(label = "cli.projects.render")]
+#[tracing::instrument(name = "cli.projects.render", level = "trace", skip_all)]
 fn print_registry_list(
     listing: AdminCliRegistryListV1,
     label: &str,
@@ -336,7 +336,7 @@ fn render_project_context(
 
 /// One page of the profile registry; the cwd's project, when there is one,
 /// is marked active.
-#[hotpath::measure(label = "cli.projects.request", future = true)]
+#[tracing::instrument(name = "cli.projects.request", level = "trace", skip_all)]
 async fn registry_list(
     profile: &ProfileRoot,
     limit: usize,
@@ -354,7 +354,7 @@ async fn registry_list(
     }
 }
 
-#[hotpath::measure(label = "cli.projects.request", future = true)]
+#[tracing::instrument(name = "cli.projects.request", level = "trace", skip_all)]
 async fn registry_context(
     profile: &ProfileRoot,
     selector: PathBuf,

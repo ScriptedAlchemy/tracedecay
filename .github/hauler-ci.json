@@ -129,16 +129,6 @@
           "timeoutSeconds": 1800
         },
         {
-          "id": "hotpath-features",
-          "run": "hauler exec -- cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked",
-          "timeoutSeconds": 1800
-        },
-        {
-          "id": "hotpath-backend",
-          "run": "hauler exec -- cargo check --workspace --all-targets --features hotpath/hotpath,hotpath/hotpath-mcp --locked",
-          "timeoutSeconds": 1800
-        },
-        {
           "id": "production-graph",
           "run": "python3 scripts/check-production-feature-profile.py",
           "timeoutSeconds": 300

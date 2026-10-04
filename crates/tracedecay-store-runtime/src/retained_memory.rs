@@ -79,9 +79,9 @@ macro_rules! execute_scoped_memory {
             DirectRetainedMemoryAuthorityV1::Profile { registry } => {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
-                    hotpath::future!(
+                    tracing::Instrument::instrument(
                         registry.profile_memory(),
-                        label = "daemon.retained.memory.open_profile"
+                        tracing::trace_span!("daemon.retained.memory.open_profile"),
                     )
                     .await
                     .map_err(map_execution_error)
@@ -164,7 +164,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         }
     }
 
-    #[hotpath::skip]
     async fn execute_add(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -180,7 +179,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_read(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -210,7 +208,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_status(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -226,7 +223,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_update(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -242,7 +238,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_remove(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -258,7 +253,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_supersede(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -274,7 +268,6 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
         )
     }
 
-    #[hotpath::skip]
     async fn execute_feedback(
         &self,
         context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -376,9 +369,9 @@ async fn execute_add_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.add_preflighted_project_memory_fact(preflight, &write_control),
-            label = "daemon.retained.memory.add.commit"
+            tracing::trace_span!("daemon.retained.memory.add.commit"),
         )
         .await)
     })
@@ -443,9 +436,9 @@ async fn execute_update_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.update_project_memory_fact(command, &write_control),
-            label = "daemon.retained.memory.update.commit"
+            tracing::trace_span!("daemon.retained.memory.update.commit"),
         )
         .await)
     })
@@ -495,9 +488,9 @@ async fn execute_remove_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.remove_project_memory_fact(command, &write_control),
-            label = "daemon.retained.memory.remove.commit"
+            tracing::trace_span!("daemon.retained.memory.remove.commit"),
         )
         .await)
     })
@@ -563,9 +556,9 @@ async fn execute_supersede_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.supersede_project_memory_fact(command, &write_control),
-            label = "daemon.retained.memory.supersede.commit"
+            tracing::trace_span!("daemon.retained.memory.supersede.commit"),
         )
         .await)
     })
@@ -623,9 +616,9 @@ async fn execute_feedback_on_db(
     )?;
     let write_control = fact_write_control(context);
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
-        Ok(hotpath::future!(
+        Ok(tracing::Instrument::instrument(
             memory.record_project_memory_fact_feedback(command, &write_control),
-            label = "daemon.retained.memory.feedback.commit"
+            tracing::trace_span!("daemon.retained.memory.feedback.commit"),
         )
         .await)
     })
@@ -693,9 +686,9 @@ async fn search_on_db(
             .map_err(memory_mapping::map_memory_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.search_project_memory_facts(query, &read_control),
-            label = "daemon.retained.memory.search.query"
+            tracing::trace_span!("daemon.retained.memory.search.query"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)
@@ -905,23 +898,23 @@ async fn semantic_search_on_db(
     let (page, _) = bounded_memory_operation(context, async {
         let page = match request {
             SemanticRead::Probe(_) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     memory.probe_project_memory_facts(query, &read_control),
-                    label = "daemon.retained.memory.probe"
+                    tracing::trace_span!("daemon.retained.memory.probe"),
                 )
                 .await
             }
             SemanticRead::Related(_) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     memory.related_project_memory_facts(query, &read_control),
-                    label = "daemon.retained.memory.related"
+                    tracing::trace_span!("daemon.retained.memory.related"),
                 )
                 .await
             }
             SemanticRead::Reason(_) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     memory.reason_project_memory_facts(query, &read_control),
-                    label = "daemon.retained.memory.reason"
+                    tracing::trace_span!("daemon.retained.memory.reason"),
                 )
                 .await
             }
@@ -950,9 +943,9 @@ async fn contradict_on_db(
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.find_project_memory_contradictions(query, &read_control),
-            label = "daemon.retained.memory.contradict.query"
+            tracing::trace_span!("daemon.retained.memory.contradict.query"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)
@@ -978,9 +971,9 @@ async fn get_on_db(
         .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (projection, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.get_project_memory_fact(target.clone(), &read_control),
-            label = "daemon.retained.memory.get.fact"
+            tracing::trace_span!("daemon.retained.memory.get.fact"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)
@@ -994,9 +987,9 @@ async fn get_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let (history, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.get_project_memory_feedback_history(history_query, &read_control),
-            label = "daemon.retained.memory.get.history"
+            tracing::trace_span!("daemon.retained.memory.get.history"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)
@@ -1031,9 +1024,9 @@ async fn list_on_db(
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.list_project_memory_facts(query, &read_control),
-            label = "daemon.retained.memory.list.query"
+            tracing::trace_span!("daemon.retained.memory.list.query"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)
@@ -1054,9 +1047,9 @@ async fn execute_status_on_db(
     let memory = memory_application(database, owner)?;
     let read_control = fact_read_control(context);
     let (status, _) = bounded_memory_operation(context, async {
-        hotpath::future!(
+        tracing::Instrument::instrument(
             memory.project_memory_status(&read_control),
-            label = "daemon.retained.memory.status.query"
+            tracing::trace_span!("daemon.retained.memory.status.query"),
         )
         .await
         .map_err(memory_mapping::map_memory_error)

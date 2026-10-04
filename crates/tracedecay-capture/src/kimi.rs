@@ -33,16 +33,16 @@ pub fn normalize_observation(
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Kimi records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
-    hotpath::gauge!("capture.kimi.record_bytes").inc(range.end() - range.start());
+    metrics::gauge!("capture.kimi.record_bytes").increment((range.end() - range.start()) as f64);
     let envelope = normalize_kimi_record(native, session_id, stable_record_id, range);
     if envelope.is_err() {
-        hotpath::gauge!("capture.kimi.normalize_failures").inc(1u64);
+        metrics::gauge!("capture.kimi.normalize_failures").increment(1.0);
     }
     envelope
 }
 
 /// One source-record canonicalization, not a per-item walk.
-#[hotpath::measure(label = "capture.kimi.normalize")]
+#[tracing::instrument(name = "capture.kimi.normalize", level = "trace", skip_all)]
 fn normalize_kimi_record(
     native: &Value,
     session_id: &str,

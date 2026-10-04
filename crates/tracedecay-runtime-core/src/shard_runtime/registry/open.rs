@@ -37,7 +37,6 @@ type BuiltShardRuntimePublication = (
 );
 
 impl StoreRuntimeOpenBegin {
-    #[hotpath::skip]
     pub async fn wait(self) -> StoreRuntimeOpenResult {
         match self {
             Self::Ready(handle) => StoreRuntimeOpenResult::Published(handle),
@@ -65,7 +64,6 @@ pub(crate) struct StoreRuntimeOpenJoin {
 }
 
 impl StoreRuntimeOpenJoin {
-    #[hotpath::skip]
     pub(super) async fn wait(mut self) -> StoreRuntimeOpenResult {
         loop {
             let current = self.updates.borrow().clone();
@@ -288,7 +286,7 @@ impl StoreRuntimeRegistry {
                     Err(failure) => return StoreRuntimeOpenBegin::Rejected(failure),
                 }
             };
-            hotpath::gauge!("runtime_core.registry.opens_in_flight").inc(1.0);
+            metrics::gauge!("runtime_core.registry.opens_in_flight").increment(1.0);
             state.entries.insert(
                 key.clone(),
                 RegistryEntry::Opening(OpeningRuntime {
@@ -376,7 +374,7 @@ impl StoreRuntimeRegistry {
         StoreRuntimeOpenBegin::Started(join)
     }
 
-    #[hotpath::measure(label = "runtime_core.registry.open")]
+    #[tracing::instrument(name = "runtime_core.registry.open", level = "trace", skip_all)]
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
         loop {
             if let Some(path) = request
@@ -447,7 +445,7 @@ impl StoreRuntimeRegistry {
         );
         if still_opening {
             state.entries.remove(key);
-            hotpath::gauge!("runtime_core.registry.opens_in_flight").dec(1.0);
+            metrics::gauge!("runtime_core.registry.opens_in_flight").decrement(1.0);
             updates.send_replace(OpenState::Failed(failure));
         }
     }
@@ -698,9 +696,8 @@ impl OpenAttemptGuard {
                             locator,
                             opened_file_identity,
                             database_authority,
-                            database_attachments: hotpath::mutex!(
-                                std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                                label = "runtime_core.shard_runtime.database_attachments"
+                            database_attachments: std::sync::Mutex::new(
+                                std::collections::BTreeMap::new(),
                             ),
                             next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
                             next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
@@ -717,8 +714,8 @@ impl OpenAttemptGuard {
                             self.key.clone(),
                             RegistryEntry::Ready(ReadyRuntime { owner }),
                         );
-                        hotpath::gauge!("runtime_core.registry.opens_in_flight").dec(1.0);
-                        hotpath::gauge!("runtime_core.registry.runtimes_ready").inc(1.0);
+                        metrics::gauge!("runtime_core.registry.opens_in_flight").decrement(1.0);
+                        metrics::gauge!("runtime_core.registry.runtimes_ready").increment(1.0);
                         self.updates.send_replace(OpenState::Published);
                     }
                     Err(failure) => self.fail(&mut state, failure),
@@ -731,7 +728,7 @@ impl OpenAttemptGuard {
 
     fn fail(&self, state: &mut RegistryState, failure: StoreRuntimeRegistryFailure) {
         state.entries.remove(&self.key);
-        hotpath::gauge!("runtime_core.registry.opens_in_flight").dec(1.0);
+        metrics::gauge!("runtime_core.registry.opens_in_flight").decrement(1.0);
         self.updates.send_replace(OpenState::Failed(failure));
     }
 }

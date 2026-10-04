@@ -60,7 +60,11 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
 /// selected by the operation's own catalog binding; it never becomes a
 /// transport-specific MCP error, which is the same contract the Work adapter
 /// holds and the reason both surfaces can be graded against one descriptor.
-#[hotpath::measure(label = "application_surface.workflow.invoke", future = true)]
+#[tracing::instrument(
+    name = "application_surface.workflow.invoke",
+    level = "trace",
+    skip_all
+)]
 pub async fn invoke_workflow_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: tracedecay_api::WorkflowHttpRequest,

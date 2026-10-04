@@ -29,7 +29,7 @@ const UNMANAGED_DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(300);
 /// reset-required state, nothing else. The daemon is the authority that
 /// refused them, so the list is read from it before the profile is taken
 /// offline; each deleted store is recreated empty on its next open.
-#[hotpath::measure(label = "cli.wipe.stale", future = true)]
+#[tracing::instrument(name = "cli.wipe.stale", level = "trace", skip_all)]
 pub(crate) async fn handle_wipe_stale(profile: &ProfileRoot, assume_yes: bool) -> Result<()> {
     if !assume_yes {
         return Err(TraceDecayError::Config {

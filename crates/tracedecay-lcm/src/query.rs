@@ -63,7 +63,7 @@ fn rerank_fetch_limit(limit: usize) -> usize {
     crate::retrieval_content::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
-#[hotpath::measure(label = "sessions.lcm.expand_query", future = true)]
+#[tracing::instrument(name = "sessions.lcm.expand_query", level = "trace", skip_all)]
 pub async fn expand_query(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmExpandQueryRequest,
@@ -97,7 +97,7 @@ pub async fn expand_query(
                     end_time: None,
                     git_filter: crate::GitScopeFilter::default(),
                 };
-                let summary_hits = hotpath::future!(
+                let summary_hits = tracing::Instrument::instrument(
                     summary_grep_hits(
                         conn,
                         &grep_request,
@@ -107,7 +107,7 @@ pub async fn expand_query(
                         &query_plan,
                         max_results,
                     ),
-                    label = "sessions.lcm.expand_query.search"
+                    tracing::trace_span!("sessions.lcm.expand_query.search"),
                 )
                 .await?;
                 // Ranked summary hits are hydrated as one page through the same
@@ -122,14 +122,14 @@ pub async fn expand_query(
                         selected_hits.push(hit);
                     }
                 }
-                let expansions = hotpath::future!(
+                let expansions = tracing::Instrument::instrument(
                     dag::expand_summary_nodes(
                         conn,
                         &request.provider,
                         &request.session_id,
                         &selected_node_ids,
                     ),
-                    label = "sessions.lcm.expand_query.hydrate"
+                    tracing::trace_span!("sessions.lcm.expand_query.hydrate"),
                 )
                 .await?;
                 for (hit, expansion) in selected_hits.iter().zip(expansions) {
@@ -139,7 +139,7 @@ pub async fn expand_query(
 
                 if selected_summaries.len() < max_results {
                     let remaining = max_results - selected_summaries.len();
-                    let raw_hits = hotpath::future!(
+                    let raw_hits = tracing::Instrument::instrument(
                         raw_grep_hits(
                             conn,
                             &grep_request,
@@ -149,7 +149,7 @@ pub async fn expand_query(
                             &query_plan,
                             remaining,
                         ),
-                        label = "sessions.lcm.expand_query.search"
+                        tracing::trace_span!("sessions.lcm.expand_query.search"),
                     )
                     .await?;
                     for hit in raw_hits {
@@ -174,14 +174,14 @@ pub async fn expand_query(
             .take(max_results)
             .cloned()
             .collect::<Vec<_>>();
-        let expansions = hotpath::future!(
+        let expansions = tracing::Instrument::instrument(
             dag::expand_summary_nodes(
                 conn,
                 &request.provider,
                 &request.session_id,
                 &requested_node_ids,
             ),
-            label = "sessions.lcm.expand_query.hydrate"
+            tracing::trace_span!("sessions.lcm.expand_query.hydrate"),
         )
         .await?;
         for expansion in expansions {
@@ -216,9 +216,9 @@ pub async fn expand_query(
         });
     }
 
-    let selected_raws = hotpath::future!(
+    let selected_raws = tracing::Instrument::instrument(
         raw::load_raw_messages_by_identity(conn, &selected_raw_identities),
-        label = "sessions.lcm.expand_query.hydrate"
+        tracing::trace_span!("sessions.lcm.expand_query.hydrate"),
     )
     .await?;
     let mut hydrated_raws = Vec::with_capacity(selected_raws.len());
@@ -235,31 +235,34 @@ pub async fn expand_query(
         context_pagination,
         context_truncated,
         synthesis_prompt,
-    ) = hotpath::measure_block!("sessions.lcm.expand_query.assemble", {
-        let mut assembler = ExpandQueryAssembler::new(context_max_chars);
-        let mut node_ids = Vec::new();
-        for expansion in selected_summaries {
-            node_ids.push(expansion.summary.node_id.clone());
-            assembler.add_summary_expansion(expansion);
+    ) = {
+        let _span = tracing::trace_span!("sessions.lcm.expand_query.assemble").entered();
+        {
+            let mut assembler = ExpandQueryAssembler::new(context_max_chars);
+            let mut node_ids = Vec::new();
+            for expansion in selected_summaries {
+                node_ids.push(expansion.summary.node_id.clone());
+                assembler.add_summary_expansion(expansion);
+            }
+            for raw in hydrated_raws {
+                assembler.add_raw_message(raw, None);
+            }
+            let used_chars = assembler.used_chars();
+            let context_blocks = assembler.context_blocks;
+            let context_pagination = assembler.context_pagination;
+            let context_truncated = !context_pagination.is_empty();
+            let synthesis_prompt =
+                expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
+            (
+                node_ids,
+                used_chars,
+                context_blocks,
+                context_pagination,
+                context_truncated,
+                synthesis_prompt,
+            )
         }
-        for raw in hydrated_raws {
-            assembler.add_raw_message(raw, None);
-        }
-        let used_chars = assembler.used_chars();
-        let context_blocks = assembler.context_blocks;
-        let context_pagination = assembler.context_pagination;
-        let context_truncated = !context_pagination.is_empty();
-        let synthesis_prompt =
-            expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
-        (
-            node_ids,
-            used_chars,
-            context_blocks,
-            context_pagination,
-            context_truncated,
-            synthesis_prompt,
-        )
-    });
+    };
 
     let context_budget = LcmExpandQueryBudget {
         requested_max_chars: context_max_chars,

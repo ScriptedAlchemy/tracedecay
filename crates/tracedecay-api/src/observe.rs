@@ -1,7 +1,7 @@
-//! Hotpath probes for the HTTP adapter.
+//! Tracing probes for the HTTP adapter.
 //!
 //! Every macro here is a compile-time no-op until the binary selects the
-//! `hotpath/hotpath` backend, so the call sites need no crate feature.
+//! `metrics`/`tracing` facades, so the call sites need no crate feature.
 //! Labels are compile-time static strings. Error class is the typed
 //! [`ApplicationProblemKind`] name only, never an unbounded message.
 
@@ -29,21 +29,25 @@ pub(crate) const fn problem_kind_label(kind: ApplicationProblemKind) -> &'static
 
 #[inline(always)]
 pub(crate) fn record_error_class(kind: ApplicationProblemKind) {
-    hotpath::val!("api.http.error_class").set(&problem_kind_label(kind));
+    tracing::trace!(name: "api.http.error_class", value = ?problem_kind_label(kind));
 }
 
 #[inline(always)]
 pub(crate) fn record_contract_error_class() {
-    hotpath::val!("api.http.error_class").set(&"application_contract");
+    tracing::trace!(name: "api.http.error_class", value = ?"application_contract");
 }
 
 #[inline(always)]
 pub(crate) fn record_response_bytes(len: usize) {
-    hotpath::gauge!("api.http.response_bytes").set(len as f64);
+    metrics::gauge!("api.http.response_bytes").set(len as f64);
 }
 
 pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
-    match hotpath::measure_block!("api.http.serialize", serde_json::to_vec(value)) {
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.serialize").entered();
+        serde_json::to_vec(value)
+    };
+    match match_result {
         Ok(body) => {
             record_response_bytes(body.len());
             (

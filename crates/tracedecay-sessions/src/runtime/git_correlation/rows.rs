@@ -538,7 +538,11 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
         }
     }
 
-    #[hotpath::measure(label = "sessions.git_correlation.rows.sessions_for", future = true)]
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.sessions_for",
+        level = "trace",
+        skip_all
+    )]
     pub async fn sessions_for(
         &self,
         query: &SessionsForQuery,
@@ -568,9 +572,10 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
 
     /// `None` for an empty filter, otherwise the authoritative (possibly
     /// empty) intersection of every scoped selector.
-    #[hotpath::measure(
-        label = "sessions.git_correlation.rows.session_ids_for_scope",
-        future = true
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_ids_for_scope",
+        level = "trace",
+        skip_all
     )]
     pub async fn session_ids_for_scope(
         &self,
@@ -605,9 +610,10 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
     /// Resolves a single branch or worktree selector only far enough for a
     /// caller to detect that its own session bound was exceeded. Compound and
     /// commit selectors keep the complete intersection above.
-    #[hotpath::measure(
-        label = "sessions.git_correlation.rows.session_ids_for_scope_bounded",
-        future = true
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_ids_for_scope_bounded",
+        level = "trace",
+        skip_all
     )]
     pub async fn session_ids_for_scope_bounded(
         &self,
@@ -633,9 +639,10 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
     /// Every span and commit attribution recorded for `session_ids`. Spans
     /// come back in `(provider, session_id, first_ts, span_id)` order and
     /// commits in canonical `(commit_sha, session_id)` order.
-    #[hotpath::measure(
-        label = "sessions.git_correlation.rows.session_evidence",
-        future = true
+    #[tracing::instrument(
+        name = "sessions.git_correlation.rows.session_evidence",
+        level = "trace",
+        skip_all
     )]
     pub async fn session_evidence(
         &self,

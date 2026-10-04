@@ -241,15 +241,18 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
 
 /// Walks the working tree once and asks each ecosystem its own question.
 pub fn audit_project(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<ProjectAudit> {
-    let files = hotpath::measure_block!(
-        "code_index.unmounted_files.walk",
+    let files = {
+        let _span = tracing::trace_span!("code_index.unmounted_files.walk").entered();
         ProjectFiles::collect(project_root, path_policy)?
-    );
-    let rust = hotpath::measure_block!("code_index.unmounted_files.rust", rust::audit(&files)?);
-    let typescript = hotpath::measure_block!(
-        "code_index.unmounted_files.typescript",
+    };
+    let rust = {
+        let _span = tracing::trace_span!("code_index.unmounted_files.rust").entered();
+        rust::audit(&files)?
+    };
+    let typescript = {
+        let _span = tracing::trace_span!("code_index.unmounted_files.typescript").entered();
         typescript::audit(&files)?
-    );
+    };
     let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));
     Ok(ProjectAudit { ecosystems })

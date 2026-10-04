@@ -380,7 +380,11 @@ pub struct StoreRuntimeRetirementReservation {
 impl StoreRuntimeRegistry {
     /// Preflights every target beneath one registry lock and transitions the
     /// whole batch to `Retiring` only if every exact target is clear.
-    #[hotpath::measure(label = "runtime_core.registry.retirement_reserve")]
+    #[tracing::instrument(
+        name = "runtime_core.registry.retirement_reserve",
+        level = "trace",
+        skip_all
+    )]
     pub fn reserve_retirement_batch(
         &self,
         targets: Vec<StoreRuntimeRetirementTarget>,
@@ -597,7 +601,7 @@ impl StoreRuntimeRegistry {
 
         if !blockers.is_empty() {
             drop(state);
-            hotpath::gauge!("runtime_core.registry.retirement_blocks").inc(1.0);
+            metrics::gauge!("runtime_core.registry.retirement_blocks").increment(1.0);
             return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                 blockers, targets,
             ));
@@ -646,7 +650,7 @@ impl StoreRuntimeRegistry {
                     retry_targets.extend(targets);
                     blockers.push(blocker);
                     drop(state);
-                    hotpath::gauge!("runtime_core.registry.retirement_blocks").inc(1.0);
+                    metrics::gauge!("runtime_core.registry.retirement_blocks").increment(1.0);
                     return StoreRuntimeRetirementResult::Blocked(
                         StoreRuntimeRetirementRefusal::new(blockers, retry_targets),
                     );
@@ -675,7 +679,7 @@ impl StoreRuntimeRegistry {
                     .into_iter()
                     .map(|retirement| retirement.target)
                     .collect();
-                hotpath::gauge!("runtime_core.registry.retirement_blocks").inc(1.0);
+                metrics::gauge!("runtime_core.registry.retirement_blocks").increment(1.0);
                 return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
                     blockers, targets,
                 ));
@@ -691,7 +695,8 @@ impl StoreRuntimeRegistry {
             );
         }
         if !pending.is_empty() {
-            hotpath::gauge!("runtime_core.registry.retirement_pending").inc(pending.len() as f64);
+            metrics::gauge!("runtime_core.registry.retirement_pending")
+                .increment(pending.len() as f64);
         }
         StoreRuntimeRetirementResult::Reserved(StoreRuntimeRetirementReservation {
             registry: self.clone(),
@@ -799,7 +804,7 @@ impl StoreRuntimeRegistry {
                 .target
                 .remove_graph_owner_attachment_after_store_close(self, &mut state)?;
             state.entries.remove(&retirement.key);
-            hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
+            metrics::gauge!("runtime_core.registry.runtimes_ready").decrement(1.0);
             if retirement.key.is_profile()
                 && state
                     .profile_authorities
@@ -861,7 +866,11 @@ impl StoreRuntimeRetirementReservation {
     ///
     /// Once [`Self::commit`] crosses the owner-attachment fence, terminal
     /// outcomes, not reusable targets, describe the physical-close result.
-    #[hotpath::measure(label = "runtime_core.registry.retirement_cancel")]
+    #[tracing::instrument(
+        name = "runtime_core.registry.retirement_cancel",
+        level = "trace",
+        skip_all
+    )]
     pub fn cancel(
         &mut self,
     ) -> Result<Vec<StoreRuntimeRetirementTarget>, StoreRuntimeRegistryFailure> {
@@ -872,7 +881,7 @@ impl StoreRuntimeRetirementReservation {
         let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
         if count > 0 {
-            hotpath::gauge!("runtime_core.registry.retirement_pending").dec(count as f64);
+            metrics::gauge!("runtime_core.registry.retirement_pending").decrement(count as f64);
         }
         Ok(targets)
     }
@@ -880,7 +889,11 @@ impl StoreRuntimeRetirementReservation {
     /// Irreversibly commits the reservation before any physical close begins.
     /// All post-reservation failures are retained as typed terminal states;
     /// they are never restored to `Ready`.
-    #[hotpath::measure(label = "runtime_core.registry.retirement_commit")]
+    #[tracing::instrument(
+        name = "runtime_core.registry.retirement_commit",
+        level = "trace",
+        skip_all
+    )]
     pub fn commit(&mut self) -> Result<StoreRuntimeRetirementCommit, StoreRuntimeRegistryFailure> {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
@@ -890,8 +903,8 @@ impl StoreRuntimeRetirementReservation {
             self.armed = false;
             if !pending.is_empty() {
                 let count = pending.len() as f64;
-                hotpath::gauge!("runtime_core.registry.retirement_pending").dec(count);
-                hotpath::gauge!("runtime_core.registry.retirement_commits").inc(count);
+                metrics::gauge!("runtime_core.registry.retirement_pending").decrement(count);
+                metrics::gauge!("runtime_core.registry.retirement_commits").increment(count);
             }
             let mut outcomes = Vec::with_capacity(pending.len());
             for mut retirement in pending {
@@ -914,8 +927,8 @@ impl StoreRuntimeRetirementReservation {
         self.armed = false;
         if !pending.is_empty() {
             let count = pending.len() as f64;
-            hotpath::gauge!("runtime_core.registry.retirement_pending").dec(count);
-            hotpath::gauge!("runtime_core.registry.retirement_commits").inc(count);
+            metrics::gauge!("runtime_core.registry.retirement_pending").decrement(count);
+            metrics::gauge!("runtime_core.registry.retirement_commits").increment(count);
         }
 
         let mut outcomes = Vec::with_capacity(pending.len());
@@ -1005,7 +1018,7 @@ impl Drop for StoreRuntimeRetirementReservation {
             let _ = self.registry.restore_retiring_batch(&mut self.pending);
             self.armed = false;
             if count > 0 {
-                hotpath::gauge!("runtime_core.registry.retirement_pending").dec(count as f64);
+                metrics::gauge!("runtime_core.registry.retirement_pending").decrement(count as f64);
             }
         }
     }

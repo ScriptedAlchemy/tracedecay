@@ -10,15 +10,8 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [lib]
 doctest = false
 
-[features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
-# that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
-
 [dependencies]
-hotpath.workspace = true
+metrics.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

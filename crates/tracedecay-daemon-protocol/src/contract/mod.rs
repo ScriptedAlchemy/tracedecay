@@ -436,7 +436,6 @@ pub enum DaemonInvocationOperation {
 }
 
 impl DaemonInvocationOperation {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GitStatus => "git_status",
@@ -2620,7 +2619,7 @@ impl DaemonInvocationRequest {
 /// Measured as the wire decode phase: this full-line parse runs between
 /// `daemon.wire.read_line` and the dispatch span, so without its own label a
 /// slow request could not be attributed between payload decode and handling.
-#[hotpath::measure(label = "daemon.wire.decode_invocation")]
+#[tracing::instrument(name = "daemon.wire.decode_invocation", level = "trace", skip_all)]
 pub fn parse_daemon_invocation_request(
     line: &str,
 ) -> Option<Result<DaemonInvocationRequest, DaemonInvocationResponse>> {

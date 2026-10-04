@@ -53,7 +53,11 @@ pub struct PreparedAutomationEffectRecovery {
     reset_journals: usize,
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.prepare_recovery", future = true)]
+#[tracing::instrument(
+    name = "daemon.automation.effect.prepare_recovery",
+    level = "trace",
+    skip_all
+)]
 pub async fn prepare_reserved_automation_effect_recovery(
     dashboard_root: &Path,
 ) -> Result<AutomationEffectRecoveryPreparation> {
@@ -101,7 +105,11 @@ fn reset_report(reset_journals: usize) -> AutomationEffectRecoveryReport {
 /// index is rebuilt from its journals, and under a current index each refused
 /// journal it does not reference is retired. Returns the number of discarded
 /// journals.
-#[hotpath::measure(label = "daemon.automation.effect.reset_refused_shapes")]
+#[tracing::instrument(
+    name = "daemon.automation.effect.reset_refused_shapes",
+    level = "trace",
+    skip_all
+)]
 fn reset_refused_shapes_blocking(dashboard_root: &Path) -> Result<usize> {
     let path = index_path(dashboard_root);
     match with_index_lock(&path, || read_index(&path)) {
@@ -271,7 +279,7 @@ pub fn pending_automation_effect_resets_blocking(
 
 /// Opens receipt authority only for reserved memory effects; failures defer that
 /// journal without preventing external or terminal recovery in the same batch.
-#[hotpath::measure(label = "daemon.automation.effect.reconcile", future = true)]
+#[tracing::instrument(name = "daemon.automation.effect.reconcile", level = "trace", skip_all)]
 pub async fn reconcile_prepared_automation_effects_for_project<F, Fut>(
     preparation: PreparedAutomationEffectRecovery,
     read_receipts: F,
@@ -348,14 +356,18 @@ where
 }
 
 fn observe_recovery_report(report: &AutomationEffectRecoveryReport) {
-    hotpath::gauge!("daemon.automation.effect.reconcile.inspected_total").inc(report.inspected);
-    hotpath::gauge!("daemon.automation.effect.reconcile.terminal_total")
-        .inc(report.already_terminal);
-    hotpath::gauge!("daemon.automation.effect.reconcile.partial_total").inc(report.partial_effects);
-    hotpath::gauge!("daemon.automation.effect.reconcile.reset_total").inc(report.reset_required);
-    hotpath::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
-        .inc(report.indeterminate);
-    hotpath::gauge!("daemon.automation.effect.reconcile.deferred_total").inc(report.deferred);
+    metrics::gauge!("daemon.automation.effect.reconcile.inspected_total")
+        .increment(report.inspected as f64);
+    metrics::gauge!("daemon.automation.effect.reconcile.terminal_total")
+        .increment(report.already_terminal as f64);
+    metrics::gauge!("daemon.automation.effect.reconcile.partial_total")
+        .increment(report.partial_effects as f64);
+    metrics::gauge!("daemon.automation.effect.reconcile.reset_total")
+        .increment(report.reset_required as f64);
+    metrics::gauge!("daemon.automation.effect.reconcile.indeterminate_total")
+        .increment(report.indeterminate as f64);
+    metrics::gauge!("daemon.automation.effect.reconcile.deferred_total")
+        .increment(report.deferred as f64);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,7 +578,11 @@ where
     .await
 }
 
-#[hotpath::measure(label = "daemon.automation.effect.persist_recovery", future = true)]
+#[tracing::instrument(
+    name = "daemon.automation.effect.persist_recovery",
+    level = "trace",
+    skip_all
+)]
 async fn persist_reserved_recovery(
     dashboard_root: &Path,
     cancellation: &CancellationSignal,

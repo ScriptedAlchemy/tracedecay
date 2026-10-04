@@ -47,7 +47,7 @@ pub(crate) enum SessionTemporalSchemaAdmission {
 /// Classifies a store without changing its schema or retained session state.
 /// Another recorded version over session rows is the scoped refusal of the
 /// authority; every other non-final shape is a hard typed reset.
-#[hotpath::measure(future = true, label = "session_temporal.schema.admit")]
+#[tracing::instrument(name = "session_temporal.schema.admit", level = "trace", skip_all)]
 pub(crate) async fn require_admissible_session_temporal_schema(
     conn: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,

@@ -38,7 +38,7 @@ pub(super) fn retained_project_server_resolver(
 ) -> crate::mcp::server::RetainedProjectServerResolver {
     crate::mcp::server::install_retained_project_server_resolver(move |request| {
         let administration = administration.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let expected_profile_id = administration.profile_identity()?.profile_id().clone();
                 let mounted_servers = {
@@ -160,7 +160,7 @@ pub(super) fn retained_project_server_resolver(
                 }
                 Ok(None)
             },
-            label = "daemon.graph_resolution.resolve"
+            tracing::trace_span!("daemon.graph_resolution.resolve"),
         ))
     })
 }

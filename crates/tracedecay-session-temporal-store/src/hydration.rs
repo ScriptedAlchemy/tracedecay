@@ -198,7 +198,6 @@ impl SessionTemporalHydrationAdapter<'_> {
     /// payload it names. The snapshot pins every row, so a revocation cannot
     /// land between resolution and read; only the payload file lives outside
     /// it, and [`Self::read_descriptor`] proves that file before emission.
-    #[hotpath::skip]
     async fn read_after_recheck(
         &self,
         snapshot: &TemporalExecutionSnapshot,
@@ -336,7 +335,6 @@ struct SessionHydrationRelationAuthority<'snapshot> {
 }
 
 impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
-    #[hotpath::skip]
     pub const fn new_registered(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -348,7 +346,6 @@ impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn new_registered_with_relations(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -364,7 +361,6 @@ impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
 }
 
 impl<'snapshot> SessionTemporalHydrationAdapter<'snapshot> {
-    #[hotpath::skip]
     pub const fn for_registered_snapshot(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -374,7 +370,6 @@ impl<'snapshot> SessionTemporalHydrationAdapter<'snapshot> {
         }
     }
 
-    #[hotpath::skip]
     pub const fn for_registered_snapshot_with_relations(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
@@ -565,13 +560,13 @@ fn canonical_projected_message(
 }
 
 impl SessionTemporalHydrationBackend<'_> {
-    #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
+    #[tracing::instrument(name = "session_temporal.hydrate.resolve", level = "trace", skip_all)]
     async fn resolve_current(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
     ) -> Result<HydrationResolution, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        metrics::gauge!("session_temporal.hydration").increment(1u32);
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let resolution = resolve_current(
@@ -585,14 +580,14 @@ impl SessionTemporalHydrationBackend<'_> {
         Ok(resolution)
     }
 
-    #[hotpath::measure(future = true, label = "session_temporal.hydrate.read")]
+    #[tracing::instrument(name = "session_temporal.hydrate.read", level = "trace", skip_all)]
     async fn open_bounded(
         &self,
         descriptor: &PayloadDescriptor,
         max_bytes: usize,
         control: &ExecutionControl,
     ) -> Result<BoundedPayload, HydrationError> {
-        hotpath::gauge!("session_temporal.hydration").inc(1u32);
+        metrics::gauge!("session_temporal.hydration").increment(1u32);
         control.checkpoint()?;
         match &descriptor.source {
             PayloadSource::Occurrence {

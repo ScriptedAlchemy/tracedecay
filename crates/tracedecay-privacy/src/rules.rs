@@ -712,7 +712,7 @@ fn line_containing(text: &str, offset: usize) -> &str {
 /// Supplement-first is load-bearing for the merge in `detect::redact_text`,
 /// which resolves overlapping candidates by kind priority and, at equal
 /// priority, by the order it saw them.
-#[hotpath::measure(label = "runtime_core.privacy.rules_compile")]
+#[tracing::instrument(name = "runtime_core.privacy.rules_compile", level = "trace", skip_all)]
 pub fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {

@@ -114,7 +114,7 @@ impl McpBackgroundTaskOwner {
     /// A caller cancelled mid-drain leaves the set retained, so a retry joins
     /// the same tasks; the failures reaped earlier are reported by whichever
     /// call completes the drain.
-    #[hotpath::measure(label = "mcp.server.background_shutdown", future = true)]
+    #[tracing::instrument(name = "mcp.server.background_shutdown", level = "trace", skip_all)]
     pub async fn shutdown(&self) -> Vec<String> {
         let mut retained = self.shutdown_tasks.lock().await;
         if retained.is_none() {
@@ -183,7 +183,6 @@ enum StartupCatchUpStateV1 {
 }
 
 impl StartupCatchUpStateV1 {
-    #[hotpath::skip]
     const fn settled(&self) -> bool {
         !matches!(self, Self::Syncing { .. })
     }
@@ -328,7 +327,7 @@ impl ProjectServerResponseLifecycle {
     /// Close response admission without invalidating an already-admitted reply.
     /// Tokio's write-preferring lock prevents later readers from overtaking the
     /// queued retirement writer, so cancellation is published at the cutover.
-    #[hotpath::measure(label = "mcp.server.revoke_drain", future = true)]
+    #[tracing::instrument(name = "mcp.server.revoke_drain", level = "trace", skip_all)]
     pub async fn revoke_after_request_drain(&self) {
         let _guard = self.response_gate.write().await;
         self.response_revoked.cancel();

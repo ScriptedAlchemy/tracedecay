@@ -76,7 +76,6 @@ pub struct AggregatedProviderUsageCountersV1 {
 }
 
 impl AggregatedProviderUsageCountersV1 {
-    #[hotpath::skip]
     pub const fn unknown() -> Self {
         Self {
             input_tokens: None,
@@ -318,7 +317,7 @@ impl ProviderUsageScanV1 {
 /// Walks one pinned provider-usage snapshot to exhaustion. Pagination and
 /// truncation semantics live here so HTTP, MCP, hooks, and CLI cannot each
 /// implement a subtly different bounded scan.
-#[hotpath::measure(label = "usecases.provider_usage.aggregate", future = true)]
+#[tracing::instrument(name = "usecases.provider_usage.aggregate", level = "trace", skip_all)]
 pub async fn provider_usage_aggregate(
     db: &RegisteredGlobalDb,
     scope: &ObservationScopeV1,

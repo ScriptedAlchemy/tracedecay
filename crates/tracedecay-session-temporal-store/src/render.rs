@@ -24,7 +24,7 @@ pub enum CanonicalLcmSourceHydrationError {
     PayloadIntegrity,
 }
 
-#[hotpath::measure(label = "session_temporal.hydrate.render")]
+#[tracing::instrument(name = "session_temporal.hydrate.render", level = "trace", skip_all)]
 pub fn apply_canonical_content(
     mut expansion: LcmExpandResponse,
     slice: LcmContentSlice,

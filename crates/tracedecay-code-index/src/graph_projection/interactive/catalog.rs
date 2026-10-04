@@ -44,54 +44,63 @@ pub(super) fn build_interactive_catalog(
 
     while !entities_complete || !relations_complete {
         check_cancelled(cancellation.as_ref())?;
-        let page = hotpath::measure_block!("code_graph.catalog.scan_page", {
-            snapshot.read_projection(GraphProjectionReadRequest {
-                namespace: projection.namespace.clone(),
-                projection: projection.projection.clone(),
-                after_entity: after_entity.clone(),
-                after_relation: after_relation.clone(),
-                max_entities: if entities_complete {
-                    0
-                } else {
-                    CATALOG_SCAN_PAGE_ITEMS
-                },
-                max_relations: if relations_complete {
-                    0
-                } else {
-                    CATALOG_SCAN_PAGE_ITEMS
-                },
-                cancellation: Arc::clone(&cancellation),
-            })
-        })?;
-        hotpath::gauge!("code_graph.catalog.pages_scanned").inc(1_u64);
+        let page = {
+            let _span = tracing::trace_span!("code_graph.catalog.scan_page").entered();
+            {
+                snapshot.read_projection(GraphProjectionReadRequest {
+                    namespace: projection.namespace.clone(),
+                    projection: projection.projection.clone(),
+                    after_entity: after_entity.clone(),
+                    after_relation: after_relation.clone(),
+                    max_entities: if entities_complete {
+                        0
+                    } else {
+                        CATALOG_SCAN_PAGE_ITEMS
+                    },
+                    max_relations: if relations_complete {
+                        0
+                    } else {
+                        CATALOG_SCAN_PAGE_ITEMS
+                    },
+                    cancellation: Arc::clone(&cancellation),
+                })
+            }
+        }?;
+        metrics::gauge!("code_graph.catalog.pages_scanned").increment(1.0);
 
         if !entities_complete {
-            hotpath::measure_block!("code_graph.catalog.record_entities", {
-                scan.record_entity_page(
-                    &page.entities,
-                    projection_node_count,
-                    cancellation.as_ref(),
-                )
-            })?;
-            hotpath::gauge!("code_graph.catalog.entities_recorded").inc(page.entities.len() as u64);
+            {
+                let _span = tracing::trace_span!("code_graph.catalog.record_entities").entered();
+                {
+                    scan.record_entity_page(
+                        &page.entities,
+                        projection_node_count,
+                        cancellation.as_ref(),
+                    )
+                }
+            }?;
+            metrics::gauge!("code_graph.catalog.entities_recorded")
+                .increment((page.entities.len() as u64) as f64);
             after_entity = page.next_entity;
             entities_complete = after_entity.is_none();
         }
         if !relations_complete {
-            hotpath::measure_block!("code_graph.catalog.record_relations", {
+            {
+                let _span = tracing::trace_span!("code_graph.catalog.record_relations").entered();
                 scan.record_relation_page(&page.relations, cancellation.as_ref())
-            })?;
-            hotpath::gauge!("code_graph.catalog.relations_recorded")
-                .inc(page.relations.len() as u64);
+            }?;
+            metrics::gauge!("code_graph.catalog.relations_recorded")
+                .increment((page.relations.len() as u64) as f64);
             after_relation = page.next_relation;
             relations_complete = after_relation.is_none();
         }
     }
 
     check_cancelled(cancellation.as_ref())?;
-    hotpath::measure_block!("code_graph.catalog.finish", {
+    {
+        let _span = tracing::trace_span!("code_graph.catalog.finish").entered();
         scan.finish(projection_node_count)
-    })
+    }
 }
 
 struct CatalogScan {

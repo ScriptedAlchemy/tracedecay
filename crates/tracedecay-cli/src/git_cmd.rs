@@ -17,14 +17,14 @@ pub(crate) async fn handle_git_action(
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         GitAction::Status { project } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_git_read(
                     profile,
                     ApplicationSurfaceOperation::GitStatus,
                     json!({}),
                     project,
                 ),
-                label = "cli.git.status"
+                tracing::trace_span!("cli.git.status"),
             )
             .await
         }
@@ -35,14 +35,14 @@ pub(crate) async fn handle_git_action(
             project,
         } => {
             let payload = git_diff_payload(scope, base, head)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_git_read(
                     profile,
                     ApplicationSurfaceOperation::GitDiff,
                     payload,
                     project,
                 ),
-                label = "cli.git.diff"
+                tracing::trace_span!("cli.git.diff"),
             )
             .await
         }
@@ -54,14 +54,14 @@ pub(crate) async fn handle_git_action(
             project,
         } => {
             let payload = git_history_payload(count, path, follow, first_parent)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_git_read(
                     profile,
                     ApplicationSurfaceOperation::GitHistory,
                     payload,
                     project,
                 ),
-                label = "cli.git.history"
+                tracing::trace_span!("cli.git.history"),
             )
             .await
         }
@@ -70,7 +70,7 @@ pub(crate) async fn handle_git_action(
             follow_renames,
             project,
         } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_git_read(
                     profile,
                     ApplicationSurfaceOperation::GitBlame,
@@ -80,20 +80,20 @@ pub(crate) async fn handle_git_action(
                     }),
                     project,
                 ),
-                label = "cli.git.blame"
+                tracing::trace_span!("cli.git.blame"),
             )
             .await
         }
         GitAction::Hunks { scope, project } => {
             let scope = git_hunk_scope(scope)?;
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 dispatch_git_read(
                     profile,
                     ApplicationSurfaceOperation::GitHunks,
                     json!({ "scope": scope }),
                     project,
                 ),
-                label = "cli.git.hunks"
+                tracing::trace_span!("cli.git.hunks"),
             )
             .await
         }

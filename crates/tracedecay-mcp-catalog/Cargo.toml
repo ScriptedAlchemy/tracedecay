@@ -11,7 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [dependencies]
-hotpath.workspace = true
 # The multi-root execute tool derives its input schema from the contracts DTO.
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +21,7 @@ tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracing = "0.1"
 
 [dev-dependencies]
 # The advertised application schemas must round-trip through the shared

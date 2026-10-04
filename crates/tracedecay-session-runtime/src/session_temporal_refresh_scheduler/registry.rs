@@ -98,19 +98,18 @@ struct SessionTemporalRefreshSupervisorInstrumentation;
 
 impl SessionTemporalRefreshSupervisorInstrumentation {
     fn new() -> Self {
-        hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(1.0);
+        metrics::gauge!("session_temporal_refresh_supervisors_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for SessionTemporalRefreshSupervisorInstrumentation {
     fn drop(&mut self) {
-        hotpath::gauge!("session_temporal_refresh_supervisors_active").inc(-1.0);
+        metrics::gauge!("session_temporal_refresh_supervisors_active").increment(-1.0);
     }
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
-    #[hotpath::skip]
     async fn shutdown(self) {
         if let Some(history) = self
             .history
@@ -238,7 +237,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         Arc::clone(&self.codex_discovery)
     }
 
-    #[hotpath::skip]
     fn spawn_entry(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -256,7 +254,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let history_admission = Arc::clone(&self.historical_ingest_admission);
         let policy = self.policy;
         state.wake();
-        let supervisor = hotpath::future!(
+        let supervisor = tracing::Instrument::instrument(
             async move {
                 if session_ingest_disabled() {
                     // Dev/profiling switch: leave the scheduler mounted but run
@@ -269,7 +267,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 let mut workers = tokio::task::JoinSet::new();
                 let mut panic_attempt = 0u32;
                 loop {
-                    workers.spawn(hotpath::future!(
+                    workers.spawn(tracing::Instrument::instrument(
                         run_session_temporal_refresh_scheduler(
                             database.clone(),
                             Arc::clone(&worker_state),
@@ -278,11 +276,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             Arc::clone(&history_admission),
                             policy,
                         ),
-                        label = "daemon.scheduler.session_temporal.worker"
+                        tracing::trace_span!("daemon.scheduler.session_temporal.worker"),
                     ));
-                    let Some(result) = hotpath::future!(
+                    let Some(result) = tracing::Instrument::instrument(
                         workers.join_next(),
-                        label = "daemon.scheduler.session_temporal.worker_join_wait"
+                        tracing::trace_span!("daemon.scheduler.session_temporal.worker_join_wait"),
                     )
                     .await
                     else {
@@ -303,17 +301,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             worker_state.requeue_projection();
                             worker_state.recover_history_after_worker_panic();
                             tokio::select! {
-                                () = hotpath::future!(
-                                    worker_state.wait_for_cancellation(),
-                                    label = "daemon.scheduler.session_temporal.supervisor_retry_cancel"
-                                ) => return,
-                                () = hotpath::future!(
-                                    tokio::time::sleep(session_refresh_retry_delay(
+                                () = tracing::Instrument::instrument(worker_state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_cancel")) => return,
+                                () = tracing::Instrument::instrument(tokio::time::sleep(session_refresh_retry_delay(
                                         SessionTemporalRefreshRetryClass::Projector,
                                         panic_attempt,
-                                    )),
-                                    label = "daemon.scheduler.session_temporal.supervisor_retry_wait"
-                                ) => {}
+                                    )), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_wait")) => {}
                             }
                         }
                         Ok(()) | Err(_) => {
@@ -323,7 +315,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     }
                 }
             },
-            label = "daemon.scheduler.session_temporal.supervisor"
+            tracing::trace_span!("daemon.scheduler.session_temporal.supervisor"),
         );
         let task = tokio::spawn(supervisor);
         SessionTemporalRefreshSchedulerEntry {
@@ -334,7 +326,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    #[hotpath::skip]
     pub async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
@@ -388,7 +379,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    #[hotpath::skip]
     pub async fn ensure_profile(
         &self,
         database_path: std::path::PathBuf,
@@ -435,7 +425,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    #[hotpath::skip]
     pub async fn ensure_project_with_history(
         &self,
         owner: StoreOwnerKey,
@@ -464,7 +453,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    #[hotpath::skip]
     pub async fn ensure_profile_with_history(
         &self,
         database_path: std::path::PathBuf,
@@ -493,7 +481,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         wake
     }
 
-    #[hotpath::skip]
     pub async fn rekey_project(
         &self,
         old_owner: &StoreOwnerKey,
@@ -551,7 +538,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         project.insert(new_owner, entry);
     }
 
-    #[hotpath::skip]
     pub async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
         if let Some(entry) = self.project.lock().await.remove(owner) {
@@ -559,7 +545,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    #[hotpath::skip]
     pub async fn cancel_historical_ingest(&self) {
         let project = self.project.lock().await;
         let profile = self.profile.lock().await;
@@ -576,7 +561,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
-    #[hotpath::skip]
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let _guard = self.shutdown_guard.lock().await;
@@ -603,7 +587,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn project_state(
         &self,
         owner: &StoreOwnerKey,
@@ -616,7 +599,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn profile_worker_status(
         &self,
         database_path: &std::path::Path,
@@ -628,19 +610,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn project_worker_count(&self) -> usize {
         self.project.lock().await.len()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn profile_worker_count(&self) -> usize {
         self.profile.lock().await.len()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn profile_pass_count(&self, database_path: &std::path::Path) -> usize {
         self.profile
             .lock()
@@ -650,7 +629,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn wait_profile_idle(
         &self,
         database_path: &std::path::Path,

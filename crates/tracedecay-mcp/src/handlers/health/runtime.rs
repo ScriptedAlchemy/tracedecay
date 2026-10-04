@@ -208,7 +208,7 @@ async fn collect_runtime_snapshot(
 
 /// Surfaces process and database telemetry so users hitting unexpected
 /// CPU/RAM pressure can attach a structured snapshot to a bug report.
-#[hotpath::measure(label = "mcp.health.runtime.total")]
+#[tracing::instrument(name = "mcp.health.runtime.total", level = "trace", skip_all)]
 pub async fn compute_runtime(
     ctx: &McpToolContext<'_>,
     request: &RuntimeSurfaceRequestV1,
@@ -216,9 +216,9 @@ pub async fn compute_runtime(
     tracedecay_version: &str,
 ) -> Result<RuntimeResultV1> {
     let authority_audit = request.authority_audit;
-    let snap = hotpath::future!(
+    let snap = tracing::Instrument::instrument(
         collect_runtime_snapshot(ctx, authority_audit, tracedecay_version),
-        label = "mcp.health.runtime.telemetry"
+        tracing::trace_span!("mcp.health.runtime.telemetry"),
     )
     .await?;
     // A snapshot that cannot be serialized is a contract bug, not an empty
@@ -247,9 +247,9 @@ pub async fn compute_runtime(
             async {
                 if authority_audit {
                     Some(
-                        hotpath::future!(
+                        tracing::Instrument::instrument(
                             observation_authority_audit(registry),
-                            label = "mcp.health.runtime.authority_audit"
+                            tracing::trace_span!("mcp.health.runtime.authority_audit"),
                         )
                         .await,
                     )
@@ -257,12 +257,12 @@ pub async fn compute_runtime(
                     None
                 }
             },
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 session_temporal_health_value(
                     ctx.authorized_project_session_db()
                         .map(|(lease, _)| lease.as_ref()),
                 ),
-                label = "mcp.health.runtime.session_temporal"
+                tracing::trace_span!("mcp.health.runtime.session_temporal")
             )
         );
         if let Some((authority_audit_ok, authority_audit_reason, authority_audit_error)) = authority
@@ -286,9 +286,9 @@ pub async fn compute_runtime(
             Some((lease, _)) => {
                 let db = lease.as_ref();
                 runtime.cursor_session_ingest = Some(
-                    match hotpath::future!(
+                    match tracing::Instrument::instrument(
                         db.cursor_session_ingest_health(),
-                        label = "mcp.health.runtime.session_ingest"
+                        tracing::trace_span!("mcp.health.runtime.session_ingest"),
                     )
                     .await
                     {
@@ -301,16 +301,16 @@ pub async fn compute_runtime(
                     },
                 );
                 runtime.cursor_session_placeholder_paths = Some(
-                    match hotpath::future!(
+                    match tracing::Instrument::instrument(
                         db.read_snapshot(),
-                        label = "mcp.health.runtime.session_snapshot"
+                        tracing::trace_span!("mcp.health.runtime.session_snapshot"),
                     )
                     .await
                     {
                         Ok(snapshot) => {
-                            hotpath::future!(
+                            tracing::Instrument::instrument(
                                 literal_workspace_placeholder_transcript_paths(&snapshot, 10),
-                                label = "mcp.health.runtime.placeholder_paths"
+                                tracing::trace_span!("mcp.health.runtime.placeholder_paths"),
                             )
                             .await
                         }

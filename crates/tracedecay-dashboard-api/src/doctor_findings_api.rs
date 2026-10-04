@@ -72,7 +72,7 @@ pub struct StorageFindingKindStatusV1 {
 }
 
 /// `GET /api/doctor/findings`
-#[hotpath::measure(label = "dashboard_api.doctor.findings", future = true)]
+#[tracing::instrument(name = "dashboard_api.doctor.findings", level = "trace", skip_all)]
 pub async fn findings(
     State(state): State<DashboardState>,
     Query(params): Query<DoctorFindingsQueryV1>,
@@ -108,7 +108,12 @@ async fn findings_with_authorities(
         // producer; this single await is the expensive phase behind
         // `/api/doctor/*`, and the span records failed reads too.
         Some(reader) => {
-            match hotpath::future!(reader(), label = "dashboard_api.doctor.report_read").await {
+            match tracing::Instrument::instrument(
+                reader(),
+                tracing::trace_span!("dashboard_api.doctor.report_read"),
+            )
+            .await
+            {
                 Ok(admitted) => doctor_findings(
                     &admitted.report,
                     admitted.schema_convergences,

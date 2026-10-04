@@ -122,10 +122,9 @@ struct Measurements {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    configure_hotpath();
     // Dropped when `main` returns, so a requested profile observes every
     // measured span of both evaluated scales.
-    let _hotpath = hotpath::HotpathGuardBuilder::new("retained-parse-bench").build();
+
     let build = build_identity();
     let scales = vec![
         evaluate_scale("current", CURRENT_FUNCTION_COUNT)?,
@@ -164,27 +163,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     } else {
         Err("retained parse evaluation did not satisfy its declared criteria".into())
-    }
-}
-
-/// Mirrors `tracedecay-index-bench`'s guard defaults: stdout here carries the
-/// machine-read evaluation JSON, so the hotpath report goes to
-/// `HOTPATH_OUTPUT_PATH` when one is named and nowhere otherwise, and the
-/// localhost metrics server stays off. This runs as the first statement of
-/// `main`, before any other thread exists, which makes `set_var` sound.
-fn configure_hotpath() {
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-    let has_output_path = std::env::var_os("HOTPATH_OUTPUT_PATH")
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var("HOTPATH_OUTPUT_FORMAT", "none");
-            std::env::remove_var("HOTPATH_OUTPUT_PATH");
-        }
     }
 }
 
@@ -473,7 +451,7 @@ fn build_identity() -> BuildIdentity {
         tree: command_output("git", &["rev-parse", "HEAD^{tree}"]),
         dirty: !command_output("git", &["status", "--porcelain"]).is_empty(),
         profile: "release",
-        command: "cargo bench -p tracedecay-code-index --no-default-features --features lite,hotpath --bench retained_parse",
+        command: "cargo bench -p tracedecay-code-index --no-default-features --features lite --bench retained_parse",
     }
 }
 

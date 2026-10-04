@@ -27,7 +27,7 @@ use super::verify::{
     application_contract_error, application_problem, config_error, idempotency_conflict,
 };
 
-#[hotpath::measure(label = "usecases.edit.reconcile", future = true)]
+#[tracing::instrument(name = "usecases.edit.reconcile", level = "trace", skip_all)]
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
@@ -229,7 +229,7 @@ fn reconcile_prepared_source_edit(
     reconcile_prepared_source_edit_controlled(durability, project_root, operation, request, None)
 }
 
-#[hotpath::measure(label = "usecases.edit.reconcile_prepared")]
+#[tracing::instrument(name = "usecases.edit.reconcile_prepared", level = "trace", skip_all)]
 fn reconcile_prepared_source_edit_controlled(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -327,7 +327,7 @@ fn reconcile_prepared_source_edit_controlled(
     Ok(result)
 }
 
-#[hotpath::measure(label = "usecases.edit.recover", future = true)]
+#[tracing::instrument(name = "usecases.edit.recover", level = "trace", skip_all)]
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
     graph: &SourceEditRuntime,
@@ -380,10 +380,10 @@ pub(super) async fn recover_source_edit_transaction(
     //     disposition reaches the same durable record. Loading a persisted
     //     journal rejects one without a predicted state.
     if journal.predicted_state.as_ref() == Some(&observed_state) {
-        hotpath::measure_block!(
-            "usecases.edit.recover.commit",
+        {
+            let _span = tracing::trace_span!("usecases.edit.recover.commit").entered();
             commit_source_edit_postimages(graph.project_root(), &journal.recovery_files)?
-        );
+        };
         let outcome = SourceEditOutcome::Reconciled {
             success: true,
             message: "source edit crash recovery confirmed the edit already committed to disk"
@@ -413,10 +413,10 @@ pub(super) async fn recover_source_edit_transaction(
              are being discarded"
         );
     }
-    hotpath::measure_block!(
-        "usecases.edit.recover.preimage",
+    {
+        let _span = tracing::trace_span!("usecases.edit.recover.preimage").entered();
         rollback_planned_source_edit_files(graph.project_root(), &journal.recovery_files)?
-    );
+    };
     let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if restored_state != journal.expected_state {
         return Err(config_error(
@@ -442,7 +442,7 @@ pub(super) async fn recover_source_edit_transaction(
     durability.clear_journal()
 }
 
-#[hotpath::measure(label = "usecases.edit.replay")]
+#[tracing::instrument(name = "usecases.edit.replay", level = "trace", skip_all)]
 pub(super) fn recover_or_replay(
     durability: &SourceEditDurability,
     request: &SourceEditEffectRequestV1,

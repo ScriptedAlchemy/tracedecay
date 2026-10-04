@@ -414,7 +414,11 @@ impl WorkAttemptProcessRegistryV1 {
             .accepting = false;
     }
 
-    #[hotpath::measure(label = "daemon.service.work_attempt.shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.work_attempt.shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn shutdown(&self) -> bool {
         let processes = {
             let mut state = self
@@ -515,7 +519,7 @@ pub(super) fn spawn_attempt_execution(
     });
 }
 
-#[hotpath::measure(label = "daemon.service.work_attempt.run", future = true)]
+#[tracing::instrument(name = "daemon.service.work_attempt.run", level = "trace", skip_all)]
 async fn run_attempt(
     registered: RegisteredWorkRuntime,
     attempt: WorkAttemptV1,
@@ -650,7 +654,6 @@ struct ProviderDenial {
 }
 
 impl ProviderDenial {
-    #[hotpath::skip]
     const fn preferred(state: WorkProviderAvailabilityV1) -> Self {
         Self {
             state,
@@ -910,7 +913,11 @@ fn admitted_provider_environment(
         .collect()
 }
 
-#[hotpath::measure(label = "daemon.service.work_attempt.provider", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work_attempt.provider",
+    level = "trace",
+    skip_all
+)]
 async fn execute_provider_with_environment<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     attempt_effects: &WorkAttemptEffectServiceV1<S>,
@@ -1127,7 +1134,11 @@ struct AppServerSessionOutput {
 /// The session client is blocking, so it runs on a blocking worker while the
 /// deadline and cancellation arms stay on the runtime, the same three-armed
 /// shape the stdio path uses.
-#[hotpath::measure(label = "daemon.service.work_attempt.app_server", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work_attempt.app_server",
+    level = "trace",
+    skip_all
+)]
 async fn execute_app_server<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     attempt_effects: &WorkAttemptEffectServiceV1<S>,
@@ -1417,7 +1428,11 @@ fn offer_no_progress_observation(
 
 /// Runs the graceful-interrupt / forced-kill cancellation ladder after the
 /// durable cancellation request has been observed.
-#[hotpath::measure(label = "daemon.service.work_attempt.cancel_ladder", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.work_attempt.cancel_ladder",
+    level = "trace",
+    skip_all
+)]
 async fn cancel_ladder<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,

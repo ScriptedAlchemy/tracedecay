@@ -455,7 +455,7 @@ pub struct ScopeRootRetentionReportV1 {
 /// This API never seals an Apply-capable plan. Production collection uses
 /// [`plan_scope_root_retention_with_liveness_proof`] after the canonical
 /// authorities have produced a complete revision-bound receipt.
-#[hotpath::measure(label = "usecases.retention.plan_scope")]
+#[tracing::instrument(name = "usecases.retention.plan_scope", level = "trace", skip_all)]
 pub fn plan_scope_root_retention(
     store_root: &Path,
     live_canonical_roots: &BTreeSet<PathBuf>,
@@ -589,7 +589,7 @@ pub(super) fn plan_scope_root_retention_from_hashes(
 
 /// Collect every stranded scope a proof-bound plan names, under the journal →
 /// quarantine → durable receipt → unlink ordering generation retention uses.
-#[hotpath::measure(label = "usecases.retention.execute_scope")]
+#[tracing::instrument(name = "usecases.retention.execute_scope", level = "trace", skip_all)]
 pub fn execute_scope_root_retention(
     store_root: &Path,
     plan: ScopeRootRetentionPlanV1,
@@ -724,7 +724,7 @@ pub fn execute_scope_root_retention(
 
 /// Finish or undo an interrupted scope-reconciliation transaction, and
 /// delete a retired binding-cleanup intent.
-#[hotpath::measure(label = "usecases.retention.recover_scope")]
+#[tracing::instrument(name = "usecases.retention.recover_scope", level = "trace", skip_all)]
 pub fn recover_scope_root_retention(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {

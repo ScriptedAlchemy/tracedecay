@@ -43,17 +43,20 @@ pub(super) fn encode_meta(meta: &HookSpoolMetaV1) -> Result<Vec<u8>, HookSpoolEr
     if bytes.len() > MAX_META_BYTES {
         return Err(HookSpoolError::MetadataCorrupted);
     }
-    hotpath::gauge!("hooks.spool.meta.bytes").set(bytes.len());
+    metrics::gauge!("hooks.spool.meta.bytes").set((bytes.len()) as f64);
     Ok(bytes)
 }
 
-#[hotpath::measure(label = "hooks.spool.write_meta")]
+#[tracing::instrument(name = "hooks.spool.write_meta", level = "trace", skip_all)]
 pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
     let bytes = encode_meta(meta)?;
-    hotpath::measure_block!("hooks.spool.fsync.meta", {
-        shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
-            .map_err(|_| HookSpoolError::Io)
-    })
+    {
+        let _span = tracing::trace_span!("hooks.spool.fsync.meta").entered();
+        {
+            shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
+                .map_err(|_| HookSpoolError::Io)
+        }
+    }
 }
 
 /// Records appended after the last metadata write continue its sequence

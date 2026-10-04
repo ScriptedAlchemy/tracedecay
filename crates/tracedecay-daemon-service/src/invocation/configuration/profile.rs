@@ -21,7 +21,11 @@ pub struct ProfileConfigurationAuthorityV1 {
     pub actor: ActorId,
 }
 
-#[hotpath::measure(label = "daemon.service.configuration.profile", future = true)]
+#[tracing::instrument(
+    name = "daemon.service.configuration.profile",
+    level = "trace",
+    skip_all
+)]
 pub async fn execute_profile_configuration(
     wire_request_id: String,
     profile: ProfileConfigurationAuthorityV1,

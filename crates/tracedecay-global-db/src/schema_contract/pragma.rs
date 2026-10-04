@@ -57,9 +57,10 @@ fn requested_values(count: usize) -> String {
         .join(", ")
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.query.table_metadata"
+#[tracing::instrument(
+    name = "global_db.schema_contract.query.table_metadata",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn read_table_metadata(
     conn: &impl QueryExecutor,

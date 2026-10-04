@@ -237,10 +237,7 @@ impl CatalogSnapshotBuilderV1 {
         self
     }
 
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "tool_catalog.snapshot.build")
-    )]
+    #[tracing::instrument(name = "tool_catalog.snapshot.build", level = "trace", skip_all)]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
         // Duplicate and reference validation runs over the borrowed input
         // first, so no map insertion below can silently overwrite a record.
@@ -308,11 +305,7 @@ impl CatalogSnapshotBuilderV1 {
             executable_schemas: executable_schemas.values().collect(),
             profiles: profiles.values().collect(),
         })?;
-        crate::hotpath_observe::snapshot_entries(
-            capabilities.len(),
-            bindings.len(),
-            profiles.len(),
-        );
+        crate::observe::snapshot_entries(capabilities.len(), bindings.len(), profiles.len());
 
         Ok(CatalogSnapshotV1 {
             digest,
@@ -386,9 +379,10 @@ impl CatalogSnapshotV1 {
 
     /// Resolves metadata only. `None` deliberately covers unknown, unavailable,
     /// feature-incompatible, profile-hidden, and protocol-incompatible entries.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")
+    #[tracing::instrument(
+        name = "tool_catalog.snapshot.resolve_binding",
+        level = "trace",
+        skip_all
     )]
     pub fn resolve_binding(
         &self,
@@ -405,7 +399,7 @@ impl CatalogSnapshotV1 {
             protocol_revision,
             negotiated_features,
         );
-        crate::hotpath_observe::binding_resolution(resolved.is_some());
+        crate::observe::binding_resolution(resolved.is_some());
         resolved
     }
 
@@ -464,9 +458,10 @@ impl CatalogSnapshotV1 {
     /// The caller supplies its already-resolved scope and authorization
     /// intersection. This keeps transport adapters from publishing a static
     /// superset and preserves indistinguishable omission for hidden entries.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")
+    #[tracing::instrument(
+        name = "tool_catalog.snapshot.visible_bindings",
+        level = "trace",
+        skip_all
     )]
     #[allow(clippy::too_many_arguments)]
     pub fn visible_bindings<'a>(
@@ -510,7 +505,7 @@ impl CatalogSnapshotV1 {
                 left.operation().as_str().cmp(right.operation().as_str())
             });
         }
-        crate::hotpath_observe::visible_bindings_published(visible.len());
+        crate::observe::visible_bindings_published(visible.len());
         visible
     }
 }

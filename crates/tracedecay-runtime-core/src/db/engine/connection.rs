@@ -34,7 +34,6 @@ pub struct ReadConnection {
 }
 
 impl ReadConnection {
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -42,7 +41,6 @@ impl ReadConnection {
         self.connection.query(sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         self.connection.read_snapshot().await
     }
@@ -113,7 +111,6 @@ impl Connection {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
@@ -127,7 +124,7 @@ impl Connection {
             .map_err(Into::into)
     }
 
-    #[hotpath::measure(label = "runtime_core.db.execute_statements", future = true)]
+    #[tracing::instrument(name = "runtime_core.db.execute_statements", level = "trace", skip_all)]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
         let statements = statements
             .into_iter()
@@ -152,7 +149,6 @@ impl Connection {
         .map_err(join_error)?
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -168,14 +164,12 @@ impl Connection {
         Ok(Rows::from_exact(rows))
     }
 
-    #[hotpath::skip]
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
         let rows = runtime.checkpoint_wal_truncate_async().await?;
         Ok(Rows::from_exact(rows))
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
@@ -186,7 +180,6 @@ impl Connection {
             .map_err(Into::into)
     }
 
-    #[hotpath::skip]
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
         tokio::spawn(async move { runtime.release_connection_memory_async().await })
@@ -196,7 +189,6 @@ impl Connection {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
         let statement = statement(sql, ())?;
         let runtime = Arc::clone(&self.runtime);
@@ -217,7 +209,7 @@ impl Connection {
         self.runtime.reader_pool_occupancy()
     }
 
-    #[hotpath::measure(label = "runtime_core.db.snapshot.read")]
+    #[tracing::instrument(name = "runtime_core.db.snapshot.read", level = "trace", skip_all)]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
@@ -230,7 +222,6 @@ impl Connection {
         .map_err(Into::into)
     }
 
-    #[hotpath::skip]
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot(READER_WAIT))
@@ -241,13 +232,12 @@ impl Connection {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn transaction(&self) -> Result<Transaction> {
         self.transaction_with_behavior(TransactionBehavior::Deferred)
             .await
     }
 
-    #[hotpath::measure(label = "runtime_core.db.transaction.begin")]
+    #[tracing::instrument(name = "runtime_core.db.transaction.begin", level = "trace", skip_all)]
     pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
@@ -286,7 +276,7 @@ impl Connection {
     /// the ordinary per-statement deadline; all other operations retain
     /// ordinary bounds, and idleness, shutdown, and authority revocation still
     /// cancel.
-    #[hotpath::measure(label = "runtime_core.db.txn.long_lease")]
+    #[tracing::instrument(name = "runtime_core.db.txn.long_lease", level = "trace", skip_all)]
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
         runtime

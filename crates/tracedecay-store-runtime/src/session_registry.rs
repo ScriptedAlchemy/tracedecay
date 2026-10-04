@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-#[cfg(feature = "hotpath")]
+
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
@@ -131,29 +131,25 @@ pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
 /// `remote.db`, turning the residue into a hard failure on the next start.
 const MAX_RETAINED_REMOTE_NODE_OWNERS: usize = crate::MAX_REGISTERED_REMOTE_NODES;
 
-#[cfg(feature = "hotpath")]
 static SESSION_STORE_MOUNTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// RAII observation of one full (non-reuse) session-store mount attempt.
 ///
 /// Entering counts the attempt; dropping restores the in-flight gauge on
 /// every exit path, so failed, denied, or cancelled mounts cannot leak it.
-#[cfg(feature = "hotpath")]
 pub(crate) struct StoreMountObservationV1;
 
-#[cfg(feature = "hotpath")]
 impl StoreMountObservationV1 {
     pub fn enter() -> Self {
         let in_flight = SESSION_STORE_MOUNTS_IN_FLIGHT
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        hotpath::gauge!("daemon.session_registry.mount.attempts_total").inc(1_u64);
-        hotpath::gauge!("daemon.session_registry.mount.in_flight").set(in_flight);
+        metrics::gauge!("daemon.session_registry.mount.attempts_total").increment(1.0);
+        metrics::gauge!("daemon.session_registry.mount.in_flight").set(in_flight as f64);
         Self
     }
 }
 
-#[cfg(feature = "hotpath")]
 impl Drop for StoreMountObservationV1 {
     fn drop(&mut self) {
         let _ = SESSION_STORE_MOUNTS_IN_FLIGHT.fetch_update(
@@ -161,8 +157,8 @@ impl Drop for StoreMountObservationV1 {
             Ordering::Relaxed,
             |in_flight| in_flight.checked_sub(1),
         );
-        hotpath::gauge!("daemon.session_registry.mount.in_flight")
-            .set(SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed));
+        metrics::gauge!("daemon.session_registry.mount.in_flight")
+            .set((SESSION_STORE_MOUNTS_IN_FLIGHT.load(Ordering::Relaxed)) as f64);
     }
 }
 
@@ -339,7 +335,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
         self.0.lock()
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.list_ready_sessions")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.list_ready_sessions",
+        level = "trace",
+        skip_all
+    )]
     fn ready_session_projects(&self) -> Result<Vec<ProjectId>> {
         let entries = self.lock().map_err(|_| {
             session_registry_error(
@@ -358,7 +358,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
             .collect())
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.wait_session_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.wait_session_graph",
+        level = "trace",
+        skip_all
+    )]
     async fn wait_for_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         let (relation_graph, graph_settled) = {
             let entries = self.lock().map_err(|_| {
@@ -447,7 +451,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.reserve_session_replacement")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.reserve_session_replacement",
+        level = "trace",
+        skip_all
+    )]
     fn reserve_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -507,7 +515,11 @@ impl ProjectRuntimeOwnerRegistryV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.session_registry.bind_memory_graph")]
+#[tracing::instrument(
+    name = "daemon.session_registry.bind_memory_graph",
+    level = "trace",
+    skip_all
+)]
 fn bind_ready_project_memory_graph(
     owners: &ProjectRuntimeOwnerRegistryV1,
     project_id: &ProjectId,
@@ -2090,7 +2102,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         tracedecay_runtime_core::shard_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
 
-    #[hotpath::skip]
     async fn profile_authority_pin(&self, operation: &'static str) -> Result<ProfileAuthorityPin> {
         self.profile_pin
             .lock()
@@ -2105,7 +2116,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             })
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.admit_remote_node")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.admit_remote_node",
+        level = "trace",
+        skip_all
+    )]
     fn admit_remote_node_owner(
         &self,
         node_id: &BrainNodeId,
@@ -2154,7 +2169,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         ))
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.admit_project_runtime")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.admit_project_runtime",
+        level = "trace",
+        skip_all
+    )]
     fn admit_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2222,7 +2241,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.extend_project_runtime")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.extend_project_runtime",
+        level = "trace",
+        skip_all
+    )]
     fn extend_project_runtime_owner(
         &self,
         project_id: &ProjectId,
@@ -2272,7 +2295,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         )))
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.reserve_runtime_retirement")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.reserve_runtime_retirement",
+        level = "trace",
+        skip_all
+    )]
     fn reserve_project_runtime_retirement(
         &self,
         project_id: &ProjectId,
@@ -2314,7 +2341,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }))
     }
 
-    #[hotpath::skip]
     async fn reserve_project_session_replacement(
         &self,
         project_id: &ProjectId,
@@ -2427,7 +2453,11 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// work. Production callers tolerate the warming window through typed
     /// retryable refusals; deterministic fixtures await settlement instead so
     /// graph-dependent operations do not race the open task.
-    #[hotpath::measure(label = "daemon.session_registry.settle_profile_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_profile_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_profile_session_graph(&self) -> Result<()> {
         let waiter = {
             let mounted = self
@@ -2460,16 +2490,21 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     /// Project-scope counterpart of [`Self::settle_profile_session_graph`].
-    #[hotpath::measure(label = "daemon.session_registry.settle_project_graph", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_project_graph",
+        level = "trace",
+        skip_all
+    )]
     pub async fn settle_project_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.project_owners.wait_for_session_graph(project_id).await
     }
 
     /// Waits for the project's background relation-graph open and requires an
     /// attached owner before a retrieval-capable surface is published.
-    #[hotpath::measure(
-        label = "daemon.session_registry.settle_project_graph_for_serving",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.session_registry.settle_project_graph_for_serving",
+        level = "trace",
+        skip_all
     )]
     pub async fn settle_project_session_graph_for_serving(
         &self,
@@ -2554,7 +2589,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         })
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.retire_session_sync", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.retire_session_sync",
+        level = "trace",
+        skip_all
+    )]
     async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
         self.active_session_sync_service("retire project session sync")?
             .retire_project(self.identity.profile_id(), project_id)
@@ -2563,7 +2602,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| session_registry_error("retire project session sync", error))
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.rebind_session_sync", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.rebind_session_sync",
+        level = "trace",
+        skip_all
+    )]
     async fn rebind_project_session_sync(
         &self,
         project_id: &ProjectId,
@@ -2583,7 +2626,11 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 }
 
-#[hotpath::measure(label = "daemon.session_registry.runtime_incarnation")]
+#[tracing::instrument(
+    name = "daemon.session_registry.runtime_incarnation",
+    level = "trace",
+    skip_all
+)]
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {
     let process_run_id = tracedecay_runtime_core::runtime_identity::process_run_id();
     let daemon_generation =
@@ -2689,14 +2736,14 @@ async fn open_runtime_with_presence(
     operation: &'static str,
 ) -> Result<(StoreRuntimeClientLease, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
-    let locator = match hotpath::measure_block!(
-        "daemon.session_registry.store_open.resolve",
+    let match_result = {
+        let _span = tracing::trace_span!("daemon.session_registry.store_open.resolve").entered();
         resolver.resolve_key(&key)
-    ) {
+    };
+    let locator = match match_result {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
         LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
+            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
             return Err(session_registry_error(
                 operation,
                 format!(
@@ -2708,10 +2755,11 @@ async fn open_runtime_with_presence(
     };
     let authority = match database_authority {
         Some(authority) => authority,
-        None => hotpath::measure_block!(
-            "daemon.session_registry.store_open.resolve",
+        None => {
+            let _span =
+                tracing::trace_span!("daemon.session_registry.store_open.resolve").entered();
             DatabaseAuthority::for_runtime(locator.locator().path(), operation)
-        )?,
+        }?,
     };
     if authority.canonical_database_path() != locator.locator().path() {
         return Err(session_registry_error(
@@ -2738,16 +2786,15 @@ async fn open_runtime_with_presence(
     } else {
         StoreRuntimeOpenRequest::new_authorized(shard_id, incarnation, profile_pin, authority)
     };
-    match hotpath::future!(
+    match tracing::Instrument::instrument(
         registry.open(request),
-        label = "daemon.session_registry.store_open.registry_open"
+        tracing::trace_span!("daemon.session_registry.store_open.registry_open"),
     )
     .await
     {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
         StoreRuntimeOpenResult::Failed(failure) => {
-            #[cfg(feature = "hotpath")]
-            hotpath::gauge!("daemon.session_registry.store_open.failed_total").inc(1_u64);
+            metrics::gauge!("daemon.session_registry.store_open.failed_total").increment(1.0);
             Err(registry_open_error(
                 "open registered session runtime",
                 failure,

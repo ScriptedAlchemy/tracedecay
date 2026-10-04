@@ -220,7 +220,6 @@ pub enum GitHubStackSignalExpandSurfaceResultV1 {
 }
 
 impl GitHubStackSignalExpandSurfaceResultV1 {
-    #[hotpath::skip]
     pub const fn unavailable(reason: GitHubStackSignalExpandUnavailableV1) -> Self {
         Self::Unavailable { reason }
     }
@@ -251,7 +250,6 @@ pub enum GitHubStackSignalExpandPortError {
 }
 
 impl GitHubStackSignalExpandPortError {
-    #[hotpath::skip]
     pub const fn into_surface_result(self) -> GitHubStackSignalExpandSurfaceResultV1 {
         let reason = match self {
             Self::Concealed => GitHubStackSignalExpandUnavailableV1::Concealed,

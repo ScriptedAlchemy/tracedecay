@@ -30,14 +30,14 @@ struct ResponseLeaseGaugeGuard;
 
 impl ResponseLeaseGaugeGuard {
     fn enter() -> Self {
-        hotpath::gauge!("mcp.server.response_leases_active").inc(1_u64);
+        metrics::gauge!("mcp.server.response_leases_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for ResponseLeaseGaugeGuard {
     fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.response_leases_active").dec(1_u64);
+        metrics::gauge!("mcp.server.response_leases_active").decrement(1.0);
     }
 }
 
@@ -92,7 +92,6 @@ impl ConnectionRouteState {
         }
     }
 
-    #[hotpath::skip]
     pub(crate) async fn observe_initialize(
         &mut self,
         params: Option<&Value>,
@@ -189,7 +188,7 @@ fn repository_discovery() -> RepositoryDiscovery {
     }
 }
 
-#[hotpath::measure(label = "mcp.server.initialize_route", future = true)]
+#[tracing::instrument(name = "mcp.server.initialize_route", level = "trace", skip_all)]
 async fn resolve_initialize_roots_project_route(
     params: Option<&Value>,
     registry_db: Option<&RegisteredGlobalDb>,
@@ -220,7 +219,7 @@ async fn resolve_initialize_roots_project_route(
     }))
 }
 
-#[hotpath::measure(label = "mcp.server.project_route", future = true)]
+#[tracing::instrument(name = "mcp.server.project_route", level = "trace", skip_all)]
 pub(crate) async fn resolve_private_project_route(
     requested_path: &Path,
     registry_db: Option<&RegisteredGlobalDb>,

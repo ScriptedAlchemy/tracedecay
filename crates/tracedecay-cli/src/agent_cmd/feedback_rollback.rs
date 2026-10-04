@@ -1181,7 +1181,7 @@ fn feedback_rollback_dry_run(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.agent.feedback")]
+#[tracing::instrument(name = "cli.agent.feedback", level = "trace", skip_all)]
 fn feedback_rollback_apply(
     profile: &ProfileRoot,
     agent_id: &str,
@@ -1353,7 +1353,7 @@ fn feedback_rollback_apply(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.agent.feedback")]
+#[tracing::instrument(name = "cli.agent.feedback", level = "trace", skip_all)]
 fn feedback_rollback_restore(
     profile: &ProfileRoot,
     state_path: &Path,

@@ -1,5 +1,5 @@
 pub mod code_search;
-mod hotpath_metrics;
 pub mod native_git;
+mod observe;
 pub mod retrieval;
 pub mod search_quality;

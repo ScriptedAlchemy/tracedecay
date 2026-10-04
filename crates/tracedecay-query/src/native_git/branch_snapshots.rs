@@ -71,7 +71,11 @@ fn local_branch_revision_in_repository(
 }
 
 /// Lists one stable lexical page from a bounded complete local-ref snapshot.
-#[hotpath::measure(label = "query.native_git.branch_snapshots.list")]
+#[tracing::instrument(
+    name = "query.native_git.branch_snapshots.list",
+    level = "trace",
+    skip_all
+)]
 pub fn local_branch_snapshots_controlled(
     project_root: &Path,
     control: &LocalBranchReadControlV1,

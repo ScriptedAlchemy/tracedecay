@@ -118,7 +118,11 @@ mod default_branch_tests {
 ///
 /// For each tracked branch in the metadata, computes the merge-base with
 /// the given branch and picks the one with the most recent common ancestor.
-#[hotpath::measure(label = "runtime_core.branch.nearest_tracked_ancestor")]
+#[tracing::instrument(
+    name = "runtime_core.branch.nearest_tracked_ancestor",
+    level = "trace",
+    skip_all
+)]
 pub fn find_nearest_tracked_ancestor(
     project_root: &Path,
     branch: &str,
@@ -243,7 +247,11 @@ pub enum PreparedBranchRollbackOutcome {
 /// follow-up sync publishes the branch generation under its own fenced
 /// mutation window (which takes the lock for its own metadata writes), and
 /// finalize/rollback re-acquire it for theirs.
-#[hotpath::measure(label = "runtime_core.branch.prepare_tracking", future = true)]
+#[tracing::instrument(
+    name = "runtime_core.branch.prepare_tracking",
+    level = "trace",
+    skip_all
+)]
 pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
@@ -387,7 +395,11 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     assert!(!meta_path.with_extension("json.tmp").exists());
 }
 
-#[hotpath::measure(label = "runtime_core.branch.rollback_prepared")]
+#[tracing::instrument(
+    name = "runtime_core.branch.rollback_prepared",
+    level = "trace",
+    skip_all
+)]
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,

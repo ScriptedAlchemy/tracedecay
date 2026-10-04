@@ -69,7 +69,7 @@ impl OverflowRoster {
         if self.entries.len() >= bound {
             // The repository loses coverage entirely until the next handshake.
             // Dropped evidence must be counted, not only retained successes.
-            hotpath::gauge!("daemon.git.watch.overflow.dropped_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.overflow.dropped_total").increment(1.0);
             return OverflowAdmission::RosterFull;
         }
         let due = next_due(now, &config);
@@ -81,14 +81,14 @@ impl OverflowRoster {
                 due,
             },
         );
-        hotpath::gauge!("daemon.git.watch.overflow.covered_total").inc(1_u64);
-        hotpath::gauge!("daemon.git.watch.overflow.depth").set(self.entries.len());
+        metrics::gauge!("daemon.git.watch.overflow.covered_total").increment(1.0);
+        metrics::gauge!("daemon.git.watch.overflow.depth").set((self.entries.len()) as f64);
         OverflowAdmission::Covered
     }
 
     pub fn remove(&mut self, root: &Path) {
         if self.entries.remove(root).is_some() {
-            hotpath::gauge!("daemon.git.watch.overflow.depth").set(self.entries.len());
+            metrics::gauge!("daemon.git.watch.overflow.depth").set((self.entries.len()) as f64);
         }
     }
 
@@ -161,7 +161,7 @@ impl GitWatcher {
 /// One backstop pass over the overflow roster: re-attempt in-memory admission
 /// (a slot may have freed), and while still refused keep the repository on
 /// the scheduler-ingress freshness floor.
-#[hotpath::measure(label = "daemon.git.watch.overflow", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.overflow", level = "trace", skip_all)]
 pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
     let due = {
         let mut roster = watcher
@@ -173,7 +173,7 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
     };
     // Coalesced batch size per backstop pass, so a profile separates roster
     // pressure from the per-root admission and scheduler-ingress cost below.
-    hotpath::gauge!("daemon.git.watch.overflow.due_per_pass").set(due.len());
+    metrics::gauge!("daemon.git.watch.overflow.due_per_pass").set((due.len()) as f64);
     for (root, identity, config) in due {
         if watcher.inner.cancellation.is_cancelled() {
             return;
@@ -186,7 +186,7 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&root);
-                hotpath::gauge!("daemon.git.watch.overflow.recovered_total").inc(1_u64);
+                metrics::gauge!("daemon.git.watch.overflow.recovered_total").increment(1.0);
                 log_daemon_event(
                     "git_watch_overflow_recovered",
                     &[("project", root.display().to_string())],

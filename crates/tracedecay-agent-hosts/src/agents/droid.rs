@@ -414,7 +414,7 @@ fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
 /// registration is removed first so a reinstall refreshes the launch surface
 /// instead of failing on the duplicate name; on add failure the previous
 /// document bytes are restored when the host left them unchanged.
-#[hotpath::measure(label = "droid_mcp_install")]
+#[tracing::instrument(name = "droid_mcp_install", level = "trace", skip_all)]
 fn droid_mcp_add_with(droid_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let config_path = droid_mcp_config_path(home);
     let previous_registration =

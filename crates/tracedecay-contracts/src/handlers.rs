@@ -54,7 +54,6 @@ impl ApplicationOperation {
         &self.result_contract
     }
 
-    #[hotpath::skip]
     pub const fn resource_addressed(&self) -> bool {
         self.resource_addressed
     }

@@ -203,7 +203,6 @@ impl MaintenanceCheckpointRequest {
         }
     }
 
-    #[hotpath::skip]
     pub const fn mode(&self) -> MaintenanceCheckpointMode {
         self.mode
     }
@@ -222,7 +221,6 @@ pub struct CheckpointTicket {
 }
 
 impl CheckpointTicket {
-    #[hotpath::skip]
     pub async fn wait(self) -> Result<CheckpointOutcome, CheckpointControlError> {
         let result = self
             .response
@@ -694,7 +692,6 @@ impl PersistentWriter {
         }
     }
 
-    #[hotpath::skip]
     pub async fn submit(
         &self,
         request: RuntimeSubmitRequestV1,
@@ -704,7 +701,11 @@ impl PersistentWriter {
             .await
     }
 
-    #[hotpath::measure(label = "rusqlite_runtime.writer.submit_authorized", future = true)]
+    #[tracing::instrument(
+        name = "rusqlite_runtime.writer.submit_authorized",
+        level = "trace",
+        skip_all
+    )]
     pub async fn submit_authorized(
         &self,
         request: RuntimeSubmitRequestV1,
@@ -738,18 +739,18 @@ impl PersistentWriter {
 
         let priority = request.envelope().metadata.priority;
         self.telemetry.offered();
-        crate::hotpath_observe::record_writer_offered(priority);
+        crate::observe::record_writer_offered(priority);
         let permit = match self.admission.reserve(&request.envelope().metadata) {
             Ok(permit) => permit,
             Err(scope) => {
                 self.telemetry.shed();
-                crate::hotpath_observe::record_writer_shed(priority);
+                crate::observe::record_writer_shed(priority);
                 return Ok(settlement::saturation(&request, scope));
             }
         };
         let bytes = request.envelope().metadata.admission_bytes;
         self.telemetry.admitted(bytes);
-        crate::hotpath_observe::record_writer_admitted(priority);
+        crate::observe::record_writer_admitted(priority);
         let (reply, response) = oneshot::channel();
         let accepted = AcceptedRequest::new(request.clone(), probe, authority, reply, permit);
         let send_result = {
@@ -771,7 +772,7 @@ impl PersistentWriter {
         if let Err((accepted, saturated)) = send_result {
             self.telemetry.released(1, bytes);
             let outcome = if saturated {
-                crate::hotpath_observe::record_writer_shed(priority);
+                crate::observe::record_writer_shed(priority);
                 settlement::saturation(
                     &request,
                     tracedecay_store::SaturationScopeV1::ShardOperations,
@@ -793,7 +794,6 @@ impl PersistentWriter {
         Ok(outcome)
     }
 
-    #[hotpath::skip]
     pub async fn bounded_incremental_vacuum(
         &self,
         max_pages: u32,

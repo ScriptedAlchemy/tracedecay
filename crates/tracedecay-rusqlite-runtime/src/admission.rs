@@ -106,23 +106,17 @@ impl State {
 /// from `submit` until the accepted request sends its terminal reply.
 #[derive(Clone)]
 pub(crate) struct Admission {
-    state: Arc<hotpath::mutexes::Mutex<State>>,
+    state: Arc<std::sync::Mutex<State>>,
 }
 
 impl Admission {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {
-            // Every store operation reserves here, so this is the lock a
-            // writer fat tail would show up on first. Instrumented at the
-            // construction site so the report keys on this line.
-            state: Arc::new(hotpath::mutex!(
-                Mutex::new(State {
-                    limits,
-                    general: Usage::default(),
-                    health: Usage::default(),
-                }),
-                label = "rusqlite.admission"
-            )),
+            state: Arc::new(Mutex::new(State {
+                limits,
+                general: Usage::default(),
+                health: Usage::default(),
+            })),
         }
     }
 
@@ -145,7 +139,7 @@ impl Admission {
         };
         let usage = state.usage(lane);
         if usage.operations >= capacity.operations {
-            crate::hotpath_observe::record_admission_refused_operations();
+            crate::observe::record_admission_refused_operations();
             return Err(SaturationScopeV1::ShardOperations);
         }
         if bytes > request_limit
@@ -155,7 +149,7 @@ impl Admission {
                 .checked_add(bytes)
                 .is_none_or(|total| total > capacity.bytes)
         {
-            crate::hotpath_observe::record_admission_refused_bytes();
+            crate::observe::record_admission_refused_bytes();
             return Err(SaturationScopeV1::ShardBytes);
         }
         let usage = state.usage_mut(lane);
@@ -179,7 +173,7 @@ impl Admission {
 
 #[must_use = "the permit must be retained through the request's terminal reply"]
 pub(crate) struct Permit {
-    state: Arc<hotpath::mutexes::Mutex<State>>,
+    state: Arc<std::sync::Mutex<State>>,
     lane: Lane,
     bytes: u64,
 }

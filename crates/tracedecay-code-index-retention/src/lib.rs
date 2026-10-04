@@ -5,4 +5,4 @@
 //! pulling the usecases spine.
 
 pub mod code_index_generations;
-mod hotpath_observe;
+mod observe;

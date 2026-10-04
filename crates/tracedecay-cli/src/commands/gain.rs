@@ -19,7 +19,7 @@ pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
     Some((saved_tokens as f64) * price.prompt_per_mtok / 1_000_000.0)
 }
 
-#[hotpath::measure(label = "cli.gain.read", future = true)]
+#[tracing::instrument(name = "cli.gain.read", level = "trace", skip_all)]
 pub async fn handle_gain(
     profile: &ProfileRoot,
     all: bool,

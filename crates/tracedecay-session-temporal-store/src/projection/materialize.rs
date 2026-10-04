@@ -362,11 +362,8 @@ pub(super) struct OccurrenceMaterializationWork {
 
 #[inline(always)]
 fn record_occurrence_materialization_work(work: OccurrenceMaterializationWork) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.occurrence_materialization.envelope_parses")
-        .inc(work.envelope_parses);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
+    metrics::gauge!("session_temporal.occurrence_materialization.envelope_parses")
+        .increment(work.envelope_parses as f64);
 }
 
 pub(super) fn derived_temporal_assertion_id(
@@ -636,14 +633,15 @@ pub(super) struct RelationDerivationWork {
 
 #[inline(always)]
 fn record_relation_derivation_work(work: RelationDerivationWork) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.relation_derivation.envelope_parses")
-        .inc(work.envelope_parses);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
+    metrics::gauge!("session_temporal.relation_derivation.envelope_parses")
+        .increment(work.envelope_parses as f64);
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.candidate_parent")]
+#[tracing::instrument(
+    name = "session_temporal.projection.candidate_parent",
+    level = "trace",
+    skip_all
+)]
 async fn candidate_parent_message_resolver(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -710,7 +708,11 @@ async fn candidate_parent_message_resolver(
     Ok(resolver)
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.parent_resolver")]
+#[tracing::instrument(
+    name = "session_temporal.projection.parent_resolver",
+    level = "trace",
+    skip_all
+)]
 /// Resolves the canonical outputs of the session's effects in
 /// `(after_frontier, source_frontier]`.
 pub async fn canonical_parent_message_resolver(
@@ -837,19 +839,16 @@ pub async fn canonical_parent_message_resolver(
 
 #[inline(always)]
 fn record_parent_resolver_probe() {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("session_temporal.parent_resolver.query_probes").inc(1_u64);
+    metrics::gauge!("session_temporal.parent_resolver.query_probes").increment(1.0);
 }
 
 #[inline(always)]
 fn record_parent_resolver_row(bytes: u64) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.parent_resolver.rows").inc(1_u64);
-        hotpath::gauge!("session_temporal.parent_resolver.row_payload_bytes").inc(bytes);
+        metrics::gauge!("session_temporal.parent_resolver.rows").increment(1.0);
+        metrics::gauge!("session_temporal.parent_resolver.row_payload_bytes")
+            .increment(bytes as f64);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = bytes;
 }
 
 impl ParentMessageResolver {

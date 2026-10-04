@@ -54,13 +54,12 @@ impl CandidatePlan {
             .any(|clause| clause.channel == channel && clause.value == value)
     }
 
-    #[hotpath::skip]
     pub const fn has_semantic_channel(&self) -> bool {
         false
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_scope")]
+#[tracing::instrument(name = "temporal.candidates.plan_scope", level = "trace", skip_all)]
 pub fn plan_scope_candidates() -> CandidatePlan {
     CandidatePlan {
         clauses: vec![
@@ -82,7 +81,7 @@ pub fn plan_scope_candidates() -> CandidatePlan {
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_anchor")]
+#[tracing::instrument(name = "temporal.candidates.plan_anchor", level = "trace", skip_all)]
 pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     CandidatePlan {
         clauses: vec![CandidateClause {
@@ -93,7 +92,7 @@ pub fn plan_anchor(anchor_id: &RetrievalAnchorId) -> CandidatePlan {
     }
 }
 
-#[hotpath::measure(label = "temporal.candidates.plan_text")]
+#[tracing::instrument(name = "temporal.candidates.plan_text", level = "trace", skip_all)]
 pub fn plan_candidates(query: &str) -> CandidatePlan {
     let query = query.trim();
     if query.is_empty() {

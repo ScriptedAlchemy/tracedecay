@@ -221,7 +221,6 @@ impl VerifiedGraphQuery {
         )
     }
 
-    #[hotpath::skip]
     async fn await_bound<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.refuse_if_bound_closed()?;
         let result = await_graph_port_wait(
@@ -242,7 +241,7 @@ impl VerifiedGraphQuery {
         Ok(self.bound_source()?.project_id())
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.dead_code", future = true)]
+    #[tracing::instrument(name = "usecases.graph.verified.dead_code", level = "trace", skip_all)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
@@ -259,13 +258,17 @@ impl VerifiedGraphQuery {
         .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.circular", future = true)]
+    #[tracing::instrument(name = "usecases.graph.verified.circular", level = "trace", skip_all)]
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
         self.await_bound(self.manager().find_circular_dependencies())
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_adjacency", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_adjacency",
+        level = "trace",
+        skip_all
+    )]
     pub async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
@@ -274,13 +277,21 @@ impl VerifiedGraphQuery {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_dependents", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_dependents",
+        level = "trace",
+        skip_all
+    )]
     pub async fn get_file_dependents(&self, file_path: &str) -> Result<FileDependentsV1> {
         self.await_bound(self.manager().get_file_dependents(file_path))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.health_snapshot", future = true)]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.health_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub async fn verified_health_snapshot(
         &self,
         path_prefix: Option<&str>,
@@ -377,7 +388,11 @@ impl VerifiedGraphQuery {
     /// `max_symbols_examined` bounds the requested files' combined symbol
     /// count; exhausting it is a typed budget refusal rather than a false
     /// end-of-page result.
-    #[hotpath::measure(label = "usecases.graph.verified.file_symbols_page")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.file_symbols_page",
+        level = "trace",
+        skip_all
+    )]
     pub fn symbols_in_logical_files_page(
         &self,
         logical_paths: &HashSet<String>,
@@ -446,7 +461,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callers")]
+    #[tracing::instrument(name = "usecases.graph.verified.callers", level = "trace", skip_all)]
     pub fn callers(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -459,7 +474,11 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callers_truncated")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.callers_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn callers_truncated(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -472,7 +491,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callees")]
+    #[tracing::instrument(name = "usecases.graph.verified.callees", level = "trace", skip_all)]
     pub fn callees(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -485,7 +504,11 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.callees_truncated")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.callees_truncated",
+        level = "trace",
+        skip_all
+    )]
     pub fn callees_truncated(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -498,7 +521,11 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.ranked_neighbors")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.ranked_neighbors",
+        level = "trace",
+        skip_all
+    )]
     pub fn ranked_neighbors(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -535,7 +562,7 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.impact")]
+    #[tracing::instrument(name = "usecases.graph.verified.impact", level = "trace", skip_all)]
     pub fn impact(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -565,7 +592,11 @@ impl VerifiedGraphQuery {
     /// lexically attached attributes, so a marker always occupies the same
     /// file as the function it annotates, and only the requested files can
     /// contribute either endpoint.
-    #[hotpath::measure(label = "usecases.graph.verified.test_annotated_files")]
+    #[tracing::instrument(
+        name = "usecases.graph.verified.test_annotated_files",
+        level = "trace",
+        skip_all
+    )]
     pub fn test_annotated_logical_files(
         &self,
         logical_paths: &HashSet<String>,
@@ -632,7 +663,7 @@ impl VerifiedGraphQuery {
 /// names a root type, and the source authority is frozen from the supplied
 /// context before the query exists, no later surface accepts a runtime,
 /// root, or database.
-#[hotpath::measure(label = "usecases.graph.open_verified", future = true)]
+#[tracing::instrument(name = "usecases.graph.open_verified", level = "trace", skip_all)]
 pub async fn open_verified_graph_query(
     admission: &dyn CodeGraphReadAdmissionPort,
     projection: &dyn CodeGraphProjectionReadPort,

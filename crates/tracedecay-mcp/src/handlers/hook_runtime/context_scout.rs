@@ -53,13 +53,10 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
     lifecycle.matches_envelope(envelope).then_some(lifecycle)
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Context-scout admission is one native lifecycle bind for the scout claim."
-    )
+#[tracing::instrument(name = "mcp.hook_runtime.scout_lifecycle", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
 )]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
@@ -276,7 +273,7 @@ fn release_hook_v2_delivery_claim(
     outcome == ContextScoutDurableStoreOutcomeV1::Unavailable
 }
 
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_delivery")]
+#[tracing::instrument(name = "mcp.hook_runtime.scout_delivery", level = "trace", skip_all)]
 pub(super) async fn hook_v2_delivery_receipt(
     cg: &TraceDecay,
     receipt: Value,
@@ -301,7 +298,7 @@ pub(super) async fn hook_v2_delivery_receipt(
     Ok(scout_store_outcome(outcome))
 }
 
-#[hotpath::measure(label = "mcp.hook_runtime.scout_notice")]
+#[tracing::instrument(name = "mcp.hook_runtime.scout_notice", level = "trace", skip_all)]
 pub(super) fn hook_v2_feedback_notice_delivery(
     cg: &TraceDecay,
     envelope: Value,

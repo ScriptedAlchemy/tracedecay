@@ -25,7 +25,7 @@ use crate::ports::mcp_tools::advertised_tools;
 /// lock; a config that exists but cannot be parsed for `dialect` is a typed
 /// error rather than a silent overwrite. `agent_label` names the host in the
 /// directory-creation error.
-#[hotpath::measure(label = "agent_hosts.agents.mcp.install")]
+#[tracing::instrument(name = "agent_hosts.agents.mcp.install", level = "trace", skip_all)]
 pub fn install_mcp_server_entry(
     config_path: &Path,
     root_key: &str,
@@ -131,7 +131,7 @@ impl McpRegistrationOutcome {
 /// decide whether to keep going across the remaining hosts. Only the entry is
 /// removed here; the root key and the file go too exactly when the install
 /// this lifecycle records created them.
-#[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
+#[tracing::instrument(name = "agent_hosts.agents.mcp.uninstall", level = "trace", skip_all)]
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
     root_key: &str,

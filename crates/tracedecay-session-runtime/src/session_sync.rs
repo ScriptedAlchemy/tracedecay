@@ -143,7 +143,6 @@ impl Default for DaemonSessionSyncService {
 }
 
 impl DaemonSessionSyncService {
-    #[hotpath::skip]
     async fn execute_request_admitted(
         &self,
         request: SessionSyncRequestV1,
@@ -161,9 +160,9 @@ impl DaemonSessionSyncService {
         }
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             context.registry.read_session_sync_journal(&key),
-            label = "daemon.session_sync.journal.admission_read"
+            tracing::trace_span!("daemon.session_sync.journal.admission_read"),
         )
         .await
         {
@@ -301,9 +300,9 @@ impl DaemonSessionSyncService {
                     };
                 }
             };
-            match hotpath::future!(
+            match tracing::Instrument::instrument(
                 context.registry.insert_session_sync_journal(&key, &encoded),
-                label = "daemon.session_sync.journal.coalesced_admission_write"
+                tracing::trace_span!("daemon.session_sync.journal.coalesced_admission_write"),
             )
             .await
             {
@@ -359,9 +358,9 @@ impl DaemonSessionSyncService {
                 };
             }
         };
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             context.registry.insert_session_sync_journal(&key, &encoded),
-            label = "daemon.session_sync.journal.admission_write"
+            tracing::trace_span!("daemon.session_sync.journal.admission_write"),
         )
         .await
         {
@@ -474,7 +473,6 @@ impl DaemonSessionSyncService {
         true
     }
 
-    #[hotpath::skip]
     async fn run_operation(
         &self,
         context: Arc<SessionSyncProjectContext>,
@@ -542,16 +540,16 @@ impl DaemonSessionSyncService {
         };
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
-                hotpath::future!(
-                    context.import_transcripts(self, &key, &request, project_sessions.clone(),),
-                    label = "daemon.session_sync.import_transcripts"
+                tracing::Instrument::instrument(
+                    context.import_transcripts(self, &key, &request, project_sessions.clone()),
+                    tracing::trace_span!("daemon.session_sync.import_transcripts"),
                 )
                 .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
-                hotpath::future!(
+                tracing::Instrument::instrument(
                     context.synchronize_git(self, &request, options, project_sessions.clone()),
-                    label = "daemon.session_sync.synchronize_git"
+                    tracing::trace_span!("daemon.session_sync.synchronize_git"),
                 )
                 .await
             }
@@ -653,7 +651,6 @@ impl DaemonSessionSyncService {
         })
     }
 
-    #[hotpath::skip]
     async fn transition_running(
         &self,
         context: &SessionSyncProjectContext,
@@ -668,7 +665,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn persist_interruption_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
@@ -693,7 +689,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn persist_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -737,7 +732,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn update_journal(
         &self,
         context: &SessionSyncProjectContext,
@@ -745,9 +739,9 @@ impl DaemonSessionSyncService {
         mut update: impl FnMut(&mut SessionSyncJournalV1),
     ) -> tracedecay_domain::errors::Result<SessionSyncJournalV1> {
         loop {
-            let current = hotpath::future!(
+            let current = tracing::Instrument::instrument(
                 context.registry.read_session_sync_journal(key),
-                label = "daemon.session_sync.journal.update_read"
+                tracing::trace_span!("daemon.session_sync.journal.update_read"),
             )
             .await
             .map_err(store_error)?
@@ -761,11 +755,11 @@ impl DaemonSessionSyncService {
             if replacement == current {
                 return Ok(journal);
             }
-            if hotpath::future!(
+            if tracing::Instrument::instrument(
                 context
                     .registry
                     .compare_and_swap_session_sync_journal(key, &current, &replacement),
-                label = "daemon.session_sync.journal.update_write"
+                tracing::trace_span!("daemon.session_sync.journal.update_write"),
             )
             .await
             .map_err(store_error)?
@@ -776,7 +770,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn persist_progress(
         &self,
         context: &SessionSyncProjectContext,
@@ -798,7 +791,6 @@ impl DaemonSessionSyncService {
         Ok(source_frontiers)
     }
 
-    #[hotpath::skip]
     async fn refresh_source_frontiers_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
@@ -829,7 +821,6 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    #[hotpath::skip]
     async fn status_request_admitted(
         &self,
         context: &SessionSyncProjectContext,
@@ -872,7 +863,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
         let project_gate = self.project_gate(control.scope());
         let _project = project_gate.lock().await;
@@ -888,9 +878,9 @@ impl DaemonSessionSyncService {
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.execute_request(request),
-                label = "daemon.session_sync.execute"
+                tracing::trace_span!("daemon.session_sync.execute"),
             )
             .await
         })
@@ -898,9 +888,9 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.status_request(control),
-                label = "daemon.session_sync.status"
+                tracing::trace_span!("daemon.session_sync.status"),
             )
             .await
         })
@@ -908,9 +898,9 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
         Box::pin(async move {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 self.cancel_request(control),
-                label = "daemon.session_sync.cancel"
+                tracing::trace_span!("daemon.session_sync.cancel"),
             )
             .await
         })
@@ -993,7 +983,6 @@ pub mod test_harness {
         run_session_temporal_refresh_pass,
     };
 
-    #[hotpath::skip]
     pub async fn wait_for_interruption(
         service: &DaemonSessionSyncService,
         cancellation: &CancellationSignal,
@@ -1120,7 +1109,6 @@ impl DaemonSessionSyncService {
         }
     }
 
-    #[hotpath::skip]
     async fn wait_for_interruption(
         &self,
         request: &SessionSyncRequestV1,
@@ -1129,7 +1117,6 @@ impl DaemonSessionSyncService {
             .await
     }
 
-    #[hotpath::skip]
     async fn wait_for_interruption_parts(
         &self,
         cancellation: &CancellationSignal,

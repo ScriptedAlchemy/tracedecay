@@ -190,7 +190,6 @@ impl ProfileHostAdmissionReplayRegistry {
         registry
     }
 
-    #[hotpath::skip]
     pub async fn ensure_bootstrap(
         &self,
         profile_root: &Path,
@@ -227,11 +226,11 @@ impl ProfileHostAdmissionReplayRegistry {
             self.bootstrap_retry_budget,
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 task_worker.run(operation).await;
             },
-            label = "daemon.authority.host_admission.bootstrap.run"
+            tracing::trace_span!("daemon.authority.host_admission.bootstrap.run"),
         ));
         workers.insert(
             profile_root,
@@ -239,7 +238,6 @@ impl ProfileHostAdmissionReplayRegistry {
         );
     }
 
-    #[hotpath::skip]
     pub async fn bootstrap_status(
         &self,
         profile_root: &Path,
@@ -251,7 +249,6 @@ impl ProfileHostAdmissionReplayRegistry {
             .and_then(|entry| entry.worker.status())
     }
 
-    #[hotpath::skip]
     pub async fn ensure(
         &self,
         broker_path: &Path,
@@ -272,7 +269,6 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub async fn ensure_with_pass_override(
         &self,
         broker_path: &Path,
@@ -291,7 +287,6 @@ impl ProfileHostAdmissionReplayRegistry {
         self.ensure_worker(broker_path, worker).await;
     }
 
-    #[hotpath::skip]
     async fn ensure_worker(
         &self,
         broker_path: &Path,
@@ -314,7 +309,7 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker_path = broker_path.to_path_buf();
         let workers_weak = Arc::downgrade(&self.workers);
         let idle_eviction_after = self.idle_eviction_after;
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 worker.run(idle_eviction_after).await;
                 let Some(workers) = workers_weak.upgrade() else {
@@ -328,7 +323,7 @@ impl ProfileHostAdmissionReplayRegistry {
                     workers.remove(&worker_path);
                 }
             },
-            label = "daemon.authority.host_admission.replay.run"
+            tracing::trace_span!("daemon.authority.host_admission.replay.run"),
         ));
         workers.insert(
             broker_path.to_path_buf(),
@@ -347,7 +342,6 @@ impl ProfileHostAdmissionReplayRegistry {
         self.cancellation.cancel();
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) {
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return;
@@ -369,7 +363,6 @@ impl ProfileHostAdmissionReplayRegistry {
         }
     }
 
-    #[hotpath::skip]
     pub async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
         if self.shutting_down.load(Ordering::Acquire)
             || self.cancellation.cancelled.load(Ordering::Acquire)
@@ -413,7 +406,6 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub async fn pass_count(&self, broker_path: &Path) -> usize {
         let workers = self.workers.lock().await;
         workers
@@ -422,7 +414,6 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub async fn backoff_count(&self, broker_path: &Path) -> usize {
         let workers = self.workers.lock().await;
         workers.get(broker_path).map_or(0, |entry| {
@@ -431,19 +422,16 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     async fn worker_count(&self) -> usize {
         self.workers.lock().await.len()
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     async fn bootstrap_worker_count(&self) -> usize {
         self.bootstrap_workers.lock().await.len()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
@@ -455,7 +443,6 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
@@ -467,7 +454,6 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn wait_bootstrap_completed(
         &self,
         profile_root: &Path,
@@ -692,7 +678,6 @@ impl ProfileHostAdmissionCancellation {
         }
     }
 
-    #[hotpath::skip]
     async fn wait(&self) {
         loop {
             let notified = self.notification.notified();
@@ -736,7 +721,6 @@ impl ProfileHostAdmissionReplayWorker {
         self.wake.notify_one();
     }
 
-    #[hotpath::skip]
     async fn is_idle(&self) -> bool {
         if self.busy.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) {
             return false;
@@ -746,12 +730,10 @@ impl ProfileHostAdmissionReplayWorker {
             && !self.dirty.load(Ordering::Acquire)
     }
 
-    #[hotpath::skip]
     async fn wait_for_cancellation(&self) {
         self.cancellation.wait().await;
     }
 
-    #[hotpath::skip]
     async fn pending_replay_count_or_cancelled(&self) -> Option<usize> {
         #[cfg(test)]
         if let Some(pending_count_override) = &self.pending_count_override {
@@ -766,7 +748,6 @@ impl ProfileHostAdmissionReplayWorker {
         }
     }
 
-    #[hotpath::skip]
     async fn has_pending_replay_or_cancelled(&self) -> Option<bool> {
         self.pending_replay_count_or_cancelled()
             .await
@@ -778,7 +759,6 @@ impl ProfileHostAdmissionReplayWorker {
         self.idle.notify_waiters();
     }
 
-    #[hotpath::skip]
     async fn run(&self, idle_eviction_after: Duration) {
         let mut consecutive_retryable = 0u32;
         loop {
@@ -874,7 +854,6 @@ impl ProfileHostAdmissionReplayWorker {
         }
     }
 
-    #[hotpath::skip]
     async fn run_pass(&self) -> HostAdmissionOutcome {
         #[cfg(test)]
         if let Some(pass_override) = &self.pass_override {

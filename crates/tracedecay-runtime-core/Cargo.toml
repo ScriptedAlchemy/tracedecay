@@ -8,11 +8,6 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
-# feature only selects the on-mode hotpath test/bench targets of this crate.
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 default = []
 # Forwarded from the root package. Gates daemonless fixture runtimes and the
 # in-process transport doubles used by storage-runtime tests.
@@ -25,7 +20,7 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = ["dep:tracing-subscriber"]
 
 [dependencies]
-hotpath.workspace = true
+metrics.workspace = true
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }

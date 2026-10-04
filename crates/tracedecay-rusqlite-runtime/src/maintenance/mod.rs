@@ -22,7 +22,6 @@ pub struct DrainBlockers {
 }
 
 impl DrainBlockers {
-    #[hotpath::skip]
     pub const fn is_clear(&self) -> bool {
         self.admissions == 0
             && self.readers == 0
@@ -93,7 +92,6 @@ impl ExclusiveMaintenancePermit {
         Self::issue_after_drain(owner, publication, drained).expect("test permit is fenced")
     }
 
-    #[hotpath::skip]
     pub const fn owner(&self) -> MaintenanceOwnerId {
         self.owner
     }

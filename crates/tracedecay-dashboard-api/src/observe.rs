@@ -1,34 +1,26 @@
-//! Opt-in hotpath probes for dashboard HTTP, events, and projections.
+//! Tracing probes for dashboard HTTP, events, and projections.
 //!
 //! Labels are compile-time static. Poll/delivery sites share one bucket each,
 //! never a per-tick, per-project, or per-receipt name. Error class is a closed
 //! typed set, never an unbounded message.
 
-#[cfg(feature = "hotpath")]
 use axum::http::StatusCode;
-#[cfg(feature = "hotpath")]
+
 use axum::http::header;
 use axum::response::Response;
 use tracedecay_api::read_model::DashboardFreshnessStateV1;
 
 #[inline(always)]
 pub(crate) fn record_error_class(class: &'static str) {
-    #[cfg(feature = "hotpath")]
-    hotpath::val!("dashboard_api.http.error_class").set(&class);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = class;
+    tracing::trace!(name: "dashboard_api.http.error_class", value = ?class);
 }
 
 #[inline(always)]
 pub(crate) fn record_response_bytes(len: usize) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("dashboard_api.http.response_bytes").set(len as f64);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = len;
+    metrics::gauge!("dashboard_api.http.response_bytes").set(len as f64);
 }
 
 #[inline(always)]
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_status_class(status: StatusCode) {
     if status.is_success() {
         return;
@@ -52,7 +44,6 @@ pub(crate) fn record_status_class(status: StatusCode) {
 
 #[inline(always)]
 pub(crate) fn observe_response(response: &Response) {
-    #[cfg(feature = "hotpath")]
     {
         record_status_class(response.status());
         if let Some(len) = response
@@ -64,23 +55,17 @@ pub(crate) fn observe_response(response: &Response) {
             record_response_bytes(len);
         }
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = response;
 }
 
 /// Strata is the largest structure payload (up to `STRATA_MAX_FILES` rows);
 /// its serialized size tracks this element count, which is free to observe.
 #[inline(always)]
 pub(crate) fn record_strata_files(len: usize) {
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("dashboard_api.graph.strata_files").set(len as f64);
-    #[cfg(not(feature = "hotpath"))]
-    let _ = len;
+    metrics::gauge!("dashboard_api.graph.strata_files").set(len as f64);
 }
 
 #[inline(always)]
 pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
-    #[cfg(feature = "hotpath")]
     {
         let class = match state {
             DashboardFreshnessStateV1::Fresh => "fresh",
@@ -89,8 +74,6 @@ pub(crate) fn record_freshness_state(state: DashboardFreshnessStateV1) {
             DashboardFreshnessStateV1::Absent => "absent",
             DashboardFreshnessStateV1::Unsupported => "unsupported",
         };
-        hotpath::val!("dashboard_api.freshness.state").set(&class);
+        tracing::trace!(name: "dashboard_api.freshness.state", value = ?class);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = state;
 }

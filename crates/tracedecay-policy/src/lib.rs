@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-mod hotpath_observe;
+mod observe;
 
 pub mod analyzer;
 pub mod configuration;

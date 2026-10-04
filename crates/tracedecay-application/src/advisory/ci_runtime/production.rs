@@ -208,7 +208,7 @@ struct GitHubActionsCheckRunsPageV1 {
     check_runs: Vec<GitHubActionsCheckRunV1>,
 }
 
-#[hotpath::measure(label = "usecases.ci_runtime.discover", future = true)]
+#[tracing::instrument(name = "usecases.ci_runtime.discover", level = "trace", skip_all)]
 pub async fn discover_production_ci_failure_request_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
@@ -800,9 +800,9 @@ impl ProductionGitHubCiArchiveV1 {
         if let Err(failure) = self.authorize_source(context, request).await {
             return source_failure_result(&self.provider, request, failure);
         }
-        let retained = hotpath::future!(
+        let retained = tracing::Instrument::instrument(
             self.retained.load(context, request),
-            label = "usecases.ci_runtime.cache_load"
+            tracing::trace_span!("usecases.ci_runtime.cache_load"),
         )
         .await;
         if let Err(failure) = self.authorize_source(context, request).await {
@@ -848,7 +848,7 @@ impl ProductionGitHubCiArchiveV1 {
         }
     }
 
-    #[hotpath::measure(label = "usecases.ci_runtime.live_record", future = true)]
+    #[tracing::instrument(name = "usecases.ci_runtime.live_record", level = "trace", skip_all)]
     async fn live_record(
         &self,
         context: &RequestContext,
@@ -970,7 +970,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
         context: &'a RequestContext,
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if !context_admitted(context) {
                     return unavailable_result(&self.provider, request);
@@ -1068,10 +1068,10 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                 if let Err(failure) = self.authorize_source(context, request).await {
                     return source_failure_result(&self.provider, request, failure);
                 }
-                let retained = hotpath::future!(
+                let retained = tracing::Instrument::instrument(
                     self.retained
                         .retain(context, request, &live, state, coverage),
-                    label = "usecases.ci_runtime.cache_store"
+                    tracing::trace_span!("usecases.ci_runtime.cache_store"),
                 )
                 .await
                 .filter(|observation| observation.validate_for(request, &live));
@@ -1106,7 +1106,7 @@ impl CiReadOnlyProviderArchiveV1 for ProductionGitHubCiArchiveV1 {
                     }),
                 }
             },
-            label = "usecases.ci_runtime.read_record"
+            tracing::trace_span!("usecases.ci_runtime.read_record"),
         ))
     }
 }

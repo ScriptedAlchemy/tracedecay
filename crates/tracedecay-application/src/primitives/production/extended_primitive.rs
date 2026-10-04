@@ -241,7 +241,7 @@ pub(super) fn update_storage_status_history(
 /// Canonical storage-status owner used by the application operation and its
 /// dashboard projection. History is durable and scope-bound, so growth does
 /// not reset when the daemon or dashboard restarts.
-#[hotpath::measure(label = "usecases.primitives.storage_status", future = true)]
+#[tracing::instrument(name = "usecases.primitives.storage_status", level = "trace", skip_all)]
 pub(crate) async fn canonical_storage_status(
     database: &Database,
     source_runtime: &SourceReadContext,
@@ -252,9 +252,9 @@ pub(crate) async fn canonical_storage_status(
     let database_path = database.canonical_database_path();
     let store_path = database_path.display().to_string();
     let file_bytes = database_path.metadata().ok().map(|metadata| metadata.len());
-    let page_counts = hotpath::future!(
+    let page_counts = tracing::Instrument::instrument(
         database.storage_page_counts(),
-        label = "usecases.primitives.storage_status.page_counts"
+        tracing::trace_span!("usecases.primitives.storage_status.page_counts"),
     )
     .await
     .ok();
@@ -290,7 +290,7 @@ pub(crate) async fn canonical_storage_status(
             // History persistence is file I/O into the store directory; run it
             // on the blocking pool so a stalled filesystem cannot capture an
             // async executor thread for the daemon.
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     update_storage_status_history(
                         &history_path,
@@ -300,7 +300,7 @@ pub(crate) async fn canonical_storage_status(
                         observed_at,
                     )
                 }),
-                label = "usecases.primitives.storage_status.history"
+                tracing::trace_span!("usecases.primitives.storage_status.history"),
             )
             .await
             .unwrap_or_else(|_| {
@@ -335,7 +335,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a QualifiedNamePrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 // The lookup answers in one page and never issues a
                 // continuation, so any presented cursor is another operation's.
@@ -399,7 +399,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.qualified_name"
+            tracing::trace_span!("usecases.primitives.qualified_name"),
         ))
     }
 
@@ -408,7 +408,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a CallChainPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
                 let reader = match open_code_graph(
@@ -490,7 +490,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.call_chain"
+            tracing::trace_span!("usecases.primitives.call_chain"),
         ))
     }
 
@@ -499,7 +499,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a FileDependentsPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let observed_at = now_observed();
                 let cancellation = request_graph_cancellation(context.request);
@@ -555,7 +555,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 };
                 outcome.with_cost(cost.receipt())
             },
-            label = "usecases.primitives.file_dependents"
+            tracing::trace_span!("usecases.primitives.file_dependents"),
         ))
     }
 
@@ -564,7 +564,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SourceBodyPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
                 let reader = match open_code_graph(
@@ -644,7 +644,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.source_body"
+            tracing::trace_span!("usecases.primitives.source_body"),
         ))
     }
 
@@ -653,7 +653,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a SourceOutlinePrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
                 let reader = match open_code_graph(
@@ -704,7 +704,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.source_outline"
+            tracing::trace_span!("usecases.primitives.source_outline"),
         ))
     }
 
@@ -713,7 +713,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
                 let reader = match open_code_graph(
@@ -747,7 +747,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.module_api"
+            tracing::trace_span!("usecases.primitives.module_api"),
         ))
     }
 
@@ -756,7 +756,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a HealthDeltaRequest,
     ) -> ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let observed_at = now_observed();
                 let cancellation = request_graph_cancellation(context.request);
@@ -811,7 +811,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     ),
                 }
             },
-            label = "usecases.primitives.health_delta"
+            tracing::trace_span!("usecases.primitives.health_delta"),
         ))
     }
 
@@ -820,7 +820,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 completed(
                     canonical_storage_status(
@@ -834,7 +834,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     now_observed(),
                 )
             },
-            label = "usecases.primitives.storage_status"
+            tracing::trace_span!("usecases.primitives.storage_status"),
         ))
     }
 
@@ -843,7 +843,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         context: RetrievalPortContext<'a>,
         request: &'a DiagnosticsPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let finished_at = now_observed();
                 if !(1..=1_000).contains(&request.maximum_diagnostics) {
@@ -1037,7 +1037,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     finished_at,
                 )
             },
-            label = "usecases.primitives.diagnostics"
+            tracing::trace_span!("usecases.primitives.diagnostics"),
         ))
     }
 }
