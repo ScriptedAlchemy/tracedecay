@@ -1041,20 +1041,35 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             .expect("release reconcile after retained graph observation");
     }
 
+    let settled_context = graph_request_context(scope.clone(), "restart-settled");
     let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let settled = loop {
+    let (settled, settled_read) = loop {
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await;
+        // A successor's graph store exists before its catalog warms. The
+        // production graph route keeps serving the retained predecessor during
+        // that interval, so text currency alone cannot prove graph currency.
+        let graph_read = port
+            .open(CodeGraphReadRequest::from_context(
+                &settled_context,
+                now_micros(),
+            ))
+            .await;
         if let Some((latest, current)) = observed.as_ref()
             && *current
-            && latest.interactive_graph_store().is_ok()
+            && let Ok(read) = graph_read.as_ref()
+            && read.freshness() == CodeGraphReadFreshnessV1::Current
+            && read.generation() == &latest.metadata().manifest().generation_id
         {
-            break latest.clone();
+            break (
+                latest.clone(),
+                graph_read.expect("observed current graph read"),
+            );
         }
         assert!(
             std::time::Instant::now() <= settled_deadline,
-            "persistent graph generation did not become query-serving: {:?}",
+            "persistent graph generation did not become query-serving: text={:?}, graph={graph_read:?}",
             observed.as_ref().map(|(latest, current)| (
                 current,
                 latest.code_graph_serving_readiness(),
@@ -1081,14 +1096,6 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         restart_started.elapsed().as_micros()
     );
 
-    let settled_context = graph_request_context(scope.clone(), "restart-settled");
-    let settled_read = port
-        .open(CodeGraphReadRequest::from_context(
-            &settled_context,
-            now_micros(),
-        ))
-        .await
-        .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
     let seated_census = if corrupt_graph || dirty_before_restart {
         // A decoded census is a strictly later state than the text-serving
@@ -1111,12 +1118,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                     generation_id,
                     freshness: GenerationCensusServingFreshness::Current,
                     ..
-                } if corrupt_graph => generation_id.as_str() == seeded_generation_id.as_str(),
-                GenerationCensusSnapshot::Observed {
-                    generation_id,
-                    freshness: GenerationCensusServingFreshness::Current,
-                    ..
-                } => generation_id.as_str() != seeded_generation_id.as_str(),
+                } => generation_id.as_str() == settled_read.generation().as_str(),
                 _ => false,
             };
             if seats_the_settled_generation {
