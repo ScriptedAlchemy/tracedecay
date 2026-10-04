@@ -544,12 +544,19 @@ async fn mount_one_production_composition_project(
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?
         };
-        Box::pin(wait_for_production_composition_code_index(
+        if let Err(error) = Box::pin(wait_for_production_composition_code_index(
             &stores.invocation,
             &composition.canonical_project_path,
             &code_search_scope,
         ))
-        .await?;
+        .await
+        {
+            // An aborted mount must retire the server's background owners:
+            // file-locked workers like the delivery recorder outlive a dropped
+            // composition and wedge every later open on their lock.
+            composition.server.shutdown().await;
+            return Err(error);
+        }
     }
     Ok((composition.canonical_project_path, composition.server))
 }

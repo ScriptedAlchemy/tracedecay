@@ -14,14 +14,32 @@
 
 #![allow(clippy::too_many_lines)]
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
-/// Distinguishes read-only queries from queries that mutate a scratch file.
+/// One untimed setup call executed before an `Effect` iteration. `capture`
+/// maps `result`-relative JSON paths to `{{token}}` names; captured values are
+/// substituted into later step args and into the timed call's args, so
+/// lifecycle chains can mint fresh identities per iteration.
+pub struct PrimeStep {
+    /// `{{token}}` values computed by the prime builder itself (no tool call
+    /// needed) — substituted before `args`, so the step's own args may
+    /// reference them.
+    pub inject: Vec<(String, Value)>,
+    pub tool: &'static str,
+    pub args: Value,
+    pub capture: &'static [(&'static str, &'static str)],
+}
+
+/// Builds the untimed prime chain for one effect iteration: given the sampled
+/// context and the iteration counter, returns the ordered setup calls.
+pub type PrimeFn = fn(&QueryContext, u64) -> Vec<PrimeStep>;
+
+/// Distinguishes read-only queries from queries that mutate state.
 #[derive(Clone)]
 pub enum QueryKind {
     Read,
@@ -32,6 +50,24 @@ pub enum QueryKind {
         /// Bytes the scratch file is reset to before each iter.
         init_content: String,
     },
+    /// One-shot or stateful operations measured with fresh preconditions per
+    /// iteration: the `prime` chain (untimed) recreates the entities the timed
+    /// call consumes, so every iteration measures a real effect, not a replay.
+    /// `cleanup` runs untimed AFTER the timed call — journaled restores that
+    /// return the shared bench corpus to its precondition state.
+    Effect {
+        prime: PrimeFn,
+        cleanup: Option<EffectCleanup>,
+    },
+}
+
+/// Post-timed restore for an `Effect` query: `capture` reads identities out
+/// of the timed response (e.g. a minted `effect_id`) into the token table,
+/// then `steps` runs the restore chain untimed.
+#[derive(Clone)]
+pub struct EffectCleanup {
+    pub capture: &'static [(&'static str, &'static str)],
+    pub steps: PrimeFn,
 }
 
 /// One concrete tool invocation: the MCP tool name, its args, and the kind
@@ -45,7 +81,7 @@ pub struct Query {
 }
 
 impl Query {
-    fn read(label: &'static str, tool: &'static str, args: Value) -> Self {
+    pub(crate) fn read(label: &'static str, tool: &'static str, args: Value) -> Self {
         Self {
             label,
             tool,
@@ -54,7 +90,7 @@ impl Query {
         }
     }
 
-    fn write(
+    pub(crate) fn write(
         label: &'static str,
         tool: &'static str,
         args: Value,
@@ -73,26 +109,180 @@ impl Query {
     }
 }
 
+// Effect queries are constructed literally at the coverage call sites —
+// constructor sugar lives there (`eq`/`eqc`), since this file is also the
+// standalone `queries` bench root where effect groups never exist.
+
 /// All queries we run for one tool. The harness invariant is `queries.len() == 5`.
 pub struct ToolGroup {
     pub tool: &'static str,
     pub queries: Vec<Query>,
 }
 
-/// Sampled data drawn from a freshly indexed graph. Built once per repo.
+/// Entity state minted during context build; `None`/empty means the producer
+/// failed and the dependent groups are skipped (the reason lands in `skipped`).
+///
+/// Lives here (not in `coverage/`) because `QueryContext` carries it and this
+/// file is compiled as two bench roots: the standalone `queries` bench has no
+/// `coverage` module, so every type it names must resolve in this crate root.
+#[derive(Default)]
+pub struct Seeds {
+    pub project_id: Option<String>,
+    pub repository_id: Option<String>,
+    pub branch: Option<String>,
+    pub head_commit: Option<String>,
+    /// First-parent ancestor of `head_commit` for range-diff coverage.
+    pub parent_commit: Option<String>,
+    /// (fact_id, related_fact_id, search_query, [entities])
+    pub fact_pair: Option<(String, String, String, Vec<String>)>,
+    /// Scalar boolean key toggled during seed (diagnostics.prewarm.v1).
+    pub config_key: Option<String>,
+    /// Latest configuration revision after the seed set/unset pair.
+    pub config_revision: Option<String>,
+    /// The seeded revision (rollback target).
+    pub config_rollback_target: Option<String>,
+    /// Toggled scalar value to set next ({kind:boolean,value}).
+    pub config_scalar: Option<Value>,
+    /// Effective work.topology_policy.v1 value for protected previews.
+    pub topology_policy: Option<Value>,
+    /// Code-query node identities minted via `code_symbol_search` (distinct
+    /// from graph node ids; these tools consume the query-side identity).
+    pub code_node_ids: Vec<String>,
+    /// A graph node whose rename_preview is unblocked (source-edit lane needs
+    /// a symbol the policy can actually rename — most corpus symbols refuse
+    /// with ambiguous/hazard evidence, so seed time probes candidates).
+    pub rename_node: Option<Value>,
+    /// Symbol qualified names whose per-op dry_run completed small enough to
+    /// return `expected_state` inline (big symbols truncate the preview into
+    /// a result handle, which timing must not depend on).
+    pub replace_target: Option<String>,
+    pub insert_target: Option<String>,
+    pub move_target: Option<String>,
+    /// Ingested codex session id for this repo (td-bench-<name>).
+    pub lcm_session: Option<String>,
+    /// Canonical occurrence id minted by lcm_load_session.
+    pub lcm_message_id: Option<String>,
+    /// multi_root scope_set committed via compare_and_swap (id/revision/digest).
+    pub scope_set_id: Option<String>,
+    pub scope_set_revision: Option<i64>,
+    pub scope_set_digest: Option<String>,
+    /// session_refresh_begin handle + its selector arguments.
+    pub refresh_handle: Option<String>,
+    /// Operation id returned alongside the begin handle.
+    pub refresh_operation_id: Option<String>,
+    pub refresh_selectors: Option<Value>,
+    pub automation_run_id: Option<String>,
+    /// git_hunks producer output for `git_preview`/`git_apply`.
+    pub preview_input_id: Option<String>,
+    pub hunk_digests: Vec<String>,
+    /// Repo-relative file left modified for the git working-tree lane.
+    pub dirty_file: Option<String>,
+    /// Skill id minted via profile skill file drop (managed skills surface).
+    pub skill_id: Option<String>,
+    /// First worktree entry id seen in the seeded worktree inventory (cleanup
+    /// lane targets `kind:"worktree"` objects).
+    pub worktree_id: Option<String>,
+    /// Changed path whose run_affected_tests plan maps to covering tests
+    /// (minted a request handle at seed time).
+    pub test_results_path: Option<String>,
+    /// Reversible-truncation handle (`rh_…`) minted by a deliberately fat
+    /// search response at seed time; feeds `tracedecay_retrieve`.
+    pub retrieve_handle: Option<String>,
+    /// Tools whose application authority never mounts under the bench
+    /// composition, discovered by seed-time probes — their groups are
+    /// omitted and named in `skipped`.
+    pub unavailable_tools: std::collections::BTreeSet<String>,
+    /// Tools/families whose seed producer failed — the bench prints these so
+    /// skipped coverage is visible instead of silent.
+    pub skipped: Vec<String>,
+    /// Real repo-relative file paths sampled from `tracedecay_files`.
+    pub sample_files: Vec<String>,
+    /// Work/workflow lifecycle artifacts minted by `seed_work`.
+    pub work: Option<WorkSeeds>,
+    /// A fresh work-executable binding committed this run; route resolution
+    /// reads bindings at composition open, so the caller must reopen the
+    /// harness once (then rebuild context) before the admit lane can pass.
+    pub needs_reopen_for_provider: bool,
+    /// Second bench branch pinned at HEAD~1 (branch_diff base ref; the tool
+    /// resolves branch names, not raw oids).
+    pub base_branch: Option<String>,
+    /// Native-integration journey artifacts minted at seed (inventory →
+    /// stack_snapshot → preflight → approve). Absent = family skipped.
+    pub native: Option<NativeSeeds>,
+}
+
+/// Minted once per run: the stack_snapshot body that seals, plus the live
+/// transaction the status lane reads.
+#[derive(Clone, Default)]
+pub struct NativeSeeds {
+    /// Validated `stack_snapshot` request body — the groups replay it to mint
+    /// fresh per-iteration transactions.
+    pub snapshot_body: Value,
+    /// transaction_id of the seed-minted (approved) transaction.
+    pub transaction_id: String,
+}
+
+/// Artifacts of one real disposable Work lifecycle plus one workflow
+/// definition/run, minted once so the ~45 work_* and workflow_* tools measure
+/// against real graph state. Field absence means that leg failed and only its
+/// dependent groups skip.
+#[derive(Default)]
+pub struct WorkSeeds {
+    pub selection: Value,
+    pub task_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    /// Started-then-cancelled terminal attempt identity {task,run,attempt}.
+    pub attempt_identity: Value,
+    /// Second terminal attempt for duplicate-adjudication reads/effects.
+    pub dup_attempt_identity: Option<Value>,
+    /// verified_graph_version from the first generate_proposal.
+    pub initial_version: Value,
+    /// accepted graph_version integer (base for admit_execution).
+    pub accepted_gv: i64,
+    /// Current verified_version from a post-lifecycle work_views.
+    pub current_version: Value,
+    /// WorkExecutionSnapshot from admit_execution (start_attempt input).
+    pub execution_snapshot: Value,
+    /// Head commit id used by the seed attempts.
+    pub commit: String,
+    /// workflow_definition validated with environment-repaired pins.
+    pub definition: Value,
+    pub definition_id: String,
+    pub actor_id: String,
+    /// worktree_id from the start_run authority (handoff scope component).
+    pub worktree_id: Option<String>,
+    /// A live workflow run (id + current sequence) for run-control effects.
+    pub wf_run_id: Option<String>,
+    /// Projection generation pair for duplicate-adjudication evidence.
+    pub work_generation: Option<Value>,
+    pub topology_generation: Option<Value>,
+}
+
+/// Sampled data drawn from a freshly indexed graph plus seeded entity state.
+/// Built once per repo.
 pub struct QueryContext {
     pub function_ids: Vec<String>,
     pub struct_ids: Vec<String>,
     pub any_ids: Vec<String>,
     pub function_qnames: Vec<String>,
     pub dir_prefixes: Vec<String>,
+    /// Mounted repo root on disk (file URIs, worktree targets).
+    pub project_root: PathBuf,
+    /// The flat `tracedecay_files` listing (file objects with `path`), so
+    /// seed probes reuse the one successful fetch rather than re-reading it.
+    pub files: Vec<Value>,
+    /// Coverage-sweep seeds, populated by `coverage::seed_all` when the
+    /// `large_repos` root wires it in; the standalone `queries` bench leaves
+    /// it defaulted.
+    pub seeds: Seeds,
 }
 
 impl QueryContext {
     /// Pick the i-th id with wrap-around. Returns `"missing"` if no samples
     /// exist, the tool handler will report a not-found error, which is still
     /// useful timing data (and the bench label keeps the case obvious).
-    fn pick(slice: &[String], i: usize) -> String {
+    pub(crate) fn pick(slice: &[String], i: usize) -> String {
         if slice.is_empty() {
             "missing".to_string()
         } else {
@@ -102,6 +292,27 @@ impl QueryContext {
 }
 
 pub async fn build_context(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<QueryContext, String> {
+    // A first-index or post-upgrade rebuild publishes after minutes, while the
+    // composition mount gates at 20s — the reads below answer typed
+    // warming/unavailable states until the generation serves. Poll the same
+    // mounted scheduler until it does (bounded, then the error propagates).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    loop {
+        match try_build_context(harness, project_root).await {
+            Ok(ctx) => return Ok(ctx),
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("[bench] context not ready ({e}); waiting for index...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn try_build_context(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> Result<QueryContext, String> {
@@ -154,17 +365,7 @@ pub async fn build_context(
         }
     }
 
-    let file_payload = call_json_tool(
-        harness,
-        project_root,
-        "tracedecay_files",
-        json!({ "layout": "flat", "format": "json" }),
-    )
-    .await?;
-    let files = file_payload
-        .get("files")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "tracedecay_files returned no files array".to_owned())?;
+    let files: Vec<Value> = list_repo_files(harness, project_root).await?;
 
     // Collect first-segment directory prefixes from the sample files (so
     // `path_prefix` queries are valid for *this* repo regardless of layout).
@@ -186,16 +387,60 @@ pub async fn build_context(
     require_samples("qualified function names", &function_qnames)?;
     require_samples("indexed directory prefixes", &dir_prefixes)?;
 
+    // Seed producers live in `coverage/` (not compiled into the standalone
+    // `queries` bench root): the caller wires `coverage::seed_all` when it
+    // wants the sweep ledger.
     Ok(QueryContext {
         function_ids,
         struct_ids,
         any_ids,
         function_qnames,
         dir_prefixes,
+        project_root: project_root.to_path_buf(),
+        files,
+        seeds: Seeds::default(),
     })
 }
 
-async fn call_json_tool(
+/// Flat `tracedecay_files` listing as value objects. Large listings come back
+/// as a result-handle envelope whose usable entries live in `preview` (a
+/// truncated JSON string); the complete file objects are recovered from the
+/// prefix so every consumer sees the same shape.
+pub(crate) async fn list_repo_files(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<Vec<Value>, String> {
+    let file_payload = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_files",
+        json!({ "layout": "flat", "format": "json" }),
+    )
+    .await?;
+    match file_payload.get("files").and_then(Value::as_array) {
+        Some(files) => Ok(files.clone()),
+        None => {
+            let preview = file_payload
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let re = regex::Regex::new(r#"\{"bytes":\d+,"path":"[^"]+","symbols":\d+\}"#)
+                .map_err(|e| e.to_string())?;
+            let recovered: Vec<Value> = re
+                .find_iter(preview)
+                .filter_map(|m| serde_json::from_str::<Value>(m.as_str()).ok())
+                .collect();
+            if recovered.is_empty() {
+                return Err(format!(
+                    "tracedecay_files returned no files array: {file_payload}"
+                ));
+            }
+            Ok(recovered)
+        }
+    }
+}
+
+pub(crate) async fn call_json_tool(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     tool_name: &str,
@@ -208,7 +453,10 @@ async fn call_json_tool(
     json_tool_payload(tool_name, &response)
 }
 
-fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Value, String> {
+pub(crate) fn json_tool_payload(
+    tool_name: &str,
+    response: &JsonRpcResponse,
+) -> Result<Value, String> {
     if let Some(error) = &response.error {
         return Err(format!("{tool_name} JSON-RPC failed: {error:?}"));
     }
@@ -227,7 +475,7 @@ fn json_tool_payload(tool_name: &str, response: &JsonRpcResponse) -> Result<Valu
         .map_err(|error| format!("{tool_name} returned non-JSON output: {error}; text={text}"))
 }
 
-fn push_unique(values: &mut Vec<String>, value: &str) {
+pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|existing| existing == value) {
         values.push(value.to_owned());
     }
@@ -243,11 +491,11 @@ fn require_samples(label: &str, values: &[String]) -> Result<(), String> {
     }
 }
 
-fn five<F: FnMut(usize) -> Query>(mut f: F) -> Vec<Query> {
+pub(crate) fn five<F: FnMut(usize) -> Query>(mut f: F) -> Vec<Query> {
     (0..5).map(&mut f).collect()
 }
 
-fn dir(ctx: &QueryContext, i: usize) -> String {
+pub(crate) fn dir(ctx: &QueryContext, i: usize) -> String {
     if ctx.dir_prefixes.is_empty() {
         "src".to_string()
     } else {
@@ -260,7 +508,7 @@ fn dir(ctx: &QueryContext, i: usize) -> String {
 /// at end-of-bench reverts everything in one shot.
 pub const SCRATCH_DIR: &str = ".tracedecay-bench-scratch";
 
-fn scratch(name: &str) -> String {
+pub(crate) fn scratch(name: &str) -> String {
     format!("{SCRATCH_DIR}/{name}")
 }
 
@@ -308,7 +556,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_callers",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "maximum_depth": 3 }),
+                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "maximum_depth": 3 }),
             )
         }),
     });
@@ -319,7 +567,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_callees",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "maximum_depth": 3 }),
+                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "maximum_depth": 3 }),
             )
         }),
     });
@@ -352,7 +600,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_signature",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i) }),
+                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i) }),
             )
         }),
     });
@@ -363,7 +611,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_impact",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 2 }),
+                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "max_depth": 2 }),
             )
         }),
     });
@@ -586,22 +834,16 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
 
     if ast_grep_on_path() {
         groups.push(ToolGroup {
-            tool: "tracedecay_ast_grep_rewrite",
+            tool: "tracedecay_ast_grep_search",
             queries: five(|i| {
-                let path = scratch(&format!("ast_grep_{i}.rs"));
-                // Provide a small rust source with a function whose name we'll
-                // rewrite. ast-grep's metavariable syntax is `$NAME`.
-                let content = format!("pub fn bench_target_{i}() {{\n    let _ = {i};\n}}\n");
-                Query::write(
-                    "rename_fn",
-                    "tracedecay_ast_grep_rewrite",
+                Query::read(
+                    "search_fn",
+                    "tracedecay_ast_grep_search",
                     json!({
-                        "path": path,
-                        "pattern": format!("fn bench_target_{i}() {{ $$$BODY }}"),
-                        "rewrite": format!("fn bench_renamed_{i}() {{ $$$BODY }}"),
+                        "pattern": *["fn $NAME($$$ARGS)", "let $X = $Y", "impl $T { $$$B }", "pub fn $NAME($$$A)", "match $E { $$$ARMS }"].iter().nth(i).unwrap_or(&""),
+                        "lang": *["rust", "python", "rust", "rust", "python"].iter().nth(i).unwrap_or(&"rust"),
+                        "max_results": 20,
                     }),
-                    path.clone(),
-                    content,
                 )
             }),
         });
