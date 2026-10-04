@@ -1699,6 +1699,44 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
     assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
 }
 
+/// Bounded admission waits only on contention. A writer whose budget is
+/// already spent, like a callback or a drain descheduled past its deadline,
+/// still takes a free lease, including the lease a settlement reacquires
+/// after its barriers; a held lease refuses it without waiting.
+#[test]
+fn a_writer_whose_budget_is_spent_takes_a_free_lease_but_never_a_held_one() {
+    let root = TestDir::new("spent-budget");
+    let (owner, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    assert_eq!(
+        HookSpoolV1::open_within(&root.0, config(), UtcMicros(11), Duration::ZERO).unwrap_err(),
+        HookSpoolError::AdmissionTimedOut
+    );
+    drop(owner);
+
+    let (mut admitted, _) =
+        HookSpoolV1::open_within(&root.0, config(), UtcMicros(11), Duration::ZERO)
+            .expect("a free lease admits a writer with no budget left");
+    let record = admitted
+        .append(envelope(1, 9), &binding(), UtcMicros(11))
+        .unwrap();
+    assert!(
+        admitted
+            .acknowledge(
+                HookSpoolAckV1 {
+                    sequence: record.sequence,
+                    receipt_id: [41; 16],
+                    disposition: HookSpoolAckDispositionV1::Committed,
+                },
+                UtcMicros(11),
+            )
+            .unwrap()
+    );
+    drop(admitted);
+    let (_, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(report.pending_records, 0);
+    assert_eq!(report.next_sequence, 2);
+}
+
 #[test]
 fn bounded_writer_admission_preserves_failfast_and_times_out_without_mutation() {
     let root = TestDir::new("bounded-admission");
@@ -1720,12 +1758,6 @@ fn bounded_writer_admission_preserves_failfast_and_times_out_without_mutation() 
     );
     assert_eq!(fs::read(meta_path(&root.0)).unwrap(), before);
     drop(owner);
-    // An exhausted budget never admits, even when the lease is free.
-    assert_eq!(
-        HookSpoolV1::open_within(&root.0, config(), UtcMicros(11), std::time::Duration::ZERO)
-            .unwrap_err(),
-        HookSpoolError::AdmissionTimedOut
-    );
     let (mut admitted, _) = HookSpoolV1::open_within(
         &root.0,
         config(),
