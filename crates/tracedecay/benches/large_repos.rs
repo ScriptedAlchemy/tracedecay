@@ -629,6 +629,10 @@ fn bench_all(c: &mut Criterion) {
                             // authority; a run-unique iteration base keeps
                             // idempotency keys distinct across runs.
                             let mut iteration = coverage::now_micros() as u64;
+                            // PerIteration, not SmallInput: a batch larger
+                            // than one runs every setup before any routine,
+                            // so a shared scratch file would be reseeded
+                            // ahead of the previous iteration's timed apply.
                             b.iter_batched(
                                 || {
                                     reset_scratch(&root, &scratch, &init);
@@ -701,13 +705,16 @@ fn bench_all(c: &mut Criterion) {
                                         }
                                     })
                                 },
-                                BatchSize::SmallInput,
+                                BatchSize::PerIteration,
                             );
                         });
                     }
                     QueryKind::Effect { prime, cleanup } => {
                         g.bench_with_input(id, q, |b, q| {
                             let mut iteration = coverage::now_micros() as u64;
+                            // PerIteration: primed state is consumed by the
+                            // paired timed call, so a batch must not run
+                            // several primes ahead of their routines.
                             b.iter_batched(
                                 || {
                                     (
@@ -742,7 +749,7 @@ fn bench_all(c: &mut Criterion) {
                                         .unwrap_or_else(|e| panic!("{e}"));
                                     }
                                 },
-                                BatchSize::SmallInput,
+                                BatchSize::PerIteration,
                             );
                         });
                     }
