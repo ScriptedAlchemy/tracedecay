@@ -13,7 +13,7 @@
 //! recovery, and reads where exact porcelain semantics remain the authority.
 
 pub mod churn;
-pub mod co_change;
+pub mod cochange;
 
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
