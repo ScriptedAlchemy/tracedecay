@@ -2,13 +2,14 @@ use serde_json::Value;
 use tracedecay_contracts::retrieval::{
     ContextLexicalAnchorV1, LexicalAnchorDropReasonV1, LexicalAnchorDropV1,
     SearchLexicalAlternativeReasonV1, SearchLexicalFieldV1, SearchLexicalRouteV1,
-    SearchResultRowV1, SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1,
+    SearchQueryRouteDeciderV1, SearchQueryRouteKindV1, SearchQueryRouteV1, SearchResultRowV1,
+    SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::retrieval::lexical::{
     LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1,
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalProximityV1, LexicalRouteKindV1,
-    LexicalRouteReceiptV1, LexicalRoutingV1,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalProximityV1, LexicalQueryRouteV1,
+    LexicalRouteDeciderV1, LexicalRouteKindV1, LexicalRouteReceiptV1, LexicalRoutingV1,
 };
 
 use crate::tools::render::Md;
@@ -27,7 +28,7 @@ pub(super) fn routing_from_request(request: &SearchSurfaceRequestV1) -> Result<L
         .collect();
     let mut routing = routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
-        request.prefer_symbol.unwrap_or(false),
+        request.prefer_symbol,
     )?
     .with_aliases(aliases)
     .map_err(|error| TraceDecayError::Config {
@@ -71,7 +72,7 @@ fn lexical_field(field: SearchLexicalFieldV1) -> LexicalFieldV1 {
 
 pub(super) fn routing_from_parts(
     anchors: Vec<String>,
-    prefer_symbol: bool,
+    prefer_symbol: Option<bool>,
 ) -> Result<LexicalRoutingV1> {
     LexicalRoutingV1::new(anchors, prefer_symbol).map_err(|error| TraceDecayError::Config {
         message: error.to_string(),
@@ -90,6 +91,38 @@ pub(super) fn route_label(route: &LexicalRouteKindV1) -> String {
         }
         LexicalRouteKindV1::Alias { alternative, .. } => format!("alias:{alternative}"),
     }
+}
+
+/// The query-shape route the kernel planned, with its margin.
+pub(super) fn query_route(receipt: &LexicalRouteReceiptV1) -> SearchQueryRouteV1 {
+    let decision = receipt.decision;
+    SearchQueryRouteV1 {
+        route: match decision.route {
+            LexicalQueryRouteV1::Name => SearchQueryRouteKindV1::Name,
+            LexicalQueryRouteV1::Prose => SearchQueryRouteKindV1::Prose,
+        },
+        margin: f64::from(decision.margin_micros) / 1_000_000.0,
+        decided_by: match decision.decided_by {
+            LexicalRouteDeciderV1::QueryShape => SearchQueryRouteDeciderV1::QueryShape,
+            LexicalRouteDeciderV1::Caller => SearchQueryRouteDeciderV1::Caller,
+        },
+    }
+}
+
+/// One markdown line naming the query route, its margin, and its decider.
+pub(super) fn query_route_line(route: &SearchQueryRouteV1) -> String {
+    let lane = match route.route {
+        SearchQueryRouteKindV1::Name => "name",
+        SearchQueryRouteKindV1::Prose => "prose",
+    };
+    let decided_by = match route.decided_by {
+        SearchQueryRouteDeciderV1::QueryShape => "query shape",
+        SearchQueryRouteDeciderV1::Caller => "caller prefer_symbol",
+    };
+    format!(
+        "Query route: {lane} (margin {:+.2}, decided by {decided_by})",
+        route.margin
+    )
 }
 
 /// The page-level route and anchor evidence, attached only when a route
@@ -312,7 +345,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::json;
-    use tracedecay_query::retrieval::lexical::{LexicalRouteMatchV1, MAX_LEXICAL_ANCHORS_V1};
+    use tracedecay_query::retrieval::lexical::{
+        LexicalRouteDecisionV1, LexicalRouteMatchV1, MAX_LEXICAL_ANCHORS_V1,
+        SymbolRoutePreferenceV1,
+    };
 
     use super::*;
 
@@ -344,7 +380,7 @@ mod tests {
         }))
         .expect("valid routing");
         assert_eq!(routing_plan.anchors.len(), 2);
-        assert!(routing_plan.prefer_symbol);
+        assert_eq!(routing_plan.prefer_symbol, SymbolRoutePreferenceV1::Always);
         assert_eq!(routing_plan.aliases[0].strict_query, "memoization");
         assert_eq!(routing_plan.aliases[0].alternative, "cache");
         assert_eq!(routing_plan.phrases, ["durable cache"]);
@@ -434,6 +470,7 @@ mod tests {
             anchors: Vec::new(),
             dropped_sites: BTreeMap::new(),
             declaring_sites: std::collections::BTreeSet::new(),
+            decision: LexicalRouteDecisionV1::default(),
         };
         assert_eq!(route_evidence(&mut results, &query_only), (None, None));
         assert_eq!(results[0].lexical_routes, None);
@@ -508,6 +545,7 @@ mod tests {
             ],
             dropped_sites: BTreeMap::new(),
             declaring_sites: std::collections::BTreeSet::new(),
+            decision: LexicalRouteDecisionV1::default(),
         };
         let (routes, anchors) = route_evidence(&mut results, &receipt);
         let output = json!({"lexical_routes": routes, "lexical_anchors": anchors});

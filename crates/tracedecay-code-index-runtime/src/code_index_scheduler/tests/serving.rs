@@ -6853,3 +6853,96 @@ async fn status_keeps_the_committed_generation_through_a_refresh() {
     assert_eq!(advertised.len(), 2, "status advertised {advertised:?}");
     assert_eq!(advertised[0].as_deref(), Some(committed.as_str()));
 }
+
+/// A name-shaped query takes the symbol-name route without `prefer_symbol`
+/// and reports the decision: qualified spellings the strict query cannot
+/// match still rank their definition first, while a prose query keeps the
+/// strict query alone and ranks exactly as with the route suppressed.
+#[tokio::test]
+async fn name_shaped_queries_take_the_symbol_name_route_by_query_shape() {
+    use tracedecay_query::retrieval::lexical::{
+        LexicalQueryRouteV1, LexicalRouteDeciderV1, LexicalRouteDecisionV1,
+    };
+    let fixture = GitFixture::new(&[
+        (
+            "src/users.ts",
+            "export function getUserById(id: number): number {\n  return id;\n}\n",
+        ),
+        (
+            "src/session.ts",
+            "import { getUserById } from './users';\n\
+             /** Session lookup: loads the current user for each request. */\n\
+             export function loadSessionUser(session: number): number {\n  \
+             return getUserById(session);\n}\n",
+        ),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    for (query, margin_micros) in [
+        ("UserStore::getUserById", 500_000),
+        ("users.getUserById", 500_000),
+        ("getUserById handler", 0),
+    ] {
+        let routed = registry
+            .execute_query_search(
+                &scope,
+                routed_core_search_request(query, LexicalRoutingV1::default()),
+            )
+            .await
+            .expect("name-shaped search composes");
+        assert_eq!(
+            ranked_symbol_names(&routed, &latest).first(),
+            Some(&Some("src/users.ts::getUserById".to_owned())),
+            "{query} ranks its definition first"
+        );
+        assert_eq!(
+            routed.lexical_routes.decision,
+            LexicalRouteDecisionV1 {
+                route: LexicalQueryRouteV1::Name,
+                margin_micros,
+                decided_by: LexicalRouteDeciderV1::QueryShape,
+            },
+            "{query}"
+        );
+    }
+
+    let prose = "session lookup for each request";
+    let routed = registry
+        .execute_query_search(
+            &scope,
+            routed_core_search_request(prose, LexicalRoutingV1::default()),
+        )
+        .await
+        .expect("prose search composes");
+    let suppressed = registry
+        .execute_query_search(
+            &scope,
+            routed_core_search_request(
+                prose,
+                LexicalRoutingV1::new(Vec::new(), false).expect("routing"),
+            ),
+        )
+        .await
+        .expect("prose search composes");
+    assert_eq!(
+        routed.lexical_routes.decision,
+        LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Prose,
+            margin_micros: -500_000,
+            decided_by: LexicalRouteDeciderV1::QueryShape,
+        }
+    );
+    assert_eq!(
+        routed.lexical_routes.routes,
+        vec![LexicalRouteKindV1::Query]
+    );
+    let prose_ranking = ranked_symbol_names(&routed, &latest);
+    assert_eq!(
+        prose_ranking.first(),
+        Some(&Some("src/session.ts::loadSessionUser".to_owned()))
+    );
+    assert_eq!(prose_ranking, ranked_symbol_names(&suppressed, &latest));
+    registry.shutdown().await;
+}

@@ -326,6 +326,101 @@ async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
     fixture.harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn context_preserves_single_name_and_multiword_prose_routing() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("routing source directory");
+        fs::write(
+            project.join("src/lib.rs"),
+            concat!(
+                "/// Numerical solver convergence.\n",
+                "pub fn gmres() -> u32 { 1 }\n\n",
+                "pub struct Type;\n",
+                "impl Type {\n    pub fn method() -> u32 { 2 }\n}\n\n",
+                "pub fn getUserById() -> u32 { 3 }\n\n",
+                "pub fn parse_config() -> u32 { 4 }\n",
+            ),
+        )
+        .expect("routing source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("routing context server");
+    warm_code_index_search(&server, "gmres").await;
+
+    for (task, route, name, source) in [
+        ("gmres", "name", "gmres", "pub fn gmres() -> u32 { 1 }"),
+        (
+            "Type.method",
+            "prose",
+            "method",
+            "pub fn method() -> u32 { 2 }",
+        ),
+        (
+            "numerical solver convergence",
+            "prose",
+            "gmres",
+            "pub fn gmres() -> u32 { 1 }",
+        ),
+        (
+            "getUserById handler",
+            "prose",
+            "getUserById",
+            "pub fn getUserById() -> u32 { 3 }",
+        ),
+        (
+            "where is parse_config called",
+            "prose",
+            "parse_config",
+            "pub fn parse_config() -> u32 { 4 }",
+        ),
+    ] {
+        let request = json!({
+            "task": task,
+            "max_nodes": 1,
+            "include_code": true,
+            "include_memory": false,
+            "max_code_blocks": 1,
+        });
+        let automatic = context_json(&server, request.clone()).await;
+        assert_eq!(automatic["route"], route, "{task}: {automatic}");
+        assert_eq!(
+            automatic["search_matches"][0]["name"], name,
+            "{task}: {automatic}"
+        );
+        assert_eq!(automatic["search_matches"][0]["file"], "src/lib.rs");
+        assert_eq!(automatic["search_matches"][0]["rank"], 1);
+        assert!(
+            automatic["code"][0]["code"]
+                .as_str()
+                .expect("source block")
+                .contains(source),
+            "{task}: {automatic}"
+        );
+        let mut explicit_request = request;
+        explicit_request["prefer_symbol"] = json!(route == "name");
+        let explicit = context_json(&server, explicit_request).await;
+        assert_eq!(explicit["route"], route);
+        assert_eq!(explicit["search_matches"], automatic["search_matches"]);
+        assert_eq!(explicit["code"], automatic["code"]);
+    }
+    for (task, prefer_symbol, route) in [
+        ("gmres", false, "prose"),
+        ("getUserById handler", true, "name"),
+        ("function", true, "prose"),
+    ] {
+        let result = context_json(
+            &server,
+            json!({"task": task, "prefer_symbol": prefer_symbol, "include_code": true}),
+        )
+        .await;
+        assert_eq!(result["route"], route, "{result}");
+    }
+    fixture.harness.shutdown().await;
+}
+
 fn assert_rejected(response: &Value, message: &str) {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
