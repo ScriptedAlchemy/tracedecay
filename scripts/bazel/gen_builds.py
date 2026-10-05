@@ -218,7 +218,8 @@ def _cfg_eval(node):
         if key == "target_os":
             return value == "linux"
         if key == "target_family":
-            return {"unix": True, "windows": False}.get(value)
+            # unix admits the lane; the other Cargo families never do.
+            return {"unix": True, "windows": False, "wasm": False}.get(value)
         return None
     verdicts = [_cfg_eval(child) for child in node[1]]
     if op == "not":
@@ -1022,6 +1023,12 @@ def main():
 
     for path, content in outputs.items():
         path.write_text(content)
+    for path in obsolete:
+        # Generator-owned files render to nothing once their last Cargo
+        # reference is gone; remove them so --check stops flagging the same
+        # stale file. Handwritten files keep their (now empty-free) content.
+        path.unlink()
+        print(f"removed obsolete generated {path.relative_to(REPO)}")
 
     counts = {
         m: sorted(tname(m, kind, c) for kind, c in v)
