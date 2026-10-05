@@ -189,9 +189,7 @@ function drawSynapsePath(
   ctx.restore();
 }
 
-// ---------------------------------------------------------------------------
 // repository neighborhood
-// ---------------------------------------------------------------------------
 
 const orbCache = new Map<string, HTMLCanvasElement>();
 
@@ -304,9 +302,7 @@ function drawRepo(
   ctx.restore();
 }
 
-// ---------------------------------------------------------------------------
 // scoped: what the project knows
-// ---------------------------------------------------------------------------
 
 function mix(hex: string, toward: string, k: number) {
   const a = parseInt(hex.slice(1), 16);

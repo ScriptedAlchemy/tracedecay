@@ -340,9 +340,7 @@ impl CodeIndexExecutionControlV1 for CancelledControl {
         false
     }
 }
-// ---------------------------------------------------------------------------
 // Workload
-// ---------------------------------------------------------------------------
 
 struct GenerationRun {
     generation: Arc<CodeIndexPublishedGenerationV1>,
@@ -989,9 +987,7 @@ fn exact_clone_lookup(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Scratch directory
-// ---------------------------------------------------------------------------
 
 /// A self-created scratch directory. `tempfile` is a dev-dependency of this
 /// crate and a binary cannot use dev-dependencies, so the few lines are
@@ -1024,9 +1020,7 @@ impl Scratch {
             .map_err(|error| format!("remove scratch {}: {error}", self.path.display()))
     }
 }
-// ---------------------------------------------------------------------------
 // Summary
-// ---------------------------------------------------------------------------
 
 struct BodyRefreshMetrics {
     state: &'static str,
