@@ -964,6 +964,34 @@ fn lifecycle_permits_and_batch_contracts_are_fenced() {
 }
 
 #[test]
+fn transaction_scope_deserialization_preserves_nested_and_structural_validation() {
+    let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata(
+        project_shard("project.one"),
+        DurabilityClassV1::Full,
+    ))
+    .unwrap();
+    let scope = RuntimeTransactionScopeV1 {
+        transaction_id: RuntimeTransactionIdV1::new("transaction.serde").unwrap(),
+        compatibility,
+        opened_at: UtcMicros(1),
+    };
+
+    let mut wrong_scope = serde_json::to_value(&scope).unwrap();
+    wrong_scope["compatibility"]["binding"]["shard_id"] =
+        serde_json::to_value(code_snapshot_shard("project.one")).unwrap();
+    assert_eq!(
+        serde_json::from_value::<RuntimeTransactionScopeV1>(wrong_scope)
+            .unwrap_err()
+            .to_string(),
+        "operation runtime batch cannot mutate an immutable shard"
+    );
+
+    let mut unknown_scope_field = serde_json::to_value(&scope).unwrap();
+    unknown_scope_field["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<RuntimeTransactionScopeV1>(unknown_scope_field).is_err());
+}
+
+#[test]
 fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatches() {
     let mut invalid_control = serde_json::to_value(control()).unwrap();
     invalid_control["cancellation"]["generation"] = json!(0);
