@@ -46,6 +46,33 @@ pub const REPOS: &[Repo] = &[
     },
 ];
 
+/// The disposable repository name used by the bounded tool audit. The wrapper
+/// creates this checkout from `benchmark_data/runtime/fixtures/project` and
+/// gives it enough native history for the Git coverage seeds.
+pub const SMALL_FIXTURE_NAME: &str = "runtime-fixture";
+
+pub fn small_fixture_enabled() -> bool {
+    std::env::var_os("TRACEDECAY_BENCH_SMALL_FIXTURE").is_some()
+}
+
+pub fn small_fixture_repo(root: &Path) -> Result<(Repo, PathBuf), String> {
+    let dir = root.join(SMALL_FIXTURE_NAME);
+    if !dir.is_dir() {
+        return Err(format!(
+            "small fixture checkout is missing at {}",
+            dir.display()
+        ));
+    }
+    Ok((
+        Repo {
+            name: SMALL_FIXTURE_NAME,
+            url: "benchmark_data/runtime/fixtures/project",
+            git_ref: "fixture",
+        },
+        dir,
+    ))
+}
+
 /// Returns the bench repos root, or `None` if `TRACEDECAY_BENCH_REPOS_DIR` is unset.
 pub fn repos_root() -> Option<PathBuf> {
     std::env::var_os("TRACEDECAY_BENCH_REPOS_DIR").map(PathBuf::from)

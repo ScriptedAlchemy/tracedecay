@@ -12,6 +12,7 @@ packages:
   - "!benchmark_data/**"
   - "!crates/*/fixtures/**"
   - "!crates/*/tests/fixtures/**"
+  - "!benchmark_data/**/fixtures/**"
   - "!evals/**"
   - "!mockups/**"
   - "!tests/fixtures/**"

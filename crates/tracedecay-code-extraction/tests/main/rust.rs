@@ -1638,3 +1638,104 @@ fn run() {
         ]
     );
 }
+
+#[test]
+fn rust_callable_arities_count_parameters_with_nested_types() {
+    let source = r#"fn combine(
+    pair: (u8, (u16, u32)),
+    values: Result<Vec<(u8, u8)>, (u16, u16)>,
+    select: fn(u8, u8) -> u8,
+) {}
+fn empty() {}
+struct Receiver;
+impl Receiver {
+    fn receive(&self, value: u8) {}
+    fn associated(value: u8) {}
+}
+"#;
+    let artifact = RustExtractor.extract_artifact("arity.rs", source);
+    let mut arities = artifact
+        .callable_arities
+        .iter()
+        .map(|row| {
+            let node = artifact
+                .result
+                .nodes
+                .iter()
+                .find(|node| node.id == row.node_id)
+                .unwrap();
+            (node.name.as_str(), row.arity.parameters, row.arity.variadic)
+        })
+        .collect::<Vec<_>>();
+    arities.sort();
+    assert_eq!(arities, [("combine", 3, false), ("empty", 0, false)]);
+}
+
+#[test]
+fn rust_call_argument_counts_follow_nested_expression_boundaries() {
+    let source = r#"fn caller() {
+    target(
+        pair(1, 2),
+        ((3, 4), 5),
+        Vec::<(u8, u8)>::new(),
+    );
+    target(/* empty */);
+}
+"#;
+    let result = RustExtractor.extract_artifact("calls.rs", source).result;
+    let calls = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| reference.reference_kind == EdgeKind::Calls)
+        .map(|reference| {
+            (
+                reference.reference_name.as_str(),
+                reference.argument_count,
+                reference.line,
+                reference.column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            ("target", Some(3), 1, 4),
+            ("pair", Some(2), 2, 8),
+            ("Vec::<(u8, u8)>::new", Some(0), 4, 8),
+            ("target", Some(0), 6, 4),
+        ]
+    );
+}
+
+#[test]
+fn rust_call_argument_evidence_retains_each_caller_and_site() {
+    let source = "fn first() { target((1, 2)); }\nfn second() { target(1, 2); }\n";
+    let result = RustExtractor.extract_artifact("owners.rs", source).result;
+    let calls = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| reference.reference_kind == EdgeKind::Calls)
+        .map(|reference| {
+            let caller = result
+                .nodes
+                .iter()
+                .find(|node| node.id == reference.from_node_id)
+                .unwrap();
+            (
+                caller.name.as_str(),
+                reference.reference_name.as_str(),
+                reference.argument_count,
+                reference.file_path.as_str(),
+                reference.line,
+                reference.column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            ("first", "target", Some(1), "owners.rs", 0, 13),
+            ("second", "target", Some(2), "owners.rs", 1, 14),
+        ]
+    );
+}
