@@ -1616,6 +1616,9 @@ mod tests {
             last_ts: 1_700_001_020,
             event_count: 2,
             source: tracedecay_sessions::runtime::git_correlation::SpanSource::Ingest,
+            branch_provenance:
+                tracedecay_sessions::runtime::git_correlation::BranchProvenance::Captured,
+            capture_window: None,
         }
     }
 
