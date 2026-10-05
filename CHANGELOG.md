@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.69](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.68...v1.0.0-beta.69) (2026-10-05)
+
+
+### Features
+
+* **context:** add checked edit impact and token budgets ([536047b](https://github.com/ScriptedAlchemy/tracedecay/commit/536047b3846ae54059aa06cd7f1069c49f5da899))
+* **index:** report accurate generic ambiguity census ([f4b8918](https://github.com/ScriptedAlchemy/tracedecay/commit/f4b89185410c8a98f82a99360155079f426030e8))
+* **retrieval:** disclose route, churn, misses, and co-change ([20175c2](https://github.com/ScriptedAlchemy/tracedecay/commit/20175c2e6dce4989fc7f8d7e767423e5b50aa11d))
+
+
+### Bug Fixes
+
+* **agent-hosts:** list routing-tracedecay in cursor plugin skills ([127ce18](https://github.com/ScriptedAlchemy/tracedecay/commit/127ce18e5550e0fc6268bba3cf7fc418262b0c1b))
+* **agent-hosts:** simplify mutation outcome matches ([d1c83c3](https://github.com/ScriptedAlchemy/tracedecay/commit/d1c83c3898849a7a4f26a34228d016631ed83bd8))
+* **bench:** wait for daemon-owned fixture readiness ([a439cab](https://github.com/ScriptedAlchemy/tracedecay/commit/a439cabecc7eef966d4c60c01a84a1e6ad16912c))
+* **build:** isolate runtime benchmark fixture ([390cd90](https://github.com/ScriptedAlchemy/tracedecay/commit/390cd90a89a3d80f6366bda07afd26fa9edd4396))
+* **chatgpt-extension:** refresh server for context tools ([80cf9a4](https://github.com/ScriptedAlchemy/tracedecay/commit/80cf9a479ea8930a002768987f5375f7025c4631))
+* **ci:** refresh shared generated and lint authorities ([a230e8e](https://github.com/ScriptedAlchemy/tracedecay/commit/a230e8ed0badb9d3cdc2d48032693d84e732f372))
+* **ci:** repair lanes broken by retrieval disclosure commit ([48e105a](https://github.com/ScriptedAlchemy/tracedecay/commit/48e105ad03b68e52ae286e9c2356ca8c3c0ec397))
+* **ci:** restore plugin validation setup ([b87930a](https://github.com/ScriptedAlchemy/tracedecay/commit/b87930acf870c3da6c9878a0e5cbc2ae06a69dfe))
+* **code-index:** seal ambiguity census as format revision 21 ([9e568b8](https://github.com/ScriptedAlchemy/tracedecay/commit/9e568b8b020c674f81dd7fd0b4f99c976de8d1c3))
+* **git:** key file churn by project-relative path ([8a87f0b](https://github.com/ScriptedAlchemy/tracedecay/commit/8a87f0bc6280c54100b5ec09ec0508fc18f3bffa))
+* **graph:** resolve full identities within indexed buckets ([929638e](https://github.com/ScriptedAlchemy/tracedecay/commit/929638e484e3882337f23eac9c00ad2106eae47c))
+* **health:** steer agents to the weakest dimension ([59ce651](https://github.com/ScriptedAlchemy/tracedecay/commit/59ce651bad865e173de83f44be302c35d0d90b44))
+* **health:** steer agents to the weakest dimension ([2b5f04e](https://github.com/ScriptedAlchemy/tracedecay/commit/2b5f04e737c1bc4a623b8ed832f598d41d769488)), closes [#3010](https://github.com/ScriptedAlchemy/tracedecay/issues/3010)
+* **mcp:** use if/else for churn rank to satisfy match_bool ([46cafef](https://github.com/ScriptedAlchemy/tracedecay/commit/46cafef545569edc0541294105f02f99c9daa9fe))
+* **mcp:** weight hotspots by file churn ([0baddcd](https://github.com/ScriptedAlchemy/tracedecay/commit/0baddcdd28543d98de0068fef84eebad3da5e26a))
+* **mcp:** weight hotspots by file churn ([72daa4b](https://github.com/ScriptedAlchemy/tracedecay/commit/72daa4b7bae2a4c3a50696ea79b0bf4abf0f6ba6)), closes [#3011](https://github.com/ScriptedAlchemy/tracedecay/issues/3011)
+* **memory:** distinguish restored graph lineage generations ([bb3eb73](https://github.com/ScriptedAlchemy/tracedecay/commit/bb3eb73decbf1d385da4c002663378822d20f6b8))
+* **perf:** move small-fixture query group into large_repos bench ([3872584](https://github.com/ScriptedAlchemy/tracedecay/commit/38725843b088982e7639d9aabd06f76d32e12d6d))
+* **sdk:** emit generated operations without trailing blank line ([31c7213](https://github.com/ScriptedAlchemy/tracedecay/commit/31c7213de19696c52f89e3d5aedbed944e370f08))
+
+
+### Performance Improvements
+
+* **work:** materialize only the current graph projection ([b378c39](https://github.com/ScriptedAlchemy/tracedecay/commit/b378c39dbe77872dc9c8b5c77de5416c4c395d73))
+* **work:** reuse snapshot for duplicate topology evidence ([af5d1b7](https://github.com/ScriptedAlchemy/tracedecay/commit/af5d1b77f3b3bd02487fe9e078032c2a23b685b3))
+
 ## [1.0.0-beta.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.67...v1.0.0-beta.68) (2026-10-04)
 
 

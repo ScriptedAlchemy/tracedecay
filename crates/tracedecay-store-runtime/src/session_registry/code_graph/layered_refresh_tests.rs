@@ -932,7 +932,9 @@ async fn a_small_refresh_materializes_the_same_output_pages_at_both_base_sizes()
     assert_eq!(small.delta_rows, large.delta_rows);
 }
 
+#[cfg(target_os = "linux")]
 const PEAK_PROBE_MODULES: &str = "TRACEDECAY_LAYERED_PEAK_PROBE_MODULES";
+#[cfg(target_os = "linux")]
 const PEAK_PROBE_LINE: &str = "layered-refresh-peak-kib ";
 
 /// Kibibytes one `/proc/self/status` field holds.
