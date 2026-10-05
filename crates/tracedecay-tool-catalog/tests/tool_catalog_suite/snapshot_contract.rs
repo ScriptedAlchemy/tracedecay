@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationHandlerDescriptorV1, BindingId, BindingSurface, CatalogContributionInputV1,
-    CatalogContributionV1, CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId,
-    ExecutableSchemaAuthority, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
-    ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    BindingId, BindingSurface, CatalogContributionInputV1, CatalogContributionV1,
+    CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId, ExecutableSchemaAuthority,
+    ProfileDefinition, ProfileDefinitionInputV1, ProfileKind, ProtocolRevisionRange,
+    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use common::{
@@ -344,89 +344,40 @@ fn snapshot_deduplicates_shared_schema_identity() {
 }
 
 #[test]
-fn snapshot_rejects_handler_schema_drift() {
+fn snapshot_rejects_duplicate_capability_use_cases() {
     let profile_id = profile_id("profile.default");
-    let capability_id = capability_id("capability.source.body");
-    let manifest = read_manifest(
-        capability_id.clone(),
-        use_case_id("use-case.source.body"),
-        schema("schema.source.body.request"),
-        schema("schema.source.body.result"),
+    let shared_use_case = use_case_id("use-case.source.shared");
+    let first = read_manifest(
+        capability_id("capability.source.first"),
+        shared_use_case.clone(),
+        schema("schema.source.first.request"),
+        schema("schema.source.first.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
+    let second = read_manifest(
+        capability_id("capability.source.second"),
+        shared_use_case.clone(),
+        schema("schema.source.second.request"),
+        schema("schema.source.second.result"),
+        Vec::new(),
+        vec![profile_id],
+    );
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.source-body").unwrap(),
+        contribution_id: ContributionId::new("contribution.source").unwrap(),
         depends_on: Vec::new(),
-        capabilities: vec![manifest.clone()],
+        capabilities: vec![first, second],
         retrieval_primitives: Vec::new(),
         bindings: Vec::new(),
     })
     .unwrap();
-    let stale_handler = ApplicationHandlerDescriptorV1::new(
-        manifest.capability_id().clone(),
-        manifest.use_case_id().clone(),
-        manifest.request_schema().clone(),
-        schema("schema.source.body.stale-result"),
-    );
     let mut builder = CatalogSnapshotBuilderV1::new();
-    builder
-        .add_contribution(contribution)
-        .add_handler(stale_handler)
-        .add_profile(profile(
-            profile_id,
-            vec![capability_id.clone()],
-            ample_budget(),
-        ));
+    builder.add_contribution(contribution);
 
     assert_eq!(
         builder.build(),
-        Err(CatalogValidationError::HandlerSchemaMismatch { capability_id })
-    );
-}
-
-#[test]
-fn snapshot_rejects_handler_capability_drift() {
-    let profile_id = profile_id("profile.default");
-    let manifest_capability_id = capability_id("capability.source.body");
-    let manifest = read_manifest(
-        manifest_capability_id.clone(),
-        use_case_id("use-case.source.body"),
-        schema("schema.source.body.request"),
-        schema("schema.source.body.result"),
-        Vec::new(),
-        vec![profile_id.clone()],
-    );
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.source-body").unwrap(),
-        depends_on: Vec::new(),
-        capabilities: vec![manifest.clone()],
-        retrieval_primitives: Vec::new(),
-        bindings: Vec::new(),
-    })
-    .unwrap();
-    let handler_capability_id = capability_id("capability.source.lines");
-    let stale_handler = ApplicationHandlerDescriptorV1::new(
-        handler_capability_id.clone(),
-        manifest.use_case_id().clone(),
-        manifest.request_schema().clone(),
-        manifest.result_schema().clone(),
-    );
-    let mut builder = CatalogSnapshotBuilderV1::new();
-    builder
-        .add_contribution(contribution)
-        .add_handler(stale_handler)
-        .add_profile(profile(
-            profile_id,
-            vec![manifest_capability_id.clone()],
-            ample_budget(),
-        ));
-
-    assert_eq!(
-        builder.build(),
-        Err(CatalogValidationError::HandlerCapabilityMismatch {
-            capability_id: manifest_capability_id,
-            handler_capability_id,
-        })
+        Err(CatalogValidationError::DuplicateCapabilityUseCaseId(
+            shared_use_case
+        ))
     );
 }

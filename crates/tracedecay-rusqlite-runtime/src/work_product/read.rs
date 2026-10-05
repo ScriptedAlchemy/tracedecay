@@ -248,10 +248,10 @@ fn build_entries(
     let mut fold = JournalFoldV1::new(journal);
     let mut entries = Vec::new();
     for (index, version) in visible.iter().copied().enumerate() {
-        let entry = journal
-            .iter()
-            .find(|entry| entry.sequence == version.event_sequence)
-            .ok_or(PortError::Unavailable)?;
+        let journal_index = journal
+            .binary_search_by_key(&version.event_sequence, |entry| entry.sequence)
+            .map_err(|_| PortError::Unavailable)?;
+        let entry = &journal[journal_index];
         let graph = fold
             .advance_to(version.event_sequence)
             .ok_or(PortError::Unavailable)?;

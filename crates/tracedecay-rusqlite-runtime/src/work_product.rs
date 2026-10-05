@@ -352,6 +352,12 @@ pub(crate) fn verified_version(
     published: &WorkProductPublishedVersionV1,
     event: &WorkProductEventV1,
 ) -> Option<VerifiedWorkGraphVersionV1> {
+    if published.event_sequence != event.sequence()
+        || published.graph_version != event.result_graph_version()
+        || published.observed_at < published.valid_at
+    {
+        return None;
+    }
     VerifiedWorkGraphVersionV1::new(
         published.graph_version,
         published.event_sequence,

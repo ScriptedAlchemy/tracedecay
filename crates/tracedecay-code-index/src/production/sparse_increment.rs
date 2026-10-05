@@ -35,7 +35,7 @@ use super::projection_rows::FileChunkRostersV1;
 use super::resolution_index::reseal_resolution_index;
 use super::sealed_parent::SealedParentGenerationV1;
 use super::sparse_resolution::moves_name_lookups;
-use super::sparse_successor::{CrossFileEdgeCountsV1, SealedSuccessorV1};
+use super::sparse_successor::{CrossFileEdgeCountsV1, SealedSuccessorV1, SuccessorResolutionV1};
 use super::*;
 use crate::generations::GenerationIncrementPlanV1;
 
@@ -460,7 +460,7 @@ impl SparseBuildV1<'_> {
             &mut publish,
         )?;
         drop(rosters);
-        let statistics = successor_statistics(parent, &edited, &cross_file_edges)?;
+        let statistics = successor_statistics(parent, &edited, &cross_file_edges, &resolution)?;
         let chunk_policy = edited
             .iter()
             .flat_map(|file| file.after.artifacts.chunks.chunks.iter())
@@ -689,6 +689,7 @@ fn successor_statistics(
     parent: &SealedParentGenerationV1,
     edited: &[EditedFileV1<'_>],
     cross_file_edges: &CrossFileEdgeCountsV1,
+    resolution: &SuccessorResolutionV1,
 ) -> Result<CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1> {
     let source_bytes = |file: &FileGenerationArtifactsV1| {
         let coverage = &file.extraction.coverage;
@@ -736,6 +737,15 @@ fn successor_statistics(
         source_total_bytes,
         symbol_count,
         edge_count,
+        ambiguous_name_drops: parent
+            .ambiguous_name_drops
+            .map(|total| {
+                grow(
+                    shrink(total, resolution.ambiguous_before)?,
+                    resolution.ambiguous_after,
+                )
+            })
+            .transpose()?,
     })
 }
 

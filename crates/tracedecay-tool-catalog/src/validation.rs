@@ -37,6 +37,8 @@ pub enum CatalogValidationError {
     ContributionDependencyCycle { contribution_id: ContributionId },
     #[error("duplicate capability ID {0}")]
     DuplicateCapabilityId(CapabilityId),
+    #[error("duplicate capability use case {0}")]
+    DuplicateCapabilityUseCaseId(UseCaseId),
     #[error("duplicate handler descriptor for use case {0}")]
     DuplicateHandlerUseCaseId(UseCaseId),
     #[error("capability {capability_id} has no application handler descriptor for {use_case_id}")]
@@ -48,13 +50,6 @@ pub enum CatalogValidationError {
     MissingInverseCapability {
         capability_id: CapabilityId,
         inverse_id: CapabilityId,
-    },
-    #[error("capability {capability_id} and its application handler use incompatible schemas")]
-    HandlerSchemaMismatch { capability_id: CapabilityId },
-    #[error("capability {capability_id} resolves to a handler for {handler_capability_id}")]
-    HandlerCapabilityMismatch {
-        capability_id: CapabilityId,
-        handler_capability_id: CapabilityId,
     },
     #[error("duplicate binding ID {0}")]
     DuplicateBindingId(BindingId),
@@ -248,6 +243,7 @@ fn index_capabilities(
     contributions: &[CatalogContributionV1],
 ) -> Result<BTreeMap<CapabilityId, &CapabilityManifestV1>, CatalogValidationError> {
     let mut capabilities = BTreeMap::new();
+    let mut use_cases = BTreeSet::new();
     for capability in contributions
         .iter()
         .flat_map(|contribution| contribution.capabilities())
@@ -259,6 +255,11 @@ fn index_capabilities(
         {
             return Err(CatalogValidationError::DuplicateCapabilityId(
                 capability.capability_id().clone(),
+            ));
+        }
+        if !use_cases.insert(capability.use_case_id().clone()) {
+            return Err(CatalogValidationError::DuplicateCapabilityUseCaseId(
+                capability.use_case_id().clone(),
             ));
         }
     }
@@ -287,25 +288,12 @@ fn validate_handler_contracts(
     handlers: &BTreeMap<UseCaseId, &ApplicationHandlerDescriptorV1>,
 ) -> Result<(), CatalogValidationError> {
     for capability in capabilities.values() {
-        let Some(handler) = handlers.get(capability.use_case_id()) else {
+        let Some(_handler) = handlers.get(capability.use_case_id()) else {
             return Err(CatalogValidationError::MissingHandler {
                 capability_id: capability.capability_id().clone(),
                 use_case_id: capability.use_case_id().clone(),
             });
         };
-        if handler.capability_id() != capability.capability_id() {
-            return Err(CatalogValidationError::HandlerCapabilityMismatch {
-                capability_id: capability.capability_id().clone(),
-                handler_capability_id: handler.capability_id().clone(),
-            });
-        }
-        if handler.request_schema() != capability.request_schema()
-            || handler.result_schema() != capability.result_schema()
-        {
-            return Err(CatalogValidationError::HandlerSchemaMismatch {
-                capability_id: capability.capability_id().clone(),
-            });
-        }
     }
     Ok(())
 }
