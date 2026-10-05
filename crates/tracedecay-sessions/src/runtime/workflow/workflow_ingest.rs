@@ -403,9 +403,7 @@ fn read_run_meta(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-// ---------------------------------------------------------------------------
 // Pure parsing (unit-tested; no disk access below this line).
-// ---------------------------------------------------------------------------
 
 /// Build a [`WorkflowRun`] and its agent roster from a parsed run-meta JSON
 /// (`workflows/<run_id>.json`).
@@ -609,9 +607,7 @@ fn ms_field_to_secs(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64).map(|ms| ms / 1000)
 }
 
-// ---------------------------------------------------------------------------
 // Agent transcript + journal parsing.
-// ---------------------------------------------------------------------------
 
 /// Fill in an agent's transcript-derived fields from
 /// `agent-<agentId>.jsonl` when that file exists: absolute `transcript_path`,

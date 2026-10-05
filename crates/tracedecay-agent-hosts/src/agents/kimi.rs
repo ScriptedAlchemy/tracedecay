@@ -313,9 +313,7 @@ impl AgentIntegration for KimiIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Kimi Code CLI native plugin helpers
-// ---------------------------------------------------------------------------
 
 /// Resolve the Kimi Code CLI home: `$KIMI_CODE_HOME` when set, non-empty, and
 /// under the admitted `home`; otherwise `~/.kimi-code`.
@@ -556,9 +554,7 @@ fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> 
     Ok(rendered)
 }
 
-// ---------------------------------------------------------------------------
 // Install helpers
-// ---------------------------------------------------------------------------
 
 /// Install-or-refresh prompt rules in AGENTS.md.
 fn install_prompt_rules(agents_md: &Path) -> Result<()> {
@@ -571,18 +567,14 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     super::prompt_rules::reconcile_prompt_rules(agents_md, PROMPT_RULE_MARKER, &block)
 }
 
-// ---------------------------------------------------------------------------
 // Uninstall helpers
-// ---------------------------------------------------------------------------
 
 /// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(agents_md: &Path) -> Result<()> {
     super::prompt_rules::remove_standard_prompt_rules(agents_md)
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 /// Check the Kimi Code CLI native plugin: registered in `installed.json` and
 /// its host-managed bundle matches the staged source. Like the other

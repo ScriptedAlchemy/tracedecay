@@ -33,9 +33,7 @@ export const DAEMON_UNREACHABLE_EXIT_CODE = 69;
 /** Catalog tool names are fixed identifiers; nothing else may reach argv. */
 const TOOL_NAME = /^tracedecay_[a-z0-9_]+$/;
 
-// ---------------------------------------------------------------------------
 // Process helpers
-// ---------------------------------------------------------------------------
 
 export interface RunResult {
   /** Process exit status; `null` when the child was killed or never spawned. */
@@ -93,9 +91,7 @@ function truncateOutput(text: string): string {
   );
 }
 
-// ---------------------------------------------------------------------------
 // Catalog tools
-// ---------------------------------------------------------------------------
 
 /** One entry of the installer-generated `schemas.json`. */
 export interface CatalogToolSchema {
@@ -225,9 +221,7 @@ export function registerCatalogTools(
   }
 }
 
-// ---------------------------------------------------------------------------
 // Lifecycle hooks
-// ---------------------------------------------------------------------------
 
 export type PiLifecycleEvent = "session_start" | "agent_end";
 
@@ -260,9 +254,7 @@ export async function dispatchLifecycle(
   return result.code === 0 && guidance.length > 0 ? guidance : undefined;
 }
 
-// ---------------------------------------------------------------------------
 // Extension factory
-// ---------------------------------------------------------------------------
 
 export default function tracedecayExtension(pi: ExtensionAPI) {
   void TD_EXTENSION_MARKER;
