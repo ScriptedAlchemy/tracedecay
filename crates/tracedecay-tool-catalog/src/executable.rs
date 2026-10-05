@@ -60,7 +60,6 @@ impl SchemaBodyAuthorityV1 {
                 reason: "Rust schema authority could not be serialized",
             }
         })?;
-        let body = canonicalize_json(body);
         let digest = canonical_sha256(&body).map_err(|_| CatalogValidationError::InvalidValue {
             field: "schema body",
             reason: "canonical schema body could not be hashed",
@@ -162,21 +161,6 @@ impl ExecutableSchemaAuthority {
 
     pub fn result_schema(&self) -> &SchemaBodyAuthorityV1 {
         &self.result_schema
-    }
-}
-
-fn canonicalize_json(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, canonicalize_json(value)))
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        scalar => scalar,
     }
 }
 

@@ -16,8 +16,8 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_contracts::retrieval::grep_analysis::{
-    AstGrepAuthorityV1, ComplexityAuthorityV1, DependencyDepthAuthorityV1, GrepAnalysisProblemV1,
-    LexicalGrepAuthorityV1, PrimitiveCoverageV1, PrimitiveOutcomeV1, PrimitivePortContextV1,
+    AstGrepAuthorityV1, DependencyDepthAuthorityV1, GrepAnalysisProblemV1, LexicalGrepAuthorityV1,
+    PrimitiveCoverageV1, PrimitiveOutcomeV1, PrimitivePortContextV1,
 };
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
@@ -49,10 +49,7 @@ use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
 use super::concrete::SourceReadAdapter;
-use super::grep_analysis::{
-    TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,
-    TraceDecayDependencyDepthAuthorityV1,
-};
+use super::grep_analysis::{TraceDecayAstGrepAuthorityV1, TraceDecayDependencyDepthAuthorityV1};
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
@@ -337,43 +334,11 @@ struct PrimitiveProjectServices {
     pub tests: Arc<dyn TestPrimitivePort + Send + Sync>,
     pub lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
     pub ast_grep: Arc<dyn AstGrepAuthorityV1 + Send + Sync>,
-    pub complexity: Arc<dyn ComplexityAuthorityV1 + Send + Sync>,
     pub dependency_depth: Arc<dyn DependencyDepthAuthorityV1 + Send + Sync>,
     pub temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     pub source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     pub health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
     pub extended: Arc<dyn ExtendedPrimitivePort>,
-}
-
-impl PrimitiveProjectServices {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync>,
-        source: Arc<dyn SourceReadPrimitivePort + Send + Sync>,
-        tests: Arc<dyn TestPrimitivePort + Send + Sync>,
-        lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
-        ast_grep: Arc<dyn AstGrepAuthorityV1 + Send + Sync>,
-        complexity: Arc<dyn ComplexityAuthorityV1 + Send + Sync>,
-        dependency_depth: Arc<dyn DependencyDepthAuthorityV1 + Send + Sync>,
-        temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-        source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
-        health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
-        extended: Arc<dyn ExtendedPrimitivePort>,
-    ) -> Self {
-        Self {
-            symbol_graph,
-            source,
-            tests,
-            lexical_grep,
-            ast_grep,
-            complexity,
-            dependency_depth,
-            temporal,
-            source_lines,
-            health,
-            extended,
-        }
-    }
 }
 
 /// Cloneable owned runtime retained by the daemon for one admitted root.
@@ -548,8 +513,7 @@ const fn reads_code_index(request: &PrimitiveRequest) -> bool {
         | PrimitiveRequest::SourceOutline(_)
         | PrimitiveRequest::ModuleApi(_)
         | PrimitiveRequest::HealthDelta(_) => true,
-        PrimitiveRequest::Complexity(_)
-        | PrimitiveRequest::SessionLookup(_)
+        PrimitiveRequest::SessionLookup(_)
         | PrimitiveRequest::HealthRead(_)
         | PrimitiveRequest::StorageStatus(_)
         | PrimitiveRequest::DiagnosticsRead(_)
@@ -602,24 +566,23 @@ pub fn open_primitive_project_runtime(
             scope.clone(),
             &admitted_project_root,
         )?);
-    let services = PrimitiveProjectServices::new(
+    let services = PrimitiveProjectServices {
         symbol_graph,
         source,
         tests,
         lexical_grep,
-        Arc::new(TraceDecayAstGrepAuthorityV1::new(
+        ast_grep: Arc::new(TraceDecayAstGrepAuthorityV1::new(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayComplexityAuthorityV1),
-        Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
+        dependency_depth: Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
             &code_graph,
         ))),
         temporal,
         source_lines,
         health,
         extended,
-    );
+    };
     let dispatch: Arc<dyn PrimitiveDispatch> = Arc::new(OwnedPrimitiveRuntime {
         project_runtime: services,
         scope,
@@ -849,21 +812,6 @@ async fn dispatch_admitted(
                 &context,
                 &operation,
                 EvidenceDomain::Source,
-                outcome,
-            )
-        }
-        PrimitiveRequest::Complexity(request) => {
-            let port_context = grep_context(&context, &operation, observed_at);
-            let outcome = runtime
-                .project_runtime
-                .complexity
-                .complexity(&port_context, &request)
-                .await;
-            grep_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Operational,
                 outcome,
             )
         }

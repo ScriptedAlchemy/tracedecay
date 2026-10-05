@@ -715,3 +715,125 @@ async fn fact_store_search_keeps_scope_and_drops_superseded_facts() {
 
     fixture.harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn fact_store_search_survives_return_to_prior_relation_topology() {
+    let (fixture, project) = open_search_project().await;
+    let server = &project.server;
+    let retained_content = "Topology return keeps the permanent ledger fact";
+    let retained_id = store_fact(
+        server,
+        json!({
+            "content": retained_content,
+            "category": "project",
+            "entities": ["TopologyLedger"],
+            "trust": 1.0
+        }),
+    )
+    .await;
+    let before = search_payload(server, json!({"query": "permanent ledger", "limit": 10})).await;
+    assert_eq!(contents(&before), vec![retained_content.to_owned()]);
+    assert_eq!(before["graph_coverage"]["kind"], "complete", "{before}");
+
+    let temporary_id = store_fact(
+        server,
+        json!({
+            "content": "Temporary topology fact is removed after publication",
+            "category": "project",
+            "entities": ["TopologyLedger"],
+            "trust": 1.0
+        }),
+    )
+    .await;
+    let expanded =
+        search_payload(server, json!({"query": "temporary topology", "limit": 10})).await;
+    assert!(
+        expanded["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"] == temporary_id),
+        "{expanded}"
+    );
+    let removed = handle_real_server_tool_call(
+        server,
+        "tracedecay_fact_store_remove",
+        json!({"fact_id": temporary_id}),
+    )
+    .await;
+    let removed = parse_text(&removed);
+    assert_eq!(removed["outcome"], "removed", "{removed}");
+
+    let after = search_payload(server, json!({"query": "permanent ledger", "limit": 10})).await;
+    assert_eq!(
+        contents(&after),
+        vec![retained_content.to_owned()],
+        "{after}"
+    );
+    assert_eq!(after["hits"][0]["fact"]["fact_id"], retained_id, "{after}");
+    assert_eq!(after["graph_coverage"]["kind"], "complete", "{after}");
+    let related = handle_real_server_tool_call_raw(
+        server,
+        "tracedecay_fact_store_related",
+        json!({"entity": "TopologyLedger", "limit": 10}),
+    )
+    .await;
+    assert!(related["error"].is_null(), "{related}");
+    assert_ne!(related["result"]["isError"], true, "{related}");
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn fact_store_search_keeps_complete_graph_after_successive_supersedes() {
+    let (fixture, project) = open_search_project().await;
+    let server = &project.server;
+    for (name, successor_content) in [
+        ("Aster", "Aster successor ledger uses the eastern region"),
+        ("Birch", "Birch successor ledger uses the western region"),
+    ] {
+        let old_id = store_fact(
+            server,
+            json!({
+                "content": format!("{name} retired ledger uses the central region"),
+                "category": "project",
+                "entities": [format!("{name}OldLedger"), format!("{name}OldRegion")],
+                "trust": 1.0
+            }),
+        )
+        .await;
+        let successor_id = store_fact(
+            server,
+            json!({
+                "content": successor_content,
+                "category": "project",
+                "entities": [format!("{name}NewLedger"), format!("{name}NewRegion")],
+                "trust": 1.0
+            }),
+        )
+        .await;
+        let superseded = handle_real_server_tool_call(
+            server,
+            "tracedecay_fact_store_supersede",
+            json!({"fact_id": old_id, "superseded_by": successor_id}),
+        )
+        .await;
+        let superseded = parse_text(&superseded);
+        assert_eq!(superseded["outcome"], "superseded", "{superseded}");
+
+        let successor = search_payload(server, json!({"query": name, "limit": 10})).await;
+        assert_eq!(
+            contents(&successor),
+            vec![successor_content.to_owned()],
+            "{successor}"
+        );
+        assert_eq!(
+            successor["hits"][0]["fact"]["fact_id"], successor_id,
+            "{successor}"
+        );
+        assert_eq!(
+            successor["graph_coverage"]["kind"], "complete",
+            "{successor}"
+        );
+    }
+    fixture.harness.shutdown().await;
+}
