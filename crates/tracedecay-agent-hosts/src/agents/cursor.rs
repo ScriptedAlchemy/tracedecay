@@ -162,9 +162,7 @@ impl AgentIntegration for CursorIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Plugin install helpers
-// ---------------------------------------------------------------------------
 
 /// The Cursor plugin's composed deploy set, sourced from the shared
 /// `plugin/` tree via [`crate::agents::plugin_bundle::cursor_files`].
@@ -329,9 +327,7 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
     Ok(rendered)
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let plugin_dir = cursor_plugin_install_dir(home);

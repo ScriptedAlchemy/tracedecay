@@ -348,9 +348,7 @@ pub(super) fn decode_artifact_row(
     decode_binary(generation, chunk_id, bytes, text, dictionary)
 }
 
-// ---------------------------------------------------------------------------
 // Binary row with a per-file / per-symbol dictionary
-// ---------------------------------------------------------------------------
 //
 // In order:
 //   ref file entry · symbol tag [ref symbol entry [ref display entry]]

@@ -1046,7 +1046,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     args["include_storage_health"] = json!(true);
                 }
                 if tool == "tracedecay_configuration_observed_state" {
-                    Query::prepared_read(label, tool, args, super::configuration_read_prime)
+                    Query::prepared_read(label, tool, args, i, super::configuration_read_prime)
                 } else {
                     rq(tool, label, args)
                 }
@@ -1084,11 +1084,12 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     }
     out.push(ToolGroup {
         tool: "tracedecay_configuration_get",
-        queries: five(|_i| {
+        queries: five(|i| {
             Query::prepared_read(
                 "config_get",
                 "tracedecay_configuration_get",
                 json!({"key": ctx.seeds.config_key.clone().unwrap_or_else(|| "diagnostics.prewarm.v1".into())}),
+                i,
                 super::configuration_read_prime,
             )
         }),

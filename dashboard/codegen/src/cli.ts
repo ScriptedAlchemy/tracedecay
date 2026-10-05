@@ -25,6 +25,7 @@ const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
 const SCHEMA_OUTPUT_ENV = "TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT";
 const RUST_SCHEMA_FILE = "codegen/schemas/dashboard-contracts.schema.json";
 const SDK_SOURCE_DIR = "sdks/typescript/src";
+const SDK_RUST_OPERATIONS_FILE = "crates/tracedecay-sdk/src/operations.rs";
 
 function cargo(args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): void {
   const result = spawnSync("cargo", args, { cwd, env, stdio: "inherit" });
@@ -70,12 +71,18 @@ function exportSdkSources(): Record<string, string> {
       ["run", "--quiet", "--locked", "--bin", "generate", "--", temporaryRoot],
       join(REPOSITORY_ROOT, "sdks", "codegen"),
     );
-    return Object.fromEntries(
-      readdirSync(join(temporaryRoot, SDK_SOURCE_DIR)).map((name) => [
-        `${SDK_SOURCE_DIR}/${name}`,
-        readFileSync(join(temporaryRoot, SDK_SOURCE_DIR, name), "utf8"),
-      ]),
-    );
+    return {
+      ...Object.fromEntries(
+        readdirSync(join(temporaryRoot, SDK_SOURCE_DIR)).map((name) => [
+          `${SDK_SOURCE_DIR}/${name}`,
+          readFileSync(join(temporaryRoot, SDK_SOURCE_DIR, name), "utf8"),
+        ]),
+      ),
+      [SDK_RUST_OPERATIONS_FILE]: readFileSync(
+        join(temporaryRoot, SDK_RUST_OPERATIONS_FILE),
+        "utf8",
+      ),
+    };
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
