@@ -74,7 +74,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     let summary = call_health(&fixture, json!({})).await;
     assert_eq!(
         extract_text(&summary.value),
-        "freshness: fresh\n**files_analyzed:** 2\n**quality_signal:** 8706\n"
+        "freshness: fresh\n**files_analyzed:** 2\n**panel:** modularity, acyclicity, coverage_discipline, depth, equality, redundancy\n**quality_signal:** 8706\n"
     );
 
     let summary_json = call_health(&fixture, json!({"format": "json"})).await;
@@ -84,6 +84,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
             "freshness": {"state": "fresh"},
             "quality_signal": 8706,
             "files_analyzed": 2,
+            "panel": "modularity, acyclicity, coverage_discipline, depth, equality, redundancy",
         })
     );
 
