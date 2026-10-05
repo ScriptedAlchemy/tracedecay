@@ -1,13 +1,1128 @@
 //! Work/workflow family: ~45 tools measured against the real disposable
 //! lifecycle `seed_work` minted (create → proposal → accept → admit →
 //! placement → start → cancel), plus per-iteration fresh-task effect chains.
-//! Args carry no `format` — the work surface rejects it.
 
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use tracedecay_contracts::{
+    WorkHandoffFrontierV1, WorkRetryReceiptV1, WorkSynthesisSourceSetV1,
+    workflow_artifact_payload_digest,
+};
 
 use crate::queries::{PrimeStep, Query, QueryContext, ToolGroup, five};
 
 use super::{WorkSeeds, eqc, eqn, no_primes, now_micros, rqn};
+
+pub(crate) fn verify_work_fixture(
+    tool: &str,
+    args: &Value,
+    response: &Value,
+) -> Option<Result<(), String>> {
+    if !matches!(
+        tool,
+        "tracedecay_work_retry_attempt"
+            | "tracedecay_work_synthesize"
+            | "tracedecay_work_adjudicate_duplicate"
+    ) {
+        return None;
+    }
+    Some((|| {
+        let payload = response
+            .pointer("/value/outcome/value/payload")
+            .or_else(|| response.pointer("/outcome/value/payload"))
+            .ok_or_else(|| "Work result omitted its canonical payload".to_owned())?;
+        let mut command = args.clone();
+        if let Some(command) = command.as_object_mut() {
+            command.remove("format");
+        }
+        match tool {
+            "tracedecay_work_retry_attempt" => {
+                let receipt: WorkRetryReceiptV1 =
+                    serde_json::from_value(payload["receipt"].clone())
+                        .map_err(|error| format!("invalid retry receipt: {error}"))?;
+                let expected_identity = json!({
+                    "task_id": args["original_attempt"]["task_id"],
+                    "run_id": args["original_attempt"]["run_id"],
+                    "attempt_id": args["new_attempt_id"],
+                });
+                if !receipt.validate_for_observation()
+                    || payload["outcome"] != "created"
+                    || payload["receipt"]["command"] != command
+                    || payload["receipt"]["new_attempt"] != expected_identity
+                    || payload["attempt"]["identity"] != expected_identity
+                    || payload["attempt"]["state"] != "recovery_required"
+                    || payload["attempt"]["recovery"]["reason"] != "failure_observed"
+                    || payload["attempt"]["recovery"]["source_attempt_id"]
+                        != args["original_attempt"]["attempt_id"]
+                    || payload["attempt"]["recovery"]["observed_at"]
+                        != payload["receipt"]["failure"]["observed_at"]
+                    || payload["attempt"]["execution"]["instructions"]
+                        != super::WORK_FAILURE_INSTRUCTIONS
+                    || args["failure"]["evidence_ref"]
+                        != format!(
+                            "runtime-terminal:{}",
+                            receipt.failure.evidence_digest.as_str()
+                        )
+                {
+                    return Err("retry did not preserve the failed fixture's evidence and create the requested successor".to_owned());
+                }
+            }
+            "tracedecay_work_adjudicate_duplicate" => {
+                let prior_revision = match args.get("expected_revision") {
+                    Some(Value::Null) => 0,
+                    Some(value) => value
+                        .as_u64()
+                        .ok_or_else(|| "invalid prepared duplicate revision".to_owned())?,
+                    None => return Err("prepared duplicate revision is absent".to_owned()),
+                };
+                let expected_revision = prior_revision
+                    .checked_add(1)
+                    .ok_or_else(|| "duplicate revision overflow".to_owned())?;
+                if payload["outcome"] != "appended"
+                    || payload["receipt"]["command"] != command
+                    || payload["receipt"]["revision"] != expected_revision
+                    || args["first_attempt"] == args["second_attempt"]
+                    || args["verdict"] != "not_duplicate"
+                {
+                    return Err("duplicate adjudication did not append the exact prepared fixture command at its next revision".to_owned());
+                }
+            }
+            "tracedecay_work_synthesize" => {
+                let source_bytes = b"TraceDecay lifecycle source evidence.";
+                let digest = workflow_artifact_payload_digest(source_bytes)
+                    .map_err(|error| format!("fixture artifact digest failed: {error}"))?;
+                let source_set: WorkSynthesisSourceSetV1 =
+                    serde_json::from_value(payload["source_set"].clone())
+                        .map_err(|error| format!("invalid synthesis source set: {error}"))?;
+                let expected_identity = json!({
+                    "task_id": args["start"]["task_id"],
+                    "run_id": args["start"]["run_id"],
+                    "attempt_id": args["start"]["attempt_id"],
+                });
+                let expected_sources = json!([{
+                    "source": args["sources"][0],
+                    "outcome": {"outcome": "succeeded", "artifacts": [digest]},
+                }]);
+                let original_instructions = args["start"]["instructions"]
+                    .as_str()
+                    .ok_or_else(|| "synthesis fixture omitted instructions".to_owned())?;
+                let hydrated = payload["attempt"]["execution"]["instructions"]
+                    .as_str()
+                    .and_then(|text| text.strip_prefix(original_instructions))
+                    .and_then(|text| text.strip_prefix("\n\n"))
+                    .ok_or_else(|| {
+                        "synthesis did not hydrate its source instructions".to_owned()
+                    })?;
+                let context: Value = serde_json::from_str(hydrated)
+                    .map_err(|error| format!("invalid hydrated synthesis context: {error}"))?;
+                let source = &context["work_synthesis_sources"][0];
+                if payload["synthesis"] != "admitted"
+                    || payload["attempt"]["identity"] != expected_identity
+                    || payload["attempt"]["execution"]["execution_snapshot"]
+                        != args["start"]["execution_snapshot"]
+                    || payload["source_set"]["sources"] != expected_sources
+                    || !source_set.verified()
+                    || payload["draft"]
+                        != json!({
+                            "output_name": args["output_name"],
+                            "synthesis_attempt": expected_identity,
+                            "cited_source_digests": [digest],
+                        })
+                    || payload["groups"]
+                        != json!([{
+                            "artifacts": [digest], "sources": args["sources"],
+                        }])
+                    || payload["uncited"] != json!([])
+                    || context["work_synthesis_sources"]
+                        .as_array()
+                        .map(|sources| sources.len())
+                        != Some(1)
+                    || source["identity"] != args["sources"][0]
+                    || source["state"] != "succeeded"
+                    || source["terminal"]["outcome"] != "succeeded"
+                    || source["artifacts"]
+                        != json!([{
+                            "artifact_id": "artifact.provider.stdout",
+                            "digest": digest,
+                            "byte_length": source_bytes.len(),
+                            "content": "TraceDecay lifecycle source evidence.",
+                        }])
+                {
+                    return Err("synthesis did not admit the exact fixture artifact bytes, source identity, digest, and citation".to_owned());
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    })())
+}
+
+fn verify_work_effect_fixture(
+    ctx: &QueryContext,
+    tool: &str,
+    args: &Value,
+    response: &Value,
+) -> Option<Result<(), String>> {
+    let handled = matches!(
+        tool,
+        "tracedecay_work_prepare_graph_mutation"
+            | "tracedecay_work_mutate_graph"
+            | "tracedecay_work_create"
+            | "tracedecay_work_generate_proposal"
+            | "tracedecay_work_review_proposal"
+            | "tracedecay_work_accept_proposal"
+            | "tracedecay_work_admit_execution"
+            | "tracedecay_work_placement_preflight"
+            | "tracedecay_work_admit_placement"
+            | "tracedecay_work_release_placement"
+            | "tracedecay_work_start_attempt"
+            | "tracedecay_work_cancel_attempt"
+            | "tracedecay_work_pause_run"
+            | "tracedecay_work_resume_run"
+            | "tracedecay_work_prepare_duplicate_adjudication"
+            | "tracedecay_workflow_register_definition"
+            | "tracedecay_workflow_activate_definition"
+            | "tracedecay_workflow_reject_definition"
+            | "tracedecay_workflow_retire_definition"
+            | "tracedecay_workflow_start_run"
+            | "tracedecay_workflow_pause_run"
+            | "tracedecay_workflow_resume_run"
+            | "tracedecay_workflow_cancel_run"
+            | "tracedecay_workflow_handoff_issue"
+            | "tracedecay_workflow_handoff_redeem"
+    );
+    if !handled {
+        return None;
+    }
+    Some((|| {
+        let seed = ctx
+            .seeds
+            .work
+            .as_ref()
+            .ok_or("Work lifecycle seed is absent")?;
+        let result = response
+            .pointer("/value/outcome/value")
+            .or_else(|| response.pointer("/outcome/value"))
+            .ok_or("Work effect omitted its canonical result")?;
+        let payload = result.get("payload").ok_or("Work effect omitted payload")?;
+        if let Some(receipt) = result.get("receipt") {
+            if receipt["outcome"] != "completed" || result["reconciliation"] != "reconciled" {
+                return Err("Work effect did not complete and reconcile its receipt".to_owned());
+            }
+        }
+        let identity = json!({"task_id": args["task_id"], "run_id": args["run_id"], "attempt_id": args["attempt_id"]});
+        let run_identity = json!({"task_id": args["task_id"], "run_id": args["run_id"]});
+        match tool {
+            "tracedecay_work_prepare_graph_mutation" => {
+                let request = &payload["request"];
+                if args["change"]["change"] != "create_task"
+                    || payload["mutation"] != "create_task"
+                    || request["selection"] != args["selection"]
+                {
+                    return Err("create preparation selected another mutation or scope".to_owned());
+                }
+                for key in ["initiative", "plan", "milestone", "item"] {
+                    if request[key] != args["change"][key] {
+                        return Err(format!("prepared create changed {key}"));
+                    }
+                }
+                verify_authored_task(&request["item"])?;
+                if request["mutation"]["expected_authority"]["authority"] != "verified"
+                    || request["mutation"]["command_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .is_none()
+                {
+                    return Err(
+                        "prepared create omitted verified authority or command identity".to_owned(),
+                    );
+                }
+            }
+            "tracedecay_work_mutate_graph"
+            | "tracedecay_work_create"
+            | "tracedecay_work_review_proposal"
+            | "tracedecay_work_accept_proposal"
+            | "tracedecay_work_admit_execution" => {
+                let request = if tool == "tracedecay_work_mutate_graph" {
+                    &args["request"]
+                } else {
+                    args
+                };
+                let committed = if tool == "tracedecay_work_admit_execution" {
+                    &payload["mutation"]
+                } else {
+                    payload
+                };
+                let event = &committed["event"];
+                let prior =
+                    request["mutation"]["expected_authority"]["verified_version"]["graph_version"]
+                        .as_i64()
+                        .ok_or("mutation request omitted verified graph version")?;
+                let next = prior
+                    .checked_add(1)
+                    .ok_or("fixture graph version overflow")?;
+                if committed["replayed"] != false
+                    || event["command_id"] != request["mutation"]["command_id"]
+                    || event["expected_graph_version"].as_i64() != Some(prior)
+                    || event["result_graph_version"].as_i64() != Some(next)
+                    || committed["verified_graph_version"]["graph_version"].as_i64() != Some(next)
+                    || event["occurred_at"] != request["mutation"]["occurred_at"]
+                {
+                    return Err("mutation receipt did not commit the exact fresh command at its next version".to_owned());
+                }
+                let change = &event["payload"]["change"];
+                if matches!(
+                    tool,
+                    "tracedecay_work_mutate_graph" | "tracedecay_work_create"
+                ) {
+                    if change["kind"] != "task_created" {
+                        return Err("create omitted task-created event".to_owned());
+                    }
+                    for key in ["initiative", "plan", "milestone", "item"] {
+                        if change[key] != request[key] {
+                            return Err(format!("create receipt changed authored {key}"));
+                        }
+                    }
+                    verify_authored_task(&change["item"])?;
+                } else if tool == "tracedecay_work_admit_execution" {
+                    if change["kind"] != "execution_admitted"
+                        || change["task_id"] != args["task_id"]
+                        || change["based_on_version"] != args["based_on_version"]
+                        || payload["execution_snapshot"]["route"]
+                            != seed.execution_snapshot["route"]
+                        || payload["execution_snapshot"]["executable"]
+                            != seed.execution_snapshot["executable"]
+                        || payload["execution_snapshot"]["backend"] != "codex_cli"
+                        || payload["execution_snapshot"]["egress"] != "deny"
+                    {
+                        return Err("execution admission lost the selected task or configured isolated provider".to_owned());
+                    }
+                } else {
+                    let accepted = tool == "tracedecay_work_accept_proposal";
+                    if change["proposal"] != args["proposal"]
+                        || change["kind"]
+                            != if accepted {
+                                "proposal_accepted"
+                            } else {
+                                "proposal_decided"
+                            }
+                        || (!accepted && change["disposition"] != "rejected")
+                        || args["disposition"] != if accepted { "accepted" } else { "rejected" }
+                    {
+                        return Err(
+                            "proposal decision committed another proposal or disposition"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "tracedecay_work_generate_proposal" => {
+                let proposal = &payload["proposal"];
+                if proposal["task_id"] != args["task_id"]
+                    || proposal["proposal_id"] != args["proposal_id"]
+                    || proposal["route"]["decision"] != "selected"
+                    || proposal["route"]["recommended"] != seed.execution_snapshot["route"]
+                    || proposal["sizing"]["likely"] != 1
+                    || proposal["sizing"]["coverage"] != "declared_work_item_effort"
+                    || payload["decision"]["task_id"] != args["task_id"]
+                    || payload["decision"]["disposition"] != "allow"
+                {
+                    return Err(
+                        "proposal lost the fresh task's declared effort or sole configured route"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_work_placement_preflight"
+            | "tracedecay_work_admit_placement"
+            | "tracedecay_work_release_placement" => {
+                let target = json!({"kind":"no_managed_placement", "root":null, "network_free":true,"in_place_acknowledged":false});
+                if payload["identity"] != run_identity
+                    || payload["target"] != target
+                    || payload["blockers"] != json!([])
+                {
+                    return Err(
+                        "placement lost the exact run, authored target or blocker result"
+                            .to_owned(),
+                    );
+                }
+                if tool == "tracedecay_work_placement_preflight" {
+                    if payload["observation"]["readable"] != true
+                        || payload["observation"]["network_required"] != false
+                    {
+                        return Err(
+                            "placement preflight did not observe the readable local fixture"
+                                .to_owned(),
+                        );
+                    }
+                } else {
+                    let released = tool == "tracedecay_work_release_placement";
+                    let revision = if released {
+                        args["expected_authority_version"]
+                            .as_u64()
+                            .and_then(|n| n.checked_add(1))
+                    } else {
+                        Some(1)
+                    };
+                    if payload["state"] != if released { "released" } else { "admitted" }
+                        || payload["authority_version"].as_u64() != revision
+                        || payload["transitioned_at"] != args["occurred_at"]
+                    {
+                        return Err(
+                            "placement transition lost its expected authority or requested state"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "tracedecay_work_start_attempt" | "tracedecay_work_cancel_attempt" => {
+                if payload["identity"] != identity
+                    || payload["execution"]["attempt_identity"] != identity
+                {
+                    return Err("attempt effect selected another task/run/attempt".to_owned());
+                }
+                if tool == "tracedecay_work_start_attempt" {
+                    for key in [
+                        "instructions",
+                        "commit",
+                        "operation",
+                        "effect_state",
+                        "execution_snapshot",
+                        "worktree_root",
+                    ] {
+                        if payload["execution"][key] != args[key] {
+                            return Err(format!("attempt admission changed {key}"));
+                        }
+                    }
+                    if args["instructions"] != "Bench lifecycle attempt."
+                        || payload["requested_route"] != args["execution_snapshot"]["route"]
+                        || !matches!(payload["state"].as_str(), Some("leased" | "running"))
+                    {
+                        return Err("attempt admission did not retain the authored command and runnable lease".to_owned());
+                    }
+                } else {
+                    if payload["state"] != "cancellation_requested"
+                        || payload["cancellation"]["state"] != "requested"
+                        || payload["cancellation"]["value"]
+                            != json!({"request_id":args["request_id"],"requested_at":args["occurred_at"]})
+                    {
+                        return Err(
+                            "attempt cancellation did not record the exact request".to_owned()
+                        );
+                    }
+                }
+            }
+            "tracedecay_work_pause_run" | "tracedecay_work_resume_run" => {
+                let paused = tool == "tracedecay_work_pause_run";
+                if payload["task_id"] != args["task_id"]
+                    || payload["run_id"] != args["run_id"]
+                    || payload["state"] != if paused { "paused" } else { "running" }
+                    || payload["reason"] != "operator_request"
+                    || payload["transitioned_at"] != args["occurred_at"]
+                    || payload["deadline"]["checkpoint_at"] != args["occurred_at"]
+                {
+                    return Err(
+                        "run control lost its exact run, requested state or deadline checkpoint"
+                            .to_owned(),
+                    );
+                }
+                if paused {
+                    let run = args["run_id"]
+                        .as_str()
+                        .ok_or("pause omitted run identity")?;
+                    let attempt = run
+                        .strip_prefix("run.bench.pz.")
+                        .ok_or("pause did not select fixture run")?;
+                    if payload["fenced_attempts"] != json!([format!("attempt.bench.pz.{attempt}")])
+                    {
+                        return Err("pause did not fence the fixture's live attempt".to_owned());
+                    }
+                } else if payload["fenced_attempts"] != json!([])
+                    || payload["authority"].as_u64()
+                        != args["expected_authority_version"]
+                            .as_u64()
+                            .and_then(|v| v.checked_add(1))
+                {
+                    return Err("resume did not advance its fenced authority".to_owned());
+                }
+            }
+            "tracedecay_work_prepare_duplicate_adjudication" => {
+                let prepared: tracedecay_domain::WorkDuplicateAdjudicationCommandV1 =
+                    serde_json::from_value(payload.clone())
+                        .map_err(|error| format!("invalid prepared adjudication: {error}"))?;
+                prepared
+                    .validate()
+                    .map_err(|error| format!("invalid adjudication evidence: {error}"))?;
+                for key in [
+                    "first_attempt",
+                    "second_attempt",
+                    "verdict",
+                    "quantities",
+                    "reason",
+                ] {
+                    if payload[key] != args[key] {
+                        return Err(format!("duplicate preparation changed {key}"));
+                    }
+                }
+                if payload["first_attempt"] != seed.attempt_identity
+                    || Some(&payload["second_attempt"]) != seed.dup_attempt_identity.as_ref()
+                    || payload["first_attempt"] == payload["second_attempt"]
+                    || payload["verdict"] != "not_duplicate"
+                {
+                    return Err("duplicate preparation did not preserve the two real terminal fixture attempts".to_owned());
+                }
+            }
+            "tracedecay_workflow_register_definition" => {
+                if *payload != args["definition"] || payload["steps"] != seed.definition["steps"] {
+                    return Err(
+                        "registration did not persist the exact authored inspect workflow"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_workflow_activate_definition"
+            | "tracedecay_workflow_reject_definition"
+            | "tracedecay_workflow_retire_definition" => {
+                let (state, increment) = match tool {
+                    "tracedecay_workflow_activate_definition" => ("active", 2),
+                    "tracedecay_workflow_reject_definition" => ("rejected", 1),
+                    _ => ("retired", 1),
+                };
+                if payload["definition_id"] != args["definition_id"]
+                    || payload["definition_version"] != args["definition_version"]
+                    || payload["state"] != state
+                    || payload["revision"].as_u64()
+                        != args["expected_revision"]
+                            .as_u64()
+                            .and_then(|v| v.checked_add(increment))
+                {
+                    return Err(
+                        "definition disposition lost the selected version or expected transition"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_workflow_start_run"
+            | "tracedecay_workflow_pause_run"
+            | "tracedecay_workflow_resume_run"
+            | "tracedecay_workflow_cancel_run" => {
+                let (state, event_kind) = match tool {
+                    "tracedecay_workflow_start_run" => ("running", "admitted"),
+                    "tracedecay_workflow_pause_run" => ("paused", "paused"),
+                    "tracedecay_workflow_resume_run" => ("running", "resumed"),
+                    _ => ("cancelled", "cancellation_requested"),
+                };
+                if payload["run_id"] != args["run_id"]
+                    || payload["status"] != state
+                    || payload["definition"]["steps"] != seed.definition["steps"]
+                    || payload["steps"]["step.bench.inspect"]["status"]
+                        != if state == "cancelled" {
+                            "cancelled"
+                        } else {
+                            "ready"
+                        }
+                {
+                    return Err(
+                        "workflow transition lost the exact run or literal inspect-step state"
+                            .to_owned(),
+                    );
+                }
+                let history = payload["history"]
+                    .as_array()
+                    .ok_or("workflow transition omitted history")?;
+                let events = history
+                    .iter()
+                    .filter(|row| row["command_id"] == args["command_id"])
+                    .collect::<Vec<_>>();
+                if events.len() != 1
+                    || events[0]["run_id"] != args["run_id"]
+                    || events[0]["event"]["type"] != event_kind
+                {
+                    return Err("workflow history lost the exact transition command".to_owned());
+                }
+                if tool == "tracedecay_workflow_start_run"
+                    && (payload["definition"]["definition_id"] != args["definition_id"]
+                        || payload["definition"]["definition_version"]
+                            != args["definition_version"]
+                        || payload["sequence"] != 1)
+                {
+                    return Err(
+                        "workflow admission lost the authored definition version".to_owned()
+                    );
+                }
+            }
+            "tracedecay_workflow_handoff_issue" | "tracedecay_workflow_handoff_redeem" => {
+                let frontier: WorkHandoffFrontierV1 =
+                    serde_json::from_value(payload["frontier"].clone())
+                        .map_err(|error| format!("invalid handoff frontier: {error}"))?;
+                let digest = frontier.digest().map_err(|error| error.to_string())?;
+                let scope = if tool == "tracedecay_workflow_handoff_issue" {
+                    &args["scope"]
+                } else {
+                    &args["expected_scope"]
+                };
+                if payload["scope"] != *scope
+                    || payload["frontier"]["task_id"] != scope["task_id"]
+                    || payload["frontier"]["legal_actions"]
+                        != json!(["Inspect the bench frontier."])
+                    || payload["frontier"]["attempts"] != json!([])
+                    || payload["frontier"]["blockers"] != json!([])
+                    || payload["frontier"]["lineage"]["issued_by"] != seed.actor_id
+                    || payload["frontier_digest"] != json!(digest)
+                {
+                    return Err(
+                        "handoff lost the exact scope or authored inspect frontier".to_owned()
+                    );
+                }
+                if tool == "tracedecay_workflow_handoff_issue"
+                    && payload["frontier"] != args["frontier"]
+                {
+                    return Err("handoff issue changed the authored frontier".to_owned());
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    })())
+}
+
+fn verify_authored_task(item: &Value) -> Result<(), String> {
+    if item["input"]["title"] != "Bench lifecycle task"
+        || item["input"]["effort"] != 1
+        || item["input"]["dependencies"] != json!([])
+        || item["accepted_attempts"] != json!([])
+        || item["accepted_proposal"] != Value::Null
+    {
+        return Err("task creation did not preserve the literal fixture requirements".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_work_read_fixture(
+    ctx: &QueryContext,
+    tool: &str,
+    label: &str,
+    args: &Value,
+    response: &Value,
+    prepared_tokens: &HashMap<String, Value>,
+) -> Option<Result<(), String>> {
+    if tool == "tracedecay_work_experience" {
+        return Some((|| {
+            let source = prepared_tokens
+                .get("experience_source")
+                .ok_or("experience fixture omitted source identity")?;
+            let payload = response
+                .pointer("/value/outcome/value/payload")
+                .or_else(|| response.pointer("/outcome/value/payload"))
+                .ok_or("experience read omitted payload")?;
+            if source["task_id"] == args["task_id"]
+                || payload["task_id"] != args["task_id"]
+                || payload["verified_version"] != args["verified_version"]
+                || payload["expertise"]["availability"] != "available"
+                || payload["expertise"]["durability"] != "ephemeral_only"
+                || payload["expertise"]["categories"] != json!(["testing"])
+            {
+                return Err("experience read lost the exact selected task/version or explicit ephemeral consent".to_owned());
+            }
+            for key in ["experience_prior_user", "experience_prior_project"] {
+                if prepared_tokens
+                    .get(key)
+                    .and_then(|v| v.pointer("/value/enabled"))
+                    != Some(&Value::Bool(false))
+                {
+                    return Err(
+                        "experience fixture did not begin with disabled isolated consent"
+                            .to_owned(),
+                    );
+                }
+            }
+            let rows = payload["candidates"]
+                .as_array()
+                .ok_or("experience omitted candidates")?;
+            let candidates = rows
+                .iter()
+                .filter(|candidate| candidate["item"]["input"]["task_id"] == source["task_id"])
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                return Err(
+                    "experience read lost or duplicated the real successful candidate".to_owned(),
+                );
+            }
+            let candidate = candidates[0];
+            if candidate["item"]["input"]["title"] != "Bench lifecycle task"
+                || candidate["item"]["accepted_at"].as_i64().is_none()
+                || !candidate["applicability"]
+                    .as_array()
+                    .is_some_and(|values| values.contains(&json!("same_accepted_route")))
+            {
+                return Err(
+                    "experience candidate lost task acceptance or route applicability".to_owned(),
+                );
+            }
+            let receipt = unique_fixture_row(&candidate["attempt_receipts"], "identity", source)?;
+            let digest = workflow_artifact_payload_digest(b"TraceDecay lifecycle source evidence.")
+                .map_err(|error| error.to_string())?;
+            if receipt["evidence"]["identity"] != *source
+                || receipt["evidence"]["outcome"] != json!({"outcome":"exited","code":0})
+                || receipt["artifacts"]
+                    != json!([{"artifact_id":"artifact.provider.stdout","digest":digest,"byte_length":37}])
+                || receipt["evidence"]["stdout"]
+                    != json!({"byte_length":37,"digest":digest,"truncated":false})
+            {
+                return Err("experience candidate lost the real successful stdout artifact, exact bytes digest or exit status".to_owned());
+            }
+            Ok(())
+        })());
+    }
+    if tool == "tracedecay_work_resume_attempts" {
+        return Some((|| {
+            let identity = prepared_tokens
+                .get("resume_identity")
+                .ok_or("recovery fixture omitted its successor identity")?;
+            let original = prepared_tokens
+                .get("retry_original")
+                .ok_or("recovery fixture omitted its failed source identity")?;
+            let payload = response
+                .pointer("/value/outcome/value/payload")
+                .or_else(|| response.pointer("/outcome/value/payload"))
+                .ok_or("recovery sweep omitted its canonical payload")?;
+            let attempt = unique_fixture_row(&payload["recovery_required"], "identity", identity)?;
+            if identity["task_id"] != original["task_id"]
+                || identity["run_id"] != original["run_id"]
+                || identity["attempt_id"] == original["attempt_id"]
+                || attempt["state"] != "recovery_required"
+                || attempt["recovery"]["reason"] != "failure_observed"
+                || attempt["recovery"]["source_attempt_id"] != original["attempt_id"]
+                || attempt["execution"]["instructions"] != super::WORK_FAILURE_INSTRUCTIONS
+            {
+                return Err(
+                    "recovery sweep lost the exact failed fixture's fenced successor".to_owned(),
+                );
+            }
+            Ok(())
+        })());
+    }
+    if let Some(result) = verify_work_effect_fixture(ctx, tool, args, response) {
+        return Some(result);
+    }
+    if !matches!(
+        tool,
+        "tracedecay_work_attempt_status"
+            | "tracedecay_work_topology"
+            | "tracedecay_work_hydrate_artifacts"
+            | "tracedecay_work_list_attempts"
+            | "tracedecay_work_execution_history"
+            | "tracedecay_work_placement_status"
+            | "tracedecay_work_run_control"
+            | "tracedecay_work_retrieve_evidence"
+            | "tracedecay_work_compare_proposal"
+            | "tracedecay_workflow_get_definition"
+            | "tracedecay_workflow_list_definitions"
+            | "tracedecay_workflow_definition_history"
+            | "tracedecay_workflow_diff_definition"
+            | "tracedecay_workflow_validate_definition"
+            | "tracedecay_workflow_get_run"
+    ) && tool != "tracedecay_work_views"
+    {
+        return None;
+    }
+    Some((|| {
+        let seed = ctx
+            .seeds
+            .work
+            .as_ref()
+            .ok_or("Work lifecycle seed is absent")?;
+        let payload = response
+            .pointer("/value/outcome/value/payload")
+            .or_else(|| response.pointer("/outcome/value/payload"))
+            .ok_or("Work read omitted its canonical payload")?;
+        let identities = std::iter::once(&seed.attempt_identity)
+            .chain(seed.dup_attempt_identity.iter())
+            .collect::<Vec<_>>();
+        if seed.attempt_identity
+            != json!({
+                "task_id": seed.task_id, "run_id": seed.run_id, "attempt_id": seed.attempt_id,
+            })
+        {
+            return Err("Work seed omitted the requested lifecycle identity".to_owned());
+        }
+        match tool {
+            "tracedecay_work_topology" => {
+                let rows = payload["execution_placement"]["lanes"]
+                    .as_array()
+                    .ok_or("topology omitted execution lanes")?;
+                let selected = rows
+                    .iter()
+                    .filter(|row| row["task_id"] == seed.task_id && row["run_id"] == seed.run_id)
+                    .collect::<Vec<_>>();
+                if selected.len() != 1
+                    || selected[0]["attempt_count"] != 1
+                    || selected[0]["placement"]["state"] != "placed"
+                    || selected[0]["placement"]["placement"]["state"] != "admitted"
+                    || selected[0]["placement"]["placement"]["target"]["kind"]
+                        != "no_managed_placement"
+                {
+                    return Err(
+                        "topology lost the real seeded run's admitted placement and attempt"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_work_hydrate_artifacts" => {
+                let empty_digest =
+                    workflow_artifact_payload_digest(b"").map_err(|error| error.to_string())?;
+                for identity in &identities {
+                    let attempt = unique_fixture_row(&payload["attempts"], "identity", identity)?;
+                    let record = &attempt["evidence"]["record"];
+                    if payload["state"] != "hydrated"
+                        || attempt["evidence"]["state"] != "sealed"
+                        || attempt["artifacts"] != json!([])
+                        || record["identity"] != **identity
+                        || record["outcome"]["outcome"] != "cancelled"
+                        || record["actual_route"] != seed.execution_snapshot["route"]
+                    {
+                        return Err("artifact hydration lost the cancelled fixture's sealed provider evidence".to_owned());
+                    }
+                    for stream in ["stdout", "stderr"] {
+                        if record[stream]
+                            != json!({"byte_length":0,"digest":empty_digest,"truncated":false})
+                        {
+                            return Err(format!(
+                                "artifact hydration changed the known empty {stream} bytes"
+                            ));
+                        }
+                    }
+                }
+            }
+            "tracedecay_work_attempt_status" => {
+                if args["task_id"] != seed.task_id
+                    || args["run_id"] != seed.run_id
+                    || args["attempt_id"] != seed.attempt_id
+                {
+                    return Err("attempt status did not select the seeded attempt".to_owned());
+                }
+                verify_cancelled_attempt(seed, &seed.attempt_identity, payload)?;
+            }
+            "tracedecay_work_list_attempts" => {
+                for identity in &identities {
+                    let attempt = unique_fixture_row(&payload["attempts"], "identity", identity)?;
+                    verify_cancelled_attempt(seed, identity, attempt)?;
+                }
+            }
+            "tracedecay_work_execution_history" => {
+                if payload["state"] != "listed" {
+                    return Err("execution history omitted the cancelled lifecycle".to_owned());
+                }
+                for identity in &identities {
+                    let span = unique_fixture_row(&payload["spans"], "identity", identity)?;
+                    let ordered =
+                        unique_fixture_row(&payload["observed_order"], "identity", identity)?;
+                    let start = span["started_at"]
+                        .as_i64()
+                        .ok_or("history omitted dispatch time")?;
+                    let end = span["ended_at"]
+                        .as_i64()
+                        .ok_or("history omitted terminal time")?;
+                    if span["state"] != "cancelled"
+                        || span["effect_state"] != "observational"
+                        || ordered["state"] != "cancelled"
+                        || end < start
+                        || span["wall_micros"].as_i64() != end.checked_sub(start)
+                        || ordered["observed_at"].as_i64() != Some(end)
+                        || span["terminal_evidence_digest"].as_str().is_none()
+                        || ordered["evidence_digest"] != span["terminal_evidence_digest"]
+                    {
+                        return Err("execution history lost the exact attempt's cancellation or measured span".to_owned());
+                    }
+                }
+            }
+            "tracedecay_work_placement_status" => {
+                let identity = json!({"task_id": seed.task_id, "run_id": seed.run_id});
+                if args["task_id"] != seed.task_id
+                    || args["run_id"] != seed.run_id
+                    || payload["state"] != "placed"
+                    || payload["placement"]["identity"] != identity
+                    || payload["placement"]["state"] != "admitted"
+                    || payload["placement"]["blockers"] != json!([])
+                    || payload["placement"]["target"]
+                        != json!({
+                            "kind": "no_managed_placement", "root": null,
+                            "network_free": true, "in_place_acknowledged": false,
+                        })
+                {
+                    return Err("placement status lost the seeded run's admitted target".to_owned());
+                }
+            }
+            "tracedecay_work_run_control" => {
+                if args["task_id"] != seed.task_id
+                    || args["run_id"] != seed.run_id
+                    || payload["state"] != "uncontrolled"
+                    || payload["live_attempts"] != json!([])
+                    || payload["total_attempts"] != 1
+                    || payload["deadline"] != seed.execution_snapshot["deadline"]
+                {
+                    return Err("run control did not retain the cancelled run's deadline and empty live frontier".to_owned());
+                }
+            }
+            "tracedecay_work_views" => {
+                if args["selection"] != seed.selection
+                    || payload["authorized_scope"]["selection"] != seed.selection
+                    || payload["mode"] != args["mode"]["mode"]
+                {
+                    return Err(
+                        "Work view did not preserve the selected fixture scope and mode".to_owned(),
+                    );
+                }
+                let snapshot = if label == "windowed" {
+                    let rows = payload["timeline"]["entries"]
+                        .as_array()
+                        .ok_or("evolution view omitted its timeline")?;
+                    let selected = rows
+                        .iter()
+                        .filter(|row| row["verified_version"] == seed.current_version)
+                        .collect::<Vec<_>>();
+                    if selected.len() != 1 {
+                        return Err(
+                            "evolution view lost the exact admitted lifecycle version".to_owned()
+                        );
+                    }
+                    selected[0]
+                } else {
+                    &payload["snapshot"]
+                };
+                // Select by the task's product identity, independent of graph order.
+                let items = snapshot["graph"]["items"]
+                    .as_array()
+                    .ok_or("Work view omitted task items")?;
+                let selected = items
+                    .iter()
+                    .filter(|item| item["input"]["task_id"] == seed.task_id)
+                    .collect::<Vec<_>>();
+                if selected.len() != 1 {
+                    return Err("Work view did not return exactly one seeded task".to_owned());
+                }
+                verify_lifecycle_item(seed, selected[0], &identities)?;
+                for identity in &identities {
+                    let attempt =
+                        unique_fixture_row(&snapshot["runtime"]["attempts"], "identity", identity)?;
+                    if attempt["state"] != "cancelled" {
+                        return Err(
+                            "Work runtime projection lost the exact seeded attempt's cancellation"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "tracedecay_work_retrieve_evidence" => {
+                if args["selection"] != seed.selection || args["task_id"] != seed.task_id {
+                    return Err("evidence read did not select the seeded task".to_owned());
+                }
+                verify_lifecycle_item(seed, &payload["item"], &identities)?;
+                let sources = payload["sources"]
+                    .as_array()
+                    .ok_or("evidence read omitted sources")?;
+                for identity in &identities {
+                    let receipts = sources
+                        .iter()
+                        .filter(|source| {
+                            source["kind"] == "attempt_receipt"
+                                && source["receipt"]["identity"] == **identity
+                        })
+                        .collect::<Vec<_>>();
+                    if receipts.len() != 1 {
+                        return Err(
+                            "evidence read lost or duplicated a seeded attempt receipt".to_owned()
+                        );
+                    }
+                    let evidence = &receipts[0]["receipt"]["evidence"];
+                    if evidence["identity"] != **identity
+                        || evidence["outcome"]["outcome"] != "cancelled"
+                        || evidence["actual_route"] != seed.execution_snapshot["route"]
+                        || evidence["stdout"]["byte_length"] != 0
+                        || evidence["stderr"]["byte_length"] != 0
+                    {
+                        return Err("evidence hydration lost the cancelled provider's identity, route or empty streams".to_owned());
+                    }
+                }
+            }
+            "tracedecay_work_compare_proposal" => {
+                if args["task_id"] != seed.task_id
+                    || args["old_version"] != seed.initial_version
+                    || args["new_version"] != seed.current_version
+                    || payload["old"]["item"]["input"]["task_id"] != seed.task_id
+                    || payload["old"]["item"]["accepted_attempts"] != json!([])
+                    || payload["old"]["item"]["accepted_proposal"] != Value::Null
+                    || payload["old"]["verified_version"] != seed.initial_version
+                    || payload["new"]["verified_version"] != seed.current_version
+                    || payload["item_changed"] != true
+                    || payload["effect"] != "advisory_only"
+                {
+                    return Err(
+                        "proposal comparison lost the authored-to-admitted lifecycle transition"
+                            .to_owned(),
+                    );
+                }
+                verify_lifecycle_item(seed, &payload["new"]["item"], &identities)?;
+            }
+            "tracedecay_workflow_get_definition" => {
+                if args["definition_id"] != seed.definition_id
+                    || args["definition_version"] != seed.definition["definition_version"]
+                    || *payload != seed.definition
+                {
+                    return Err(
+                        "definition read did not return the exact authored workflow".to_owned()
+                    );
+                }
+            }
+            "tracedecay_workflow_list_definitions" | "tracedecay_workflow_definition_history" => {
+                if tool.ends_with("definition_history")
+                    && args["definition_id"] != seed.definition_id
+                {
+                    return Err("definition history selected another workflow".to_owned());
+                }
+                let rows = payload
+                    .as_array()
+                    .ok_or("workflow definitions omitted rows")?;
+                if rows.iter().filter(|row| **row == seed.definition).count() != 1 {
+                    return Err(
+                        "workflow listing lost or duplicated the exact authored definition"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_workflow_diff_definition" => {
+                if args["definition_id"] != seed.definition_id
+                    || args["from_version"] != seed.definition["definition_version"]
+                    || args["to_version"] != seed.definition["definition_version"]
+                    || *payload
+                        != json!({
+                            "definition_id": seed.definition_id,
+                            "from_version": args["from_version"], "to_version": args["to_version"],
+                            "catalog_changed": false, "configuration_changed": false,
+                            "policy_changed": false, "changed_steps": [],
+                        })
+                {
+                    return Err(
+                        "workflow self-comparison invented a change or selected another version"
+                            .to_owned(),
+                    );
+                }
+            }
+            "tracedecay_workflow_validate_definition" => {
+                if args["definition"] != seed.definition || payload["definition"] != seed.definition
+                {
+                    return Err(
+                        "workflow validation did not preserve the authored definition".to_owned(),
+                    );
+                }
+            }
+            "tracedecay_workflow_get_run" => {
+                let run_id = seed
+                    .wf_run_id
+                    .as_ref()
+                    .ok_or("seed workflow run is absent")?;
+                if args["run_id"] != *run_id
+                    || payload["run_id"] != *run_id
+                    || payload["definition"] != seed.definition
+                    || payload["status"] != "running"
+                    || payload["steps"]["step.bench.inspect"]["status"] != "ready"
+                    || seed.definition["steps"]
+                        != json!([{
+                            "step_id": "step.bench.inspect", "operation": "operation.work.start_attempt",
+                            "predecessors": [], "inputs": [], "outputs": [], "fan_out": null,
+                        }])
+                {
+                    return Err(
+                        "workflow run read lost its admitted definition or ready inspect step"
+                            .to_owned(),
+                    );
+                }
+                let event = unique_fixture_row(&payload["history"], "sequence", &json!(1))?;
+                if event["run_id"] != *run_id
+                    || event["event"]["type"] != "admitted"
+                    || event["event"]["definition"] != seed.definition
+                {
+                    return Err(
+                        "workflow run history lost its admitted definition event".to_owned()
+                    );
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    })())
+}
+
+fn unique_fixture_row<'a>(
+    rows: &'a Value,
+    key: &str,
+    identity: &Value,
+) -> Result<&'a Value, String> {
+    let rows = rows
+        .as_array()
+        .ok_or_else(|| format!("fixture read omitted {key} rows"))?;
+    let mut matches = rows.iter().filter(|row| row.get(key) == Some(identity));
+    let row = matches
+        .next()
+        .ok_or_else(|| format!("fixture read omitted {identity}"))?;
+    if matches.next().is_some() {
+        return Err(format!("fixture read duplicated {identity}"));
+    }
+    Ok(row)
+}
+
+fn verify_cancelled_attempt(
+    seed: &WorkSeeds,
+    identity: &Value,
+    attempt: &Value,
+) -> Result<(), String> {
+    if attempt["identity"] != *identity
+        || attempt["execution"]["attempt_identity"] != *identity
+        || attempt["execution"]["instructions"] != "Bench lifecycle attempt."
+        || attempt["execution"]["commit"] != seed.commit
+        || attempt["execution"]["execution_snapshot"] != seed.execution_snapshot
+        || attempt["state"] != "cancelled"
+        || attempt["terminal"]["outcome"] != "cancelled"
+        || attempt["cancellation"]["state"] != "acknowledged"
+        || attempt["actual_route"] != seed.execution_snapshot["route"]
+    {
+        return Err("attempt read lost the exact cancelled lifecycle's command, commit, route or terminal acknowledgement".to_owned());
+    }
+    Ok(())
+}
+
+fn verify_lifecycle_item(
+    seed: &WorkSeeds,
+    item: &Value,
+    identities: &[&Value],
+) -> Result<(), String> {
+    if item["input"]["task_id"] != seed.task_id
+        || item["input"]["title"] != "Bench lifecycle task"
+        || item["input"]["effort"] != 1
+        || item["accepted_route"]["decision"] != "selected"
+        || item["accepted_route"]["recommended"] != seed.execution_snapshot["route"]
+        || item["execution_admitted_at"].as_i64().is_none()
+    {
+        return Err(
+            "Work read lost the seeded task's literal title, effort, selected route or admission"
+                .to_owned(),
+        );
+    }
+    let attempts = item["accepted_attempts"]
+        .as_array()
+        .ok_or("Work item omitted accepted attempts")?;
+    for identity in identities {
+        if attempts
+            .iter()
+            .filter(|attempt| **attempt == **identity)
+            .count()
+            != 1
+        {
+            return Err("Work item lost or duplicated an exact seeded accepted attempt".to_owned());
+        }
+    }
+    Ok(())
+}
 
 fn w(ctx: &QueryContext) -> &WorkSeeds {
     ctx.seeds.work.as_ref().unwrap()
@@ -373,30 +1488,205 @@ fn cleanup_cancel_rz(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
     ]
 }
 
-fn cleanup_cancel_retry(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
-    // The retried attempt lands under the seeded attempt's task/run scope.
-    let w = w(ctx);
-    vec![
-        PrimeStep {
+fn p_retry(ctx: &QueryContext, i: u64) -> Vec<PrimeStep> {
+    let mut steps = p_admit_placement_run(ctx, i, "run.bench.retry.{{iter}}");
+    let mut start = step_start_ids(
+        ctx,
+        "run.bench.retry.{{iter}}",
+        "attempt.bench.failed.{{iter}}",
+    );
+    start.args["instructions"] = json!(super::WORK_FAILURE_INSTRUCTIONS);
+    start.capture = &[
+        ("dig:identity", "retry_original"),
+        ("digpath:terminal:evidence_digest", "failure_digest"),
+    ];
+    steps.push(start);
+    steps
+}
+
+fn p_recovery(ctx: &QueryContext, i: u64) -> Vec<PrimeStep> {
+    let mut steps = p_retry(ctx, i);
+    steps.push(PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_work_retry_attempt",
+        args: json!({
+            "original_attempt": "{{retry_original}}",
+            "new_attempt_id": "attempt.recovery.bench.{{iter}}",
+            "failure": {
+                "source": "runtime", "cause": "runtime_failure",
+                "evidence_ref": "runtime-terminal:{{failure_digest}}",
+            },
+            "command_id": "command.bench.recovery.{{iter}}",
+        }),
+        capture: &[("digpath:payload:attempt.identity", "resume_identity")],
+    });
+    steps
+}
+
+fn p_experience(ctx: &QueryContext, i: u64) -> Vec<PrimeStep> {
+    let mut steps = p_admit_placement_run(ctx, i, "run.bench.experience.{{iter}}");
+    let mut source = step_start_ids(
+        ctx,
+        "run.bench.experience.{{iter}}",
+        "attempt.bench.experience.{{iter}}",
+    );
+    source
+        .inject
+        .push(("experience_not_before".to_owned(), json!(now_micros())));
+    source.args["instructions"] = json!(super::WORK_SOURCE_INSTRUCTIONS);
+    source.capture = &[("dig:identity", "experience_source")];
+    steps.push(source);
+    steps.push(PrimeStep {
+        inject: Vec::new(), tool: "tracedecay_work_prepare_graph_mutation",
+        args: json!({"selection":w(ctx).selection,
+            "change":{"change":"accept_task","task_id":"task.bench.{{iter}}","evidence_by_criterion":{}},
+            "evidence":[],"format":"json"}),
+        capture: &[("dig:request","experience_accept_request")],
+    });
+    steps.push(PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_work_mutate_graph",
+        args: json!({"mutation":"accept_task","request":"{{experience_accept_request}}"}),
+        capture: &[],
+    });
+    steps.push(PrimeStep {
+        inject: Vec::new(), tool:"tracedecay_work_views",
+        args:json!({"selection":w(ctx).selection,"mode":{"mode":"current"},"continuation":null,"observed_at":"{{now}}"}),
+        capture:&[("digpath:payload:authorized_scope.owner_profile_id","experience_profile"),
+            ("dig:verified_version","experience_version")],
+    });
+    let now = now_micros();
+    let consent = json!({"kind":"work_expertise_consent","value":{
+        "schema_version":1,"enabled":true,"granted_at":now,"expires_at":now+3_600_000_000_i64,
+        "allowed_categories":["testing"],
+    }});
+    for (key, layer, prior_token) in [
+        (
+            tracedecay_domain::USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+            json!({"kind":"user_profile","profile_id":"{{experience_profile}}"}),
+            "experience_prior_user",
+        ),
+        (
+            tracedecay_domain::PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+            json!({"kind":"project","project_id":ctx.seeds.project_id}),
+            "experience_prior_project",
+        ),
+    ] {
+        let capture = if prior_token == "experience_prior_user" {
+            &[
+                ("digpath:payload:revision_id", "experience_revision"),
+                ("digpath:payload:effective_value", "experience_prior_user"),
+            ][..]
+        } else {
+            &[
+                ("digpath:payload:revision_id", "experience_revision"),
+                (
+                    "digpath:payload:effective_value",
+                    "experience_prior_project",
+                ),
+            ][..]
+        };
+        steps.push(PrimeStep {
             inject: Vec::new(),
-            tool: "tracedecay_work_cancel_attempt",
-            args: json!({
-                "task_id": w.task_id,
-                "run_id": w.run_id,
-                "attempt_id": "attempt.retry.bench.{{iter}}",
-                "request_id": "cancel.cleanup.bench.retry.{{iter}}",
-                "occurred_at": "{{now}}",
-            }),
-            capture: &[],
+            tool: "tracedecay_configuration_get",
+            args: json!({"key":key,"format":"json"}),
+            capture,
+        });
+        steps.push(PrimeStep { inject:Vec::new(),tool:"tracedecay_configuration_set",
+            args:json!({"key":key,"layer":layer,"value":consent,"expected_revision":"{{experience_revision}}",
+                "idempotency_key":format!("bench-experience-grant-{prior_token}-{{{{iter}}}}"),"format":"json"}),capture:&[] });
+    }
+    steps
+}
+
+fn cleanup_experience(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
+    let mut steps = Vec::new();
+    for (key, layer) in [
+        (
+            tracedecay_domain::USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+            json!({"kind":"user_profile","profile_id":"{{experience_profile}}"}),
+        ),
+        (
+            tracedecay_domain::PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+            json!({"kind":"project","project_id":ctx.seeds.project_id}),
+        ),
+    ] {
+        steps.push(PrimeStep {
+            inject: Vec::new(),
+            tool: "tracedecay_configuration_get",
+            args: json!({"key":key,"format":"json"}),
+            capture: &[("digpath:payload:revision_id", "experience_restore_revision")],
+        });
+        steps.push(PrimeStep { inject:Vec::new(),tool:"tracedecay_configuration_unset",
+            args:json!({"key":key,"layer":layer,"expected_revision":"{{experience_restore_revision}}",
+                "idempotency_key":format!("bench-experience-revoke-{key}-{{{{iter}}}}"),"format":"json"}),capture:&[] });
+    }
+    steps
+}
+
+fn cleanup_retry(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
+    vec![PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_work_attempt_status",
+        args: json!({
+            "task_id": "task.bench.{{iter}}",
+            "run_id": "run.bench.retry.{{iter}}",
+            "attempt_id": "attempt.retry.bench.{{iter}}",
+        }),
+        capture: &[],
+    }]
+}
+
+fn duplicate_args(ctx: &QueryContext) -> Value {
+    json!({
+        "first_attempt": w(ctx).attempt_identity,
+        "second_attempt": w(ctx).dup_attempt_identity,
+        "verdict": "not_duplicate",
+        "quantities": {
+            "wall_micros": null, "token_count": null, "cost_micros": null,
+            "test_count": null, "effect_count": null,
+            "evidence": "owner_receipt",
+            "effect_outcome": "not_applicable",
+            "coverage": "known",
         },
-        resume_attempts_step(),
-    ]
+        "reason": "bench duplicate probe",
+    })
+}
+
+fn p_duplicate(ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
+    vec![PrimeStep {
+        inject: Vec::new(),
+        tool: "tracedecay_work_prepare_duplicate_adjudication",
+        args: duplicate_args(ctx),
+        capture: &[("dig:payload", "duplicate_request")],
+    }]
+}
+
+fn p_synthesize(ctx: &QueryContext, i: u64) -> Vec<PrimeStep> {
+    let mut steps = p_admit_placement_run(ctx, i, "run.bench.source.{{iter}}");
+    let mut source = step_start_ids(
+        ctx,
+        "run.bench.source.{{iter}}",
+        "attempt.bench.source.{{iter}}",
+    );
+    source.args["instructions"] = json!(super::WORK_SOURCE_INSTRUCTIONS);
+    source.capture = &[
+        ("dig:identity", "synthesis_source"),
+        (
+            "digpath:payload:artifacts.0.digest",
+            "source_artifact_digest",
+        ),
+    ];
+    steps.push(source);
+    steps.push(step_preflight_run("run.bench.synth.{{iter}}"));
+    steps.push(step_admit_placement_run("run.bench.synth.{{iter}}"));
+    steps
 }
 
 fn cleanup_cancel_synth(_ctx: &QueryContext, _i: u64) -> Vec<PrimeStep> {
     vec![
         cancel_attempt_step(
-            "task.bench.synth.{{iter}}",
+            "task.bench.{{iter}}",
             "run.bench.synth.{{iter}}",
             "attempt.bench.synth.{{iter}}",
             "cancel.cleanup.bench.synth.{{iter}}",
@@ -582,16 +1872,6 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     };
     let sel = || w.selection.clone();
     let ident = || w.attempt_identity.clone();
-    let dup = || w.dup_attempt_identity.clone().unwrap_or(Value::Null);
-    let quantities = || {
-        json!({
-            "wall_micros": null, "token_count": null, "cost_micros": null,
-            "test_count": null, "effect_count": null,
-            "evidence": "owner_receipt",
-            "effect_outcome": "not_applicable",
-            "coverage": "known",
-        })
-    };
 
     // ── reads ────────────────────────────────────────────────────────────
     let now = now_micros();
@@ -648,7 +1928,7 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             "tracedecay_work_topology_metrics",
             json!({
                 "horizon": {"since_micros": 0, "until_micros": now},
-                "max_events": 8,
+                "max_events": 4096,
             }),
         ),
         ("tracedecay_work_list_attempts", json!({"page_size": 8})),
@@ -697,16 +1977,21 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
     out.push(tg(
         "tracedecay_work_experience",
         fiveq(&|_| {
-            rqn(
+            eqc(
                 "tracedecay_work_experience",
                 "experience",
                 json!({
                     "selection": sel(), "task_id": w.task_id,
-                    "verified_version": w.current_version,
-                    "evidence_not_before": 0,
+                    "verified_version": "{{experience_version}}",
+                    "evidence_not_before": "{{experience_not_before}}",
                     "expertise_categories": ["testing"],
                     "limit": 8, "observed_at": now_micros(),
                 }),
+                p_experience,
+                crate::queries::EffectCleanup {
+                    capture: &[],
+                    steps: cleanup_experience,
+                },
             )
         }),
     ));
@@ -935,52 +2220,30 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 json!({
                     "occurred_at": "{{now}}",
                 }),
-                no_primes,
+                p_recovery,
             )
         }),
     ));
-    out.push(tg(
-        "tracedecay_work_prepare_duplicate_adjudication",
-        fiveq(&|_| {
-            eqn(
-                "tracedecay_work_prepare_duplicate_adjudication",
-                "prepare",
-                json!({
-                    "first_attempt": ident(),
-                    "second_attempt": dup(),
-                    "verdict": "not_duplicate",
-                    "quantities": quantities(),
-                    "reason": "bench duplicate probe",
-                }),
-                no_primes,
-            )
-        }),
-    ));
-    if w.work_generation.is_some()
-        && w.topology_generation.is_some()
-        && w.dup_attempt_identity.is_some()
-    {
+    if !w.attempt_identity.is_null() && w.dup_attempt_identity.is_some() {
+        out.push(tg(
+            "tracedecay_work_prepare_duplicate_adjudication",
+            fiveq(&|_| {
+                eqn(
+                    "tracedecay_work_prepare_duplicate_adjudication",
+                    "prepare",
+                    duplicate_args(ctx),
+                    no_primes,
+                )
+            }),
+        ));
         out.push(tg(
             "tracedecay_work_adjudicate_duplicate",
             fiveq(&|_| {
                 eqn(
                     "tracedecay_work_adjudicate_duplicate",
                     "commit",
-                    json!({
-                        "first_attempt": ident(),
-                        "second_attempt": dup(),
-                        "evidence": {
-                            "work_generation": w.work_generation,
-                            "topology_generation": w.topology_generation,
-                        },
-                        "verdict": "not_duplicate",
-                        "quantities": quantities(),
-                        "reason": "bench duplicate probe",
-                        "command_id": "command.bench.dup.{{iter}}",
-                        "occurred_at": "{{now}}",
-                        "expected_revision": null,
-                    }),
-                    no_primes,
+                    json!("{{duplicate_request}}"),
+                    p_duplicate,
                 )
             }),
         ));
@@ -1009,19 +2272,19 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_work_retry_attempt",
                 "retry",
                 json!({
-                    "original_attempt": ident(),
+                    "original_attempt": "{{retry_original}}",
                     "new_attempt_id": "attempt.retry.bench.{{iter}}",
                     "failure": {
                         "source": "runtime",
                         "cause": "runtime_failure",
-                        "evidence_ref": "bench",
+                        "evidence_ref": "runtime-terminal:{{failure_digest}}",
                     },
                     "command_id": "command.bench.retry.{{iter}}",
                 }),
-                no_primes,
+                p_retry,
                 crate::queries::EffectCleanup {
                     capture: &[],
-                    steps: cleanup_cancel_retry,
+                    steps: cleanup_retry,
                 },
             )
         }),
@@ -1034,13 +2297,13 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "synthesize",
                 json!({
                     "output_name": "bench.synthesis",
-                    "sources": [ident()],
+                    "sources": ["{{synthesis_source}}"],
                     "start": {
-                        "task_id": "task.bench.synth.{{iter}}",
+                        "task_id": "task.bench.{{iter}}",
                         "run_id": "run.bench.synth.{{iter}}",
                         "attempt_id": "attempt.bench.synth.{{iter}}",
                         "operation": "operation.work.start_attempt",
-                        "execution_snapshot": w.execution_snapshot,
+                        "execution_snapshot": "{{execution_snapshot}}",
                         "worktree_root": ctx.project_root,
                         "commit": w.commit,
                         "instructions": "Bench synthesis attempt.",
@@ -1048,7 +2311,7 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                         "occurred_at": "{{now}}",
                     },
                 }),
-                no_primes,
+                p_synthesize,
                 crate::queries::EffectCleanup {
                     capture: &[],
                     steps: cleanup_cancel_synth,
@@ -1069,7 +2332,8 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "tracedecay_workflow_get_definition",
                     "get",
                     json!({
-                        "definition_id": w.definition_id, "definition_version": 1,
+                        "definition_id": w.definition_id,
+                        "definition_version": w.definition["definition_version"],
                     }),
                 )
             }),
@@ -1093,7 +2357,9 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     "tracedecay_workflow_diff_definition",
                     "diff",
                     json!({
-                        "definition_id": w.definition_id, "from_version": 1, "to_version": 1,
+                        "definition_id": w.definition_id,
+                        "from_version": w.definition["definition_version"],
+                        "to_version": w.definition["definition_version"],
                     }),
                 )
             }),
