@@ -1,5 +1,3 @@
-"""Hermetic Rust tests for generated workspace targets."""
-
 load("@rules_rust//rust:defs.bzl", _rust_test = "rust_test")
 
 
@@ -44,7 +42,6 @@ _isolated_rust_test = rule(
 
 
 def rust_test(name, tags = [], **kwargs):
-    """Compiles a Rust test and runs it with a Bazel-owned profile."""
     visibility = kwargs.pop("visibility", None)
     binary_name = name + "__binary"
     _rust_test(
