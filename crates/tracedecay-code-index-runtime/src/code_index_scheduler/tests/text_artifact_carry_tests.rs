@@ -221,6 +221,87 @@ fn an_edit_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
     }
 }
 
+/// One commit's written files and removed paths.
+type RosterChange<'a> = (Vec<(&'a str, &'a str)>, Vec<&'a str>);
+
+/// Files added and removed shift every later file's ordinal, yet the edit
+/// still carries: with every parent segment out of the store, the successor
+/// seals byte for byte what a cold build seals through an added file, a
+/// removed one, a file replaced by its neighbour beside a body edit, a
+/// rename across the roster, and a file added first and removed last.
+#[test]
+fn an_added_or_removed_file_carries_the_parent_text_artifact_byte_identical_to_a_cold_build() {
+    let fixture = corpus_fixture();
+    let store = TempDir::new().expect("store");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish the parent"));
+    drain_text(&scheduler);
+
+    let added = long_module(9, 150);
+    let body_edit = module(6, "").replace("wrapping_mul(31)", "wrapping_mul(37)");
+    let replacement = module(10, "");
+    let renamed = module(1, "").replace("wrapping_mul(31)", "wrapping_mul(43)");
+    let first = module(11, "");
+    let rounds: [RosterChange<'_>; 6] = [
+        (vec![("src/m03a.rs", added.as_str())], vec![]),
+        (vec![], vec!["src/m05.rs"]),
+        (
+            vec![
+                ("src/m03b.rs", replacement.as_str()),
+                ("src/m06.rs", body_edit.as_str()),
+            ],
+            vec!["src/m03a.rs"],
+        ),
+        (vec![("src/n01.rs", renamed.as_str())], vec!["src/m01.rs"]),
+        (vec![("a_first.rs", first.as_str())], vec![]),
+        (vec![], vec!["src/untouched_6.rs"]),
+    ];
+    let hidden = TempDir::new().expect("hidden segments");
+    for (round, (edits, removals)) in rounds.iter().enumerate() {
+        let parent_segments = segment_files(store.path());
+        for (path, source) in edits {
+            fixture.edit(path, source);
+        }
+        for path in removals {
+            fixture.remove(path);
+        }
+        fixture.commit_all(&format!("roster change {round}"));
+        published(scheduler.reconcile_now().expect("publish the successor"));
+        let successor = scheduler.latest_complete().expect("successor generation");
+        for segment in &parent_segments {
+            std::fs::rename(
+                segment,
+                hidden.path().join(segment.file_name().expect("name")),
+            )
+            .expect("hide a parent segment");
+        }
+        drain_latest_text(&successor);
+        drop(successor);
+        for segment in &parent_segments {
+            std::fs::rename(
+                hidden.path().join(segment.file_name().expect("name")),
+                segment,
+            )
+            .expect("restore a parent segment");
+        }
+        let carried = active_artifact(store.path());
+        let cold = cold_artifact(&fixture);
+        assert_eq!(
+            carried.len(),
+            cold.len(),
+            "round {round}: the carried artifact's size differs from a cold build's"
+        );
+        assert!(
+            carried == cold,
+            "round {round}: the carried artifact's bytes differ from a cold build's"
+        );
+    }
+}
+
 /// A parent artifact the carry cannot trust is not carried: the edit's build
 /// falls back to a cold build of its own source instead of failing or sealing
 /// the parent's damage into the successor.

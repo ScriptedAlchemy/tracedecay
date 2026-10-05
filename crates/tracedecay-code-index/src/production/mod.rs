@@ -89,12 +89,12 @@ pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod lexical_page_source;
 pub use lexical_page_source::VerifiedSealedLexicalCursorRestoreErrorV1;
 pub use lexical_page_source::{
-    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
-    VerifiedSealedTextGenerationMetadataV1, advance_import_dictionary_digest,
-    initial_import_dictionary_digest,
+    SealedLexicalFileReplacementV1, VerifiedSealedLexicalCursorV1,
+    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSymbolDisplayV1, VerifiedSealedTextGenerationMetadataV1,
+    advance_import_dictionary_digest, initial_import_dictionary_digest,
 };
 mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};

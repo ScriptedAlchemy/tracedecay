@@ -3028,13 +3028,18 @@ impl LatestCodeTextGenerationV1 {
             }
             ancestor.clone_from(&ancestor_source.metadata().manifest().parent_generation);
         };
-        let changed = source.changed_files_since(&parent_source);
+        let replacements = source.file_replacements_since(&parent_source);
         drop(parent_source);
-        let Some(changed) = changed else {
+        let Some(replacements) = replacements else {
             return Ok(None);
         };
-        let changed_count = u64::try_from(changed.len()).unwrap_or(u64::MAX);
-        if changed_count.saturating_mul(8) > source.total_files() {
+        let replaced_files = replacements
+            .iter()
+            .map(|run| {
+                (run.files.end - run.files.start).max(run.parent_files.end - run.parent_files.start)
+            })
+            .fold(0u64, u64::saturating_add);
+        if replaced_files.saturating_mul(8) > source.total_files() {
             return Ok(None);
         }
         let parent_path = code_text_artifact_path(store.store_root(), &descriptor)
@@ -3061,7 +3066,7 @@ impl LatestCodeTextGenerationV1 {
             builder_budget,
             source_state_digest,
             source_format_revision,
-            &changed,
+            &replacements,
             &mut stage_file_pages,
             control,
         )

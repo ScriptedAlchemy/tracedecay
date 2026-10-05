@@ -1,22 +1,24 @@
 //! Carry a sealed parent artifact into a successor that re-encodes only the
-//! pages of the files that changed.
+//! pages of the files that changed, were added, or were removed.
 //!
 //! Pages never span files and their stored receipts are position-free, so
 //! every unchanged file's rows, postings, receipts, and clone rows are
-//! already the rows a cold build of the successor writes, at document,
-//! page, and occurrence positions shifted by the changed files' growth.
-//! The carry replaces each changed file's pages in place at the cold
-//! position, shifts what follows, and leaves the staging file exactly where
-//! a cold build stands when it enters digest verification. The digests,
-//! layout rewrite, and receipt are then the cold build's own steps, which
-//! is what makes the sealed bytes equal.
+//! already the rows a cold build of the successor writes, at file,
+//! document, page, and occurrence positions shifted by the replaced files'
+//! growth. The carry replaces each run of replaced files' pages in place at
+//! the cold position, shifts what follows, and leaves the staging file
+//! exactly where a cold build stands when it enters digest verification.
+//! The digests, layout rewrite, and receipt are then the cold build's own
+//! steps, which is what makes the sealed bytes equal.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use rusqlite::{OptionalExtension, Transaction, params};
-use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
+use tracedecay_code_index::production::{
+    CodeIndexExecutionControlV1, SealedLexicalFileReplacementV1, VerifiedSealedLexicalPageV1,
+};
 use tracedecay_domain::CodeGenerationId;
 
 use super::builder::page_transient_peak_bytes;
@@ -66,6 +68,22 @@ struct PageRowV1 {
 }
 
 impl PageRowV1 {
+    fn shifted_by(&self, file_growth: i64) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let file_ordinal = self
+            .file_ordinal
+            .checked_add(file_growth)
+            .filter(|ordinal| *ordinal >= 0)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried lexical file ordinal underflowed".to_owned(),
+                )
+            })?;
+        Ok(Self {
+            file_ordinal,
+            ..self.clone()
+        })
+    }
+
     fn of_prepared(
         page: &PreparedCodeLexicalArtifactPageV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -84,11 +102,13 @@ impl PageRowV1 {
     }
 }
 
-/// One changed file: the parent positions it held and the pages it now has.
-struct ChangedFileV1 {
+/// One run of replaced files: the parent positions its files held, the
+/// pages its successor files have, and how many files it adds net.
+struct ReplacedFilesV1 {
     old_pages: (usize, usize),
     old_documents: (u64, u64),
     old_clones: (u64, u64),
+    file_growth: i64,
     pages: Vec<PreparedCodeLexicalArtifactPageV1>,
 }
 
@@ -259,21 +279,21 @@ impl RowDictionaryV1 for RecordingRowDictionaryV1<'_> {
     }
 }
 
-/// Replace the changed files' pages of the sealed parent copy `transaction`
+/// Replace the replaced files' pages of the sealed parent copy `transaction`
 /// holds with the successor's, in place, and shift everything after them.
 #[tracing::instrument(name = "query.artifact.carry.patch", level = "trace", skip_all)]
 pub(super) fn carry_parent_rows(
     transaction: &Transaction<'_>,
     metadata: &CodeLexicalProjectionMetadataV1,
-    changed_files: &[u64],
+    replacements: &[SealedLexicalFileReplacementV1],
     stage_file_pages: &mut CarriedFilePagesV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CarriedRowsV1, CodeLexicalArtifactErrorV1> {
     let parent_pages = read_page_rows(transaction, control)?;
-    let changed = stage_changed_files(
+    let changed = stage_replaced_files(
         metadata,
         &parent_pages,
-        changed_files,
+        replacements,
         stage_file_pages,
         control,
     )?;
@@ -384,15 +404,15 @@ fn read_page_rows(
     Ok(pages)
 }
 
-/// Locate each changed file's parent pages and stage its successor pages at
-/// the position a cold build reaches it.
-fn stage_changed_files(
+/// Locate each run's parent pages and stage its successor files' pages at
+/// the position a cold build reaches them.
+fn stage_replaced_files(
     metadata: &CodeLexicalProjectionMetadataV1,
     parent_pages: &[PageRowV1],
-    changed_files: &[u64],
+    replacements: &[SealedLexicalFileReplacementV1],
     stage_file_pages: &mut CarriedFilePagesV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<Vec<ChangedFileV1>, CodeLexicalArtifactErrorV1> {
+) -> Result<Vec<ReplacedFilesV1>, CodeLexicalArtifactErrorV1> {
     let mut document_starts = Vec::with_capacity(parent_pages.len() + 1);
     let mut clone_starts = Vec::with_capacity(parent_pages.len() + 1);
     let (mut documents, mut clones) = (0u64, 0u64);
@@ -406,42 +426,59 @@ fn stage_changed_files(
     clone_starts.push(clones);
     let mut page_growth = 0i64;
     let mut document_growth = 0i64;
-    let mut previous = None;
-    let mut changed = Vec::with_capacity(changed_files.len());
-    for &file in changed_files {
+    let mut file_growth = 0i64;
+    let mut previous_end = 0u64;
+    let mut changed = Vec::with_capacity(replacements.len());
+    for replacement in replacements {
         checkpoint(control)?;
-        if previous.is_some_and(|previous| previous >= file) {
+        let (parent_files, files) = (&replacement.parent_files, &replacement.files);
+        if parent_files.start < previous_end
+            || parent_files.end < parent_files.start
+            || files.end < files.start
+            || shifted(parent_files.start, file_growth)? != files.start
+        {
             return Err(CodeLexicalArtifactErrorV1::Contract(
-                "carried lexical changed files must ascend".to_owned(),
+                "carried lexical file replacements must ascend in step".to_owned(),
             ));
         }
-        previous = Some(file);
-        let file_ordinal = i64::try_from(file).map_err(contract_number)?;
-        let start = parent_pages.partition_point(|page| page.file_ordinal < file_ordinal);
-        let end = parent_pages.partition_point(|page| page.file_ordinal <= file_ordinal);
-        let first_page = shifted(start as u64, page_growth)?;
-        let first_chunk = shifted(document_starts[start], document_growth)?;
-        let staged = stage_file_pages(file, first_page, first_chunk)?;
-        let mut pages = Vec::with_capacity(staged.len());
-        for (offset, page) in staged.iter().enumerate() {
-            if page.file_ordinal() != file || page.page_ordinal() != first_page + offset as u64 {
-                return Err(CodeLexicalArtifactErrorV1::Contract(
-                    "carried lexical file pages are not that file's contiguous pages".to_owned(),
-                ));
+        previous_end = parent_files.end;
+        let first_file = i64::try_from(parent_files.start).map_err(contract_number)?;
+        let end_file = i64::try_from(parent_files.end).map_err(contract_number)?;
+        let start = parent_pages.partition_point(|page| page.file_ordinal < first_file);
+        let end = parent_pages.partition_point(|page| page.file_ordinal < end_file);
+        let mut next_page = shifted(start as u64, page_growth)?;
+        let mut next_chunk = shifted(document_starts[start], document_growth)?;
+        let mut pages = Vec::new();
+        for file in files.clone() {
+            let staged = stage_file_pages(file, next_page, next_chunk)?;
+            for (offset, page) in staged.iter().enumerate() {
+                if page.file_ordinal() != file || page.page_ordinal() != next_page + offset as u64 {
+                    return Err(CodeLexicalArtifactErrorV1::Contract(
+                        "carried lexical file pages are not that file's contiguous pages"
+                            .to_owned(),
+                    ));
+                }
+                let scratch = page_transient_peak_bytes(metadata, page, usize::MAX)?;
+                let prepared = prepare_page(metadata, page, None, scratch, control)?;
+                next_chunk += prepared.chunk_count;
+                pages.push(prepared);
             }
-            let scratch = page_transient_peak_bytes(metadata, page, usize::MAX)?;
-            pages.push(prepare_page(metadata, page, None, scratch, control)?);
+            next_page += staged.len() as u64;
         }
-        page_growth += staged.len() as i64 - (end - start) as i64;
+        page_growth += pages.len() as i64 - (end - start) as i64;
         document_growth += pages
             .iter()
             .map(|page| page.chunk_count as i64)
             .sum::<i64>()
             - (document_starts[end] - document_starts[start]) as i64;
-        changed.push(ChangedFileV1 {
+        let run_growth = i64::try_from(files.end - files.start).map_err(contract_number)?
+            - i64::try_from(parent_files.end - parent_files.start).map_err(contract_number)?;
+        file_growth += run_growth;
+        changed.push(ReplacedFilesV1 {
             old_pages: (start, end),
             old_documents: (document_starts[start], document_starts[end]),
             old_clones: (clone_starts[start], clone_starts[end]),
+            file_growth: run_growth,
             pages,
         });
     }
@@ -465,7 +502,7 @@ fn carry_row_dictionary(
     transaction: &Transaction<'_>,
     metadata: &CodeLexicalProjectionMetadataV1,
     parent_pages: &[PageRowV1],
-    changed: &[ChangedFileV1],
+    changed: &[ReplacedFilesV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut net = BTreeMap::<i64, i64>::new();
@@ -738,18 +775,24 @@ fn apply_field_totals(
 fn write_page_rows(
     transaction: &Transaction<'_>,
     parent_pages: &[PageRowV1],
-    changed: &[ChangedFileV1],
+    changed: &[ReplacedFilesV1],
 ) -> Result<u64, CodeLexicalArtifactErrorV1> {
     let mut rows = Vec::with_capacity(parent_pages.len());
     let mut next_parent = 0usize;
-    for file in changed {
-        rows.extend_from_slice(&parent_pages[next_parent..file.old_pages.0]);
-        for page in &file.pages {
+    let mut file_growth = 0i64;
+    for run in changed {
+        for row in &parent_pages[next_parent..run.old_pages.0] {
+            rows.push(row.shifted_by(file_growth)?);
+        }
+        for page in &run.pages {
             rows.push(PageRowV1::of_prepared(page)?);
         }
-        next_parent = file.old_pages.1;
+        file_growth += run.file_growth;
+        next_parent = run.old_pages.1;
     }
-    rows.extend_from_slice(&parent_pages[next_parent..]);
+    for row in &parent_pages[next_parent..] {
+        rows.push(row.shifted_by(file_growth)?);
+    }
     transaction
         .execute("DELETE FROM source_pages", [])
         .map_err(sqlite_error)?;
