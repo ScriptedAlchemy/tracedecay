@@ -15,6 +15,10 @@ pub struct CodeIndexGenerationStatisticsV1 {
     pub source_total_bytes: u64,
     pub symbol_count: u64,
     pub edge_count: u64,
+    /// References the generic name resolver dropped for multiple matching definitions.
+    /// Excludes module-specific resolution. `None` means the count was not measured.
+    #[serde(default)]
+    pub ambiguous_name_drops: Option<u64>,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -45,6 +49,7 @@ impl CodeIndexGenerationStatisticsV1 {
         files: &[std::sync::Arc<super::FileGenerationArtifactsV1>],
         symbol_count: usize,
         edge_count: usize,
+        ambiguous_name_drops: Option<u64>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let source_total_bytes =
             checked_source_total(files.iter().map(|file| &file.extraction.coverage))?;
@@ -58,7 +63,24 @@ impl CodeIndexGenerationStatisticsV1 {
             source_total_bytes,
             symbol_count,
             edge_count,
+            ambiguous_name_drops,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodeIndexGenerationStatisticsV1;
+
+    #[test]
+    fn a_census_sealed_before_the_field_decodes_as_not_counted() {
+        let statistics: CodeIndexGenerationStatisticsV1 =
+            serde_json::from_str(r#"{"source_total_bytes":1,"symbol_count":2,"edge_count":3}"#)
+                .expect("old census");
+        assert_eq!(statistics.source_total_bytes, 1);
+        assert_eq!(statistics.symbol_count, 2);
+        assert_eq!(statistics.edge_count, 3);
+        assert_eq!(statistics.ambiguous_name_drops, None);
     }
 }
 

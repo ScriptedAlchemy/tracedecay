@@ -28,6 +28,8 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_runtime_core::git::GitCommandBounds;
+use tracedecay_runtime_core::git::cochange::co_change_partners;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
@@ -580,6 +582,21 @@ where
             .map(String::as_str)
             .chain(files.iter().map(String::as_str)),
     );
+    let partners = if files.is_empty() {
+        Vec::new()
+    } else {
+        let project_root = ctx.project_root().to_path_buf();
+        let changed_files = files.clone();
+        blocking_git_span("co-change", move || {
+            co_change_partners(&project_root, &changed_files, &GitCommandBounds::default())
+        })
+        .await??
+        .into_iter()
+        .map(|partner| {
+            DiffContextResultV1::co_change_partner(partner.file, partner.partner, partner.together)
+        })
+        .collect()
+    };
 
     let result = DiffContextResultV1 {
         changed_files: files,
@@ -589,6 +606,7 @@ where
         impact_complete: impacted.complete,
         affected_tests: tests_sorted,
         freshness: None,
+        co_change_partners: partners,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::DiffContext(result),

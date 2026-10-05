@@ -62,6 +62,7 @@ pub use self::routes::{
     LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1, MAX_LEXICAL_ALIASES_V1,
     MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
     SymbolRoutePreferenceV1, classify_query_shape, merge_lexical_routes, preferred_symbol_tokens,
+    task_is_name_shaped,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared

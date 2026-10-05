@@ -522,10 +522,10 @@ mod tests {
     use tracedecay_contracts::retrieval::DerivesSymbolV1;
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, ContextRetrievalPlanV1, ContextStageV1, PrimitiveFreshnessStateV1,
-        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
-        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1,
-        ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
+        ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextStageV1,
+        PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
@@ -609,6 +609,7 @@ mod tests {
     fn plan_context() -> ContextResultV1 {
         ContextResultV1 {
             task: "extend the store".to_owned(),
+            route: ContextRetrievalRouteV1::Prose,
             mode: ContextModeV1::Plan,
             freshness: PrimitiveSearchFreshnessV1 {
                 state: PrimitiveFreshnessStateV1::Fresh,
@@ -617,7 +618,6 @@ mod tests {
             code_generation: Some("generation.context".to_owned()),
             search_matches: Vec::new(),
             lexical_anchors: Vec::new(),
-            query_route: None,
             symbols: vec![PrimitiveSymbolLocationV1 {
                 node_id: "symbol.store".to_owned(),
                 name: "Store".to_owned(),

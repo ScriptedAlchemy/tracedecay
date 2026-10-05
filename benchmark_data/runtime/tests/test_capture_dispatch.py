@@ -62,6 +62,11 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 raise SystemExit(0)
 
             if sys.argv[1:2] == ["tool"]:
+                if len(sys.argv) > 2 and sys.argv[2] == "tracedecay_status":
+                    print(json.dumps({{
+                        "structuredContent": {{"wait": {{"outcome": "reached"}}}},
+                    }}, sort_keys=True))
+                    raise SystemExit(0)
                 if {tool_exit}:
                     print("forced tool failure", file=sys.stderr)
                     raise SystemExit({tool_exit})
@@ -218,7 +223,11 @@ class CaptureDispatchTest(unittest.TestCase):
             ]
             self.assertTrue(any(command[:1] == ["init"] for command in commands))
             self.assertTrue(any(command[:2] == ["daemon", "run"] for command in commands))
-            tool_command = next(command for command in commands if command[:1] == ["tool"])
+            tool_command = next(
+                command
+                for command in commands
+                if command[:1] == ["tool"] and command[1] != "tracedecay_status"
+            )
             payload = json.loads(tool_command[tool_command.index("--args") + 1])
             self.assertEqual(payload["name"], "fixture_catalog")
 

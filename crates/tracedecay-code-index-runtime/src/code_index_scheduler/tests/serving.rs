@@ -6880,7 +6880,11 @@ async fn name_shaped_queries_take_the_symbol_name_route_by_query_shape() {
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
 
-    for query in ["UserStore::getUserById", "users.getUserById"] {
+    for (query, margin_micros) in [
+        ("UserStore::getUserById", 500_000),
+        ("users.getUserById", 500_000),
+        ("getUserById handler", 0),
+    ] {
         let routed = registry
             .execute_query_search(
                 &scope,
@@ -6897,7 +6901,7 @@ async fn name_shaped_queries_take_the_symbol_name_route_by_query_shape() {
             routed.lexical_routes.decision,
             LexicalRouteDecisionV1 {
                 route: LexicalQueryRouteV1::Name,
-                margin_micros: 500_000,
+                margin_micros,
                 decided_by: LexicalRouteDeciderV1::QueryShape,
             },
             "{query}"

@@ -855,6 +855,72 @@ fn corruption_and_external_bundle_paths_are_rejected() {
     );
 }
 
+/// Hermes carries exactly one profile binding and every other host carries
+/// none; the component-set validator and the single-component planner are two
+/// views of that one admission rule.
+#[test]
+fn hermes_profile_binding_admission_is_identical_at_both_entry_points() {
+    for (host, bindings, admitted) in [
+        (HostKindV1::Hermes, 0_u8, false),
+        (HostKindV1::Hermes, 1_u8, true),
+        (HostKindV1::Hermes, 2_u8, false),
+        (HostKindV1::OpenCode, 0_u8, true),
+        (HostKindV1::OpenCode, 1_u8, false),
+    ] {
+        let artifacts = tempfile::tempdir().unwrap();
+        let bundle = manifest(host, b"bundle");
+        let mut request = execution(host, HostBundleLifecycleOpV1::Install, 96, true);
+        request.lifecycle.hermes_profile_bindings = bindings;
+        let previewed = dry_run_host_bundle_lifecycle_at(
+            artifacts.path(),
+            &bundle,
+            &request,
+            &verifier(&bundle),
+            &[],
+        );
+        if admitted {
+            assert!(
+                previewed.is_ok(),
+                "plan must admit {host:?} with {bindings} bindings: {:?}",
+                previewed.err()
+            );
+        } else {
+            assert!(
+                matches!(previewed, Err(HostBundleError::InvalidHermesProfileBinding)),
+                "plan must refuse {host:?} with {bindings} bindings: {:?}",
+                previewed.err()
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let set = component_set(host, b"core", b"agent");
+        let mut set_request = component_set_request(host, HostBundleLifecycleOpV1::Install, 96);
+        set_request.lifecycle.hermes_profile_bindings = bindings;
+        let set_verifier = ComponentSetVerifier::from_set(&set);
+        let mut registration = ArtifactOnlyTestRegistration;
+        let previewed = HostComponentSetTransactionV1::new(&mut writer).preview(
+            &set,
+            &set_request,
+            &set_verifier,
+            &mut registration,
+        );
+        if admitted {
+            assert!(
+                previewed.is_ok(),
+                "component set must admit {host:?} with {bindings} bindings: {:?}",
+                previewed.err()
+            );
+        } else {
+            assert!(
+                matches!(previewed, Err(HostBundleError::InvalidHermesProfileBinding)),
+                "component set must refuse {host:?} with {bindings} bindings: {:?}",
+                previewed.err()
+            );
+        }
+    }
+}
+
 #[test]
 fn lifecycle_ops_converge_cataloged_pre_receipt_artifacts_only_with_adoption() {
     let bundle = manifest(HostKindV1::KimiCode, b"expected");

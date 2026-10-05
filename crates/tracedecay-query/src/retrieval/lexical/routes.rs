@@ -181,6 +181,20 @@ impl LexicalAnchorV1 {
     }
 }
 
+/// True when `task` is one identifier (`gmres`, `shared_token`, `camelCase`)
+/// or one `Type.method` / `path::name` token. Two or more words are prose.
+/// Prose must stay off the preferred-symbol route. Forcing it there drops
+/// MRR to 0.016.
+pub fn task_is_name_shaped(task: &str) -> bool {
+    let task = task.trim();
+    if task.is_empty() || task.chars().any(char::is_whitespace) {
+        return false;
+    }
+    is_identifier_token(task)
+        || is_qualified_name_token(task)
+        || (task.contains('.') && task.split('.').all(is_identifier_token))
+}
+
 /// A token only code would spell: a `::` path, an inner underscore, or a
 /// lowercase-to-uppercase hump. Plain words such as `update` stay prose.
 fn names_identifier(token: &str) -> bool {
@@ -1399,6 +1413,25 @@ fn union_terms(existing: &mut Vec<String>, incoming: &[String]) {
     existing.extend(incoming.iter().cloned());
     existing.sort();
     existing.dedup();
+}
+
+#[cfg(test)]
+mod task_shape {
+    use super::task_is_name_shaped;
+
+    #[test]
+    fn classifies_a_single_token_as_a_name_and_prose_as_prose() {
+        assert!(task_is_name_shaped("gmres"));
+        assert!(task_is_name_shaped("shared_token"));
+        assert!(task_is_name_shaped("camelCase"));
+        assert!(task_is_name_shaped("Type.method"));
+        assert!(task_is_name_shaped("path::name"));
+        assert!(task_is_name_shaped("  gmres  "));
+        assert!(!task_is_name_shaped("gmres solver"));
+        assert!(!task_is_name_shaped("how does gmres work"));
+        assert!(!task_is_name_shaped("fix the solver."));
+        assert!(!task_is_name_shaped(""));
+    }
 }
 
 #[cfg(test)]

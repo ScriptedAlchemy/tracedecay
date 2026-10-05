@@ -11,11 +11,12 @@ use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextRelatedOmissionV1,
-    ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1,
-    ContextSurfaceRequestV1, LexicalAnchorDropReasonV1,
+    ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextSearchMatchV1,
+    ContextStageV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
+use tracedecay_query::retrieval::lexical::task_is_name_shaped;
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -300,9 +301,12 @@ where
     let max_code_blocks = request
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
+    let prefer_symbol = request
+        .prefer_symbol
+        .unwrap_or_else(|| task_is_name_shaped(task));
     let lexical_routing = lexical_routing::routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
-        request.prefer_symbol,
+        Some(prefer_symbol),
     )?
     .with_task_identifiers(task);
     let requested_anchors: Vec<String> = lexical_routing
@@ -528,14 +532,16 @@ where
         .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
     let result = ContextResultV1 {
         task: request.task,
+        route: if prefer_symbol {
+            ContextRetrievalRouteV1::Name
+        } else {
+            ContextRetrievalRouteV1::Prose
+        },
         mode,
         freshness,
         code_generation,
         search_matches,
         lexical_anchors,
-        query_route: complete
-            .as_ref()
-            .map(|complete| lexical_routing::query_route(&complete.lexical_routes)),
         symbols,
         related_symbols,
         related_omission: projection.related_omission,

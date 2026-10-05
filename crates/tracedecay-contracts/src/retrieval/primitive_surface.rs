@@ -17,8 +17,6 @@ use tracedecay_domain::{
 use crate::code_index_freshness::{CodeIndexConvergenceParkedV1, CodeIndexStalenessStateV1};
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
-use super::search_surface::SearchQueryRouteV1;
-
 pub const MAX_REDUNDANCY_FAMILIES_V1: u32 = 100;
 pub const MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1: usize = 256;
 pub const MAX_REDUNDANCY_WORK_V1: u32 = 10_000;
@@ -61,8 +59,7 @@ pub struct ContextSurfaceRequestV1 {
     /// (`snake_case`, `camelCase`, `a::b`) are anchored after these.
     pub lexical_anchors: Option<Vec<String>>,
     /// Add a symbol-name lexical route for the identifier-shaped words of the
-    /// task text. Omitted, it runs when the task is name-shaped; true forces
-    /// it, false suppresses it. `query_route` reports the decision.
+    /// task text.
     pub prefer_symbol: Option<bool>,
 }
 
@@ -389,10 +386,23 @@ pub struct ContextPlanV1 {
     pub test_files: Option<Vec<String>>,
 }
 
+/// Which retrieval route `context` ran.
+///
+/// `name` is the preferred-symbol route. `prose` is the ordinary task
+/// route. A caller that omits `prefer_symbol` gets `name` only when the
+/// task is one identifier or one `Type.method` / `path::name` token.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRetrievalRouteV1 {
+    Name,
+    Prose,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextResultV1 {
     pub task: String,
+    pub route: ContextRetrievalRouteV1,
     pub mode: ContextModeV1,
     /// Freshness of the served code generation, derived from the typed lane
     /// coverage and the daemon scheduler's worktree state.
@@ -405,10 +415,6 @@ pub struct ContextResultV1 {
     /// identifier the task names; empty when there are neither.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexical_anchors: Vec<ContextLexicalAnchorV1>,
-    /// Which lane the task's shape selected, and its margin; absent when no
-    /// code generation answered.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub query_route: Option<SearchQueryRouteV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,
     /// Neighbors of `symbols`, ranked before the `max_nodes` cut: best edge
     /// kind to a selected symbol (calls, implements, extends, `type_of`,
@@ -904,11 +910,11 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ContextModeV1, ContextResultV1, ContextRetrievalPlanV1, ContextStageV1,
-        ContextSurfaceRequestV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
-        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
-        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, RedundancySurfaceRequestV1,
-        SimilarSurfaceRequestV1,
+        ContextModeV1, ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1,
+        ContextStageV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
+        PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        RedundancySurfaceRequestV1, SimilarSurfaceRequestV1,
     };
     use crate::code_index_freshness::CodeIndexStalenessStateV1;
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
@@ -916,6 +922,7 @@ mod tests {
     fn context_result() -> ContextResultV1 {
         ContextResultV1 {
             task: "explain memory".to_owned(),
+            route: ContextRetrievalRouteV1::Prose,
             mode: ContextModeV1::Explore,
             freshness: PrimitiveSearchFreshnessV1 {
                 state: PrimitiveFreshnessStateV1::Fresh,
@@ -924,7 +931,6 @@ mod tests {
             code_generation: Some("generation.test".to_owned()),
             search_matches: vec![],
             lexical_anchors: vec![],
-            query_route: None,
             symbols: vec![],
             related_symbols: vec![],
             related_omission: None,
@@ -1041,6 +1047,7 @@ mod tests {
 
         let fresh = serde_json::to_value(context_result()).expect("context result serializes");
         assert_eq!(fresh["freshness"], json!({"state": "fresh"}));
+        assert_eq!(fresh["route"], "prose");
 
         let mut stale = context_result();
         stale.freshness = PrimitiveSearchFreshnessV1 {
@@ -1070,10 +1077,11 @@ mod tests {
         let schema = serde_json::to_value(schema_for!(ContextResultV1))
             .expect("context result schema serializes");
         assert!(
-            schema["required"]
-                .as_array()
-                .is_some_and(|required| required.contains(&Value::String("freshness".to_owned()))),
-            "freshness is part of every context result"
+            schema["required"].as_array().is_some_and(|required| {
+                required.contains(&Value::String("freshness".to_owned()))
+                    && required.contains(&Value::String("route".to_owned()))
+            }),
+            "freshness and route are part of every context result"
         );
     }
 
