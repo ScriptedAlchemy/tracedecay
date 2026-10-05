@@ -557,9 +557,7 @@ fn process_snapshot_text_block(
     )
 }
 
-// ---------------------------------------------------------------------------
 // Process sampling
-// ---------------------------------------------------------------------------
 
 pub fn unix_epoch_secs() -> Result<u64> {
     Ok(std::time::SystemTime::now()
@@ -886,9 +884,7 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
     })
 }
 
-// ---------------------------------------------------------------------------
 // Database file sampling
-// ---------------------------------------------------------------------------
 
 /// Reads and parses a store dirty-marker file into its typed snapshot.
 pub fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
@@ -945,9 +941,7 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Format a byte count as a short human-readable string (`353.2 MB`).
 fn bytes_human(n: u64) -> String {
