@@ -84,16 +84,23 @@ BUILD_SCRIPT_ENV = {
 }
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def run(cmd, cwd=REPO):
     out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if out.returncode != 0:
         sys.exit(f"{' '.join(cmd)} failed:\n{out.stderr}")
-    return out.stdout
+    # CARGO_TERM_COLOR=always CI shells would otherwise bake color escapes
+    # into parsed feature names; --color never covers Cargo, this covers the
+    # rest.
+    return _ANSI.sub("", out.stdout)
 
 
 def cargo_metadata():
     return json.loads(
-        run(["cargo", "metadata", "--format-version", "1", "--no-deps", "-q"])
+        run(["cargo", "metadata", "--format-version", "1", "--no-deps", "-q",
+             "--color", "never"])
     )
 
 
@@ -106,7 +113,7 @@ def feature_map(pkg_name, edges, features=()):
     """cargo tree resolution for one root context. Maps member -> feature set."""
     cmd = [
         "cargo", "tree", "-p", pkg_name, "-e", edges,
-        "-f", "{p}|{f}", "--prefix", "none",
+        "-f", "{p}|{f}", "--prefix", "none", "--color", "never",
     ]
     if features:
         cmd += ["--features", ",".join(sorted(features))]
