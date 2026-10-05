@@ -102,55 +102,9 @@ impl ApplicationOperation {
     }
 }
 
-/// One canonical dispatcher can implement this trait for each typed request it
-/// accepts. The catalog never erases requests through JSON or `Any`.
-pub trait CanonicalApplicationDispatcher<Request> {
-    type Output;
-
-    fn invoke(&self, operation: &ApplicationOperation, request: Request) -> Self::Output;
-}
-
-/// A resolved application handler bound to the one canonical dispatcher
-/// retained by `tracedecay-daemon-service`.
-pub struct BoundApplicationHandler<'a, Dispatcher> {
-    descriptor: &'a ApplicationHandlerDescriptor,
-    dispatcher: &'a Dispatcher,
-}
-
-impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
-    fn new(descriptor: &'a ApplicationHandlerDescriptor, dispatcher: &'a Dispatcher) -> Self {
-        Self {
-            descriptor,
-            dispatcher,
-        }
-    }
-
-    pub fn operation(&self) -> &ApplicationOperation {
-        self.descriptor.operation()
-    }
-
-    pub fn request_schema(&self) -> &SchemaRef {
-        self.descriptor.request_schema()
-    }
-
-    pub fn result_schema(&self) -> &SchemaRef {
-        self.descriptor.result_schema()
-    }
-
-    pub fn invoke<Request>(
-        &self,
-        request: Request,
-    ) -> <Dispatcher as CanonicalApplicationDispatcher<Request>>::Output
-    where
-        Dispatcher: CanonicalApplicationDispatcher<Request>,
-    {
-        self.dispatcher.invoke(self.descriptor.operation(), request)
-    }
-}
-
 /// Proof that one concrete application use case owns a request/result schema
-/// pair and can be bound to the canonical dispatcher that
-/// `tracedecay-daemon-service` binds and the composition root mounts.
+/// pair. Transport adapters resolve the catalog binding and invoke their
+/// concrete application executor directly.
 ///
 /// Canonical public operations also retain their typed surface identity and
 /// execution service here so MCP, HTTP, SDK, and dispatch projections do not
@@ -160,7 +114,8 @@ pub struct ApplicationHandlerDescriptor {
     surface_operation: Option<ApplicationSurfaceOperation>,
     service_id: Option<ServiceId>,
     operation: ApplicationOperation,
-    catalog_descriptor: CatalogHandlerDescriptor,
+    request_schema: SchemaRef,
+    result_schema: SchemaRef,
 }
 
 impl ApplicationHandlerDescriptor {
@@ -174,17 +129,12 @@ impl ApplicationHandlerDescriptor {
                 field: "application handler result schema",
             });
         }
-        let catalog_descriptor = CatalogHandlerDescriptor::new(
-            operation.capability_id().clone(),
-            operation.use_case_id().clone(),
-            request_schema,
-            result_schema,
-        );
         Ok(Self {
             surface_operation: None,
             service_id: None,
             operation,
-            catalog_descriptor,
+            request_schema,
+            result_schema,
         })
     }
 
@@ -217,22 +167,15 @@ impl ApplicationHandlerDescriptor {
     }
 
     pub fn request_schema(&self) -> &SchemaRef {
-        self.catalog_descriptor.request_schema()
+        &self.request_schema
     }
 
     pub fn result_schema(&self) -> &SchemaRef {
-        self.catalog_descriptor.result_schema()
+        &self.result_schema
     }
 
-    pub fn bind<'a, Dispatcher>(
-        &'a self,
-        dispatcher: &'a Dispatcher,
-    ) -> BoundApplicationHandler<'a, Dispatcher> {
-        BoundApplicationHandler::new(self, dispatcher)
-    }
-
-    pub fn catalog_descriptor(&self) -> Result<CatalogHandlerDescriptor, ApplicationContractError> {
-        Ok(self.catalog_descriptor.clone())
+    pub fn catalog_descriptor(&self) -> CatalogHandlerDescriptor {
+        CatalogHandlerDescriptor::new(self.operation.use_case_id().clone())
     }
 }
 
@@ -301,9 +244,7 @@ impl ApplicationHandlerDescriptors {
             })
     }
 
-    pub fn catalog_descriptors(
-        &self,
-    ) -> Result<Vec<CatalogHandlerDescriptor>, ApplicationContractError> {
+    pub fn catalog_descriptors(&self) -> Vec<CatalogHandlerDescriptor> {
         self.descriptors
             .values()
             .map(ApplicationHandlerDescriptor::catalog_descriptor)
@@ -381,9 +322,8 @@ fn validate_descriptor_mapping(
 }
 
 /// Application-owned descriptor source. [`crate::catalog_composition`]
-/// validates these descriptors against the catalog contributions;
-/// `tracedecay-daemon-service` binds the canonical dispatcher and the
-/// composition root mounts the result.
+/// validates these descriptors against the catalog contributions before the
+/// immutable snapshot is exposed to transport adapters.
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];

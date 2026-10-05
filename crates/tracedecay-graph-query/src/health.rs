@@ -559,7 +559,7 @@ pub struct HealthDimensions {
 /// Formula: `(product of all 5).powf(1.0/5.0) * 10000.0`, rounded.
 /// Zero in any dimension → 0.
 /// A low-weight multiplicative penalty for `coverage_discipline` reduces
-/// the score by up to 10% when skip-test-coverage is overused.
+/// the score by up to 2% when skip-test-coverage is overused.
 pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     let product = dims.acyclicity * dims.depth * dims.equality * dims.redundancy * dims.modularity;
 
@@ -568,7 +568,6 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     }
 
     let base = (product.powf(1.0 / 5.0) * 10_000.0).round();
-    // Low-weight penalty: skip-test-coverage overuse reduces score by up to 2%.
     let penalized = base * (0.98 + 0.02 * dims.coverage_discipline);
     penalized.round() as u32
 }
@@ -652,6 +651,30 @@ mod tests {
             hash_lookups <= FILES * 4,
             "DSM clustering hashed adjacency probes {hash_lookups} times for {FILES} edges"
         );
+    }
+
+    #[test]
+    fn skip_test_coverage_overuse_costs_at_most_two_percent_of_the_signal() {
+        let perfect = HealthDimensions {
+            acyclicity: 1.0,
+            depth: 1.0,
+            equality: 1.0,
+            redundancy: 1.0,
+            modularity: 1.0,
+            coverage_discipline: 1.0,
+        };
+        let every_function_skipped = HealthDimensions {
+            coverage_discipline: 0.0,
+            ..perfect.clone()
+        };
+        let half_skipped = HealthDimensions {
+            coverage_discipline: 0.5,
+            ..perfect.clone()
+        };
+
+        assert_eq!(compute_composite_health(&perfect), 10_000);
+        assert_eq!(compute_composite_health(&half_skipped), 9_900);
+        assert_eq!(compute_composite_health(&every_function_skipped), 9_800);
     }
 
     #[test]
