@@ -273,7 +273,7 @@ struct RecordingFeedbackDeliveryPort {
 impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for RecordingFeedbackDeliveryPort
 {
-    fn deliver_hook_v2<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
         _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
