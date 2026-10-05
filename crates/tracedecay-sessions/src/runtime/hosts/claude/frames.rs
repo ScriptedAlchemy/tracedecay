@@ -188,6 +188,7 @@ pub fn try_scan_claude_source_frames_with_resume(
             session_id,
             tool_use_id: tool_use_id.as_deref(),
         });
+    let transcript_path = identity.source_path.to_string_lossy();
     for frame in raw.frames.drain(..) {
         let Ok(range) = ObservationSourceRangeV1::new(frame.offset, frame.end_offset) else {
             return Ok(None);
@@ -208,6 +209,7 @@ pub fn try_scan_claude_source_frames_with_resume(
                     &native,
                     &identity.session_id,
                     spawn,
+                    Some(transcript_path.as_ref()),
                     stable_record_id,
                     range,
                 )

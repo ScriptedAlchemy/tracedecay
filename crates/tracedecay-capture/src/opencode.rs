@@ -88,6 +88,27 @@ fn normalize_opencode_record(
     if facts.is_empty() {
         return Err(ObservationRecordParseErrorV1::Empty);
     }
+    if let Some(transcript_path) = native
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    {
+        facts.insert(
+            0,
+            CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: None,
+                transcript_path: Some(transcript_path.to_owned()),
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: Some("opencode_state_db".to_owned()),
+                native_source: Some(PROVIDER.to_owned()),
+                profile: None,
+                location_provenance: None,
+            },
+        );
+    }
 
     let timestamp = created_at;
     let mut evidence =

@@ -243,6 +243,7 @@ fn claude_real_usage_shape_records_true_counts_and_model() {
     let envelope = claude::normalize(
         &native,
         "claude-real-session",
+        None,
         record_id,
         ObservationSourceRangeV1::new(0, 128).unwrap(),
     )
@@ -323,6 +324,7 @@ fn claude_api_error_placeholder_records_no_provider_usage() {
         let envelope = claude::normalize(
             &native,
             "claude-error-session",
+            None,
             record_id,
             ObservationSourceRangeV1::new(0, 128).unwrap(),
         )
@@ -350,6 +352,7 @@ fn claude_api_error_placeholder_records_no_provider_usage() {
     let envelope = claude::normalize(
         &billed,
         "claude-error-session",
+        None,
         record_id,
         ObservationSourceRangeV1::new(0, 128).unwrap(),
     )

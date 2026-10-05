@@ -6,7 +6,7 @@ use tracedecay_sessions::runtime::source::{
 };
 
 use crate::restart_atomicity::{ingest_global_sources_for_provider, open_project_session_db};
-use crate::support::{assert_metadata_path_eq, setup};
+use crate::support::{assert_metadata_path_eq, assert_path_text_eq, setup};
 
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -168,8 +168,9 @@ async fn vibe_session_location_projects_session_metadata() {
         .to_string(),
     )
     .unwrap();
+    let transcript = session_dir.join("messages.jsonl");
     std::fs::write(
-        session_dir.join("messages.jsonl"),
+        &transcript,
         concat!(
             "{\"role\":\"user\",\"content\":\"Investigate the billing pipeline regression\"}\n",
             "{\"role\":\"assistant\",\"content\":\"The billing pipeline regression is fixed.\"}\n"
@@ -181,6 +182,13 @@ async fn vibe_session_location_projects_session_metadata() {
     ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Vibe)).await;
 
     let session = db.get_session("vibe", "vibe-location").await.unwrap();
+    assert_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &transcript,
+    );
     let metadata: serde_json::Value =
         serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&metadata["vibe_session_cwd"], &project);

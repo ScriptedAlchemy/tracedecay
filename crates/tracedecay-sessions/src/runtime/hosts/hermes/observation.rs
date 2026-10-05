@@ -38,6 +38,7 @@ pub struct HermesProjectionMetadata {
     pub location_path: Option<String>,
     pub profile: Option<String>,
     pub location_provenance: Option<&'static str>,
+    pub transcript_path: Option<String>,
 }
 
 pub(super) fn project_projection_metadata(
@@ -57,6 +58,7 @@ pub(super) fn project_projection_metadata(
         location_path: Some(presentation_path.to_string_lossy().into_owned()),
         profile: source.profile.clone(),
         location_provenance: Some(location_provenance),
+        transcript_path: Some(source.state_db.to_string_lossy().into_owned()),
     }
 }
 
@@ -100,6 +102,7 @@ struct HermesNativeObservation {
     source: Option<String>,
     profile: Option<String>,
     location_provenance: Option<String>,
+    transcript_path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -159,6 +162,7 @@ pub fn native_observation_record(
         "source": row.session_source,
         "profile": projection.profile,
         "location_provenance": projection.location_provenance,
+        "transcript_path": projection.transcript_path,
         "usage": include_session_usage.then(|| json!({
             "input_tokens": row.session_input_tokens,
             "output_tokens": row.session_output_tokens,
@@ -242,7 +246,7 @@ pub fn normalize_native_observation(
     let mut facts = vec![CanonicalObservationFactV1::Session {
         project_path: native.project_path,
         location_path: native.location_path,
-        transcript_path: None,
+        transcript_path: native.transcript_path,
         title: native.title,
         started_at: native.started_at.map(|value| value as i64),
         ended_at: native.ended_at.map(|value| value as i64),

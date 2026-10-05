@@ -833,8 +833,13 @@ async fn admit_session_file(
                 range,
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
-                    let envelope =
-                        pi_capture::normalize_observation(&native, &canonical_session_id, range)?;
+                    let transcript_path = path.to_string_lossy();
+                    let envelope = pi_capture::normalize_observation(
+                        &native,
+                        &canonical_session_id,
+                        Some(transcript_path.as_ref()),
+                        range,
+                    )?;
                     native_record_id = Some(envelope.stable_record_id().clone());
                     Ok(envelope)
                 },

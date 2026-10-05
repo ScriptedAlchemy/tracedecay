@@ -4,7 +4,7 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_capture::codex::{
-    CodexObservationLocation, codex_native_record_id, normalize_codex_observation_with_location,
+    CodexObservationContext, codex_native_record_id, normalize_codex_observation_with_context,
 };
 use tracedecay_domain::{
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -108,15 +108,17 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
             let record_id = record_id.clone();
             let project = project.clone();
             move |value| {
-                normalize_codex_observation_with_location(
+                normalize_codex_observation_with_context(
                     &value,
                     session_id.as_str(),
                     Some(session_id.as_str()),
                     record_id.clone(),
                     range,
-                    CodexObservationLocation {
+                    CodexObservationContext {
                         project_path: Some(&project),
                         location_path: Some(&project),
+                        transcript_path: None,
+                        model: None,
                     },
                 )
             }
