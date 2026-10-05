@@ -459,8 +459,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// [`Self::commit_session_refresh_begin_batch_result`].
     ///
     /// Rollback keeps every begin-time decision identical to the committing
-    /// path — reset application, frontier rebase, join detection, cursor-key
-    /// provisioning, generation allocation — while leaving nothing durable.
+    /// path: reset application, frontier rebase, join detection, cursor-key
+    /// provisioning, and generation allocation, while leaving nothing durable.
     /// Pending refresh work is derived from `session_temporal_observation_effects`,
     /// so a plan that never commits loses no work: discovery re-queues an
     /// equivalent request next pass.
@@ -576,7 +576,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// replayed here and the batch persists only when the replayed binding
     /// matches it; when the durable state moved between plan and commit the
     /// begin commits alone and the running operation resumes from durable
-    /// recovery next pass — the same state a crash between the two commits
+    /// recovery next pass, the same state a crash between the two commits
     /// left behind.
     #[tracing::instrument(
         name = "session_temporal.txn.begin_refresh_batch",
@@ -616,7 +616,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // persists only when the begin this transaction replayed agrees with
         // it. Batch writes that a later check refuses roll back with the
         // transaction; the begin is then replayed alone so a refused batch
-        // still leaves a durable running operation the next pass retires —
+        // still leaves a durable running operation the next pass retires,
         // the same state a crash between the two commits left behind.
         let diverged = operation_id != *progress.operation_id()
             || validate_batch_binding(&binding, &batch).is_err()
