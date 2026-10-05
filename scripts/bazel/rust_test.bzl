@@ -13,24 +13,26 @@ set -eu
 : "${{TEST_TMPDIR:?Bazel did not provide TEST_TMPDIR}}"
 export TRACEDECAY_DATA_DIR="$TEST_TMPDIR/.tracedecay"
 export TRACEDECAY_DISABLE_GLOBAL_DB=1
-export CARGO_MANIFEST_DIR="$TEST_SRCDIR/$TEST_WORKSPACE/{package}"
 exec "$TEST_SRCDIR/$TEST_WORKSPACE/{binary}" "$@"
-""".format(
-            binary = test_binary.short_path,
-            package = ctx.attr.package,
-        ),
+""".format(binary = test_binary.short_path),
         is_executable = True,
     )
     runfiles = ctx.runfiles(files = [test_binary]).merge(
         ctx.attr.test_binary[DefaultInfo].default_runfiles,
     )
-    return [DefaultInfo(executable = executable, runfiles = runfiles)]
+    test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
+    return [
+        DefaultInfo(executable = executable, runfiles = runfiles),
+        RunEnvironmentInfo(
+            environment = test_environment.environment,
+            inherited_environment = test_environment.inherited_environment,
+        ),
+    ]
 
 
 _isolated_rust_test = rule(
     implementation = _isolated_rust_test_impl,
     attrs = {
-        "package": attr.string(mandatory = True),
         "test_binary": attr.label(
             executable = True,
             cfg = "target",
@@ -57,7 +59,6 @@ def rust_test(name, tags = [], **kwargs):
     )
     wrapper_args = {
         "name": name,
-        "package": native.package_name(),
         "tags": tags,
         "test_binary": ":" + binary_name,
     }
