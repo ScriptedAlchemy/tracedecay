@@ -119,13 +119,16 @@ fn health_description_points_agents_at_the_weakest_dimension() {
         .expect("health is advertised");
     let description = definition.description.to_lowercase();
 
+    // "maximize" is admissible only inside the warning not to chase the
+    // composite; any other occurrence instructs agents to chase it.
+    let sans_negation = description.replace("not a number to maximize", "");
     assert!(
-        !description.contains("maximize"),
+        !sans_negation.contains("maximize"),
         "health must not tell agents to maximize the composite: {description}"
     );
     assert!(
         description.contains("pass details=true")
-            && description.contains("fix the lowest-scoring dimension"),
+            && description.contains("fix that dimension"),
         "health must send agents to the per-dimension breakdown: {description}"
     );
     assert_eq!(
