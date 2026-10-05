@@ -462,6 +462,15 @@ fn published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerSt
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Holds a publication's text projection after its first advance opened the
+/// build, while the pass that published it waits to join it.
+#[cfg(test)]
+fn opened_published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Holds a worker's graph tail right before it seats the decoded generation.
 #[cfg(test)]
 fn serving_swap_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
@@ -2683,6 +2692,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 && let Some(opened) = opened.take()
             {
                 let _ = opened.send(());
+                #[cfg(test)]
+                Self::wait_for_opened_published_text_projection_gate(&project_root).await;
             }
             match advance {
                 Ok(Ok(true)) => {
