@@ -641,6 +641,7 @@ mod tests {
             memory_graph_coverage: None,
             memory_matches_error: None,
             verified_graph_evidence: None,
+            token_budget: None,
             plan: Some(ContextPlanV1 {
                 extension_points: vec![ContextExtensionPointV1 {
                     name: "Store".to_owned(),

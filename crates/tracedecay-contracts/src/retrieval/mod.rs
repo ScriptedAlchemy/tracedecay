@@ -168,10 +168,11 @@ pub use git_context_surface::{
     GitContextSymbolV1, GitFileChangeStatusV1, GitFileChangeV1, GitFileRoleV1, GitPageStatusV1,
     GitReadCompleteV1, GitReadPartialV1, GitReadUnavailableV1, GitReferenceLimitV1,
     GitResultLimitV1, GitToolErrorKindV1, GitToolErrorV1, GitToolFailureV1, GitToolOperationV1,
-    PrAnalysisCoverageV1, PrContextCompleteV1, PrContextGraphPendingV1, PrContextResultV1,
-    PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1, PrCoverageSelectionV1,
-    PrSelectionCoverageV1, PrSymbolChangesCompleteV1, PrSymbolEntryV1, PrSymbolPageV1,
-    PrSymbolSelectionV1, SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
+    IncompatibleCallSiteV1, PrAnalysisCoverageV1, PrContextCompleteV1, PrContextGraphPendingV1,
+    PrContextResultV1, PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1,
+    PrCoverageSelectionV1, PrSelectionCoverageV1, PrSymbolChangesCompleteV1, PrSymbolEntryV1,
+    PrSymbolPageV1, PrSymbolSelectionV1, SignatureEditStatusV1, SignatureEditV1,
+    SymbolChangesCompleteV1, SymbolChangesUnavailableV1, TestGateV1,
 };
 pub use git_topology_anchor::{
     GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,
@@ -239,6 +240,7 @@ pub use primitive_surface::{
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
     SimilarSurfaceRequestV1, SimilarTargetV1, TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
+    TokenBudgetCutV1, TokenBudgetSectionV1,
 };
 pub use project_file_surface::{
     ConfigKeyFoundV1, ConfigKeyMissingV1, ConfigMatchV1, ConfigParseErrorV1, ConfigResultV1,

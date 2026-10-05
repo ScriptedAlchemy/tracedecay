@@ -195,7 +195,7 @@ pub(super) fn def_health(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_health",
         "Health Score",
-        "Get quality signal (0-10000): the geometric mean of acyclicity, depth, equality, redundancy, and modularity, reduced by up to 2% for skip-test-coverage overuse. One weak dimension drags the whole signal down (a zero zeroes it), so pass details=true for the per-dimension breakdown and fix the lowest-scoring dimension instead of chasing the composite.",
+        "Health panel, worst dimension first in `panel`. Fix that dimension. quality_signal is the geometric mean of acyclicity, depth, equality, redundancy, and modularity (0-10000), reduced by up to 2% for skip-test-coverage overuse. It is a breakdown, not a number to maximize. A zero in one dimension zeroes it. Pass details=true for the per-dimension scores.",
         input_schema,
     )
 }
