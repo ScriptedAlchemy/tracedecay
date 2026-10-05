@@ -116,9 +116,7 @@ impl AgentIntegration for ChatGptIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Staged source helpers
-// ---------------------------------------------------------------------------
 
 /// The staged portable bundle the ChatGPT host flow consumes.
 pub(crate) fn chatgpt_staged_plugin_dir(home: &Path) -> PathBuf {
@@ -151,9 +149,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 /// Check the staged ChatGPT bundle: its manifest parses, every file the
 /// rendered inventory names is present, and host registration is reported as

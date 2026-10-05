@@ -437,9 +437,7 @@ async fn walk_store_blob_bounded(
     }
 }
 
-// ---------------------------------------------------------------------------
 // store.db blob-DAG reader (SQL length-gated, reachable-only)
-// ---------------------------------------------------------------------------
 
 pub(super) struct StoreMeta {
     pub agent_id: String,

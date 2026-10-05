@@ -121,9 +121,7 @@ impl AgentIntegration for ClineIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = cline_mcp_settings_path(home);
