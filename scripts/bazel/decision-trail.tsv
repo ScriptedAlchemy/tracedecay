@@ -18,3 +18,5 @@ seq	phase	decision	evidence	result
 17	verify	bazel test executes generated rust_test through the wrapper	bazel test //scripts:rust_test_environment_probe and //crates/tracedecay-framing:unit_test PASSED on Linux	VERIFIED
 18	verify	bazel cli build exercises digest-verified dashboard staging	bazel build //crates/tracedecay-cli:tracedecay 4035 actions on Linux; binary reports <head>.dirty	VERIFIED
 19	drift	generated BUILD files checked against Cargo metadata in Repository gates	gen_builds.py --check wired into the gates job	VERIFIED
+20	drift	generated filegroups re-rendered inside marked blocks, never inherited	stale glob, dropped group, and orphan block all fail --check	VERIFIED
+21	drift	member cfg() target gates evaluated for a generic Linux host	cfg(not(any(windows,linux))) resolves False; host-dependent gates abort	VERIFIED
