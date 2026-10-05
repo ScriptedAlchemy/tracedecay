@@ -1012,26 +1012,20 @@ impl ProjectContextScoutOwnerV1 {
             let retired = match (&mutation, &receipt.result) {
                 (
                     ContextScoutPublicMutationV1::Cancel { work },
-                    ContextScoutMutationResultV1::Cancel(outcome),
-                ) if matches!(
-                    outcome,
-                    ContextScoutDurableStoreOutcomeV1::Stored
-                        | ContextScoutDurableStoreOutcomeV1::Duplicate
-                ) =>
-                {
-                    Some((*work, None))
-                }
+                    ContextScoutMutationResultV1::Cancel(
+                        ContextScoutDurableStoreOutcomeV1::Stored
+                        | ContextScoutDurableStoreOutcomeV1::Duplicate,
+                    ),
+                ) => Some((*work, None)),
                 (
                     ContextScoutPublicMutationV1::Delivery { work, .. },
-                    ContextScoutMutationResultV1::Delivery { outcome, receipt },
-                ) if matches!(
-                    outcome,
-                    ContextScoutDurableStoreOutcomeV1::Stored
-                        | ContextScoutDurableStoreOutcomeV1::Duplicate
-                ) =>
-                {
-                    Some((*work, Some(receipt.outcome)))
-                }
+                    ContextScoutMutationResultV1::Delivery {
+                        outcome:
+                            ContextScoutDurableStoreOutcomeV1::Stored
+                            | ContextScoutDurableStoreOutcomeV1::Duplicate,
+                        receipt,
+                    },
+                ) => Some((*work, Some(receipt.outcome))),
                 _ => None,
             };
             if let Some((work, delivery)) = retired
