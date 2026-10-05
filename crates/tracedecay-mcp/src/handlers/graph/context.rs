@@ -16,7 +16,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
-use tracedecay_query::retrieval::lexical::task_is_name_shaped;
+use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -530,13 +530,17 @@ where
     let cost = graph
         .as_ref()
         .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
+    // Mirror the lexical planner's admission rule: a name preference only
+    // becomes a served name route when at least one eligible symbol token
+    // survives normalization and the stoplist.
+    let route = if prefer_symbol && !preferred_symbol_tokens(task).is_empty() {
+        ContextRetrievalRouteV1::Name
+    } else {
+        ContextRetrievalRouteV1::Prose
+    };
     let result = ContextResultV1 {
         task: request.task,
-        route: if prefer_symbol {
-            ContextRetrievalRouteV1::Name
-        } else {
-            ContextRetrievalRouteV1::Prose
-        },
+        route,
         mode,
         freshness,
         code_generation,

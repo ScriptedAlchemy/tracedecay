@@ -328,7 +328,7 @@ async fn context_preserves_single_name_and_multiword_prose_routing() {
         ("gmres", "name", "gmres", "pub fn gmres() -> u32 { 1 }"),
         (
             "Type.method",
-            "name",
+            "prose",
             "method",
             "pub fn method() -> u32 { 2 }",
         ),
@@ -383,6 +383,7 @@ async fn context_preserves_single_name_and_multiword_prose_routing() {
     for (task, prefer_symbol, route) in [
         ("gmres", false, "prose"),
         ("getUserById handler", true, "name"),
+        ("function", true, "prose"),
     ] {
         let result = context_json(
             &server,
