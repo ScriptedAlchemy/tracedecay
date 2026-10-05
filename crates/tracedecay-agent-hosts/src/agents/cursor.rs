@@ -36,6 +36,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "managing-workflows",
     "project-memory",
     "reviewing-changes",
+    "routing-tracedecay",
     "tracing-functions",
     "using-the-cli",
 ];
