@@ -60,6 +60,11 @@ pub async fn compute_find_exact_symbol(
         nodes.truncate(limit);
     }
 
+    let suggestions = if nodes.is_empty() {
+        graph.suggest_simple_names(name, 5)?
+    } else {
+        Vec::new()
+    };
     let touched_files = graph_symbol_paths(&nodes)?;
     let matches = nodes
         .iter()
@@ -82,6 +87,7 @@ pub async fn compute_find_exact_symbol(
             name: request.name.clone(),
             count: matches.len() as u64,
             matches,
+            suggestions,
             freshness: None,
         }),
         touched_files,
