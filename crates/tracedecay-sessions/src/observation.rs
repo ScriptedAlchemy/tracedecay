@@ -15,8 +15,7 @@ use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCursorAdvance, ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationAdmissionPort, ObservationCaptureSink,
-    ObservationCursorPort, ObservationPersistOutcome, ObservationProjectionStatus,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
@@ -412,7 +411,7 @@ pub struct ObservationApplication<S> {
 
 impl<S> ObservationApplication<S>
 where
-    S: ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
+    S: ObservationStore,
 {
     pub fn new(store: S, sanitizer: RecordSanitizerV1) -> Self {
         Self {
@@ -462,7 +461,7 @@ where
         }
         let outcome = self
             .store
-            .advance_admitted_source_cursor(advance)
+            .advance_source_cursor(advance)
             .await
             .map_err(ObservationApplicationError::from)?;
         if cancellation.is_cancelled() {
@@ -609,7 +608,7 @@ where
             return Err(ObservationApplicationError::Cancelled);
         }
         let observation_id = outcome.receipt().observation().observation_id();
-        let stored = self.store.read_admitted_observation(observation_id).await?;
+        let stored = self.store.get_observation(observation_id).await?;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
         }
@@ -676,7 +675,7 @@ where
                         findings,
                         cancellation,
                     } => {
-                        let outcome = self.store.persist_admitted_observation(*write).await?;
+                        let outcome = self.store.persist_observation(*write).await?;
                         self.persisted_outcome(outcome, sanitized_record, findings, &cancellation)
                             .await
                     }
@@ -706,7 +705,7 @@ where
         }
         let observation = self
             .store
-            .read_admitted_observation(&observation_id)
+            .get_observation(&observation_id)
             .await
             .map_err(ObservationApplicationError::from)?;
         if cancellation.is_cancelled() {
@@ -737,7 +736,7 @@ where
             .and_then(|limit| ObservationReplayRequest::new(request.after_sequence(), limit).ok());
         let mut observations = self
             .store
-            .replay_admitted_observations(lookahead.unwrap_or(request))
+            .replay_observations(lookahead.unwrap_or(request))
             .await?;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
@@ -752,11 +751,7 @@ where
             if cancellation.is_cancelled() {
                 return Err(ObservationApplicationError::Cancelled);
             }
-            has_more = !self
-                .store
-                .replay_admitted_observations(probe)
-                .await?
-                .is_empty();
+            has_more = !self.store.replay_observations(probe).await?.is_empty();
             if cancellation.is_cancelled() {
                 return Err(ObservationApplicationError::Cancelled);
             }
@@ -777,12 +772,7 @@ where
             next_after_sequence,
         })
     }
-}
 
-impl<S> ObservationApplication<S>
-where
-    S: ObservationStore + ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
-{
     #[tracing::instrument(name = "sessions.observation.prepare_batch", level = "trace", skip_all)]
     async fn prepare_batch_captures(
         &self,
