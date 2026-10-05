@@ -429,6 +429,12 @@ fn main() -> ExitCode {
                     if refusal.code.as_deref() == Some(tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT)
             ) {
                 ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
+            } else if matches!(
+                &e,
+                tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal)
+                    if refusal.code.as_deref() == Some(tool_command::TEST_GATE_REFUSAL)
+            ) {
+                ExitCode::from(tool_command::TEST_GATE_EXIT_CODE)
             } else {
                 ExitCode::FAILURE
             };
