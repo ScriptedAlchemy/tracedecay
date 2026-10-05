@@ -23,12 +23,12 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * another, because each site re-derived the mapping. A single normalisation
  * makes drift a compile error instead of a screen nobody looks at twice.
  */
-export type ReadState<T> =
+export type ReadState<T, BlockedState extends DomainStateKind = DomainStateKind> =
   | { kind: 'ready'; value: T }
   | {
       kind: 'blocked';
       /** What the reader is told this read is. Always one of the taxonomy. */
-      state: DomainStateKind;
+      state: BlockedState;
       /** Whatever the source said about this state, and nothing where it said nothing. */
       detail?: string | undefined;
       /**
@@ -43,64 +43,12 @@ export type ReadState<T> =
       payload?: T | undefined;
     };
 
-/**
- * The states a payload read can be blocked in, the six failure outcomes plus
- * the two the ladder itself contributes.
- *
- * Narrower than `DomainStateKind` on purpose. A surface that words these in its
- * own terms, the Automations scheduler queues do, can then switch over them
- * exhaustively and fail to build when the set grows, which is the guarantee the
- * per-surface `PayloadResult` switches used to hold individually.
- */
-export type PayloadBlockedState =
-  | 'loading'
-  | 'unknown'
-  | 'offline'
-  | 'unauthorized'
-  | 'denied'
-  | 'error'
-  | 'unsupported_schema'
-  | 'unavailable';
-
-/** A payload read resolved, with its blocked states narrowed. Assignable to
- * `ReadState<T>` wherever only the taxonomy matters. */
-export type PayloadReadState<T> =
-  | { kind: 'ready'; value: T }
-  | {
-      kind: 'blocked';
-      state: PayloadBlockedState;
-      detail?: string | undefined;
-      payload?: T | undefined;
-    };
-
-/** The domain state a non-ok payload read renders as.
- *
- * Exhaustive over the failure outcomes, so a new one added to `PayloadResult`
- * fails to build here rather than falling into whichever arm a chain of
- * ternaries happened to end on, which is how 401 and 403 spent their whole
- * life rendering as a generic error whose only discriminator was status text. */
-function payloadFailureState(
-  result: Exclude<PayloadResult<unknown>, { outcome: 'ok' }>,
-): PayloadBlockedState {
-  switch (result.outcome) {
-    case 'offline':
-      return 'offline';
-    case 'unauthorized':
-      return 'unauthorized';
-    case 'denied':
-      return 'denied';
-    case 'error':
-      return 'error';
-    case 'unsupported_schema':
-      return 'unsupported_schema';
-    case 'unavailable':
-      return 'unavailable';
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
-}
+/** A payload read resolved, with blocked states derived from its outcomes so
+ * new outcomes remain exhaustive without a second list or identity switch. */
+export type PayloadReadState<T> = ReadState<
+  T,
+  'loading' | 'unknown' | Exclude<PayloadResult<unknown>['outcome'], 'ok'>
+>;
 
 /**
  * The payload ladder, resolved.
@@ -126,7 +74,7 @@ export function payloadReadState<T>(
   }
   return {
     kind: 'blocked',
-    state: payloadFailureState(result),
+    state: result.outcome,
     detail: result.outcome === 'error' ? result.detail : undefined,
   };
 }

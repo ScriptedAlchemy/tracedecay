@@ -1268,6 +1268,7 @@ mod tests {
                 source_total_bytes: 1_024,
                 symbol_count: 12,
                 edge_count: 7,
+                ambiguous_name_drops: Some(0),
             },
         };
         let value = graph_statistics_value(Some(&observed)).expect("observed census serializes");

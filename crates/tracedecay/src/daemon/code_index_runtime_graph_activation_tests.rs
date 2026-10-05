@@ -1144,6 +1144,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
                         source_total_bytes: seeded_statistics.source_total_bytes,
                         symbol_count: seeded_statistics.symbol_count,
                         edge_count: seeded_statistics.edge_count,
+                        ambiguous_name_drops: seeded_statistics.ambiguous_name_drops,
                     },
             },
             "clean restart must retain the exact authenticated generation census"
@@ -1976,6 +1977,7 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
                 source_total_bytes: 28,
                 symbol_count: statistics.symbol_count,
                 edge_count: statistics.edge_count,
+                ambiguous_name_drops: statistics.ambiguous_name_drops,
             },
         }
     );
