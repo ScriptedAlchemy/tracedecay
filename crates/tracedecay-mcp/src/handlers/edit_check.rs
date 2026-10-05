@@ -335,8 +335,14 @@ mod tests {
                 file: "caller.rs".to_owned(),
                 line: 0,
             };
-            let error = signature_edits(root.path(), &[target.clone()], &[target, caller], &[])
-                .unwrap_err();
+            let symbols = [target, caller];
+            let error = signature_edits(
+                root.path(),
+                std::slice::from_ref(&symbols[0]),
+                &symbols,
+                &[],
+            )
+            .unwrap_err();
             assert!(
                 matches!(error, TraceDecayError::Io(ref error) if error.kind() == std::io::ErrorKind::NotFound),
                 "{missing}: {error}"
