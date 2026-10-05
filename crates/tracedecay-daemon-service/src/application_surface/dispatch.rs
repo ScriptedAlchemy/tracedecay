@@ -1,12 +1,7 @@
 //! Application-surface request resolution and canonical dispatch through the daemon executor.
 
-use std::collections::BTreeSet;
-
 use serde_json::Value;
-use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationInvocationFuture, HttpApplicationRequest,
-};
-use tracedecay_contracts::catalog_composition::ApplicationCatalogComposition;
+use tracedecay_api::{CanonicalInvocationResult, HttpApplicationRequest};
 use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationProblem,
     ApplicationProblemEnvelope, CancellationSignal, Deadline, PageRequest, RequestId,
@@ -23,6 +18,7 @@ use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CatalogSnapshotV1, ProfileId, SurfaceOperationName,
 };
 
+use super::APPLICATION_PROTOCOL_REVISION;
 use super::catalog::{
     application_negotiated_features, application_surface_binding_catalog_ref,
     resolve_application_binding, validate_current_application_binding,
@@ -31,10 +27,6 @@ use super::configuration_wire::validate_application_outcome;
 use super::feedback_observation::observe_surface_argument_rejection;
 use super::problems::{
     current_micros, http_adapter_problem, invocation_contract_problem, map_dispatch_error,
-};
-use super::{
-    APPLICATION_PROTOCOL_REVISION, CatalogBoundHttpApplicationRequest,
-    HttpApplicationCatalogDispatcher,
 };
 
 pub fn application_surface_dispatch_input_with_controls(
@@ -324,32 +316,6 @@ pub fn resolve_application_surface_dispatch_with_controls(
     )?;
     let dispatched = resolve_dispatch(&resolver, surface, input).map_err(map_dispatch_error)?;
     Ok(dispatched)
-}
-
-pub(super) fn invoke_catalog_bound_application_request(
-    request: HttpApplicationRequest,
-    surface: BindingSurface,
-    composition: &ApplicationCatalogComposition<HttpApplicationCatalogDispatcher>,
-) -> HttpApplicationInvocationFuture {
-    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)
-        .unwrap_or_else(|_| panic!("the application profile id is static"));
-    let operation_name = SurfaceOperationName::new(request.operation.name_for_surface(surface))
-        .unwrap_or_else(|_| panic!("the application operation name is static"));
-    let capability = composition
-        .snapshot()
-        .resolve_binding(&profile_id, surface, &operation_name, 1, &BTreeSet::new())
-        .unwrap_or_else(|| {
-            panic!("surface bindings are validated before the application router is mounted")
-        });
-    let handler = composition
-        .handler(capability.use_case_id())
-        .unwrap_or_else(|| panic!("catalog composition validates every callable handler"));
-    handler.invoke(CatalogBoundHttpApplicationRequest {
-        capability_id: capability.capability_id().clone(),
-        use_case_id: capability.use_case_id().clone(),
-        surface,
-        request,
-    })
 }
 
 #[tracing::instrument(name = "application_surface.adapter.invoke", level = "trace", skip_all)]
