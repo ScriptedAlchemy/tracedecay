@@ -43,6 +43,10 @@ pub struct FindExactSymbolResultV1 {
     pub name: String,
     pub count: u64,
     pub matches: Vec<FindExactSymbolMatchV1>,
+    /// Nearest indexed bare names when `count` is 0. Empty when the query
+    /// matched, or when it is not itself a bare identifier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,

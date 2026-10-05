@@ -18,45 +18,22 @@ use crate::validation::{CatalogValidationError, validate_catalog};
 
 /// Validation-only evidence that an owning application use case exists.
 ///
-/// This descriptor intentionally cannot invoke anything: it contains no
-/// function pointer, trait object, service locator, or runtime registration.
+/// Capability identity and schemas remain authoritative on the manifest. A
+/// handler descriptor only proves that the application has registered the
+/// manifest's use case; copying the manifest fields here made validation compare
+/// two records generated from the same specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptorV1 {
-    capability_id: CapabilityId,
     use_case_id: UseCaseId,
-    request_schema: SchemaRef,
-    result_schema: SchemaRef,
 }
 
 impl ApplicationHandlerDescriptorV1 {
-    pub fn new(
-        capability_id: CapabilityId,
-        use_case_id: UseCaseId,
-        request_schema: SchemaRef,
-        result_schema: SchemaRef,
-    ) -> Self {
-        Self {
-            capability_id,
-            use_case_id,
-            request_schema,
-            result_schema,
-        }
-    }
-
-    pub fn capability_id(&self) -> &CapabilityId {
-        &self.capability_id
+    pub fn new(use_case_id: UseCaseId) -> Self {
+        Self { use_case_id }
     }
 
     pub fn use_case_id(&self) -> &UseCaseId {
         &self.use_case_id
-    }
-
-    pub fn request_schema(&self) -> &SchemaRef {
-        &self.request_schema
-    }
-
-    pub fn result_schema(&self) -> &SchemaRef {
-        &self.result_schema
     }
 }
 
