@@ -1052,6 +1052,56 @@ impl ProjectContextScoutDurableStoreV1 {
         state.validate(self.project_id).then_some(state)
     }
 
+    /// Read the existing effect receipt before starting request-driven producer
+    /// work. Absence permits production; a malformed or conflicting receipt
+    /// remains a typed refusal. The commit path repeats this under its writer.
+    pub async fn retained_public_mutation(
+        &self,
+        binding: &ContextScoutMutationBindingV1,
+    ) -> Option<ContextScoutMutationSettlementOutcomeV1> {
+        if !valid_mutation_binding(binding) {
+            return Some(ContextScoutMutationSettlementOutcomeV1::Unavailable);
+        }
+        let Some(key) = mutation_receipt_key(&binding.effect_identity) else {
+            return Some(ContextScoutMutationSettlementOutcomeV1::Unavailable);
+        };
+        let encoded = match self.database.get_metadata(&key).await {
+            Ok(Some(encoded)) => encoded,
+            Ok(None) => return None,
+            Err(_) => return Some(ContextScoutMutationSettlementOutcomeV1::Unavailable),
+        };
+        let Some(settlement) = decode_mutation_settlement(&encoded) else {
+            return Some(ContextScoutMutationSettlementOutcomeV1::Unavailable);
+        };
+        Some(if settlement.binding == *binding {
+            self.reconcile_mutation_settlement(&key, settlement).await
+        } else {
+            ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict
+        })
+    }
+
+    /// An outstanding lease or ready explicit suggestion is already owned.
+    /// A public request must not supersede it merely to change delivery timing.
+    pub async fn needs_explicit_production(
+        &self,
+        address: ContextScoutAddressV1,
+        configuration_revision: [u8; 32],
+        now: UtcMicros,
+    ) -> Option<bool> {
+        if !self.in_scope(address) || configuration_revision == [0; 32] || now.0 <= 0 {
+            return None;
+        }
+        let state = self.load_state().await?;
+        Some(!state.entries.iter().any(|stored| {
+            stored.entry.work.address == address
+                && stored.entry.envelope.configuration_revision == configuration_revision
+                && stored.entry.envelope.candidate.expires_at > now
+                && (stored.lease.is_some_and(|lease| lease.expires_at > now)
+                    || stored.entry.envelope.delivery_window
+                        == ContextScoutDeliveryWindowV1::OnRequest)
+        }))
+    }
+
     pub async fn commit_public_mutation(
         &self,
         binding: ContextScoutMutationBindingV1,
