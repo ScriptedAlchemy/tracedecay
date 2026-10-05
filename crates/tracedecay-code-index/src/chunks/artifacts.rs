@@ -163,6 +163,10 @@ pub struct CodeIndexUnresolvedReferenceV1 {
     /// Arguments the call site passes, where the extractor counts them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_count: Option<u32>,
+    /// The file defines more than one candidate the call site cannot choose
+    /// between, so it is a disclosed caller gap and never binds cross-file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ambiguous_local: bool,
 }
 
 impl CodeIndexUnresolvedReferenceV1 {

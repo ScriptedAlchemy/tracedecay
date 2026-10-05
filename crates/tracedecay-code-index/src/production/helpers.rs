@@ -314,8 +314,8 @@ type EdgeEvidenceV1 = (
     u64,
 );
 
-/// `files`' edge evidence resolved whole, with the interfaces whose
-/// implementors the seal cannot decide.
+/// `files`' edge evidence resolved whole, with the references the seal
+/// cannot decide.
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
 ) -> Result<EdgeEvidenceV1, CodeIndexProductionErrorV1>
@@ -327,11 +327,11 @@ where
     // the edges this returns plus one sort buffer.
     let CrossFileResolutionV1 {
         edges,
-        implementor_gaps,
+        gaps,
         ambiguous_name_drops,
     } = resolve_cross_file_references(files)?;
     let (edges, abstentions) = edge_evidence(files, edges);
-    Ok((edges, abstentions, implementor_gaps, ambiguous_name_drops))
+    Ok((edges, abstentions, gaps, ambiguous_name_drops))
 }
 
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
@@ -398,7 +398,8 @@ pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
 
 /// Resolves only `selection`'s references against the whole file set whose
 /// symbols `by_simple_name` indexes. Each reference binds exactly as
-/// [`resolve_cross_file_references`] binds it.
+/// [`resolve_cross_file_references`] binds it; the result is the edges those
+/// references contribute and the ambiguous calls among them.
 #[tracing::instrument(name = "code_index.seal.resolve_selected", level = "trace", skip_all)]
 pub(crate) fn resolve_selected_cross_file_references<T>(
     files: &[T],
@@ -411,11 +412,13 @@ where
     resolve_references(files, by_simple_name, Some(selection))
 }
 
-/// A whole-set resolution: the cross-file edges, and one row per interface
-/// whose implementors the seal cannot decide.
+/// A resolution: the cross-file edges, and the references the seal cannot
+/// decide, each a disclosed gap: calls with more than one candidate, and, for
+/// a whole-set pass, one row per interface whose implementors it cannot
+/// decide.
 pub(crate) struct CrossFileResolutionV1 {
     pub(crate) edges: Vec<CanonicalRelationEdgeV1>,
-    pub(crate) implementor_gaps: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(crate) gaps: Vec<CodeIndexUnresolvedReferenceV1>,
     pub(crate) ambiguous_name_drops: u64,
 }
 
@@ -505,7 +508,7 @@ where
     })?;
     let ambiguous_name_drops = per_file
         .iter()
-        .fold(0_u64, |total, (_, drops)| total.saturating_add(*drops));
+        .fold(0_u64, |total, (_, _, drops)| total.saturating_add(*drops));
     // Satisfaction needs every Go method set, so only a whole-set pass
     // decides it, and only a file set with Go types builds the module index.
     let satisfaction = if selection.is_none()
@@ -521,12 +524,14 @@ where
     let mut edges = Vec::with_capacity(
         per_file
             .iter()
-            .map(|(file_edges, _)| file_edges.len())
+            .map(|(edges, _, _)| edges.len())
             .sum::<usize>()
             .saturating_add(satisfaction.edges.len()),
     );
-    for (file_edges, _) in per_file {
+    let mut gaps = satisfaction.gaps;
+    for (file_edges, file_gaps, _) in per_file {
         edges.extend(file_edges);
+        gaps.extend(file_gaps);
     }
     edges.extend(satisfaction.edges);
     {
@@ -538,7 +543,7 @@ where
     };
     Ok(CrossFileResolutionV1 {
         edges,
-        implementor_gaps: satisfaction.gaps,
+        gaps,
         ambiguous_name_drops,
     })
 }
@@ -677,7 +682,7 @@ where
 }
 
 /// Resolve one file's retained unresolved references against the whole staged
-/// file set.
+/// file set: the edges they bind, and the calls left ambiguous.
 ///
 /// The memo is file-local on purpose. `ResolvedReferenceCacheV1` is keyed by
 /// source-file index, so a shared map could never serve another file's entry.
@@ -689,7 +694,11 @@ fn resolve_one_file_cross_file_references<T>(
     modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     picks: Option<&[usize]>,
-) -> (Vec<CanonicalRelationEdgeV1>, u64)
+) -> (
+    Vec<CanonicalRelationEdgeV1>,
+    Vec<CodeIndexUnresolvedReferenceV1>,
+    u64,
+)
 where
     T: ResolutionFileV1,
 {
@@ -698,6 +707,7 @@ where
     let same_file_binds = is_module_import_language(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
+    let mut gaps = Vec::new();
     let mut ambiguous_name_drops = 0_u64;
     let references = &files[index].as_ref().artifacts.unresolved_references;
     let every = picks.is_none().then(|| references.iter());
@@ -708,6 +718,7 @@ where
             reference.reference_name.as_str(),
             reference.kind,
             reference.argument_count,
+            reference.ambiguous_local,
         );
         let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
@@ -732,8 +743,15 @@ where
         if ambiguous {
             ambiguous_name_drops = ambiguous_name_drops.saturating_add(1);
         }
-        let Some((target_index, targets)) = resolved else {
-            continue;
+        let (target_index, targets) = match resolved {
+            Some(ReferenceResolutionV1::Bound(target_index, targets)) => (target_index, targets),
+            Some(ReferenceResolutionV1::Ambiguous) => {
+                if reference.kind == RelationEdgeKindV1::Calls {
+                    gaps.push(reference.clone());
+                }
+                continue;
+            }
+            None => continue,
         };
         if target_index == index && !same_file_binds {
             continue;
@@ -746,7 +764,7 @@ where
             evidence_span: reference.evidence_span,
         }));
     }
-    (edges, ambiguous_name_drops)
+    (edges, gaps, ambiguous_name_drops)
 }
 
 #[cfg(test)]
@@ -760,9 +778,19 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
 }
 
 type ResolvedReferenceCacheV1<'a> = HashMap<
-    (usize, &'a str, RelationEdgeKindV1, Option<u32>),
-    (Option<(usize, Vec<SymbolOccurrenceId>)>, bool),
+    (usize, &'a str, RelationEdgeKindV1, Option<u32>, bool),
+    (Option<ReferenceResolutionV1>, bool),
 >;
+
+/// What one retained reference resolves to; `None` beside it is a reference
+/// with no cross-file binding.
+#[derive(Clone)]
+enum ReferenceResolutionV1 {
+    /// The targets, all in one file.
+    Bound(usize, Vec<SymbolOccurrenceId>),
+    /// More than one candidate the reference cannot choose between.
+    Ambiguous,
+}
 
 fn resolve_cross_file_reference<T>(
     files: &[T],
@@ -771,19 +799,22 @@ fn resolve_cross_file_reference<T>(
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
     ambiguous: &mut bool,
-) -> Option<(usize, Vec<SymbolOccurrenceId>)>
+) -> Option<ReferenceResolutionV1>
 where
     T: ResolutionFileV1,
 {
+    if reference.ambiguous_local {
+        return Some(ReferenceResolutionV1::Ambiguous);
+    }
     let rust = &modules.rust;
     let file = files[index].as_ref();
     // These languages bind one exact module member through their own import
     // and package rules, never by name matching.
     if is_module_import_language(file.extraction.language.as_str()) {
         return match modules.modules().call_outcome(index, reference)? {
-            ImportBindingOutcomeV1::Bound(target_index, symbol) => {
-                Some((target_index, vec![symbol.occurrence.clone()]))
-            }
+            ImportBindingOutcomeV1::Bound(target_index, symbol) => Some(
+                ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
+            ),
             ImportBindingOutcomeV1::External
             | ImportBindingOutcomeV1::Unresolved
             | ImportBindingOutcomeV1::ValueMember => None,
@@ -810,9 +841,9 @@ where
         )
     {
         return match outcome {
-            ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => {
-                Some((target_index, vec![symbol.occurrence.clone()]))
-            }
+            ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => Some(
+                ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
+            ),
             ImportBindingOutcomeV1::Bound(..)
             | ImportBindingOutcomeV1::External
             | ImportBindingOutcomeV1::Unresolved
@@ -937,7 +968,8 @@ where
         .collect::<Vec<_>>();
     // A type-path call may match both an inherent `Type::method` and one or
     // more `<Type as Trait>::method` aliases; Rust prefers the inherent, so
-    // keep a unique non-UFCS hit when aliases also matched.
+    // keep a unique non-UFCS hit when aliases also matched. Any other choice
+    // between candidates is ambiguous.
     let compatible = match compatible.as_slice() {
         [] => return None,
         [_] => compatible,
@@ -965,7 +997,7 @@ where
                 [_] => inherent,
                 _ => {
                     *ambiguous = true;
-                    return None;
+                    return Some(ReferenceResolutionV1::Ambiguous);
                 }
             }
         }
@@ -974,7 +1006,7 @@ where
     if *target_index == index {
         return None;
     }
-    Some((
+    Some(ReferenceResolutionV1::Bound(
         *target_index,
         compatible
             .iter()

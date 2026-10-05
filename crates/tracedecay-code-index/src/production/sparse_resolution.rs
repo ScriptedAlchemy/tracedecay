@@ -640,7 +640,7 @@ pub(super) fn resolve_edit(
         &|| Ok(()),
     )
     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    for call in rederived {
+    for call in rederived.into_iter().chain(resolved.gaps) {
         let owner = owner_of
             .get(&call.from_occurrence)
             .ok_or_else(|| contract("a re-derived call limitation leaves the selection"))?;
