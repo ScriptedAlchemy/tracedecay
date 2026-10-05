@@ -40,7 +40,7 @@ npm.npm_translate_lock(
         "//dashboard:package.json",
     ],
     # scripts/bazel/sync-pnpm-lock.sh strips pnpm 12's leading
-    # packageManager document; rules_js parses single-doc lockfiles only.
+    # packageManager document. rules_js parses single-doc lockfiles only.
     pnpm_lock = "//:pnpm-lock.bazel.yaml",
     verify_node_modules_ignored = "//:.bazelignore",
 )

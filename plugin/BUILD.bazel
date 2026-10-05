@@ -1,6 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
-# Plugin host bundles pulled into Rust crates via include_str!/compile_data.
+# Rust crates embed these plugin host bundles via include_str! and
+# compile_data.
 filegroup(
     name = "sources",
     srcs = glob(["**/*"]),

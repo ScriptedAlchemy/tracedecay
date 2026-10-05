@@ -4,7 +4,7 @@ common --show_progress_rate_limit=15
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh
-# .cargo/config.toml compiles vendored C deps with NDEBUG; keep parity for
+# .cargo/config.toml compiles vendored C deps with NDEBUG. Keep parity for
 # cc crates built inside cargo_build_script actions (tree-sitter grammars).
 build --action_env=CFLAGS=-DNDEBUG
 build --action_env=CXXFLAGS=-DNDEBUG
@@ -12,11 +12,11 @@ build --action_env=CXXFLAGS=-DNDEBUG
 # sandbox execroot. Crates that read CARGO_MANIFEST_DIR with env! instead of
 # env::var (arborium grammars) then use a dead sandbox path when the build
 # script runs. Compiling build-script binaries locally bakes the stable real
-# execroot. Only the *_ / _bs_ script binaries match; lib/bin compiles stay
-# sandboxed.
+# execroot. Only the *_ / _bs_ script binaries match. Lib and bin compiles
+# stay sandboxed.
 build "--strategy_regexp=Compiling Rust bin _bs_.*=local"
 build "--strategy_regexp=Compiling Rust bin build_script_build_.*=local"
-# ld.bfd peaks near 4 GB per link; cap parallelism so links do not
+# ld.bfd peaks near 4 GB per link. Cap parallelism so links do not
 # OOM-kill each other on 8-core/32 GB workers.
 build --jobs=4
 build "--@rules_rust//rust/settings:extra_rustc_flags=-Clink-arg=-fuse-ld=bfd"

@@ -12,8 +12,9 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
-# Product provenance for crates/tracedecay-cli's build script: the exact
-# commit this binary compiles, written by --workspace_status_command.
+# This genrule emits product provenance for crates/tracedecay-cli's build
+# script. The file records the exact commit this binary compiles.
+# --workspace_status_command supplies it.
 genrule(
     name = "product_git_sha",
     srcs = [],
