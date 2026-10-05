@@ -12,3 +12,5 @@ export function buildFixtureReport(): FixtureReport {
     edgeCount: dependencyCount(nodes),
   };
 }
+
+export const reportTemplate: FixtureReport = { nodeCount: 0, edgeCount: 0 };

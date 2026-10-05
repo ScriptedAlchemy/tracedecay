@@ -368,3 +368,59 @@ revision on the same machine. Compare the `samples.jsonl` files, not single
 runs. For CPU attribution of a lane, attach `perf record -g -p <daemon pid>`
 while the lane runs. For OS-level counters, read
 `/proc/<pid>/status` and `perf stat` against the daemon pid.
+
+## Bounded MCP catalog audit
+
+The existing `large_repos` benchmark also provides a finite audit through the
+production composition. Build it with
+`cargo bench -p tracedecay --profile perf --features test-helpers,test-transport --bench large_repos --no-run`,
+then pass the executable printed by Cargo explicitly to the wrapper.
+
+```sh
+TRACEDECAY_BENCH_PROFILE=perf scripts/run-tool-performance.sh \
+  --bin /absolute/path/to/large_repos-executable \
+  --samples 1 \
+  --report /absolute/path/to/tool-audit.json
+```
+
+The wrapper stages the checked-in runtime fixture in a disposable Git repository
+and isolates home, profile, and host transcript inputs. It removes staging after
+confirming that the owned process group has stopped. A cleanup failure exits
+nonzero and reports the staging path while the child may still be alive.
+It never selects a binary from `PATH` or builds one.
+
+The report compares exercised query groups with the live maximal MCP catalog.
+The catalog snapshot includes canonical application surface bindings across
+MCP, CLI, HTTP, LSP, and dashboard surfaces. This audit measures
+the MCP binding projection only; `measured_surface` identifies that scope, and
+the other bindings require their own transport measurements. The catalog
+is an authority and provenance value, not a claim that this benchmark
+executed every binding.
+It retains first arguments and responses, direct dispatch timings, optional
+server duration telemetry, typed failures, setup omissions, and cleanup errors.
+The report lists catalog entries without a timed sample and entries without a
+passing behavioral assertion separately from missing query groups. Each gap
+or failed call makes the run fail. Asynchronous effects retain their admission
+timing and a separate completion measurement with the actual terminal record;
+an admission receipt alone does not count as completed functionality.
+Truncated results are verified after fetching the complete stored response
+through public MCP retrieval pages. The original timed response remains in the
+report; retrieval timing and the completed body are recorded separately.
+Setup, file-content assertions,
+and cleanup are outside the measured dispatch interval. Generation-dependent
+reads obtain a current symbol claim during setup.
+Work fixtures exercise admission, execution, cancellation, and evidence hydration
+with a configured local executable. Model and host execution require their own
+production journeys and measurements.
+Nonrepeatable effects, such as removing an owned linked worktree, receive one
+sample and record that limit in `samples_target`. Criterion omits these groups
+before warmup because later iterations would lack their real precondition.
+
+One sample is a coverage diagnostic. Dispatch success does not prove semantic
+correctness, and samples from different query variants or first/repeat states
+must not be pooled into a tail-latency claim. Pair the audit with the functional
+MCP and production transport journeys before claiming that tools work. Set
+`TRACEDECAY_SPAN_TIMINGS=1` and `RUST_LOG=large_repos=trace` for setup and dispatch
+span diagnostics; retain a separate run without diagnostic logging for latency
+comparison. The supplied profile label and checkout identity are report metadata;
+the executable SHA-256 identifies the measured artifact.
