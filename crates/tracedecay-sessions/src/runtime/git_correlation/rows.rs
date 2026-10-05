@@ -52,6 +52,12 @@ pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_git_evidence_commit_session
         ON git_evidence_commit(session_id);
+    CREATE TABLE IF NOT EXISTS git_history_session_publication (
+        provider TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        PRIMARY KEY(provider, session_id)
+    ) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS git_evidence_generation (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -129,6 +135,8 @@ pub struct GitEvidenceWriter<'t, T: Executor + ?Sized> {
     change_digest: Vec<String>,
     spans_added: u64,
     commits_added: u64,
+    spans_removed: u64,
+    commits_removed: u64,
     attributed_through: Option<i64>,
 }
 
@@ -145,8 +153,94 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             change_digest: Vec::new(),
             spans_added: 0,
             commits_added: 0,
+            spans_removed: 0,
+            commits_removed: 0,
             attributed_through: None,
         })
+    }
+
+    /// Start replacement of one retained-history revision. Explicit capture
+    /// and hook observations remain facts; inferred backfill evidence is
+    /// retracted before this revision's staged pages are published.
+    pub async fn replace_backfill_session(
+        &mut self,
+        provider: &str,
+        session_id: &str,
+        revision: i64,
+    ) -> Result<(), GitCorrelationError> {
+        let mut rows = self.transaction.query(
+            "SELECT sequence FROM git_history_session_change WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+        ).await?;
+        let current = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(rows);
+        if current != Some(revision) {
+            return Err(GitCorrelationError::Unavailable(
+                "session history changed during Git evidence derivation".to_owned(),
+            ));
+        }
+        let mut rows = self.transaction.query(
+            "SELECT sequence FROM git_history_session_publication WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+        ).await?;
+        let published = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        drop(rows);
+        if published == Some(revision) {
+            return Ok(());
+        }
+        let (spans, commits) =
+            load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
+        let removed = spans
+            .values()
+            .filter(|span| span.provider == provider && span.source == super::SpanSource::Backfill)
+            .map(|span| span.span_id.clone())
+            .collect::<BTreeSet<_>>();
+        for span_id in &removed {
+            self.transaction
+                .execute(
+                    "DELETE FROM git_evidence_span WHERE span_id = ?1",
+                    params![span_id.as_str()],
+                )
+                .await?;
+            self.spans_removed += 1;
+            self.change_digest
+                .push(serde_json::to_string(&("delete_span", span_id))?);
+        }
+        for record in commits.values().filter(|record| {
+            record.provider == provider
+                && (record.evidence == super::CommitEvidence::ReflogOverlap
+                    || record
+                        .span_id
+                        .as_ref()
+                        .is_some_and(|id| removed.contains(id)))
+        }) {
+            self.transaction
+                .execute(
+                    "DELETE FROM git_evidence_commit WHERE commit_sha = ?1 AND session_id = ?2",
+                    params![record.commit_sha.as_str(), session_id],
+                )
+                .await?;
+            self.commits_removed += 1;
+            self.change_digest.push(serde_json::to_string(&(
+                "delete_commit",
+                &record.commit_sha,
+                session_id,
+            ))?);
+        }
+        self.transaction.execute(
+            "INSERT INTO git_history_session_publication(provider, session_id, sequence) VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider, session_id) DO UPDATE SET sequence = excluded.sequence",
+            params![provider, session_id, revision],
+        ).await?;
+        Ok(())
     }
 
     /// Merges `batch` into the stored rows of the sessions it names and
@@ -366,12 +460,14 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
                 .base
                 .as_ref()
                 .map_or(0, |base| base.span_count)
-                .saturating_add(self.spans_added),
+                .saturating_add(self.spans_added)
+                .saturating_sub(self.spans_removed),
             commit_count: self
                 .base
                 .as_ref()
                 .map_or(0, |base| base.commit_count)
-                .saturating_add(self.commits_added),
+                .saturating_add(self.commits_added)
+                .saturating_sub(self.commits_removed),
             attributed_through,
         };
         self.transaction

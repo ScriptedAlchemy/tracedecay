@@ -441,6 +441,49 @@ impl CodeGraphInteractiveReader {
         )))
     }
 
+    /// Nearest indexed bare names within a bounded edit distance.
+    ///
+    /// The bound is 1 edit for names shorter than 6 characters and 2
+    /// otherwise. A query that is not a bare identifier returns no
+    /// suggestions. This does not bind an edge.
+    pub fn suggest_simple_names(
+        &self,
+        name: &str,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<String>, CodeGraphProjectionError> {
+        if limit == 0 || !bare_identifier(name) {
+            return Ok(Vec::new());
+        }
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let query = name.to_lowercase();
+        let max_distance = if query.chars().count() < 6 { 1 } else { 2 };
+        let mut hits: Vec<(usize, String)> = Vec::new();
+        for (index, (key, ids)) in catalog.by_simple_name.iter().enumerate() {
+            if index % 1024 == 0 {
+                catalog::check_cancelled(cancellation.as_ref())?;
+            }
+            let Some(distance) = bounded_edit_distance(key, &query, max_distance) else {
+                continue;
+            };
+            if distance == 0 {
+                continue;
+            }
+            let display = ids
+                .first()
+                .and_then(|id| catalog.symbols.get(id))
+                .and_then(|symbol| symbol.metadata.as_ref())
+                .map(|metadata| metadata.simple_name.clone())
+                .unwrap_or_else(|| key.clone());
+            hits.push((distance, display));
+        }
+        hits.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        hits.dedup_by(|left, right| left.1 == right.1);
+        hits.truncate(limit);
+        Ok(hits.into_iter().map(|(_, name)| name).collect())
+    }
+
     /// Whether unresolved call sites can name one of the queried methods.
     /// Matching a member name establishes uncertainty only, never a target edge.
     pub fn has_unresolved_callers(
@@ -2017,6 +2060,61 @@ fn catalog_lock_poisoned() -> CodeGraphProjectionError {
     CodeGraphProjectionError::Unavailable(
         "code graph interactive catalog lock is poisoned".to_owned(),
     )
+}
+
+fn bare_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+/// Edit distance when it is at most `max`, otherwise `None`.
+fn bounded_edit_distance(left: &str, right: &str, max: usize) -> Option<usize> {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let (left_len, right_len) = (left.len(), right.len());
+    if left_len.abs_diff(right_len) > max {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right_len).collect();
+    let mut current = vec![0; right_len + 1];
+    for (row_index, left_char) in left.iter().enumerate() {
+        current[0] = row_index + 1;
+        let mut row_best = current[0];
+        for (column, right_char) in right.iter().enumerate() {
+            let cost = usize::from(left_char != right_char);
+            current[column + 1] = (previous[column + 1] + 1)
+                .min(current[column] + 1)
+                .min(previous[column] + cost);
+            row_best = row_best.min(current[column + 1]);
+        }
+        if row_best > max {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distance = previous[right_len];
+    (distance <= max).then_some(distance)
+}
+
+#[cfg(test)]
+mod suggest_distance {
+    use super::{bare_identifier, bounded_edit_distance};
+
+    #[test]
+    fn distance_stops_at_the_bound() {
+        assert_eq!(bounded_edit_distance("gmre", "gmres", 1), Some(1));
+        assert_eq!(bounded_edit_distance("gmre", "shared_token", 1), None);
+        assert_eq!(
+            bounded_edit_distance("shared_tok", "shared_token", 2),
+            Some(2)
+        );
+        assert!(!bare_identifier("src/lib.rs::gmres"));
+        assert!(bare_identifier("shared_tok"));
+    }
 }
 
 #[cfg(test)]

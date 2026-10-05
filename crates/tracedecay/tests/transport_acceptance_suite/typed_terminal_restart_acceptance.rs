@@ -45,7 +45,7 @@ mod stale_profile_authority_reset;
 mod stale_project_sessions_census;
 /// Stale session stores refuse only sessions until their scoped reset.
 mod stale_sessions_store_reset;
-/// The HTTP, MCP-host, and Rust SDK legs of this same journey.
+/// The HTTP, MCP-host, Rust SDK, and TypeScript SDK legs of this same journey.
 mod transport_boundaries;
 
 use std::io::{BufRead, BufReader};

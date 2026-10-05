@@ -454,4 +454,24 @@ fn delivery_receipts_drain_promptly_after_the_last_append_and_after_a_restart() 
         receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
         "a receipt spooled across a restart must drain within {PROMPT_DRAIN:?} without another client"
     );
+
+    // The native output writer can see the same event after its receipt was
+    // acknowledged. Its logical key survives, while the new callback time
+    // must not replace the durable settlement's first timestamps.
+    let mut retry = held[0].settlement.clone();
+    retry.attempt.valid_at.0 += 1;
+    retry.attempt.attempted_at.0 += 1;
+    retry.settled_at.0 += 1;
+    let retry = HookDeliverySourceReceiptV1::new(retry).unwrap();
+    assert_eq!(retry.receipt_id, held[0].receipt_id);
+    publish(&receipts, &retry);
+    assert!(
+        receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
+        "an acknowledged exact output retry must replay its durable settlement"
+    );
+    let drained = json!({ "status": "drained" });
+    assert_eq!(
+        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
+        drained
+    );
 }

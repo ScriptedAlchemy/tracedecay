@@ -442,12 +442,14 @@ class CommandLineTest(unittest.TestCase):
                 bin_dir = root / "bin"
                 bin_dir.mkdir()
                 hauler = bin_dir / "hauler"
-                hauler.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+                hauler.write_text(f"#!{sys.executable}\n" + '''import json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 assert args[:3] == ["exec", "--", "cargo"], args
 with Path("commands.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\\n")
+if os.name == "nt":
+    sys.exit(subprocess.call([sys.executable, str(Path(__file__).with_name("cargo.py")), *args[3:]]))
 os.execvp("cargo", args[2:])
 ''', encoding="utf-8")
                 cargo = bin_dir / "cargo"
@@ -468,7 +470,14 @@ if first and mode == "report-move-failure":
 sys.exit(101 if first and mode == "test-failure" else 0)
 ''', encoding="utf-8")
                 for executable in (hauler, cargo):
-                    executable.chmod(0o755)
+                    if os.name == "nt":
+                        python_source = executable.with_suffix(".py")
+                        executable.rename(python_source)
+                        executable.with_suffix(".cmd").write_text(
+                            f'@"{sys.executable}" "%~dp0{python_source.name}" %*\n', encoding="utf-8"
+                        )
+                    else:
+                        executable.chmod(0o755)
                 source = root / "target/nextest/ci/junit.xml"
                 source.parent.mkdir(parents=True)
                 source.write_text("stale source", encoding="utf-8")
@@ -510,8 +519,10 @@ sys.exit(101 if first and mode == "test-failure" else 0)
                     self.assertFalse((output / "root-lib.xml").exists())
                 elif mode == "report-move-failure":
                     self.assertEqual(first["test"]["exit_code"], 0)
-                    self.assertIn("junit.xml' -> '", first["error"])
-                    self.assertTrue(first["error"].endswith("root-lib.xml'"), first["error"])
+                    self.assertIn(repr(str(source)), first["error"])
+                    self.assertTrue(
+                        first["error"].endswith(repr(str(output / "root-lib.xml"))), first["error"]
+                    )
                     self.assertIsNone(first["report"])
                 else:
                     self.assertEqual(first["test"]["exit_code"], 101 if mode == "test-failure" else 0)

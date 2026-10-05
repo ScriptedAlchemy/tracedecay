@@ -72,6 +72,11 @@ where
 
     let transaction = session_store.open_write_transaction().await?;
     let mut writer = GitEvidenceWriter::open(&transaction).await?;
+    for (provider, session_id, revision) in &backfill.settled_sessions {
+        writer
+            .replace_backfill_session(provider, session_id, *revision)
+            .await?;
+    }
     let backfilled = writer
         .apply(GitEvidenceBatch {
             spans: backfill.spans,

@@ -9,6 +9,7 @@ use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{CoverageCompleteness, OpaqueCursor};
+use crate::retrieval::PrimitiveSearchFreshnessV1;
 
 pub const MAX_GREP_RESULTS_V1: u32 = 200;
 pub const MAX_GREP_CONTEXT_LINES_V1: u32 = 3;
@@ -114,56 +115,6 @@ pub struct AstGrepResultV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ComplexityRequestV1 {
-    pub node_kind: Option<String>,
-    pub path: Option<String>,
-    pub window: PrimitiveWindowV1,
-}
-
-impl ComplexityRequestV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if self.window.limit > MAX_ANALYSIS_RESULTS_V1 {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "complexity result limit",
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ComplexityItemV1 {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub file: String,
-    pub line: u32,
-    pub lines: u32,
-    pub cyclomatic_complexity: u32,
-    pub branches: u32,
-    pub loops: u32,
-    pub returns: u32,
-    pub max_nesting: u32,
-    pub unsafe_blocks: u32,
-    pub unchecked_calls: u32,
-    pub assertions: u32,
-    pub fan_out: u64,
-    pub fan_in: u64,
-    pub score: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ComplexityResultV1 {
-    pub formula: String,
-    pub note: String,
-    pub result_count: u64,
-    pub ranking: Vec<ComplexityItemV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct DependencyDepthRequestV1 {
     pub path: Option<String>,
     pub window: PrimitiveWindowV1,
@@ -196,6 +147,9 @@ pub struct DependencyDepthResultV1 {
     pub ideal_depth: u64,
     pub depth_score: f64,
     pub chains: Vec<DependencyDepthChainV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,14 +215,6 @@ pub trait AstGrepAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a AstGrepRequestV1,
     ) -> PrimitiveFutureV1<'a, AstGrepResultV1>;
-}
-
-pub trait ComplexityAuthorityV1 {
-    fn complexity<'a>(
-        &'a self,
-        context: &'a PrimitivePortContextV1<'a>,
-        request: &'a ComplexityRequestV1,
-    ) -> PrimitiveFutureV1<'a, ComplexityResultV1>;
 }
 
 pub trait DependencyDepthAuthorityV1 {
@@ -339,26 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn analysis_request_json_validation_covers_complexity_and_depth() {
-        let complexity: ComplexityRequestV1 = serde_json::from_value(serde_json::json!({
-            "node_kind": "function",
-            "path": "src/lib.rs",
-            "window": { "limit": 10, "cursor": null }
-        }))
-        .unwrap();
-        complexity.validate().unwrap();
-        let over_complexity = ComplexityRequestV1 {
-            window: PrimitiveWindowV1 {
-                limit: MAX_ANALYSIS_RESULTS_V1 + 1,
-                cursor: None,
-            },
-            ..complexity
-        };
-        assert!(matches!(
-            over_complexity.validate(),
-            Err(ApplicationContractError::InvalidRange { .. })
-        ));
-
+    fn dependency_depth_request_json_validates() {
         let depth: DependencyDepthRequestV1 = serde_json::from_value(serde_json::json!({
             "path": "crates/tracedecay-contracts",
             "window": { "limit": 5, "cursor": null }

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.67...v1.0.0-beta.68) (2026-10-04)
+
+
+### Bug Fixes
+
+* **bench:** clear warnings without changing query coverage ([b0dc6b9](https://github.com/ScriptedAlchemy/tracedecay/commit/b0dc6b9bdbfa35550898c6083cbb7ce2ab61be85))
+* **contracts:** carry freshness across served graph results ([92094ed](https://github.com/ScriptedAlchemy/tracedecay/commit/92094ed817029b8133bbcfd2880a6c730c9c32a4))
+* **contracts:** type freshness on distribution reports ([c2f767d](https://github.com/ScriptedAlchemy/tracedecay/commit/c2f767da1105c42dd62cee6d12241189ba0a7977))
+* **daemon:** await native graph without duplicate decoding ([612c0b3](https://github.com/ScriptedAlchemy/tracedecay/commit/612c0b3368bfe05a43de243e42d8c017f2dd80ea))
+* **feedback:** admit test attribution on advisory demand ([108278b](https://github.com/ScriptedAlchemy/tracedecay/commit/108278be87f2073d4bb710276cf0811eb69e4a27))
+* **git:** preserve history changes under session upserts ([e15a711](https://github.com/ScriptedAlchemy/tracedecay/commit/e15a7116d3cf3072bbfa046c35e21db115226122))
+* **git:** track rewritten session history and replace inference ([505f1a1](https://github.com/ScriptedAlchemy/tracedecay/commit/505f1a1b9321d1a56d2a009aa9c6ef3eb29b7c4c))
+* **hooks:** replay acknowledged delivery receipts durably ([51c1cb0](https://github.com/ScriptedAlchemy/tracedecay/commit/51c1cb07114b7c11e23aedabf3b3ff674005ef61))
+* **index:** decline graph waits when activation is disabled ([c92586a](https://github.com/ScriptedAlchemy/tracedecay/commit/c92586a392e635ba24c496e5a7d5b3ff0e69c5a9))
+* **observability:** retain production graph row counts ([b3f4d3c](https://github.com/ScriptedAlchemy/tracedecay/commit/b3f4d3cbc1aee7b8d13ea21d87e1279d06188674))
+* recover stopped Claude graph, session, and worktree work ([8a66340](https://github.com/ScriptedAlchemy/tracedecay/commit/8a663405454b2ceb20ef3984863de12674c87cee))
+* **retention:** recognize lexical initialization sidecars ([bdb3ad1](https://github.com/ScriptedAlchemy/tracedecay/commit/bdb3ad1ad13ab17dd4066e8d72f91e61382edb8e))
+* **service:** isolate daemon tasks and launchd agents by profile ([e1494b2](https://github.com/ScriptedAlchemy/tracedecay/commit/e1494b2a83fbabee4eea64e3d3c321ba520739f0))
+* **service:** remove obsolete runner profile arguments ([38de0fb](https://github.com/ScriptedAlchemy/tracedecay/commit/38de0fb435518b1bd4c1889707c48ae82aefe4f9))
+* **tests:** isolate concurrent SDK journey builds ([ab3ab23](https://github.com/ScriptedAlchemy/tracedecay/commit/ab3ab233cd25c527ff82afe1bfd76d90d8bcfda0))
+* **tests:** prevent retained-history cancellation lost wakeups ([27193b1](https://github.com/ScriptedAlchemy/tracedecay/commit/27193b1c95b2cc29b67fc04f466689e3d691a058))
+* **windows:** drain the refused-connection test listener ([5b62c5e](https://github.com/ScriptedAlchemy/tracedecay/commit/5b62c5e91a9cccb2abda95d930bcc69f7eeddd15))
+* **windows:** preserve checkout bytes and resolve executable shims ([ae1504c](https://github.com/ScriptedAlchemy/tracedecay/commit/ae1504c61769e12f78d85e52638231b8dabc4f55))
+* **windows:** prove cache currency with closed-handle NTFS USNs ([ec66c8e](https://github.com/ScriptedAlchemy/tracedecay/commit/ec66c8e806427b8996f6bdc432c3ea36b1b68e6f))
+* **windows:** provider fixture stdin and refusal classification ([cb85253](https://github.com/ScriptedAlchemy/tracedecay/commit/cb85253d92f8bbac88a42c71a7455b27a7734c18))
+* **windows:** remove needless project-root borrow ([44a31a6](https://github.com/ScriptedAlchemy/tracedecay/commit/44a31a6718b2186de42442cea362ef3f9ec17b97))
+* **worktrees:** separate inspection tag from Git operation ([03b3c6e](https://github.com/ScriptedAlchemy/tracedecay/commit/03b3c6ecf7f419dcafc5749ab24336ec793c10a7))
+
 ## [1.0.0-beta.67](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.66...v1.0.0-beta.67) (2026-10-04)
 
 

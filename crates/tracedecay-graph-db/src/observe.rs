@@ -89,6 +89,13 @@ pub(crate) fn record_counts(
 ) {
     #[cfg(any(test, feature = "test-helpers"))]
     counters::record(nodes, edges, replay_rows, generation_bytes);
+    tracing::trace!(
+        name: "graph_db.rows.observed",
+        nodes,
+        edges,
+        replay_rows,
+        generation_bytes
+    );
 }
 
 /// Records how one sealed generation's recovered digest was established.

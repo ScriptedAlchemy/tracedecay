@@ -1676,6 +1676,7 @@ mod recent_first_discovery_tests {
         let secondary = TempDir::new().unwrap();
         write_dated_rollout(primary.path(), ("2026", "08", "23"), "primary");
         let removed = write_dated_rollout(secondary.path(), ("2026", "08", "23"), "secondary-old");
+        let settled = crate::runtime::source::spin_until_jsonl_change_settled(&removed);
         let hub = CodexDiscoveryHub::default();
         hub.register("primary", Some(primary.path()));
         let primary_source = CodexSource::with_home(primary.path());
@@ -1710,17 +1711,19 @@ mod recent_first_discovery_tests {
         .await;
         // Without a stat witness no file proves unchanged: the retained probe
         // honestly re-emits and re-enumerates the corpus.
-        #[cfg(unix)]
-        assert!(unchanged.is_empty());
-        #[cfg(not(unix))]
-        assert_eq!(unchanged, vec![removed.clone()]);
-        #[cfg(unix)]
-        assert_eq!(unchanged_frontier, secondary_frontier);
+        if settled {
+            assert!(unchanged.is_empty());
+        }
+        if !settled {
+            assert_eq!(unchanged, vec![removed.clone()]);
+        }
+        if settled {
+            assert_eq!(unchanged_frontier, secondary_frontier);
+        }
         // The corpus epoch folds each file's identity digest; without a stat
         // witness those digests are unvouched per observation, so only the
         // sweep state and file count stay comparable across enumerations.
-        #[cfg(not(unix))]
-        {
+        if !settled {
             assert_eq!(unchanged_frontier.state, secondary_frontier.state);
             assert_eq!(
                 unchanged_frontier.epoch.files,
@@ -1735,7 +1738,7 @@ mod recent_first_discovery_tests {
                 .get(&secondary_source.discovery_key())
                 .expect("secondary replay index")
                 .completed_enumerations,
-            if cfg!(unix) { 1 } else { 2 },
+            if settled { 1 } else { 2 },
             "an unchanged retained probe must not enumerate the corpus again"
         );
         std::fs::remove_file(&removed).unwrap();
@@ -1760,7 +1763,7 @@ mod recent_first_discovery_tests {
             .expect("secondary replay index");
         // The earlier unchanged probe already enumerated a second time where
         // no stat witness proves the corpus unchanged.
-        assert_eq!(index.completed_enumerations, if cfg!(unix) { 2 } else { 3 });
+        assert_eq!(index.completed_enumerations, if settled { 2 } else { 3 });
         assert!(!index.paths.iter().any(|entry| entry.path == removed));
     }
 
@@ -2308,16 +2311,10 @@ mod recent_first_discovery_tests {
         assert!(frontier.is_complete());
         let restarted = retained_pass(&source, &mut state, bounds, frontier);
         assert!(restarted.report.paths.is_empty());
-        // A settled identity proves the restart's validation complete in one
-        // pass; without a stat witness the corpus validates in bounded slices
-        // like the fresh-process contract above.
-        #[cfg(unix)]
-        assert!(!restarted.report.is_truncated());
-        #[cfg(not(unix))]
-        assert!(
-            restarted.report.is_truncated(),
-            "without a stat witness restart validation continues in bounded slices"
-        );
+        let settled = all
+            .iter()
+            .all(|path| crate::runtime::source::spin_until_jsonl_change_settled(path));
+        assert_eq!(restarted.report.is_truncated(), !settled);
     }
 
     #[test]

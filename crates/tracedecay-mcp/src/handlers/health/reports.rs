@@ -64,6 +64,7 @@ pub async fn compute_gini(
             scope,
             incomplete_complexity_symbols: incomplete_complexity_symbols as u64,
             outliers,
+            freshness: None,
         }),
         Vec::new(),
     ))
@@ -278,6 +279,7 @@ pub async fn compute_dependency_depth(
                         chain: chain.chain,
                     })
                     .collect(),
+                freshness: None,
             }
         }
     };
@@ -359,6 +361,7 @@ pub async fn compute_health(
             files_analyzed: snap.files_analyzed as u64,
             dimensions,
             weights,
+            freshness: None,
         }),
         Vec::new(),
     ))

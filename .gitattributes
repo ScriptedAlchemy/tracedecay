@@ -1,3 +1,8 @@
+# Keep text identical across checkouts: shell entrypoints, generated contracts,
+# embedded assets, and their digests must survive Git for Windows autocrlf.
+# Auto detection preserves binary assets; explicit -text rules below still win.
+* text=auto eol=lf
+
 # Force LF line endings for test fixtures. Tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf

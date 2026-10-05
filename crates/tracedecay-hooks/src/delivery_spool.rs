@@ -70,7 +70,9 @@ impl HookDeliverySourceReceiptV1 {
         Ok(())
     }
 
-    fn same_identity(&self, other: &Self) -> bool {
+    /// Compare the logical delivery and recipient, retaining the first
+    /// attempt's timestamps as evidence when an identical output is retried.
+    pub fn same_identity(&self, other: &Self) -> bool {
         self.receipt_id == other.receipt_id
             && StableReceiptIdentity::from_settlement(&self.settlement)
                 == StableReceiptIdentity::from_settlement(&other.settlement)

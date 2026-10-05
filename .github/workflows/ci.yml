@@ -66,7 +66,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@3146cc68bf6dd067aa302d30f3216e6dc2e01819
+        uses: ScriptedAlchemy/cargo-hauler@783ddee7d8b81fd93899a97eec90cb25a4125d2d
         with:
           mode: route
           token: ${{ github.token }}
@@ -233,6 +233,9 @@ jobs:
 
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
+
+      - name: Test Windows checkout preserves generated and embedded bytes
+        run: python3 scripts/test-checkout-bytes.py
 
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
@@ -547,7 +550,7 @@ jobs:
       - name: Install Cargo Hauler
         run: |
           echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
-          npm install --global cargo-hauler@0.14.0
+          npm install --global cargo-hauler@0.14.1
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest

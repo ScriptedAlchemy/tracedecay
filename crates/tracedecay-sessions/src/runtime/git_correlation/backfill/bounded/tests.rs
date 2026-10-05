@@ -229,6 +229,8 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 timestamp INTEGER,
+                content_hash TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT,
                 UNIQUE(provider, message_id)
             );",
         )
@@ -244,6 +246,9 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
         .await
         .unwrap();
     touch(&store, "session-1").await;
+    crate::runtime::git_correlation::install_history_change_schema(&store.connection)
+        .await
+        .unwrap();
     store
 }
 
@@ -259,7 +264,25 @@ async fn touch(store: &TestStore, session_id: &str) -> i64 {
         )
         .await
         .unwrap();
-    scalar(store, "SELECT MAX(store_id) FROM lcm_raw_messages").await
+    let mut tables = store
+        .connection
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE name = 'git_history_session_change'",
+            (),
+        )
+        .await
+        .unwrap();
+    let installed = tables.next().await.unwrap().is_some();
+    drop(tables);
+    if installed {
+        scalar(
+            store,
+            "SELECT MAX(sequence) FROM git_history_session_change",
+        )
+        .await
+    } else {
+        scalar(store, "SELECT MAX(store_id) FROM lcm_raw_messages").await
+    }
 }
 
 /// The evidence rows, the attribution mark, and the history frontier commit
@@ -327,6 +350,210 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
             .generation(),
         &installed
     );
+}
+
+#[tokio::test]
+async fn history_change_journal_survives_upserts_reinstall_and_rollback() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let initial = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO sessions(provider, session_id, project_path, started_at)
+         VALUES ('codex', 'session-1', ?1, 1)
+         ON CONFLICT(provider, session_id) DO UPDATE SET started_at = excluded.started_at",
+            params![repository.path().to_str().unwrap()],
+        )
+        .await
+        .unwrap();
+    let changed = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(changed > initial);
+
+    for content_hash in ["first", "revised"] {
+        store.connection.execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+             VALUES ('codex', 'stable-message', 'session-1', ?1)
+             ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            params![content_hash],
+        ).await.unwrap();
+    }
+    let revised = scalar(
+        &store,
+        "SELECT MAX(sequence) FROM git_history_session_change",
+    )
+    .await;
+    assert!(revised > changed);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_session_change").await,
+        1
+    );
+
+    let transaction = store
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    transaction
+        .execute("UPDATE lcm_raw_messages SET timestamp = 99", ())
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+
+    // A shipped trigger must be repaired on open without resetting the frontier.
+    store
+        .connection
+        .execute_batch(
+            "DROP TRIGGER git_history_message_update;
+         CREATE TRIGGER git_history_message_update AFTER UPDATE ON lcm_raw_messages BEGIN
+             INSERT OR REPLACE INTO git_history_session_change(provider, session_id)
+                 VALUES (NEW.provider, NEW.session_id);
+         END;",
+        )
+        .await
+        .unwrap();
+    crate::runtime::git_correlation::install_history_change_schema(&store.connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await,
+        revised
+    );
+    store
+        .connection
+        .execute(
+            "INSERT OR ABORT INTO lcm_raw_messages(provider, message_id, session_id, content_hash)
+         VALUES ('codex', 'stable-message', 'session-1', 'after-reopen')
+         ON CONFLICT(provider, message_id) DO UPDATE SET content_hash = excluded.content_hash",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(
+        scalar(
+            &store,
+            "SELECT MAX(sequence) FROM git_history_session_change"
+        )
+        .await
+            > revised
+    );
+}
+
+#[tokio::test]
+async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
+    for rewrite_message in [true, false] {
+        let repository = repository_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+        store
+            .connection
+            .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+            .await
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE lcm_raw_messages SET timestamp = ?1",
+                params![head_commit_time(repository.path())],
+            )
+            .await
+            .unwrap();
+        let initial = converge_git_evidence_pass(&store, &SystemGit, None)
+            .await
+            .unwrap()
+            .pass;
+        let initial_generation = initial.generation.unwrap();
+        assert!(initial_generation.span_count > 0);
+        let message_identity = scalar(&store, "SELECT MAX(store_id) FROM lcm_raw_messages").await;
+        if rewrite_message {
+            // Old activity is corrected without allocating a new message id.
+            store
+                .connection
+                .execute("UPDATE lcm_raw_messages SET timestamp = 1", ())
+                .await
+                .unwrap();
+        } else {
+            // Metadata can move a retained session out of its former worktree.
+            let plain = directory.path().join("plain directory");
+            std::fs::create_dir(&plain).unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE sessions SET metadata_json = ?1",
+                    params![
+                        serde_json::json!({"codex_session_cwd": plain.to_str().unwrap()})
+                            .to_string()
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            scalar(&store, "SELECT MAX(store_id) FROM lcm_raw_messages").await,
+            message_identity
+        );
+        let corrected = converge_git_evidence_pass(&store, &SystemGit, None)
+            .await
+            .unwrap()
+            .pass;
+        assert_eq!(corrected.backfill.sessions_scanned, 1);
+        assert!(corrected.frontier.change_sequence > initial.frontier.change_sequence);
+        let generation = corrected.generation.unwrap();
+        assert_eq!(
+            generation.span_count,
+            u64::from(rewrite_message),
+            "obsolete inferred windows must be retracted"
+        );
+        assert_eq!(
+            generation.commit_count, 0,
+            "obsolete inferred relations must be retracted"
+        );
+        assert_eq!(
+            scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+            i64::from(rewrite_message)
+        );
+        if rewrite_message {
+            assert_eq!(
+                scalar(&store, "SELECT MIN(first_ts) FROM git_evidence_span").await,
+                1
+            );
+            assert_eq!(
+                scalar(&store, "SELECT MAX(last_ts) FROM git_evidence_span").await,
+                1
+            );
+        }
+        assert_eq!(
+            scalar(&store, "SELECT COUNT(*) FROM git_evidence_commit").await,
+            0
+        );
+        let idle = converge_git_evidence_pass(&store, &SystemGit, None)
+            .await
+            .unwrap()
+            .pass;
+        assert_eq!(idle.backfill.sessions_scanned, 0);
+        assert!(idle.generation.is_none());
+    }
 }
 
 /// A fresh project has never recorded Git evidence. Reporting that as a
@@ -564,7 +791,7 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         read_meta_value(&store.connection, GIT_HISTORY_SEQUENCE_FRONTIER_KEY)
             .await
             .unwrap(),
-        Some(1)
+        Some(2)
     );
     let repeated = converge_git_evidence_pass(&store, &SystemGit, None)
         .await
@@ -667,7 +894,7 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
     .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.remaining_sessions, 0);
-    assert_eq!(completed.frontier.change_sequence, 1);
+    assert_eq!(completed.frontier.change_sequence, 2);
     assert_eq!(completed.stats.spans_written, 0);
     assert_eq!(completed.stats.commits_attributed, 0);
     assert_eq!(
@@ -780,7 +1007,7 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.change_sequence, 1);
+    assert_eq!(completed.frontier.change_sequence, 3);
     assert!(completed.stats.spans_written > 0);
 }
 
@@ -937,7 +1164,7 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
     .await
     .unwrap();
     assert_eq!(completed.interruption, None);
-    assert_eq!(completed.frontier.change_sequence, 1);
+    assert_eq!(completed.frontier.change_sequence, 2);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
@@ -1083,7 +1310,7 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
 }
 
 #[tokio::test]
-async fn new_messages_finish_sealed_candidate_before_newer_row() {
+async fn changed_session_discards_sealed_candidate_before_publishing_new_revision() {
     let repository = repository_fixture();
     let old_activity = head_commit_time(repository.path());
     let new_activity = old_activity.checked_add(1).unwrap();
@@ -1115,7 +1342,7 @@ async fn new_messages_finish_sealed_candidate_before_newer_row() {
             "SELECT change_sequence FROM git_history_index_progress"
         )
         .await,
-        1
+        2
     );
 
     store
@@ -1134,7 +1361,7 @@ async fn new_messages_finish_sealed_candidate_before_newer_row() {
     )
     .await
     .unwrap();
-    assert_eq!(resumed.frontier.change_sequence, 1);
+    assert_eq!(resumed.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0

@@ -522,7 +522,7 @@ pub use profile_identity::{
     read_existing_profile_identity_record,
 };
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use paths_and_io::open_lock_file;
 
 include!("storage/tests.rs");

@@ -13,13 +13,11 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationRequest, is_http_application_operation_exposed,
 };
 use tracedecay_application::operation_stream::OperationEventAuthority;
-use tracedecay_contracts::catalog_composition::compose_application_catalog_with;
+use tracedecay_contracts::catalog_composition::application_catalog_snapshot;
 pub use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_contracts::handlers::CanonicalApplicationDispatcher;
 use tracedecay_contracts::{
-    ApplicationOperation, ApplicationOutcome, ApplicationProblemKind, Deadline, Omission,
-    OmissionReason, OperationTermination, PageRequest, RequestId,
-    configuration_surface_catalog_contribution,
+    ApplicationOutcome, ApplicationProblemKind, Deadline, Omission, OmissionReason,
+    OperationTermination, PageRequest, RequestId, configuration_surface_catalog_contribution,
 };
 pub use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
@@ -36,8 +34,8 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::{ProjectId, ScopeOutcome, ScopePartialReasonV1, ScopeUnavailableReasonV1};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1,
-    ExecutableBindingRegistryV1, OperationId, RouteExposureV1, UseCaseId,
+    ApplicationSurfaceOperation, BindingSurface, ExecutableBindingRegistryV1, OperationId,
+    RouteExposureV1,
 };
 
 mod catalog;
@@ -62,13 +60,13 @@ pub use catalog::{
 use configuration_wire::{
     CONFIGURATION_WIRE_OPERATIONS, configuration_binding_has_schema, is_configuration_operation,
 };
+use dispatch::invoke_application_adapter_request;
 pub use dispatch::{
     application_surface_dispatch_input_with_controls, execute_application_surface,
     parse_http_application_surface_request, resolve_application_surface_dispatch,
     resolve_application_surface_dispatch_with_controls, resolve_dashboard_application_surface,
     resolve_http_application_surface, resolve_http_application_surface_dispatch,
 };
-use dispatch::{invoke_application_adapter_request, invoke_catalog_bound_application_request};
 pub use feedback_observation::observe_surface_argument_rejection;
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
@@ -103,44 +101,6 @@ const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 
-struct HttpApplicationCatalogDispatcher {
-    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
-    catalog: Arc<CatalogSnapshotV1>,
-}
-
-struct CatalogBoundHttpApplicationRequest {
-    capability_id: CapabilityId,
-    use_case_id: UseCaseId,
-    surface: BindingSurface,
-    request: HttpApplicationRequest,
-}
-
-impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
-    for HttpApplicationCatalogDispatcher
-{
-    type Output = HttpApplicationInvocationFuture;
-
-    fn invoke(
-        &self,
-        operation: &ApplicationOperation,
-        request: CatalogBoundHttpApplicationRequest,
-    ) -> Self::Output {
-        assert_eq!(operation.capability_id(), &request.capability_id);
-        assert_eq!(operation.use_case_id(), &request.use_case_id);
-        let executor = Arc::clone(&self.executor);
-        let catalog = self.catalog.clone();
-        Box::pin(async move {
-            invoke_application_adapter_request(
-                request.request,
-                request.surface,
-                executor.as_ref(),
-                &catalog,
-            )
-            .await
-        })
-    }
-}
-
 #[tracing::instrument(
     name = "application_surface.invoker_assemble",
     level = "trace",
@@ -154,13 +114,8 @@ fn application_invoker_for_surface(
     impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
     ApplicationSurfaceAdapterError,
 > {
-    let composition = Arc::new(compose_application_catalog_with(|catalog| {
-        HttpApplicationCatalogDispatcher {
-            executor,
-            catalog: Arc::clone(catalog),
-        }
-    })?);
-    let resolver = CatalogBindingResolver::new(composition.snapshot());
+    let catalog = Arc::clone(application_catalog_snapshot()?);
+    let resolver = CatalogBindingResolver::new(&catalog);
     let configuration_schemas = (surface == BindingSurface::Http
         || required_operations
             .iter()
@@ -187,17 +142,19 @@ fn application_invoker_for_surface(
         };
         if is_configuration_operation(operation)
             && configuration_schemas.as_ref().is_none_or(|schemas| {
-                !configuration_binding_has_schema(
-                    composition.snapshot(),
-                    schemas,
-                    &binding.binding_id,
-                )
+                !configuration_binding_has_schema(&catalog, schemas, &binding.binding_id)
             })
         {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
-    Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
+    Ok(move |request| -> HttpApplicationInvocationFuture {
+        let executor = Arc::clone(&executor);
+        let catalog = Arc::clone(&catalog);
+        Box::pin(async move {
+            invoke_application_adapter_request(request, surface, executor.as_ref(), &catalog).await
+        })
+    })
 }
 
 #[tracing::instrument(

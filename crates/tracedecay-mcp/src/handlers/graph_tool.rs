@@ -329,8 +329,10 @@ pub fn render_graph_tool(
     };
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
-        GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
-        | GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
+        GraphToolResultV1::Node(NodeResultV1::NotFound(not_found)) => {
+            not_found_tool_result(not_found)?
+        }
+        GraphToolResultV1::Impact(ImpactResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }
@@ -520,10 +522,10 @@ mod tests {
     use tracedecay_contracts::retrieval::DerivesSymbolV1;
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, ContextRetrievalPlanV1, ContextStageV1, PrimitiveFreshnessStateV1,
-        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
-        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1,
-        ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
+        ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextStageV1,
+        PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
@@ -544,6 +546,7 @@ mod tests {
                     text: "// TODO: probe".to_owned(),
                     enclosing: None,
                 }],
+                freshness: None,
             }),
             touched_files: vec!["src/lib.rs".to_owned()],
             code_graph,
@@ -606,6 +609,7 @@ mod tests {
     fn plan_context() -> ContextResultV1 {
         ContextResultV1 {
             task: "extend the store".to_owned(),
+            route: ContextRetrievalRouteV1::Prose,
             mode: ContextModeV1::Plan,
             freshness: PrimitiveSearchFreshnessV1 {
                 state: PrimitiveFreshnessStateV1::Fresh,
@@ -798,6 +802,7 @@ mod tests {
                     match_count: 400,
                     by_kind: BTreeMap::from([("TODO".to_owned(), 400)]),
                     markers,
+                    freshness: None,
                 }),
                 touched_files: Vec::new(),
                 code_graph: Some(fresh_worktree_seat()),

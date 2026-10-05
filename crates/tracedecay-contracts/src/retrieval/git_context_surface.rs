@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::RankedCandidate;
 
-use super::{PrimitiveUnavailableEvidenceV1, RankedAffectedTestV1};
+use super::{PrimitiveSearchFreshnessV1, PrimitiveUnavailableEvidenceV1, RankedAffectedTestV1};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -201,6 +201,19 @@ pub struct AffectedResultV1 {
     /// Tests within two dependency hops of a changed file.
     pub recommended_tests: Vec<String>,
     pub ranking_metadata: AffectedRankingMetadataV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
+}
+
+/// A file that shares commits with one changed file and is outside the diff.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoChangePartnerV1 {
+    pub file: String,
+    pub partner: String,
+    /// Commits in the measured window that contain both `file` and `partner`.
+    pub together: usize,
 }
 
 /// A verified-graph symbol a git-context read reports.
@@ -225,6 +238,24 @@ pub struct DiffContextResultV1 {
     /// still unexplored.
     pub impact_complete: bool,
     pub affected_tests: Vec<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    /// Partners that share at least three commits with a changed file in the
+    /// last 18 months and are not part of this diff. At most eight. Omitted
+    /// when history has none, so a diff with no partners keeps its old shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_change_partners: Vec<CoChangePartnerV1>,
+}
+
+impl DiffContextResultV1 {
+    pub fn co_change_partner(file: String, partner: String, together: usize) -> CoChangePartnerV1 {
+        CoChangePartnerV1 {
+            file,
+            partner,
+            together,
+        }
+    }
 }
 
 /// A symbol the exact base/head branch-generation comparison reports.
@@ -269,6 +300,9 @@ pub struct ChangelogCompleteV1 {
     pub symbols_removed: Vec<GitComparedSymbolV1>,
     pub symbols_modified: Vec<GitComparedSymbolV1>,
     pub symbol_changes_coverage: SymbolChangesCompleteV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// The tree diff without symbol changes: the refs are not both exact local
@@ -285,6 +319,9 @@ pub struct ChangelogPartialV1 {
     pub symbols_removed: Vec<GitComparedSymbolV1>,
     pub symbols_modified: Vec<GitComparedSymbolV1>,
     pub symbol_changes_coverage: SymbolChangesUnavailableV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -368,12 +405,15 @@ pub struct CommitContextSummaryV1 {
     pub suggested_category: Option<CommitCategoryV1>,
     pub recent_commits: Vec<String>,
     pub summary: String,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum CommitContextResultV1 {
-    Summary(CommitContextSummaryV1),
+    Summary(Box<CommitContextSummaryV1>),
     GitFailure(GitToolFailureV1),
 }
 
@@ -490,6 +530,9 @@ pub struct PrContextCompleteV1 {
     pub affected_tests_coverage: PrSelectionCoverageV1,
     pub impacted_modules: Vec<String>,
     pub impacted_modules_coverage: PrSelectionCoverageV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// The git comparison while exact base/head symbol comparison is unavailable
@@ -516,6 +559,9 @@ pub struct PrContextSymbolsUnavailableV1 {
     pub modified: Vec<PrSymbolEntryV1>,
     pub symbol_changes_coverage: SymbolChangesUnavailableV1,
     pub next_cursor: Option<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// The git comparison while the verified graph generation is still warming.
@@ -547,6 +593,9 @@ pub struct PrContextGraphPendingV1 {
     pub impacted_modules: Vec<String>,
     pub impacted_modules_coverage: PrSelectionCoverageV1,
     pub verified_graph_evidence: PrimitiveUnavailableEvidenceV1,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -585,12 +634,15 @@ pub struct BranchListPageV1 {
     pub limit: usize,
     pub next_cursor: Option<String>,
     pub snapshots: Vec<BranchSnapshotEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum BranchListResultV1 {
-    Page(BranchListPageV1),
+    Page(Box<BranchListPageV1>),
     Unavailable(BranchReadUnavailableV1),
 }
 
@@ -643,12 +695,15 @@ pub struct BranchSearchPageV1 {
     pub code_generation: String,
     pub next_cursor: Option<String>,
     pub results: Vec<BranchSearchHitV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum BranchSearchResultV1 {
-    Page(BranchSearchPageV1),
+    Page(Box<BranchSearchPageV1>),
     SearchUnavailable(BranchSearchUnavailableV1),
     ReferenceUnavailable(BranchReferenceUnavailableV1),
 }
@@ -706,6 +761,9 @@ pub struct BranchDiffCompleteV1 {
     pub total_changes: usize,
     pub summary: BranchDiffSummaryV1,
     pub changes: Vec<BranchSymbolChangeV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -725,6 +783,9 @@ pub struct BranchDiffPartialV1 {
     pub next_cursor: String,
     pub summary: BranchDiffSummaryV1,
     pub changes: Vec<BranchSymbolChangeV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Either branch of `base..head` does not resolve to a local commit.

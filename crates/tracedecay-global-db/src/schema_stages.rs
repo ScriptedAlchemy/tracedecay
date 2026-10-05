@@ -1041,6 +1041,11 @@ async fn install_registered_schema_stage_sequence(
         )
         .await
         .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
+        tracedecay_sessions::runtime::git_correlation::install_history_change_schema(transaction)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize Git history change journal", error)
+            })?;
         tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(transaction)
             .await
             .map_err(|error| {

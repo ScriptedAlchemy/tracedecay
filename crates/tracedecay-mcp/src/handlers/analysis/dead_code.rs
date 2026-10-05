@@ -80,6 +80,7 @@ pub(super) async fn compute_dead_code(
         GraphToolResultV1::DeadCode(DeadCodeResultV1 {
             dead_code_count: symbols.len() as u64,
             symbols,
+            freshness: None,
         }),
         touched_files,
     ))

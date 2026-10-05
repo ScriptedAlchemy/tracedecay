@@ -6,8 +6,9 @@ use std::process::Command;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
+use super::unit_file::{launchd_label, launchd_user_service_path};
 use super::unit_file::{systemd_unit_name, systemd_user_service_path};
-use super::{DaemonServiceState, LAUNCHD_LABEL, windows_task};
+use super::{DaemonServiceState, windows_task};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 /// All variants exist on every platform so that dispatch stays exhaustive.
@@ -23,8 +24,11 @@ pub(super) enum ServiceRunner {
     Launchd {
         launchctl: PathBuf,
         id: PathBuf,
+        profile: ProfileRoot,
     },
-    WindowsTask,
+    WindowsTask {
+        profile: ProfileRoot,
+    },
 }
 
 /// The user unit a profile owns: its name and the file that profile installs.
@@ -106,8 +110,11 @@ impl ServiceRunner {
                     "launchd user-domain resolution",
                     path_var.as_deref(),
                 )?,
+                profile,
             ),
-            ServicePlatform::WindowsTask => Ok(Self::WindowsTask),
+            ServicePlatform::WindowsTask => Ok(Self::WindowsTask {
+                profile: profile.clone(),
+            }),
         }
     }
 
@@ -137,7 +144,11 @@ impl ServiceRunner {
         })
     }
 
-    pub(super) fn launchd(launchctl: impl AsRef<Path>, id: impl AsRef<Path>) -> Result<Self> {
+    pub(super) fn launchd(
+        launchctl: impl AsRef<Path>,
+        id: impl AsRef<Path>,
+        profile: &ProfileRoot,
+    ) -> Result<Self> {
         Ok(Self::Launchd {
             launchctl: required_service_program(
                 "launchctl",
@@ -145,13 +156,13 @@ impl ServiceRunner {
                 launchctl.as_ref(),
             )?,
             id: required_service_program("id", "launchd user-domain resolution", id.as_ref())?,
+            profile: profile.clone(),
         })
     }
 
     #[tracing::instrument(name = "daemon.service.runner.install", level = "trace", skip_all)]
     pub(super) fn install(
         &self,
-        profile: &ProfileRoot,
         service_path: &Path,
         start: bool,
         socket_path: &Path,
@@ -169,10 +180,13 @@ impl ServiceRunner {
                 }
                 Ok(())
             }
-            Self::Launchd { launchctl, id } => {
-                launchd_install(profile, launchctl, id, service_path, start, socket_path)
-            }
-            Self::WindowsTask => windows_task::apply_state(
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => launchd_install(profile, launchctl, id, service_path, start, socket_path),
+            Self::WindowsTask { profile } => windows_task::apply_state(
+                profile,
                 if start {
                     DaemonServiceState::RunningEnabled
                 } else {
@@ -186,7 +200,6 @@ impl ServiceRunner {
     #[tracing::instrument(name = "daemon.service.runner.refresh", level = "trace", skip_all)]
     pub(super) fn refresh(
         &self,
-        profile: &ProfileRoot,
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,
@@ -201,15 +214,24 @@ impl ServiceRunner {
                 }
                 Ok(())
             }
-            Self::Launchd { launchctl, id } if previous_state.is_running() => {
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } if previous_state.is_running() => {
                 launchd_refresh(profile, launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
-                    run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
+                    run_launchctl(
+                        launchctl,
+                        &["disable", &launchd_service_target(id, profile)?],
+                    )?;
                 }
                 Ok(())
             }
             Self::Launchd { .. } => Ok(()),
-            Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
+            Self::WindowsTask { profile } => {
+                windows_task::apply_state(profile, previous_state, expected_version)
+            }
         }
     }
 
@@ -253,12 +275,17 @@ impl ServiceRunner {
                     Ok(DaemonServiceState::StoppedDisabled)
                 }
             }
-            Self::Launchd { launchctl, id } => Ok(launchd_service_state(
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => Ok(launchd_service_state(
                 launchctl,
                 id,
                 daemon_socket_state(socket_path),
+                profile,
             )?),
-            Self::WindowsTask => Ok(windows_task::service_state()?),
+            Self::WindowsTask { profile } => Ok(windows_task::service_state(profile)?),
         }
     }
 
@@ -277,9 +304,15 @@ impl ServiceRunner {
                 }
                 Ok(())
             }
-            Self::Launchd { launchctl, id } => launchd_before_uninstall(launchctl, id, stop),
-            Self::WindowsTask if stop => windows_task::deactivate(expected_version),
-            Self::WindowsTask => Ok(()),
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => launchd_before_uninstall(launchctl, id, profile, stop),
+            Self::WindowsTask { profile } if stop => {
+                windows_task::deactivate(profile, expected_version)
+            }
+            Self::WindowsTask { .. } => Ok(()),
         }
     }
 
@@ -299,17 +332,22 @@ impl ServiceRunner {
                 let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
                 run_systemctl(systemctl.as_deref(), &["start", name])
             }
-            Self::Launchd { launchctl, id } => {
-                let target = launchd_service_target(id)?;
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => {
+                let target = launchd_service_target(id, profile)?;
                 launchd_start_preserving_enablement(
                     launchctl,
                     id,
+                    profile,
                     &target,
                     service_path,
                     socket_path,
                 )
             }
-            Self::WindowsTask => windows_task::start(expected_version),
+            Self::WindowsTask { profile } => windows_task::start(profile, expected_version),
         }
     }
 
@@ -320,8 +358,12 @@ impl ServiceRunner {
                 let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
                 run_systemctl(systemctl.as_deref(), &["stop", name])
             }
-            Self::Launchd { launchctl, id } => launchd_stop(launchctl, id),
-            Self::WindowsTask => windows_task::stop(expected_version),
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => launchd_stop(launchctl, id, profile),
+            Self::WindowsTask { profile } => windows_task::stop(profile, expected_version),
         }
     }
 
@@ -360,10 +402,17 @@ impl ServiceRunner {
                     expected_version,
                 )
             }
-            Self::Launchd { launchctl, id } => {
+            Self::Launchd {
+                launchctl,
+                id,
+                profile,
+            } => {
                 launchd_refresh(profile, launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
-                    run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
+                    run_launchctl(
+                        launchctl,
+                        &["disable", &launchd_service_target(id, profile)?],
+                    )?;
                 }
                 // `launchd_refresh` proves only that the socket accepts a
                 // connection; hold launchd restores to the same authenticated
@@ -377,7 +426,9 @@ impl ServiceRunner {
             }
             // `windows_task::apply_state` already polls authenticated
             // readiness internally; a second wait would double the restore.
-            Self::WindowsTask => windows_task::apply_state(previous_state, expected_version),
+            Self::WindowsTask { profile } => {
+                windows_task::apply_state(profile, previous_state, expected_version)
+            }
         }
     }
 
@@ -388,7 +439,7 @@ impl ServiceRunner {
                     let _ = run_systemctl(systemctl.as_deref(), &["daemon-reload"]);
                 }
             }
-            Self::Launchd { .. } | Self::WindowsTask => {}
+            Self::Launchd { .. } | Self::WindowsTask { .. } => {}
         }
     }
 
@@ -399,7 +450,7 @@ impl ServiceRunner {
                 "tail -f \"{}\"",
                 profile.data_dir().join("daemon.err.log").display()
             ),
-            Self::WindowsTask => {
+            Self::WindowsTask { .. } => {
                 "Event Viewer: Applications and Services Logs/Microsoft/Windows/TaskScheduler/Operational"
                     .to_string()
             }
@@ -409,10 +460,10 @@ impl ServiceRunner {
     pub(super) fn service_detail_hint(&self) -> Option<String> {
         match self {
             Self::Systemd { .. } => None,
-            Self::Launchd { id, .. } => launchd_service_target(id)
+            Self::Launchd { id, profile, .. } => launchd_service_target(id, profile)
                 .ok()
                 .map(|target| format!("launchctl print {target}")),
-            Self::WindowsTask => windows_task::task_name()
+            Self::WindowsTask { profile } => windows_task::task_name(profile)
                 .ok()
                 .map(|name| format!("Get-ScheduledTask -TaskName '{name}'")),
         }
@@ -860,8 +911,50 @@ fn launchd_domain(id: &Path) -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
-fn launchd_service_target(id: &Path) -> Result<String> {
-    Ok(format!("{}/{}", launchd_domain(id)?, LAUNCHD_LABEL))
+fn launchd_service_target(id: &Path, profile: &ProfileRoot) -> Result<String> {
+    Ok(format!(
+        "{}/{}",
+        launchd_domain(id)?,
+        launchd_label(profile)
+    ))
+}
+
+/// A shared launchd domain must never act on a label loaded from another
+/// profile's plist, even when both profiles retain the default label.
+fn launchd_require_owned(launchctl: &Path, target: &str, profile: &ProfileRoot) -> Result<bool> {
+    let output = launchctl_spawn(launchctl, &["print", target])?;
+    if !output.status.success() {
+        if launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stderr))
+            || launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stdout))
+        {
+            return Ok(false);
+        }
+        return Err(launchctl_failure(&["print", target], &output));
+    }
+    let owned = launchd_user_service_path(profile)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut paths = text.lines().filter_map(|line| {
+        let value = line.trim().strip_prefix("path = ")?.trim();
+        Some(PathBuf::from(
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(value),
+        ))
+    });
+    let loaded = paths.next();
+    if paths.next().is_none()
+        && loaded
+            .as_deref()
+            .is_some_and(|path| same_unit_file(path, &owned))
+    {
+        return Ok(true);
+    }
+    Err(TraceDecayError::ServiceUnitNotOwned {
+        unit: target.to_owned(),
+        owned: owned.into_boxed_path(),
+        loaded: loaded.map(PathBuf::into_boxed_path),
+    })
 }
 
 /// launchd has no liveness query of its own: the agent is running when its
@@ -870,9 +963,10 @@ pub(super) fn launchd_service_state(
     launchctl: &Path,
     id: &Path,
     socket_state: DaemonSocketState,
+    profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
     let running = matches!(socket_state, DaemonSocketState::Connectable);
-    let enabled = !launchd_service_is_disabled(launchctl, id)?;
+    let enabled = !launchd_service_is_disabled(launchctl, id, profile)?;
     Ok(match (running, enabled) {
         (true, true) => DaemonServiceState::RunningEnabled,
         (true, false) => DaemonServiceState::RunningDisabled,
@@ -881,7 +975,7 @@ pub(super) fn launchd_service_state(
     })
 }
 
-fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
+fn launchd_service_is_disabled(launchctl: &Path, id: &Path, profile: &ProfileRoot) -> Result<bool> {
     let domain = launchd_domain(id)?;
     let output = Command::new(launchctl)
         .args(["print-disabled", &domain])
@@ -891,16 +985,15 @@ fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {
         })?;
     Ok(launchd_disabled_output_contains_label(
         &String::from_utf8_lossy(&output.stdout),
-        LAUNCHD_LABEL,
+        &launchd_label(profile),
     ))
 }
 
 pub(super) fn launchd_disabled_output_contains_label(output: &str, label: &str) -> bool {
     output.lines().any(|line| {
-        line.contains(label)
-            && line
-                .split_once("=>")
-                .is_some_and(|(_, value)| value.trim().starts_with("true"))
+        line.split_once("=>").is_some_and(|(name, value)| {
+            name.trim().trim_matches('"') == label && value.trim().starts_with("true")
+        })
     })
 }
 
@@ -923,14 +1016,15 @@ fn launchd_install(
     socket_path: &Path,
 ) -> Result<()> {
     ensure_launchd_runtime_dirs(profile)?;
-    let target = launchd_service_target(id)?;
+    let target = launchd_service_target(id, profile)?;
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
         // so persist a disabled state to keep --no-start meaning "do not run".
+        launchd_require_owned(launchctl, &target, profile)?;
         run_launchctl(launchctl, &["disable", &target])?;
         return Ok(());
     }
-    launchd_start(launchctl, id, &target, service_path, socket_path)
+    launchd_start(launchctl, id, profile, &target, service_path, socket_path)
 }
 
 fn launchd_refresh(
@@ -941,19 +1035,20 @@ fn launchd_refresh(
     socket_path: &Path,
 ) -> Result<()> {
     ensure_launchd_runtime_dirs(profile)?;
-    let target = launchd_service_target(id)?;
-    launchd_start(launchctl, id, &target, service_path, socket_path)
+    let target = launchd_service_target(id, profile)?;
+    launchd_start(launchctl, id, profile, &target, service_path, socket_path)
 }
 
 fn launchd_start_preserving_enablement(
     launchctl: &Path,
     id: &Path,
+    profile: &ProfileRoot,
     target: &str,
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    let was_disabled = launchd_service_is_disabled(launchctl, id)?;
-    let start_result = launchd_start(launchctl, id, target, service_path, socket_path);
+    let was_disabled = launchd_service_is_disabled(launchctl, id, profile)?;
+    let start_result = launchd_start(launchctl, id, profile, target, service_path, socket_path);
     if !was_disabled {
         return start_result;
     }
@@ -972,10 +1067,12 @@ fn launchd_start_preserving_enablement(
 fn launchd_start(
     launchctl: &Path,
     id: &Path,
+    profile: &ProfileRoot,
     target: &str,
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
+    launchd_require_owned(launchctl, target, profile)?;
     let domain = launchd_domain(id)?;
     run_launchd_commands(
         launchctl,
@@ -984,16 +1081,27 @@ fn launchd_start(
     verify_launchd_started(launchctl, target, socket_path)
 }
 
-fn launchd_before_uninstall(launchctl: &Path, id: &Path, stop: bool) -> Result<()> {
+fn launchd_before_uninstall(
+    launchctl: &Path,
+    id: &Path,
+    profile: &ProfileRoot,
+    stop: bool,
+) -> Result<()> {
     if !stop {
         return Ok(());
     }
-    let target = launchd_service_target(id)?;
+    let target = launchd_service_target(id, profile)?;
+    if !launchd_require_owned(launchctl, &target, profile)? {
+        return Ok(());
+    }
     run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
 }
 
-fn launchd_stop(launchctl: &Path, id: &Path) -> Result<()> {
-    let target = launchd_service_target(id)?;
+fn launchd_stop(launchctl: &Path, id: &Path, profile: &ProfileRoot) -> Result<()> {
+    let target = launchd_service_target(id, profile)?;
+    if !launchd_require_owned(launchctl, &target, profile)? {
+        return Ok(());
+    }
     run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])
 }
 

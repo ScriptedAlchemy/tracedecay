@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createClient } from "@tracedecay/sdk";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFile, stat, writeFile } from "node:fs/promises";
@@ -10,6 +11,7 @@ import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
+import { ServeSession } from "../src/server/serve-client.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { UI_RESOURCE_URI } from "../src/server/register.js";
 import { isViewState, type ViewState } from "../src/shared/view.js";
@@ -34,7 +36,7 @@ let billingProjectId: string;
 let shippingProjectId: string;
 
 function view(result: CallToolResult): ViewState {
-  expect(result.isError ?? false).toBe(false);
+  expect(result.isError ?? false, JSON.stringify(result)).toBe(false);
   const structured = result.structuredContent;
   if (!isViewState(structured)) throw new Error(`tool returned no view state: ${JSON.stringify(result)}`);
   return structured;
@@ -95,6 +97,15 @@ beforeAll(async () => {
   fixture.initProject(shipping.root);
   bridge = new DaemonBridge({ binary: fixture.binary, profileRoot: fixture.profileRoot, env: fixture.env, cwd: fixture.home });
   client = await newClient();
+  const projects = await waitFor("registered fixture projects", async () => {
+    const state = await call("tracedecay_workspace");
+    return state.page === "projects" && state.projects.state === "ready" ? state.projects.data : null;
+  });
+  const billingProject = projects.find((project) => project.project_root === billing.root);
+  const shippingProject = projects.find((project) => project.project_root === shipping.root);
+  if (!billingProject || !shippingProject) throw new Error("fixture projects were not registered");
+  billingProjectId = billingProject.project_id;
+  shippingProjectId = shippingProject.project_id;
 });
 
 afterAll(async () => {
@@ -195,8 +206,8 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     if (state.projects.state !== "ready") throw new Error(`projects ${state.projects.state}: ${JSON.stringify(state.projects)}`);
     const roots = state.projects.data.map((project) => project.project_root).sort();
     expect(roots).toEqual([billing.root, shipping.root].sort());
-    billingProjectId = state.projects.data.find((project) => project.project_root === billing.root)!.project_id;
-    shippingProjectId = state.projects.data.find((project) => project.project_root === shipping.root)!.project_id;
+    expect(state.projects.data.find((project) => project.project_root === billing.root)!.project_id).toBe(billingProjectId);
+    expect(state.projects.data.find((project) => project.project_root === shipping.root)!.project_id).toBe(shippingProjectId);
     expect(billingProjectId).toMatch(/^proj_/u);
     expect(shippingProjectId).not.toBe(billingProjectId);
   });
@@ -243,6 +254,38 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     expect(symbol.evidence!.structured).toMatchObject({ project: { project_id: billingProjectId } });
     const text = (await client.callTool({ name: "tracedecay_inspect_symbol", arguments: { project_id: billingProjectId, node_id: hit!.node_id } })) as CallToolResult;
     expect(text.content[0]).toMatchObject({ type: "text", text: symbol.evidence!.markdown });
+  });
+
+  it("decodes freshness on graph reads through the generated SDK and live MCP transport", async () => {
+    const search = await waitFor("freshness fixture search", async () => {
+      const state = await call("tracedecay_search_code", { project_id: billingProjectId, query: "outstandingTotal" });
+      return state.page === "search" && state.results.state === "ready" ? state : null;
+    });
+    if (search.page !== "search" || search.results.state !== "ready") throw new Error(JSON.stringify(search));
+    const node = search.results.data.hits.find((hit) => hit.name === "outstandingTotal");
+    expect(node).toBeDefined();
+    const session = new ServeSession({ binary: fixture.binary, projectRoot: billing.root, env: fixture.env, cwd: fixture.home });
+    const sdk = createClient({
+      baseUrl: "http://127.0.0.1",
+      projectId: billingProjectId,
+      token: "unused-mcp-reads",
+      mcp: { callTool: (name, request, options) => session.callJson(name, request as Record<string, unknown>, options.signal) },
+    });
+    try {
+      const todos = await sdk.operations.todos({});
+      expect(todos.freshness).toMatchObject({ state: "fresh" });
+      const rename = await sdk.operations.rename_preview({ node_id: node!.node_id, new_name: "unpaidTotal" });
+      expect(rename).toMatchObject({ freshness: { state: "fresh" } });
+      expect(rename).not.toHaveProperty("error");
+      const files = await sdk.operations.files({});
+      expect(files.freshness).toMatchObject({ state: "fresh" });
+      for (const summary of [true, false]) {
+        const distribution = await sdk.operations.distribution({ summary });
+        expect(distribution.freshness).toMatchObject({ state: "fresh" });
+      }
+    } finally {
+      await session.close();
+    }
   });
 
   it("denies unregistered project ids with a typed denied state", async () => {

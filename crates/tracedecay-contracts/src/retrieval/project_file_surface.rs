@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::code_index_freshness::CodeIndexOmittedSourcesV1;
+use crate::retrieval::PrimitiveSearchFreshnessV1;
 
 /// How `tracedecay_files` lays out its listing.
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -52,6 +53,9 @@ pub struct FilesResultV1 {
     /// not index, unfiltered by `path` or `pattern`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_omitted_sources: Option<CodeIndexOmittedSourcesV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Exactly one of `path` or `glob` names the files to query.
@@ -116,4 +120,7 @@ pub struct ConfigResultV1 {
     /// Files where the key was found or that failed to parse.
     pub match_count: usize,
     pub matches: Vec<ConfigMatchV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }

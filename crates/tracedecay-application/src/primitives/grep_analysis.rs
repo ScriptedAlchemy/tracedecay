@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use tracedecay_contracts::CoverageCompleteness;
 use tracedecay_contracts::retrieval::grep_analysis::{
-    AstGrepAuthorityV1, AstGrepHitV1, AstGrepRequestV1, AstGrepResultV1, ComplexityAuthorityV1,
-    ComplexityRequestV1, ComplexityResultV1, DependencyDepthAuthorityV1, DependencyDepthChainV1,
-    DependencyDepthRequestV1, DependencyDepthResultV1, GrepAnalysisProblemV1, PrimitiveCoverageV1,
-    PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
+    AstGrepAuthorityV1, AstGrepHitV1, AstGrepRequestV1, AstGrepResultV1,
+    DependencyDepthAuthorityV1, DependencyDepthChainV1, DependencyDepthRequestV1,
+    DependencyDepthResultV1, GrepAnalysisProblemV1, PrimitiveCoverageV1, PrimitiveFutureV1,
+    PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
 };
 
 use tracedecay_code_index::ast_grep_search::search_tree_scoped_with_cancel;
@@ -197,34 +197,6 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
     }
 }
 
-pub struct TraceDecayComplexityAuthorityV1;
-
-impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
-    fn complexity<'a>(
-        &'a self,
-        context: &'a PrimitivePortContextV1<'a>,
-        request: &'a ComplexityRequestV1,
-    ) -> PrimitiveFutureV1<'a, ComplexityResultV1> {
-        Box::pin(tracing::Instrument::instrument(
-            async move {
-                if request.window.cursor.is_some() {
-                    return unsupported_compatibility_cursor();
-                }
-                let _path =
-                    match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
-                        Ok(path) => path,
-                        Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
-                    };
-                PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                "the verified graph generation does not publish the full complexity metric contract"
-                    .to_owned(),
-            ))
-            },
-            tracing::trace_span!("usecases.primitives.complexity"),
-        ))
-    }
-}
-
 pub struct TraceDecayDependencyDepthAuthorityV1 {
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
 }
@@ -313,6 +285,7 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                         ideal_depth: count(result.ideal_depth),
                         depth_score: round4(depth_score(result.max_depth, result.ideal_depth)),
                         chains,
+                        freshness: None,
                     },
                     coverage: coverage(count(adjacency.len()), returned, false),
                     continuation: None,

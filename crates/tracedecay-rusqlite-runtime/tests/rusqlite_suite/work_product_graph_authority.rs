@@ -486,6 +486,108 @@ fn current_read_at_an_earlier_observation_excludes_later_published_versions() {
 }
 
 #[test]
+fn current_reads_retain_exact_contents_across_published_history() {
+    let store = RegisteredWorkStore::start("work-product-current-history");
+    let mut latest = create(
+        &store,
+        "command.work-product.current-history.create",
+        UtcMicros(100),
+        vec![item("task.history.0", &[], 2)],
+    )
+    .expect("publish initial graph");
+    let first = read_current(&store).expect("read initial graph");
+    assert_eq!(
+        first.entries()[0].graph().items()[0],
+        item("task.history.0", &[], 2)
+    );
+
+    for index in 1..32 {
+        let mut change = mutation(
+            &format!("command.work-product.current-history.add.{index}"),
+            UtcMicros(100 + index),
+        );
+        change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+            verified_version: latest.verified_graph_version().clone(),
+        };
+        latest = mutations(&store)
+            .add_task(
+                &context(),
+                &binding(),
+                AddWorkTaskRequestV1 {
+                    selection: repository_selection(),
+                    item: item(&format!("task.history.{index}"), &[], 2),
+                    mutation: change,
+                },
+            )
+            .expect("publish next graph");
+    }
+
+    let current = read_current(&store).expect("read latest graph across history");
+    let snapshot = &current.entries()[0];
+    assert_eq!(snapshot.verified_version(), latest.verified_graph_version());
+    assert_eq!(snapshot.graph().items().len(), 32);
+    for index in 0..32 {
+        let task = id::<TaskId>(&format!("task.history.{index}"));
+        assert_eq!(
+            snapshot.graph().item(&task).expect("published task"),
+            &item(&format!("task.history.{index}"), &[], 2)
+        );
+    }
+    let earlier = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(repository_selection(), UtcMicros(115)),
+        )
+        .expect("read only versions observed before the cutoff");
+    assert_eq!(earlier.entries()[0].graph().items().len(), 16);
+    assert!(
+        earlier.entries()[0]
+            .graph()
+            .item(&id("task.history.16"))
+            .is_none()
+    );
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 99) WHERE sequence = 1",
+                [],
+            )
+            .expect("change an earlier event's embedded sequence");
+    });
+    assert_eq!(
+        read_current(&store).expect_err("a mismatched historical event sequence is unavailable"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 1) WHERE sequence = 1",
+                [],
+            )
+            .expect("restore the historical event's sequence");
+    });
+    assert_eq!(
+        read_current(&store)
+            .expect("the canonical sequence restores graph availability")
+            .entries()[0]
+            .verified_version(),
+        latest.verified_graph_version()
+    );
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_graph_versions_v1 SET recovered_graph_digest = 'invalid' WHERE graph_version = 1",
+                [],
+            )
+            .expect("corrupt an earlier published identity");
+    });
+    assert_eq!(
+        read_current(&store).expect_err("invalid historical publication remains unavailable"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+}
+
+#[test]
 fn an_owner_with_no_journal_has_an_absent_current_graph_and_an_explicitly_empty_timeline() {
     let store = RegisteredWorkStore::start("work-product-empty");
 

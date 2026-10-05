@@ -617,6 +617,14 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     let mut writer = GitEvidenceWriter::open(&transaction)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .replace_backfill_session(
+            &row.provider,
+            &row.session_id,
+            candidate_frontier.change_sequence,
+        )
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let written = writer
         .apply(GitEvidenceBatch {
             spans: evidence_spans,
@@ -700,6 +708,21 @@ async fn finalize_session<S: GitCorrelationSessionStore>(
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     }
     history_failures::clear_unresolved(&transaction, progress.key.source_rowid)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .replace_backfill_session(
+            &progress.provider,
+            &progress.session_id,
+            candidate_frontier.change_sequence,
+        )
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .finish()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let persisted = super::super::advance_history_frontier(&transaction, candidate_frontier)

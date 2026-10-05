@@ -352,16 +352,10 @@ mod tests {
             .discover_transcript_paths_with_state(bounds, reloaded, &mut discovery_state)
             .expect("restart discovery");
         assert!(idle.report.paths.is_empty());
-        // A settled identity keeps the persisted frontier complete in one
-        // pass; without a stat witness the corpus validates in bounded slices
-        // before it reports complete.
-        #[cfg(unix)]
-        assert!(idle.next_frontier.is_complete());
-        #[cfg(not(unix))]
-        assert!(
-            !idle.next_frontier.is_complete(),
-            "without a stat witness restart validation continues in bounded slices"
-        );
+        let settled = expected
+            .iter()
+            .all(|path| spin_until_jsonl_change_settled(path));
+        assert_eq!(idle.next_frontier.is_complete(), settled);
         // Production consumers acknowledge every delivered pass (idle ones
         // included); an unacknowledged pass replays verbatim on the next
         // discovery, which would mask the addition below.

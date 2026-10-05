@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 #[cfg(any(windows, test))]
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(windows, test))]
+use sha2::Digest;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{DaemonServiceSpec, DaemonServiceState, xml_escape, xml_unescape};
 
@@ -86,12 +89,13 @@ struct TaskIdentity {
     user_sid: String,
     task_name: String,
     task_path: String,
+    profile_root: Option<PathBuf>,
     #[cfg(any(windows, test))]
     sddl: String,
 }
 
 impl TaskIdentity {
-    fn current() -> Result<Self> {
+    fn current(profile: &ProfileRoot) -> Result<Self> {
         #[cfg(windows)]
         {
             let package_id = std::env::current_exe()
@@ -102,10 +106,11 @@ impl TaskIdentity {
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("could not determine current Windows user SID: {error}"),
                 })?;
-            Self::for_package_user_sid(package_id, &user_sid)
+            Self::for_package_user_sid(package_id, &user_sid)?.for_profile(profile)
         }
         #[cfg(not(windows))]
         {
+            let _ = profile;
             Err(TraceDecayError::Config {
                 message: "Windows Task Scheduler identity is unavailable on this platform"
                     .to_string(),
@@ -137,8 +142,29 @@ impl TaskIdentity {
             user_sid: user_sid.to_string(),
             task_path: format!(r"\{task_name}"),
             task_name,
+            profile_root: None,
             sddl: format!("O:{user_sid}D:P(A;;GA;;;SY)(A;;GA;;;{user_sid})"),
         })
+    }
+
+    #[cfg(any(windows, test))]
+    #[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))] // path qualification can fail on Windows
+    fn for_profile(mut self, profile: &ProfileRoot) -> Result<Self> {
+        #[cfg(windows)]
+        let root = fully_qualified_windows_path(profile.data_dir(), "daemon profile root")?;
+        #[cfg(not(windows))]
+        let root = profile.data_dir().to_path_buf();
+        if !profile.is_home_default() {
+            #[cfg(windows)]
+            let spelling = root.as_os_str().as_encoded_bytes().to_ascii_lowercase();
+            #[cfg(not(windows))]
+            let spelling = root.as_os_str().as_encoded_bytes();
+            let digest = sha2::Sha256::digest(spelling);
+            self.task_name = format!("{} [{}]", self.task_name, hex::encode(&digest[..8]));
+            self.task_path = format!(r"\{}", self.task_name);
+        }
+        self.profile_root = Some(root);
+        Ok(self)
     }
 }
 
@@ -422,16 +448,16 @@ impl DaemonControlApi for NativeDaemonControl {
     }
 }
 
-pub(super) fn task_name() -> Result<String> {
-    Ok(TaskIdentity::current()?.task_name)
+pub(super) fn task_name(profile: &ProfileRoot) -> Result<String> {
+    Ok(TaskIdentity::current(profile)?.task_name)
 }
 
-pub(super) fn task_path() -> Result<PathBuf> {
-    Ok(PathBuf::from(TaskIdentity::current()?.task_path))
+pub(super) fn task_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    Ok(PathBuf::from(TaskIdentity::current(profile)?.task_path))
 }
 
 pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
-    render_task_xml_for(spec, &TaskIdentity::current()?)
+    render_task_xml_for(spec, &TaskIdentity::current(&spec.profile)?)
 }
 
 fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Result<String> {
@@ -549,7 +575,9 @@ fn fully_qualified_windows_path(path: &Path, description: &str) -> Result<PathBu
             ),
         });
     }
-    Ok(absolute)
+    Ok(tracedecay_runtime_core::path_safety::plain_host_path(
+        &absolute,
+    ))
 }
 
 fn validate_task_command_text(command: &str) -> Result<()> {
@@ -851,73 +879,77 @@ fn secure_path_error(operation: &str, path: &Path, error: std::io::Error) -> Tra
     }
 }
 
-pub(super) fn task_exists() -> Result<bool> {
-    with_platform_api(|api| Ok(api.snapshot()?.is_some()))
+pub(super) fn task_exists(profile: &ProfileRoot) -> Result<bool> {
+    with_platform_api(profile, |api| Ok(api.snapshot()?.is_some()))
 }
 
-pub(super) fn service_state() -> Result<DaemonServiceState> {
-    with_platform_api(|api| Ok(state_from_snapshot(api.snapshot()?)))
+pub(super) fn service_state(profile: &ProfileRoot) -> Result<DaemonServiceState> {
+    with_platform_api(profile, |api| Ok(state_from_snapshot(api.snapshot()?)))
 }
 
-pub(super) fn register_task_xml(xml: &str) -> Result<()> {
-    with_platform_api(|api| register_task_xml_with(api, xml))
+pub(super) fn register_task_xml(profile: &ProfileRoot, xml: &str) -> Result<()> {
+    with_platform_api(profile, |api| register_task_xml_with(api, xml))
 }
 
-pub(super) fn registered_task_xml() -> Result<Option<String>> {
-    with_platform_api(|api| api.registered_xml())
+pub(super) fn registered_task_xml(profile: &ProfileRoot) -> Result<Option<String>> {
+    with_platform_api(profile, |api| api.registered_xml())
 }
 
-pub(super) fn apply_state(state: DaemonServiceState, expected_version: &str) -> Result<()> {
+pub(super) fn apply_state(
+    profile: &ProfileRoot,
+    state: DaemonServiceState,
+    expected_version: &str,
+) -> Result<()> {
     #[cfg(any(windows, test))]
     {
         if state == DaemonServiceState::Missing {
-            return with_platform_api(delete_with);
+            return with_platform_api(profile, delete_with);
         }
-        with_platform_control_api(expected_version, |api, control| {
+        with_platform_control_api(profile, expected_version, |api, control| {
             apply_managed_state_with(api, control, state)
         })
     }
     #[cfg(not(any(windows, test)))]
     {
-        let _ = (state, expected_version);
+        let _ = (profile, state, expected_version);
         control_api_unavailable()
     }
 }
 
-pub(super) fn start(expected_version: &str) -> Result<()> {
+pub(super) fn start(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(expected_version, start_managed_with)
+        with_platform_control_api(profile, expected_version, start_managed_with)
     }
     #[cfg(not(any(windows, test)))]
     {
-        let _ = expected_version;
+        let _ = (profile, expected_version);
         control_api_unavailable()
     }
 }
 
-pub(super) fn stop(expected_version: &str) -> Result<()> {
+pub(super) fn stop(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(expected_version, stop_managed_with)
+        with_platform_control_api(profile, expected_version, stop_managed_with)
     }
     #[cfg(not(any(windows, test)))]
     {
-        let _ = expected_version;
+        let _ = (profile, expected_version);
         control_api_unavailable()
     }
 }
 
-pub(super) fn deactivate(expected_version: &str) -> Result<()> {
+pub(super) fn deactivate(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     #[cfg(any(windows, test))]
     {
-        with_platform_control_api(expected_version, |api, control| {
+        with_platform_control_api(profile, expected_version, |api, control| {
             apply_managed_state_with(api, control, DaemonServiceState::StoppedDisabled)
         })
     }
     #[cfg(not(any(windows, test)))]
     {
-        let _ = expected_version;
+        let _ = (profile, expected_version);
         control_api_unavailable()
     }
 }
@@ -929,12 +961,12 @@ fn control_api_unavailable<T>() -> Result<T> {
     })
 }
 
-pub(super) fn delete() -> Result<()> {
-    with_platform_api(delete_with)
+pub(super) fn delete(profile: &ProfileRoot) -> Result<()> {
+    with_platform_api(profile, delete_with)
 }
 
-pub(super) fn rollback_new_registration() -> Result<()> {
-    with_platform_api(|api| rollback_registration_with(api, None, None))
+pub(super) fn rollback_new_registration(profile: &ProfileRoot) -> Result<()> {
+    with_platform_api(profile, |api| rollback_registration_with(api, None, None))
 }
 
 pub(super) fn prepare_scoop_package_service(
@@ -1889,6 +1921,31 @@ fn task_definition_is_owned(xml: &str, sddl: &str, identity: &TaskIdentity) -> b
     trigger_user.as_deref() == Some(identity.user_sid.as_str())
         && principal_user.as_deref() == Some(identity.user_sid.as_str())
         && task_sddl_is_private(sddl, &identity.user_sid)
+        && task_profile_is_owned(xml, identity)
+}
+
+#[cfg(any(windows, test))]
+fn task_profile_is_owned(xml: &str, identity: &TaskIdentity) -> bool {
+    let Some(owned) = identity.profile_root.as_deref() else {
+        // Unbound identities are used only by the legacy-definition unit tests.
+        // Native scheduler connections require an explicit profile below.
+        return true;
+    };
+    let Some(loaded) = profile_root_from_task_xml(xml) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        let Ok(loaded) = fully_qualified_windows_path(&loaded, "registered daemon profile root")
+        else {
+            return false;
+        };
+        windows_paths_equal(owned, &loaded).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        owned == loaded
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -2023,16 +2080,17 @@ fn windows_argument_tokens(arguments: &str) -> Result<Vec<String>> {
 }
 
 fn with_platform_api<T>(
+    profile: &ProfileRoot,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,
 ) -> Result<T> {
     #[cfg(windows)]
     {
-        let mut api = native::NativeTaskScheduler::connect()?;
+        let mut api = native::NativeTaskScheduler::connect(profile)?;
         operation(&mut api)
     }
     #[cfg(not(windows))]
     {
-        let _ = operation;
+        let _ = (profile, operation);
         Err(TraceDecayError::Config {
             message: "Windows Task Scheduler is unavailable on this platform".to_string(),
         })
@@ -2050,19 +2108,21 @@ fn with_platform_api_for_package<T>(
                 message: format!("could not determine current Windows user SID: {error}"),
             }
         })?;
-    let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?;
+    let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?
+        .for_profile(&ProfileRoot::from_env()?)?;
     let mut api = native::NativeTaskScheduler::connect_for(identity)?;
     operation(&mut api)
 }
 
 #[cfg(any(windows, test))]
 fn with_platform_control_api<T>(
+    profile: &ProfileRoot,
     expected_version: &str,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi, &mut dyn DaemonControlApi) -> Result<T>,
 ) -> Result<T> {
     #[cfg(windows)]
     {
-        with_platform_api(|api| {
+        with_platform_api(profile, |api| {
             let xml = api
                 .registered_xml()?
                 .ok_or_else(|| missing_task("resolve profile for"))?;
@@ -2083,7 +2143,7 @@ fn with_platform_control_api<T>(
     }
     #[cfg(not(windows))]
     {
-        let _ = (expected_version, operation);
+        let _ = (profile, expected_version, operation);
         Err(TraceDecayError::Config {
             message: "Windows Task Scheduler is unavailable on this platform".to_string(),
         })
@@ -2132,12 +2192,17 @@ mod native {
     }
 
     impl NativeTaskScheduler {
-        pub(super) fn connect() -> Result<Self> {
-            let identity = TaskIdentity::current()?;
+        pub(super) fn connect(profile: &ProfileRoot) -> Result<Self> {
+            let identity = TaskIdentity::current(profile)?;
             Self::connect_for(identity)
         }
 
         pub(super) fn connect_for(identity: TaskIdentity) -> Result<Self> {
+            if identity.profile_root.is_none() {
+                return Err(TraceDecayError::Config {
+                    message: "Windows task connections require an explicit profile root".to_owned(),
+                });
+            }
             let apartment = ComApartment::initialize()?;
             let service: ITaskService =
                 unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
@@ -2179,6 +2244,20 @@ mod native {
             let xml = String::try_from(xml).map_err(|error| TraceDecayError::Config {
                 message: format!("daemon task XML is not valid UTF-16: {error}"),
             })?;
+            if !task_profile_is_owned(&xml, &self.identity) {
+                return Err(TraceDecayError::ServiceUnitNotOwned {
+                    unit: self.identity.task_name.clone(),
+                    owned: self
+                        .identity
+                        .profile_root
+                        .clone()
+                        .ok_or_else(|| TraceDecayError::Config {
+                            message: "Windows task identity has no profile root".to_owned(),
+                        })?
+                        .into_boxed_path(),
+                    loaded: profile_root_from_task_xml(&xml).map(PathBuf::into_boxed_path),
+                });
+            }
             let sddl = unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
                 .map_err(|error| com_error("read daemon task security descriptor", error))?;
             let sddl = String::try_from(sddl).map_err(|error| TraceDecayError::Config {
@@ -2247,6 +2326,9 @@ mod native {
         }
 
         fn register_xml_with_sddl(&mut self, xml: &str, sddl: &str) -> Result<()> {
+            if !task_definition_is_owned(xml, sddl, &self.identity) {
+                return Err(foreign_task(&self.identity));
+            }
             if self.task_unchecked()?.is_some() {
                 let _ = self.task()?;
             }
@@ -2278,6 +2360,25 @@ mod native {
             let Some(task) = self.task_unchecked()? else {
                 return Ok(());
             };
+            let xml = unsafe { task.Xml() }
+                .map_err(|error| com_error("read daemon task XML during rollback", error))?;
+            let xml = String::try_from(xml).map_err(|error| TraceDecayError::Config {
+                message: format!("daemon task XML is not valid UTF-16: {error}"),
+            })?;
+            if !task_profile_is_owned(&xml, &self.identity) {
+                return Err(TraceDecayError::ServiceUnitNotOwned {
+                    unit: self.identity.task_name.clone(),
+                    owned: self
+                        .identity
+                        .profile_root
+                        .clone()
+                        .ok_or_else(|| TraceDecayError::Config {
+                            message: "Windows task identity has no profile root".to_owned(),
+                        })?
+                        .into_boxed_path(),
+                    loaded: profile_root_from_task_xml(&xml).map(PathBuf::into_boxed_path),
+                });
+            }
             unsafe { task.SetEnabled(false.into()) }
                 .map_err(|error| com_error("disable daemon task during rollback", error))
         }
@@ -2295,6 +2396,9 @@ mod native {
         }
 
         fn delete(&mut self) -> Result<()> {
+            if self.task()?.is_none() {
+                return Ok(());
+            }
             match unsafe {
                 self.root
                     .DeleteTask(&BSTR::from(self.identity.task_name.as_str()), 0)

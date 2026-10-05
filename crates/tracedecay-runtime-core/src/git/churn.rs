@@ -10,12 +10,34 @@ use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
 /// Counts commits touching each exact UTF-8 Git path during the requested window.
 /// Missing/unborn repositories have no history. Unreadable history and paths that
 /// cannot be represented by the graph's string identity are errors, not zero churn.
+///
+/// `paths` limits the log to those exact pathspecs. An empty list reads nothing
+/// and returns an empty map.
 #[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
     let root = project_root.to_owned();
     tokio::task::spawn_blocking(move || read_file_churn(&root, days, &GitCommandBounds::default()))
         .await
         .map_err(|error| churn_error(error.to_string()))?
+}
+
+/// Like [`file_churn`], but the log is restricted to `paths`.
+/// An empty list reads nothing and returns an empty map.
+pub async fn file_churn_paths(
+    project_root: &Path,
+    days: u32,
+    paths: &[String],
+) -> Result<HashMap<String, usize>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let root = project_root.to_owned();
+    let paths = paths.to_vec();
+    tokio::task::spawn_blocking(move || {
+        read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default())
+    })
+    .await
+    .map_err(|error| churn_error(error.to_string()))?
 }
 
 fn churn_error(detail: impl Into<String>) -> TraceDecayError {
@@ -74,9 +96,71 @@ fn read_file_churn(
             output.status
         )));
     }
+    tally_name_only(&output.stdout)
+}
+
+fn read_file_churn_paths(
+    root: &Path,
+    days: u32,
+    paths: &[String],
+    bounds: &GitCommandBounds,
+) -> Result<HashMap<String, usize>> {
+    try_git_program().map_err(|_| TraceDecayError::HostCliUnavailable {
+        program: "git".to_owned(),
+        lifecycle: "Git churn analysis".to_owned(),
+    })?;
+    match std::fs::metadata(root) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(TraceDecayError::Io(error)),
+        Ok(_) => {}
+    }
+    let repository = match GitRepositoryAuthority::discover(root) {
+        Ok(repository) => repository,
+        Err(GitRepositoryError::NotARepository { .. }) => return Ok(HashMap::new()),
+        Err(error) => return Err(churn_error(error.to_string())),
+    };
+    if repository
+        .head()
+        .map_err(|error| churn_error(error.to_string()))?
+        .commit()
+        .is_none()
+    {
+        return Ok(HashMap::new());
+    }
+    let since = format!("--since={days} days ago");
+    let mut args = vec![
+        "log",
+        "--format=",
+        "--name-only",
+        "-z",
+        since.as_str(),
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let output =
+        bounded_git_output(root, &args, bounds).map_err(|error| churn_error(error.to_string()))?;
+    if !output.status.success() {
+        return Err(churn_error(format!(
+            "git log exited with {}",
+            output.status
+        )));
+    }
+    let allowed: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
+    let mut churn = tally_name_only(&output.stdout)?;
+    churn.retain(|path, _| allowed.contains(path.as_str()));
+    Ok(churn)
+}
+
+fn tally_name_only(stdout: &[u8]) -> Result<HashMap<String, usize>> {
     let mut churn = HashMap::new();
-    for path in output
-        .stdout
+    for path in stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
     {
@@ -139,6 +223,15 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-m", "second"]);
         let counts = read_file_churn(root, 90, &GitCommandBounds::default()).unwrap();
+        let only_first = read_file_churn_paths(
+            root,
+            90,
+            &[paths[0].to_owned()],
+            &GitCommandBounds::default(),
+        )
+        .unwrap();
+        assert_eq!(only_first.len(), 1);
+        assert_eq!(only_first[paths[0]], counts[paths[0]]);
         assert_eq!(counts.len(), paths.len());
         for (index, path) in paths.iter().enumerate() {
             assert_eq!(counts[*path], if index == 0 { 2 } else { 1 });

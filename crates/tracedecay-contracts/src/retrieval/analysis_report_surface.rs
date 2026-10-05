@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ComplexityAnalysisV1;
 
 use crate::result::CoverageCompleteness;
+use crate::retrieval::PrimitiveSearchFreshnessV1;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +45,9 @@ pub struct DeadCodeSymbolV1 {
 pub struct DeadCodeResultV1 {
     pub dead_code_count: u64,
     pub symbols: Vec<DeadCodeSymbolV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -78,6 +82,9 @@ pub struct CircularResultV1 {
     pub limit: u64,
     pub member_limit: u64,
     pub cycles: Vec<CircularCycleV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -98,6 +105,10 @@ pub struct HotspotV1 {
     pub incoming: u64,
     pub outgoing: u64,
     pub total: u64,
+    /// Commits touching `file` in the last 90 days. Absent when git history
+    /// could not be read; `0` means the file had no commits in that window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub churn: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -105,6 +116,13 @@ pub struct HotspotV1 {
 pub struct HotspotsResultV1 {
     pub hotspot_count: u64,
     pub hotspots: Vec<HotspotV1>,
+    /// Names a measurement this result could not make. `churn` means the
+    /// ranking is connectivity alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_fields: Vec<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -172,6 +190,9 @@ pub struct UnmountedFilesResultV1 {
     pub path: Option<String>,
     pub ecosystem: Option<String>,
     pub unmounted: Vec<UnmountedFileV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Relationship the rank report counts.
@@ -237,6 +258,9 @@ pub struct RankResultV1 {
     pub node_kind_filter: Option<String>,
     pub result_count: u64,
     pub ranking: Vec<RankEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -269,6 +293,9 @@ pub struct LargestResultV1 {
     pub node_kind_filter: Option<String>,
     pub result_count: u64,
     pub ranking: Vec<LargestEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Which side of a file dependency the coupling report counts.
@@ -305,6 +332,9 @@ pub struct CouplingResultV1 {
     pub direction: CouplingDirectionV1,
     pub result_count: u64,
     pub ranking: Vec<CouplingEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -332,6 +362,9 @@ pub struct InheritanceDepthEntryV1 {
 pub struct InheritanceDepthResultV1 {
     pub result_count: u64,
     pub ranking: Vec<InheritanceDepthEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -384,6 +417,9 @@ pub enum DistributionViewV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct DistributionResultV1 {
     pub path_filter: Option<String>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
     #[serde(flatten)]
     pub view: DistributionViewV1,
 }
@@ -420,6 +456,9 @@ pub struct RecursionCycleV1 {
 pub struct RecursionResultV1 {
     pub cycle_count: u64,
     pub cycles: Vec<RecursionCycleV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -461,6 +500,9 @@ pub struct ComplexityReportV1 {
     pub note: String,
     pub result_count: u64,
     pub ranking: Vec<ComplexityReportEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -502,6 +544,9 @@ pub struct DocCoverageResultV1 {
     pub limit: u64,
     pub file_count: u64,
     pub files: Vec<DocCoverageFileV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -531,6 +576,9 @@ pub struct GodClassEntryV1 {
 pub struct GodClassResultV1 {
     pub result_count: u64,
     pub ranking: Vec<GodClassEntryV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Risky construct the pattern scan looks for.
@@ -601,6 +649,9 @@ pub struct UnsafePatternsResultV1 {
     /// `partial` exactly when `omissions` names a file whose sites are withheld.
     pub coverage: CoverageCompleteness,
     pub omissions: Vec<UnsafePatternFileOmissionV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 /// Why a file's risky-pattern sites are withheld from the verified result.
@@ -686,6 +737,9 @@ pub struct ConstructorsNotFoundV1 {
     pub message: String,
     pub match_count: u64,
     pub sites: Vec<ConstructorSiteV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -700,6 +754,9 @@ pub struct ConstructorsReportV1 {
     pub expected_fields: Option<Vec<String>>,
     pub match_count: u64,
     pub sites: Vec<ConstructorSiteV1>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -745,4 +802,7 @@ pub struct FieldSitesResultV1 {
     pub write_sites: Vec<FieldSiteV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_sites: Option<Vec<FieldSiteV1>>,
+    /// The worktree verdict a served graph read opens with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }

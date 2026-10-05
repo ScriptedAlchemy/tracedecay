@@ -228,8 +228,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 .unwrap_or_else(|| "td-bench-missing".into()),
             "target": wt_target,
         });
-        if let Value::Object(m) = extra {
-            a.as_object_mut().map(|o| o.extend(m));
+        if let Value::Object(m) = extra
+            && let Some(object) = a.as_object_mut()
+        {
+            object.extend(m);
         }
         a
     };

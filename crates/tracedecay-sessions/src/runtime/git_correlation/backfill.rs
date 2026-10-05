@@ -509,6 +509,7 @@ pub struct CollectedBackfill {
     /// Last session tuple before any transient Git failure; `None` when no
     /// session past `start` settled.
     pub settled_through: Option<GitHistoryIndexFrontier>,
+    pub settled_sessions: Vec<(String, String, i64)>,
 }
 
 /// Derives span and commit evidence for every retained session that changed
@@ -568,12 +569,25 @@ where
         .checked_sub(1)
         .and_then(|index| frontiers.get(index))
         .copied();
+    let settled_sessions = rows
+        .iter()
+        .zip(&frontiers)
+        .take(derived.settled_rows)
+        .map(|(row, frontier)| {
+            (
+                row.provider.clone(),
+                row.session_id.clone(),
+                frontier.change_sequence,
+            )
+        })
+        .collect();
     Ok(CollectedBackfill {
         spans: derived.spans,
         commits: derived.commits,
         stats: derived.stats,
         start,
         settled_through,
+        settled_sessions,
     })
 }
 
@@ -949,20 +963,14 @@ pub(super) async fn session_activity_rows(
     Ok(out)
 }
 
-/// Page of sessions whose newest stored message is past change sequence `?1`,
-/// in change order.
-///
-/// A session's change sequence is its highest `lcm_raw_messages.store_id`. The
-/// store assigns ids monotonically at import, so a session imported late
-/// still lands past the frontier however old its activity is. Ids are unique,
-/// so the sequence alone orders the page.
+/// Changed sessions in journal order. Rewrites keep message identities but
+/// allocate a new history revision in the source transaction.
 const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
-         SELECT provider, session_id, MAX(store_id) AS change_sequence
-         FROM lcm_raw_messages
-         WHERE store_id > ?1
-         GROUP BY provider, session_id
+         SELECT provider, session_id, sequence AS change_sequence
+         FROM git_history_session_change
+         WHERE sequence > ?1
      )
-     SELECT s.provider, s.session_id,
+     SELECT touched.provider, touched.session_id,
             COALESCE(
                 CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
                     s.metadata_json, '$.' || s.provider || '_session_cwd'
@@ -974,7 +982,7 @@ const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
             (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
-            s.rowid, touched.change_sequence
+            COALESCE(s.rowid, touched.change_sequence), touched.change_sequence
      FROM touched
      JOIN sessions s
        ON s.provider = touched.provider AND s.session_id = touched.session_id

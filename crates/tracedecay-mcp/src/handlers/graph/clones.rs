@@ -178,6 +178,7 @@ pub async fn compute_similar(
         source,
         families,
         coverage,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::Similar(result),

@@ -48,7 +48,6 @@ use unit_file::{
 };
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
-const LAUNCHD_PLIST_NAME: &str = "com.tracedecay.daemon.plist";
 static SERVICE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // Cached project owners retain SQLite families and coordination locks. The
@@ -563,8 +562,11 @@ pub fn with_unavailable_daemon_advice(
 /// miss.
 fn observed_service_unit(profile: &ProfileRoot) -> DaemonServiceUnitObservationV1 {
     let unit = service_unit_path(profile).and_then(|service_path| {
-        if service_unit_exists(&service_path)? {
-            Ok(Some((read_service_unit(&service_path)?, service_path)))
+        if service_unit_exists(profile, &service_path)? {
+            Ok(Some((
+                read_service_unit(profile, &service_path)?,
+                service_path,
+            )))
         } else {
             Ok(None)
         }
@@ -785,7 +787,7 @@ impl DaemonServiceSpec {
                <string>{stderr}</string>\n\
              </dict>\n\
              </plist>\n",
-            label = xml_escape(LAUNCHD_LABEL),
+            label = xml_escape(&unit_file::launchd_label(&self.profile)),
             bin = xml_escape(&self.tracedecay_bin.display().to_string()),
             socket = xml_escape(&self.socket_path.display().to_string()),
             open_file_limit = DAEMON_OPEN_FILE_LIMIT,
@@ -1076,12 +1078,13 @@ pub fn install_service_under_lease(
 ) -> Result<PathBuf> {
     let runner = ServiceRunner::current(&spec.profile)?;
     #[cfg(windows)]
-    let new_windows_task = windows_task::service_state()? == DaemonServiceState::Missing;
+    let new_windows_task =
+        windows_task::service_state(&spec.profile)? == DaemonServiceState::Missing;
     #[cfg(not(windows))]
     let new_windows_task = false;
     let operation_result = (|| {
         #[cfg(windows)]
-        let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
+        let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask { .. }) {
             windows_task::materialize_service_spec_after_quiescence(spec)?
         } else {
             spec.clone()
@@ -1090,7 +1093,6 @@ pub fn install_service_under_lease(
         let materialized_spec = spec.clone();
         let service_path = write_service_unit(&materialized_spec)?;
         runner.install(
-            &spec.profile,
             &service_path,
             start,
             &materialized_spec.socket_path,
@@ -1099,7 +1101,7 @@ pub fn install_service_under_lease(
         Ok(service_path)
     })();
     if operation_result.is_err() && new_windows_task {
-        let rollback_result = windows_task::rollback_new_registration();
+        let rollback_result = windows_task::rollback_new_registration(&spec.profile);
         return combine_operation_and_restore(
             "install new Windows daemon task",
             operation_result,
@@ -1130,7 +1132,7 @@ fn refresh_service_with_runner(
         }
     }
     #[cfg(windows)]
-    let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
+    let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask { .. }) {
         windows_task::materialize_service_spec_after_quiescence(spec)?
     } else {
         spec.clone()
@@ -1139,7 +1141,6 @@ fn refresh_service_with_runner(
     let materialized_spec = spec.clone();
     let service_path = write_service_unit(&materialized_spec)?;
     runner.refresh(
-        &spec.profile,
         &service_path,
         &materialized_spec.socket_path,
         previous_state,
@@ -1180,10 +1181,10 @@ fn refresh_installed_service_with_state_and_runner(
         return Ok(None);
     }
     let service_path = service_unit_path(&spec.profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(&spec.profile, &service_path)? {
         return Ok(None);
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(&spec.profile, &service_path)?;
     let mut refreshed_spec = spec.clone();
     refreshed_spec.remote_tls = unit_file::remote_tls_from_unit_text(&unit)?;
     if matches!(runner, ServiceRunner::Launchd { .. }) {
@@ -1192,7 +1193,7 @@ fn refresh_installed_service_with_state_and_runner(
         refreshed_spec.data_dir_override =
             launchd_plist_env_value(&unit, tracedecay_runtime_core::config::USER_DATA_DIR_ENV)
                 .map(PathBuf::from);
-    } else if matches!(runner, ServiceRunner::WindowsTask) {
+    } else if matches!(runner, ServiceRunner::WindowsTask { .. }) {
         refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
     if let Some(socket_path) = socket_path_from_unit_text(&unit) {
@@ -1230,7 +1231,7 @@ fn quiesce_installed_service_before_lease_with_runner(
         return Ok(DaemonServiceState::Missing);
     }
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         let socket_path = default_socket_path(profile.data_dir())?;
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -1243,7 +1244,7 @@ fn quiesce_installed_service_before_lease_with_runner(
         }
         return Ok(DaemonServiceState::Missing);
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     let state = runner.service_state(&socket_path)?;
@@ -1284,7 +1285,7 @@ fn verify_installed_service_quiesced_under_lease_with_runner(
         return Ok(DaemonServiceState::Missing);
     }
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         let socket_path = default_socket_path(profile.data_dir())?;
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -1297,7 +1298,7 @@ fn verify_installed_service_quiesced_under_lease_with_runner(
         }
         return Ok(DaemonServiceState::Missing);
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     let state = runner.service_state(&socket_path)?;
@@ -1348,7 +1349,7 @@ fn restore_installed_service_after_update_with_runner(
         return Ok(());
     }
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         return Err(TraceDecayError::Config {
             message: format!(
                 "cannot restore TraceDecay daemon state: service unit '{}' is missing",
@@ -1356,7 +1357,7 @@ fn restore_installed_service_after_update_with_runner(
             ),
         });
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     runner.restore_after_update(
@@ -1418,10 +1419,10 @@ pub fn uninstall_service(
 
 pub fn installed_service_state(profile: &ProfileRoot) -> Result<DaemonServiceState> {
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         return Ok(DaemonServiceState::Missing);
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     ServiceRunner::current(profile)?.service_state(&socket_path)
@@ -1436,12 +1437,12 @@ pub fn installed_service_process_proof(
     expected_version: &str,
 ) -> Result<DaemonProcessProofV1> {
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         return Ok(DaemonProcessProofV1::Unproven {
             detail: "no managed TraceDecay daemon service is installed".to_owned(),
         });
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     let state = ServiceRunner::current(profile)?.service_state(&socket_path)?;
@@ -1460,18 +1461,18 @@ pub fn installed_service_process_proof(
 #[tracing::instrument(name = "daemon.service.start", level = "trace", skip_all)]
 pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()> {
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         return Err(TraceDecayError::Config {
             message: "no TraceDecay daemon service is installed".to_string(),
         });
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     let runner = ServiceRunner::current(profile)?;
     let pre_start_state = runner.service_state(&socket_path)?;
     runner.start(&service_path, &socket_path, expected_version)?;
-    if matches!(runner, ServiceRunner::WindowsTask) {
+    if matches!(runner, ServiceRunner::WindowsTask { .. }) {
         // `windows_task::start` already polls authenticated readiness
         // internally; a second wait would double the start path.
         return Ok(());
@@ -1610,7 +1611,7 @@ fn installed_service_status_snapshot(
 )> {
     const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         let socket_path = default_socket_path(profile.data_dir())?;
         let socket_state = daemon_socket_state(&socket_path);
         return Ok((
@@ -1620,16 +1621,21 @@ fn installed_service_status_snapshot(
             DaemonProtocolState::NotRequired,
         ));
     }
-    let unit = read_service_unit(&service_path)?;
+    let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     // launchd's liveness is a socket connect, so the authenticated readiness
     // probe doubles as that observation instead of the daemon seeing an extra
     // bare connection ahead of it.
-    if let ServiceRunner::Launchd { launchctl, id } = runner {
+    if let ServiceRunner::Launchd {
+        launchctl,
+        id,
+        profile,
+    } = runner
+    {
         let (socket_state, protocol_state) =
             daemon_readiness_probe(profile, &socket_path, expected_version, READINESS_TIMEOUT);
-        let actual = launchd_service_state(launchctl, id, socket_state)?;
+        let actual = launchd_service_state(launchctl, id, socket_state, profile)?;
         let protocol_state = if actual.is_running() {
             protocol_state
         } else {
@@ -1691,7 +1697,7 @@ fn uninstall_service_under_lease(
     let runner = ServiceRunner::current(profile)?;
     let service_path = service_unit_path(profile)?;
     runner.before_uninstall(stop, expected_version)?;
-    remove_service_unit(&service_path)?;
+    remove_service_unit(profile, &service_path)?;
     runner.after_uninstall(stop);
     Ok(service_path)
 }

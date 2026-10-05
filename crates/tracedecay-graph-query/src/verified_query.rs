@@ -432,6 +432,13 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    pub fn suggest_simple_names(&self, name: &str, limit: usize) -> Result<Vec<String>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .suggest_simple_names(name, limit, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
     pub fn external_type_import_candidates(
         &self,
         query: &str,

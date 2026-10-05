@@ -303,7 +303,7 @@ async fn expected_source_watermark(
         return Ok((Some(stamp), watermark));
     }
     let loaded = load_source(db, owner, read_control, None).await?;
-    let watermark = source_watermark(owner, &loaded.source, read_control)?;
+    let watermark = source_watermark(owner, &loaded.source, loaded.lineage_stamp, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());
     }
@@ -375,7 +375,7 @@ async fn reconcile_project_memory_graph_pass(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let loaded = load_source(db, &owner, read_control, Some(db)).await?;
-    let watermark = source_watermark(&owner, &loaded.source, read_control)?;
+    let watermark = source_watermark(&owner, &loaded.source, loaded.lineage_stamp, read_control)?;
     if let Some(stamp) = loaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, watermark.clone());
     }
@@ -457,7 +457,12 @@ async fn finish_reconciliation_watermark(
         return Ok(());
     }
     let reloaded = load_source(db, owner, read_control, Some(db)).await?;
-    let reloaded_watermark = source_watermark(owner, &reloaded.source, read_control)?;
+    let reloaded_watermark = source_watermark(
+        owner,
+        &reloaded.source,
+        reloaded.lineage_stamp,
+        read_control,
+    )?;
     if let Some(stamp) = reloaded.lineage_stamp {
         db.record_memory_graph_source_watermark(stamp, reloaded_watermark.clone());
     }

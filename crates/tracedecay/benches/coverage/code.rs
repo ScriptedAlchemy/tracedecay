@@ -109,7 +109,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_code_facets",
                 "facets",
                 json!({
-                    "dimension": *["kind", "language", "path", "kind", "language"].iter().nth(i).unwrap_or(&"kind"),
+                    "dimension": *["kind", "language", "path", "kind", "language"].get(i).unwrap_or(&"kind"),
                     "scope": cq_scope(),
                     "meta": meta("summary", "stable_identity"),
                 }),
@@ -215,7 +215,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_signature_search",
                 "signature_search",
                 json!({
-                    "returns": *["i32", "bool", "String", "void", "Result"].iter().nth(i).unwrap_or(&""),
+                    "returns": *["i32", "bool", "String", "void", "Result"].get(i).unwrap_or(&""),
                     "params": [NAMES[i % NAMES.len()]],
                     "scope": scope(),
                     "meta": meta("summary", "relevance"),

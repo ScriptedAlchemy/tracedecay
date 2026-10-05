@@ -123,6 +123,7 @@ pub async fn compute_todos(
         match_count: markers.len(),
         by_kind,
         markers,
+        freshness: None,
     };
     Ok(graph_tool_completion(
         GraphToolResultV1::Todos(result),

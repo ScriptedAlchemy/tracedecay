@@ -8,8 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::runner::ServicePlatform;
 use super::{
-    DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, windows_task, xml_escape,
-    xml_unescape,
+    DaemonServiceSpec, LAUNCHD_LABEL, SERVICE_TEMP_SEQUENCE, windows_task, xml_escape, xml_unescape,
 };
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -121,7 +120,7 @@ pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let service_path = service_unit_path(&spec.profile)?;
     let unit = spec.render_unit()?;
     match ServicePlatform::current()? {
-        ServicePlatform::WindowsTask => windows_task::register_task_xml(&unit)?,
+        ServicePlatform::WindowsTask => windows_task::register_task_xml(&spec.profile, &unit)?,
         ServicePlatform::Systemd | ServicePlatform::Launchd => {
             atomic_replace_service_unit_with(&service_path, &unit, &mut |_| Ok(()))?;
         }
@@ -131,18 +130,19 @@ pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
 
 pub fn installed_service_socket_path(profile: &ProfileRoot) -> Result<Option<PathBuf>> {
     let service_path = service_unit_path(profile)?;
-    if !service_unit_exists(&service_path)? {
+    if !service_unit_exists(profile, &service_path)? {
         return Ok(None);
     }
     Ok(socket_path_from_unit_text(&read_service_unit(
+        profile,
         &service_path,
     )?))
 }
 
-pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
+pub(super) fn read_service_unit(profile: &ProfileRoot, service_path: &Path) -> Result<String> {
     match ServicePlatform::current()? {
         ServicePlatform::WindowsTask => {
-            windows_task::registered_task_xml()?.ok_or_else(|| TraceDecayError::Config {
+            windows_task::registered_task_xml(profile)?.ok_or_else(|| TraceDecayError::Config {
                 message: format!("daemon task '{}' is not registered", service_path.display()),
             })
         }
@@ -154,17 +154,17 @@ pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
     }
 }
 
-pub(super) fn service_unit_exists(service_path: &Path) -> Result<bool> {
+pub(super) fn service_unit_exists(profile: &ProfileRoot, service_path: &Path) -> Result<bool> {
     match ServicePlatform::current()? {
-        ServicePlatform::WindowsTask => windows_task::task_exists(),
+        ServicePlatform::WindowsTask => windows_task::task_exists(profile),
         ServicePlatform::Systemd | ServicePlatform::Launchd => Ok(service_path.exists()),
     }
 }
 
 #[tracing::instrument(name = "daemon.service.unit.remove", level = "trace", skip_all)]
-pub(super) fn remove_service_unit(service_path: &Path) -> Result<()> {
+pub(super) fn remove_service_unit(profile: &ProfileRoot, service_path: &Path) -> Result<()> {
     match ServicePlatform::current()? {
-        ServicePlatform::WindowsTask => windows_task::delete(),
+        ServicePlatform::WindowsTask => windows_task::delete(profile),
         ServicePlatform::Systemd | ServicePlatform::Launchd => {
             match std::fs::remove_file(service_path) {
                 Ok(()) => Ok(()),
@@ -419,7 +419,7 @@ pub(super) fn service_unit_path(profile: &ProfileRoot) -> Result<PathBuf> {
     match ServicePlatform::current()? {
         ServicePlatform::Systemd => systemd_user_service_path(profile),
         ServicePlatform::Launchd => launchd_user_service_path(profile),
-        ServicePlatform::WindowsTask => windows_task::task_path(),
+        ServicePlatform::WindowsTask => windows_task::task_path(profile),
     }
 }
 
@@ -447,7 +447,17 @@ pub fn systemd_unit_name(profile: &ProfileRoot) -> String {
     format!("tracedecay-{}.service", hex::encode(&digest[..8]))
 }
 
-fn launchd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
+pub(super) fn launchd_label(profile: &ProfileRoot) -> String {
+    if profile.is_home_default() {
+        return LAUNCHD_LABEL.to_owned();
+    }
+    let digest = sha2::Sha256::digest(profile.data_dir().as_os_str().as_encoded_bytes());
+    format!("{LAUNCHD_LABEL}.{}", hex::encode(&digest[..8]))
+}
+
+pub(super) fn launchd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
     let home = profile.require_home("launchd daemon service")?;
-    Ok(home.join("Library/LaunchAgents").join(LAUNCHD_PLIST_NAME))
+    Ok(home
+        .join("Library/LaunchAgents")
+        .join(format!("{}.plist", launchd_label(profile))))
 }

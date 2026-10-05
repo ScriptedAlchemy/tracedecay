@@ -11,6 +11,7 @@ use std::fs::Metadata;
 use std::hash::BuildHasher;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,6 +37,23 @@ pub enum RewriteWitness {
 }
 
 impl RewriteWitness {
+    /// A path witness sampled before reading its bytes. Windows uses an
+    /// active NTFS journal only after write/delete handles have closed;
+    /// unsupported, busy or inaccessible journals remain unvouched.
+    #[must_use]
+    pub fn native_path_stamp(
+        path: &Path,
+        metadata: &Metadata,
+        reading: ChangeClockReading,
+    ) -> ChangeStamp {
+        #[cfg(windows)]
+        if let Some(stamp) = crate::windows_rewrite_witness::stamp(path, metadata) {
+            return stamp;
+        }
+        #[cfg(not(windows))]
+        let _ = path;
+        Self::NATIVE.stamp(metadata, reading)
+    }
     /// This platform's witness.
     pub const NATIVE: Self = if cfg!(unix) {
         Self::ChangeTime
@@ -82,15 +100,19 @@ impl RewriteWitness {
     }
 }
 
-/// The change-time component of a cached stat identity.
+/// The rewrite witness component of a cached file identity.
 ///
-/// Two stamps are equal only when both carry the same settled change time,
+/// Two stamps are equal only when both carry the same settled change time
+/// or the same closed-handle NTFS journal token,
 /// so an identity equal to a later one proves the bytes unchanged. A stamp no
 /// reading settled is unique to its sample and equals only its own copies, so
 /// an identity holding one never matches a later stat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChangeStamp {
     Settled(i128),
+    /// File identity, journal epoch and USN sampled with modifying handles
+    /// excluded. The token is the first 128 bits of their SHA-256 digest.
+    Journal([u8; 16]),
     Unvouched(u128),
 }
 
@@ -106,7 +128,7 @@ impl ChangeStamp {
 
     #[must_use]
     pub const fn is_settled(self) -> bool {
-        matches!(self, Self::Settled(_))
+        matches!(self, Self::Settled(_) | Self::Journal(_))
     }
 
     /// A tagged encoding for hashing the stamp into a digest identity.
@@ -114,6 +136,7 @@ impl ChangeStamp {
     pub fn to_le_bytes(self) -> [u8; 17] {
         let (tag, value) = match self {
             Self::Settled(changed_at) => (1, changed_at.to_le_bytes()),
+            Self::Journal(token) => (2, token),
             Self::Unvouched(sample) => (0, sample.to_le_bytes()),
         };
         let mut bytes = [0; 17];
