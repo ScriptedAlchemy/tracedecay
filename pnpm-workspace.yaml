@@ -9,7 +9,6 @@ packages:
   # worktrees are not install targets. Worktree checkouts
   # (`.worktrees`, `.codex-worktrees`, `.claude-worktrees`, and
   # `.claude/worktrees`) sit inside the repo and carry their own Cargo.toml.
-  - "!benchmark_data/**"
   - "!crates/*/fixtures/**"
   - "!crates/*/tests/fixtures/**"
   - "!benchmark_data/**/fixtures/**"
