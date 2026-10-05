@@ -348,17 +348,29 @@ pub async fn compute_health(
                 },
             }),
             Some(HealthWeightsV1 {
-                note: "quality_signal is geometric mean × 10000".to_owned(),
+                note: "quality_signal is a breakdown of panel, worst dimension first. Do not maximize it.".to_owned(),
             }),
         )
     } else {
         (None, None)
     };
 
+    let panel = tracedecay_graph_query::health::health_panel(
+        &tracedecay_graph_query::health::HealthDimensions {
+            acyclicity: snap.acyclicity,
+            depth: snap.depth,
+            equality: snap.equality,
+            redundancy: snap.redundancy,
+            modularity: snap.modularity,
+            coverage_discipline: snap.coverage_discipline,
+        },
+    )
+    .join(", ");
     Ok(graph_tool_completion(
         GraphToolResultV1::Health(HealthResultV1 {
             quality_signal: snap.quality_signal,
             files_analyzed: snap.files_analyzed as u64,
+            panel,
             dimensions,
             weights,
             freshness: None,

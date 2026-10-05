@@ -538,7 +538,8 @@ where
     } else {
         ContextRetrievalRouteV1::Prose
     };
-    let result = ContextResultV1 {
+    let budget_tokens = request.budget_tokens;
+    let mut result = ContextResultV1 {
         task: request.task,
         route,
         mode,
@@ -557,7 +558,26 @@ where
         verified_graph_evidence,
         plan,
         retrieval,
+        token_budget: None,
     };
+    if let Some(budget) = budget_tokens {
+        let shares = crate::handlers::token_budget::quotas(budget, &[40, 25, 25, 10]);
+        let sections = vec![
+            crate::handlers::token_budget::trim_section("symbols", &mut result.symbols, shares[0])?,
+            crate::handlers::token_budget::trim_section(
+                "related_symbols",
+                &mut result.related_symbols,
+                shares[1],
+            )?,
+            crate::handlers::token_budget::trim_section("code", &mut result.code, shares[2])?,
+            crate::handlers::token_budget::trim_section(
+                "memory_matches",
+                &mut result.memory_matches,
+                shares[3],
+            )?,
+        ];
+        result.token_budget = Some(crate::handlers::token_budget::cut(budget, sections)?);
+    }
     Ok(GraphToolCompletionV1 {
         result: GraphToolResultV1::Context(Box::new(result)),
         touched_files,

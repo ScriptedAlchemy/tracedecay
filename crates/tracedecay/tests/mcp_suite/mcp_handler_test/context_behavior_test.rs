@@ -175,6 +175,32 @@ async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
         })
     );
 
+    let budgeted = context_json(
+        &server,
+        json!({
+            "task": "invoice_total", "max_nodes": 1, "include_code": true,
+            "max_code_blocks": 1, "budget_tokens": 1
+        }),
+    )
+    .await;
+    assert_eq!(
+        code_identity(&budgeted),
+        json!({
+            "file": "src/lib.rs", "start_line": 1, "end_line": 3,
+            "code": "pub fn invoice_total(cents: u32) -> u32 {\n    cents\n}"
+        })
+    );
+    assert_eq!(budgeted["token_budget"]["budget_tokens"], 1);
+    assert_eq!(budgeted["token_budget"]["over_ceiling"], true);
+    assert_eq!(
+        budgeted["token_budget"]["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["section"] == "code"),
+        Some(&json!({"section": "code", "total": 1, "shown": 1}))
+    );
+
     let invoice_markdown = context_text(
         &server,
         json!({
@@ -430,7 +456,7 @@ async fn tracedecay_context_rejects_malformed_requests() {
     .await;
     assert_rejected(
         &unknown,
-        "invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`",
+        "invalid arguments for tracedecay_context: unknown field `not_a_context_field`, expected one of `task`, `max_nodes`, `include_code`, `max_code_blocks`, `mode`, `include_memory`, `memory_limit`, `memory_min_trust`, `lexical_anchors`, `prefer_symbol`, `budget_tokens`",
     );
 
     let mode = handle_real_server_tool_call_raw(
