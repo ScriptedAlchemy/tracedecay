@@ -194,9 +194,7 @@ impl DartExtractor {
         Self::push_library_node(state, node, name.to_string());
     }
 
-    // ----------------------------------
     // Library
-    // ----------------------------------
 
     fn visit_library(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "dotted_identifier_list").map_or_else(
@@ -258,9 +256,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Imports
-    // ----------------------------------
 
     fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
         let text = state.node_text(node);
@@ -336,9 +332,7 @@ impl DartExtractor {
         text.trim().to_string()
     }
 
-    // ----------------------------------
     // Top-level function
-    // ----------------------------------
 
     /// Visit a top-level function. In Dart's grammar, `function_signature` and
     /// `function_body` are siblings at the program level.
@@ -436,9 +430,7 @@ impl DartExtractor {
         Self::extract_annotations_from_modifiers(state, sig_node, &id);
     }
 
-    // ----------------------------------
     // Class
-    // ----------------------------------
 
     fn visit_class(state: &mut ExtractionState, node: TsNode<'_>) {
         let is_abstract = find_direct_child_by_kind(node, "abstract").is_some();
@@ -528,9 +520,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Mixin
-    // ----------------------------------
 
     fn visit_mixin(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
@@ -602,9 +592,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Extension
-    // ----------------------------------
 
     fn visit_extension(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
@@ -674,9 +662,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Enum
-    // ----------------------------------
 
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node.child_by_field_name("name").map_or_else(
@@ -817,9 +803,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Type alias
-    // ----------------------------------
 
     fn visit_type_alias(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = find_direct_child_by_kind(node, "type_identifier")
@@ -882,9 +866,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Class body
-    // ----------------------------------
 
     fn visit_class_body(state: &mut ExtractionState, body: TsNode<'_>) {
         Self::visit_body_members(state, body);
@@ -1014,9 +996,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Declarations (inside class bodies and top-level)
-    // ----------------------------------
 
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // A "declaration" node wraps various things.
@@ -1169,9 +1149,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Constructor
-    // ----------------------------------
 
     fn visit_constructor(state: &mut ExtractionState, decl_node: TsNode<'_>, sig_node: TsNode<'_>) {
         let name = Self::extract_constructor_name(state, sig_node);
@@ -1256,9 +1234,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Getter / Setter
-    // ----------------------------------
 
     fn visit_getter_or_setter(
         state: &mut ExtractionState,
@@ -1340,9 +1316,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Operator
-    // ----------------------------------
 
     fn visit_operator(state: &mut ExtractionState, decl_node: TsNode<'_>, _sig_node: TsNode<'_>) {
         let text = state.node_text(decl_node);
@@ -1427,9 +1401,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------------
     // Fields
-    // ----------------------------------
 
     /// Visit `initialized_variable_definition`: `Type name = value;`
     fn visit_initialized_var_def(
@@ -1555,9 +1527,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------
     // Call site extraction
-    // ----------------------------
 
     /// Recursively find call expressions inside a given node and create unresolved Calls references.
     /// Dart AST structure for calls: `identifier` followed by `selector` siblings containing
@@ -1692,9 +1662,7 @@ impl DartExtractor {
         }
     }
 
-    // ----------------------------
     // Helper extraction methods
-    // ----------------------------
 
     /// Extract a signature by slicing to the body child, else the first `{`.
     fn extract_signature_to_brace(state: &ExtractionState, node: TsNode<'_>) -> String {

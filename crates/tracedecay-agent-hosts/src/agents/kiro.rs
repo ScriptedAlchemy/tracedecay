@@ -428,9 +428,7 @@ fn mcp_registry_has_tracedecay(path: &Path) -> bool {
     mcp_config_has_tracedecay(path, "mcpServers", load_json_file)
 }
 
-// ---------------------------------------------------------------------------
 // Install helpers
-// ---------------------------------------------------------------------------
 
 fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
     json!({
@@ -574,9 +572,7 @@ missing decision or an external or destructive action outside that authority.",
     )
 }
 
-// ---------------------------------------------------------------------------
 // Uninstall helpers
-// ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(path: &Path) -> Result<()> {
     uninstall_mcp_server_entry(path, "mcpServers", JsonConfigDialect::Json)
@@ -662,9 +658,7 @@ fn owned_steering_ranges(contents: &str) -> Vec<Range<usize>> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_mcp_config(dc: &mut DoctorCounters, home: &Path) -> Option<serde_json::Value> {
     let path = mcp_config_path(home);
