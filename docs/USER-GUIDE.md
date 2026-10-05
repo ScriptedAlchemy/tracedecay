@@ -814,7 +814,7 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
 | `tracedecay_complexity` | Rank functions by composite complexity score, including cyclomatic complexity from the AST. |
 | `tracedecay_god_class` | Find classes with the most members, candidates for decomposition. |
-| `tracedecay_hotspots` | Rank symbols by connectivity (incoming + outgoing edges) weighted by file churn over the last 90 days. These are high-risk areas. |
+| `tracedecay_hotspots` | Rank symbols by `(incoming + outgoing + 1) * (file churn + 1)` over the last 90 days. When Git history is unavailable, rank by connectivity and report churn as unavailable. |
 | `tracedecay_doc_coverage` | Find public symbols missing documentation. |
 
 ### Health & quality signals

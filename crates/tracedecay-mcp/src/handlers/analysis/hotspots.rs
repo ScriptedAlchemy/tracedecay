@@ -1,10 +1,12 @@
-//! `tracedecay_hotspots`, churn-weighted connectivity ranking.
+//! `tracedecay_hotspots`, connectivity weighted by recent git churn.
 
 use std::sync::LazyLock;
 
+use std::collections::HashMap;
+
 use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_contracts::retrieval::{HotspotV1, HotspotsResultV1, HotspotsSurfaceRequestV1};
-use tracedecay_runtime_core::git::churn::file_churn;
+use tracedecay_runtime_core::git::churn::file_churn_paths;
 
 use super::*;
 
@@ -13,6 +15,14 @@ use super::*;
 static EXTRACTORS: LazyLock<LanguageRegistry> = LazyLock::new(LanguageRegistry::new);
 
 const CHURN_WINDOW_DAYS: u32 = 90;
+
+/// `(degree + 1) * (churn + 1)`. Equal churn keeps degree order. A leaf
+/// still moves when its file changed and a hub's file did not.
+fn churn_weighted_rank(degree: u64, churn: u64) -> u64 {
+    degree
+        .saturating_add(1)
+        .saturating_mul(churn.saturating_add(1))
+}
 
 #[tracing::instrument(name = "mcp.analysis.hotspots.total", level = "trace", skip_all)]
 pub(super) async fn compute_hotspots(
@@ -32,8 +42,7 @@ pub(super) async fn compute_hotspots(
             (symbols, edges)
         }
     };
-    let churn = file_churn(graph.project_root()?, CHURN_WINDOW_DAYS).await?;
-    let mut hotspots: Vec<HotspotV1> = {
+    let (incoming, outgoing) = {
         let _span = tracing::trace_span!("mcp.analysis.hotspots.compute").entered();
         let mut incoming = HashMap::<SymbolOccurrenceId, u64>::new();
         let mut outgoing = HashMap::<SymbolOccurrenceId, u64>::new();
@@ -42,43 +51,94 @@ pub(super) async fn compute_hotspots(
             *incoming.entry(edge.to_occurrence).or_default() += 1;
         }
         symbols.retain(|symbol| !EXTRACTORS.is_configuration_file(&symbol.path));
-        symbols
-            .into_iter()
-            .map(|symbol| {
-                let incoming = incoming.get(&symbol.occurrence).copied().unwrap_or(0);
-                let outgoing = outgoing.get(&symbol.occurrence).copied().unwrap_or(0);
-                let total = incoming.saturating_add(outgoing);
-                let churn = churn.get(&symbol.path).copied().unwrap_or(0) as u64;
-                HotspotV1 {
-                    id: symbol.occurrence.as_str().to_owned(),
-                    name: symbol.metadata.simple_name,
-                    kind: symbol.metadata.kind,
-                    file: symbol.path,
-                    line: user_line(symbol.metadata.start_line),
-                    incoming,
-                    outgoing,
-                    total,
-                    churn,
-                    score: total.saturating_mul(churn.saturating_add(1)),
-                }
-            })
-            .collect()
+        (incoming, outgoing)
     };
-    hotspots.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| right.total.cmp(&left.total))
-            .then_with(|| left.id.cmp(&right.id))
+    let mut files: Vec<String> = symbols.iter().map(|symbol| symbol.path.clone()).collect();
+    files.sort();
+    files.dedup();
+    let project_root = graph.project_root()?.to_path_buf();
+    let churn_by_file = file_churn_paths(&project_root, CHURN_WINDOW_DAYS, &files).await;
+    let churn_available = churn_by_file.is_ok();
+    let churn_by_file = churn_by_file.unwrap_or_default();
+    let degree = |occurrence: &SymbolOccurrenceId| {
+        incoming
+            .get(occurrence)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(outgoing.get(occurrence).copied().unwrap_or(0))
+    };
+    symbols.sort_by(|left, right| {
+        let left_degree = degree(&left.occurrence);
+        let right_degree = degree(&right.occurrence);
+        let rank = |symbol_degree: u64, path: &str| {
+            if churn_available {
+                churn_weighted_rank(
+                    symbol_degree,
+                    u64::try_from(churn_by_file.get(path).copied().unwrap_or(0))
+                        .unwrap_or(u64::MAX),
+                )
+            } else {
+                symbol_degree
+            }
+        };
+        rank(right_degree, right.path.as_str())
+            .cmp(&rank(left_degree, left.path.as_str()))
+            .then_with(|| right_degree.cmp(&left_degree))
+            .then_with(|| left.occurrence.cmp(&right.occurrence))
     });
-    hotspots.truncate(limit);
+    symbols.truncate(limit);
+    let hotspots: Vec<HotspotV1> = symbols
+        .into_iter()
+        .map(|symbol| {
+            let incoming = incoming.get(&symbol.occurrence).copied().unwrap_or(0);
+            let outgoing = outgoing.get(&symbol.occurrence).copied().unwrap_or(0);
+            let churn = churn_available.then(|| {
+                u64::try_from(
+                    churn_by_file
+                        .get(symbol.path.as_str())
+                        .copied()
+                        .unwrap_or(0),
+                )
+                .unwrap_or(u64::MAX)
+            });
+            HotspotV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: symbol.metadata.simple_name,
+                kind: symbol.metadata.kind,
+                file: symbol.path,
+                line: user_line(symbol.metadata.start_line),
+                incoming,
+                outgoing,
+                total: incoming + outgoing,
+                churn,
+            }
+        })
+        .collect();
     let touched_files = unique_file_paths(hotspots.iter().map(|hotspot| hotspot.file.as_str()));
     Ok(graph_tool_completion(
         GraphToolResultV1::Hotspots(HotspotsResultV1 {
             hotspot_count: hotspots.len() as u64,
             hotspots,
+            unavailable_fields: if churn_available {
+                Vec::new()
+            } else {
+                vec!["churn".to_owned()]
+            },
             freshness: None,
         }),
         touched_files,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::churn_weighted_rank;
+
+    #[test]
+    fn churn_weighted_rank_is_degree_plus_one_times_churn_plus_one() {
+        assert_eq!(churn_weighted_rank(1, 1), 4);
+        assert_eq!(churn_weighted_rank(2, 1), 6);
+        assert_eq!(churn_weighted_rank(0, 0), 1);
+        assert_eq!(churn_weighted_rank(0, 4), 5);
+    }
 }

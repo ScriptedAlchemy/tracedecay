@@ -5179,7 +5179,7 @@ fn assert_exact_hotspot(
     name: &str,
     file: &str,
     line: u64,
-    [incoming, outgoing, total, churn, score]: [u64; 5],
+    [incoming, outgoing, total, churn]: [u64; 4],
 ) {
     let id = row["id"]
         .as_str()
@@ -5197,7 +5197,6 @@ fn assert_exact_hotspot(
             "outgoing": outgoing,
             "total": total,
             "churn": churn,
-            "score": score,
         }),
         "{row}"
     );
@@ -5218,8 +5217,8 @@ fn hotspots(payload: &Value) -> &[Value] {
 fn assert_chain_ranking(payload: &Value) {
     let rows = hotspots(payload);
     assert_eq!(rows.len(), 4, "{payload}");
-    assert_exact_hotspot(&rows[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1, 4]);
-    assert_exact_hotspot(&rows[3], "quiet", "src/calls.ts", 1, [0, 0, 0, 1, 0]);
+    assert_exact_hotspot(&rows[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1]);
+    assert_exact_hotspot(&rows[3], "quiet", "src/calls.ts", 1, [0, 0, 0, 1]);
     let mut tied = [rows[1].clone(), rows[2].clone()];
     tied.sort_by(|left, right| {
         left["name"]
@@ -5227,8 +5226,8 @@ fn assert_chain_ranking(payload: &Value) {
             .unwrap_or("")
             .cmp(right["name"].as_str().unwrap_or(""))
     });
-    assert_exact_hotspot(&tied[0], "hub", "src/calls.ts", 13, [0, 1, 1, 1, 2]);
-    assert_exact_hotspot(&tied[1], "leaf", "src/calls.ts", 5, [1, 0, 1, 1, 2]);
+    assert_exact_hotspot(&tied[0], "hub", "src/calls.ts", 13, [0, 1, 1, 1]);
+    assert_exact_hotspot(&tied[1], "leaf", "src/calls.ts", 5, [1, 0, 1, 1]);
     assert!(
         rows.windows(2)
             .all(|pair| pair[0]["total"].as_u64() >= pair[1]["total"].as_u64()),
@@ -5239,7 +5238,7 @@ fn assert_chain_ranking(payload: &Value) {
 fn assert_fanout_page(payload: &Value, expected_count: usize) {
     let rows = hotspots(payload);
     assert_eq!(rows.len(), expected_count, "{payload}");
-    assert_exact_hotspot(&rows[0], "hub", "src/fanout.ts", 1, [101, 0, 101, 1, 202]);
+    assert_exact_hotspot(&rows[0], "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
     let mut seen = Vec::new();
     for row in rows.iter().skip(1) {
         let name = row["name"]
@@ -5251,7 +5250,7 @@ fn assert_fanout_page(payload: &Value, expected_count: usize) {
             .parse()
             .unwrap_or_else(|_| panic!("caller index missing: {row}"));
         assert!(index < 101, "caller outside the fixture: {row}");
-        assert_exact_hotspot(row, name, "src/fanout.ts", index + 2, [0, 1, 1, 1, 2]);
+        assert_exact_hotspot(row, name, "src/fanout.ts", index + 2, [0, 1, 1, 1]);
         seen.push(index);
     }
     seen.sort_unstable();
@@ -5308,7 +5307,7 @@ fn assert_clamped_truncation(payload: &Value) {
             &array[..=end]
         )
     });
-    assert_exact_hotspot(&first, "hub", "src/fanout.ts", 1, [101, 0, 101, 1, 202]);
+    assert_exact_hotspot(&first, "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
 
     let handle = payload["handle"]
         .as_str()
@@ -5364,14 +5363,14 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let chain_one_payload = parse_body(&chain_limit_one);
     let one = hotspots(&chain_one_payload);
     assert_eq!(one.len(), 1, "{chain_one_payload}");
-    assert_exact_hotspot(&one[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1, 4]);
+    assert_exact_hotspot(&one[0], "mid", "src/calls.ts", 9, [1, 1, 2, 1]);
     assert_savings_footer(&chain_limit_one, CHAIN_SOURCE.len());
 
     let mid_id = one[0]["id"].as_str().expect("mid occurrence id").to_owned();
     assert_eq!(
         body_text(&chain_markdown),
         format!(
-            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **churn:** 1\n  **incoming:** 1\n  **outgoing:** 1\n  **score:** 4\n  **total:** 2\n"
+            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **churn:** 1\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
         )
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());
@@ -5405,22 +5404,13 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let fanout_one_payload = parse_body(&fanout_one);
     let fanout_top = hotspots(&fanout_one_payload);
     assert_eq!(fanout_top.len(), 1, "{fanout_one_payload}");
-    assert_exact_hotspot(
-        &fanout_top[0],
-        "hub",
-        "src/fanout.ts",
-        1,
-        [101, 0, 101, 1, 202],
-    );
+    assert_exact_hotspot(&fanout_top[0], "hub", "src/fanout.ts", 1, [101, 0, 101, 1]);
     assert_savings_footer(&fanout_one, fanout_bytes);
 
     assert_clamped_truncation(&parse_body(&fanout_capped));
     assert_savings_footer(&fanout_capped, fanout_bytes);
 }
 
-/// `stable.ts` holds the best-connected symbol but is committed once;
-/// `churned.ts` is committed three times, so its moderately connected `mid`
-/// must outrank the stable `hub`.
 const STABLE_SOURCE: &str = "\
 export function hub(): number {\n\
   return 1;\n\
@@ -5477,6 +5467,11 @@ async fn hotspots_weights_connectivity_by_file_churn() {
     write_package(&root, "hotspots-churn");
     fs::write(root.join("src/stable.ts"), STABLE_SOURCE).unwrap();
     fs::write(root.join("src/churned.ts"), CHURNED_SOURCE).unwrap();
+    fs::write(
+        root.join("src/isolated.ts"),
+        "export function lonely() { return 0; }\n",
+    )
+    .unwrap();
     git_run(&root, &["init", "--quiet"]);
     commit_all(&root, "fixture");
     for revision in 1..=2 {
@@ -5485,15 +5480,82 @@ async fn hotspots_weights_connectivity_by_file_churn() {
         fs::write(root.join("src/churned.ts"), source).unwrap();
         commit_all(&root, &format!("touch churned.ts {revision}"));
     }
+    for revision in 1..=7 {
+        fs::write(
+            root.join("src/isolated.ts"),
+            format!("export function lonely() {{ return {revision}; }}\n"),
+        )
+        .unwrap();
+        commit_all(&root, &format!("touch isolated.ts {revision}"));
+    }
     let host = init_test_project(&root).await;
-    let result = call_hotspots(&host, json!({"format": "json", "limit": 2})).await;
+    let result = call_hotspots(&host, json!({"format": "json", "limit": 3})).await;
     close_test_graph(host).await;
 
     let payload = parse_body(&result);
     let rows = hotspots(&payload);
-    assert_eq!(rows.len(), 2, "{payload}");
-    assert_exact_hotspot(&rows[0], "mid", "src/churned.ts", 5, [1, 1, 2, 3, 8]);
-    assert_exact_hotspot(&rows[1], "hub", "src/stable.ts", 1, [3, 0, 3, 1, 6]);
+    assert_eq!(rows.len(), 3, "{payload}");
+    assert_exact_hotspot(&rows[0], "mid", "src/churned.ts", 5, [1, 1, 2, 3]);
+    assert_exact_hotspot(&rows[1], "lonely", "src/isolated.ts", 1, [0, 0, 0, 8]);
+    assert_exact_hotspot(&rows[2], "hub", "src/stable.ts", 1, [3, 0, 3, 1]);
+}
+
+#[tokio::test]
+async fn hotspots_reports_unavailable_churn_when_git_is_missing() {
+    const CHILD_ROOT: &str = "TRACEDECAY_HOTSPOTS_MISSING_GIT_PROJECT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let harness = ProductionProjectCompositionHarnessV1::open(
+            root.parent().expect("fixture isolation root"),
+            [root.clone()],
+        )
+        .await
+        .expect("production hotspot composition without Git CLI");
+        let host = MountedProductionProject {
+            harness,
+            project_root: root,
+        };
+        wait_for_current_graph(&host).await;
+        let result = call_hotspots(&host, json!({"format": "json"})).await;
+        close_test_graph(host).await;
+        let payload = parse_body(&result);
+        assert_eq!(payload["unavailable_fields"], json!(["churn"]));
+        let rows = hotspots(&payload);
+        assert_eq!(rows.len(), 4, "{payload}");
+        assert_eq!(rows[0]["name"], "mid");
+        assert_eq!(rows[0]["total"], 2);
+        assert_eq!(rows[3]["name"], "quiet");
+        assert_eq!(rows[3]["total"], 0);
+        for row in rows {
+            assert!(row.get("churn").is_none(), "{row}");
+        }
+        return;
+    }
+    let dir = test_temp_dir();
+    let root = dir.path().join("project");
+    write_chain_project(&root);
+    git_run(&root, &["init", "--quiet"]);
+    commit_all(&root, "fixture");
+    let filter = format!(
+        "{}::hotspots_reports_unavailable_churn_when_git_is_missing",
+        module_path!().split_once("::").expect("test module path").1,
+    );
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([filter.as_str(), "--exact", "--nocapture"])
+        .env(CHILD_ROOT, &root)
+        .env("GIT", dir.path().join("missing-git"))
+        .output()
+        .expect("run isolated missing-Git hotspot journey");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{output:?}"
+    );
 }
 
 // Literal `tracedecay_recursion` results from production MCP `tools/call`.

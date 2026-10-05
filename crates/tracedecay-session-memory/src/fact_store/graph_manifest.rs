@@ -128,10 +128,19 @@ pub(super) fn generation_for_watermark(
 pub(super) fn source_watermark(
     owner: &FactOwnerV1,
     source: &MemoryGraphSource,
+    lineage_stamp: Option<i64>,
     read_control: Option<&FactReadControl>,
 ) -> FactStoreResult<GraphWatermark> {
     let mut hasher = Sha256::new();
     hash_source_component(&mut hasher, &source.owner);
+    // A later lineage revision can restore a topology whose generation has retired.
+    match lineage_stamp {
+        Some(stamp) => {
+            hasher.update([1]);
+            hasher.update(stamp.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
     for entity in &source.entities {
         ensure_source_read_active(read_control)?;
         hash_source_component(&mut hasher, entity);
