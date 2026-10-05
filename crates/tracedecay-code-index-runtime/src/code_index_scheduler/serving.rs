@@ -701,6 +701,9 @@ pub(super) struct CodeTextArtifactBuildV1 {
 pub(super) struct CodeTextProjectionStateV1 {
     slot: Mutex<CodeTextProjectionSlotV1>,
     ready: Condvar,
+    /// Whether the slot holds `Idle`, written with every slot transition so
+    /// a read probe never has to take the slot lock.
+    slot_idle: AtomicBool,
 }
 
 pub(super) enum CodeTextProjectionSlotV1 {
@@ -720,7 +723,25 @@ impl CodeTextProjectionStateV1 {
         Self {
             slot: Mutex::new(CodeTextProjectionSlotV1::Idle),
             ready: Condvar::new(),
+            slot_idle: AtomicBool::new(true),
         }
+    }
+
+    fn replace_slot(
+        &self,
+        slot: &mut CodeTextProjectionSlotV1,
+        next: CodeTextProjectionSlotV1,
+    ) -> CodeTextProjectionSlotV1 {
+        let previous = std::mem::replace(slot, next);
+        self.slot_idle.store(
+            matches!(slot, CodeTextProjectionSlotV1::Idle),
+            Ordering::Release,
+        );
+        previous
+    }
+
+    fn slot_is_idle(&self) -> bool {
+        self.slot_idle.load(Ordering::Acquire)
     }
 
     pub(super) fn lock_slot(&self) -> MutexGuard<'_, CodeTextProjectionSlotV1> {
@@ -754,7 +775,8 @@ impl<'a> TextHeadOpenClaimV1<'a> {
     ) -> MutexGuard<'a, CodeTextProjectionSlotV1> {
         self.armed = false;
         let mut slot = self.state.lock_slot();
-        *slot = CodeTextProjectionSlotV1::Building(build);
+        self.state
+            .replace_slot(&mut slot, CodeTextProjectionSlotV1::Building(build));
         self.state.ready.notify_all();
         slot
     }
@@ -767,7 +789,8 @@ impl Drop for TextHeadOpenClaimV1<'_> {
         }
         let mut slot = self.state.lock_slot();
         if matches!(&*slot, CodeTextProjectionSlotV1::HeadOpening) {
-            *slot = CodeTextProjectionSlotV1::Idle;
+            self.state
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::Idle);
         }
         drop(slot);
         self.state.ready.notify_all();
@@ -1845,16 +1868,10 @@ impl LatestCodeTextGenerationV1 {
         if !self.query_owners_are_ready() {
             return true;
         }
-        // A read probe must not queue behind an advance: a wake holds the
-        // slot lock for its whole bounded slice. A contended slot is by
-        // definition work in progress.
-        match self.text_projection_build.slot.try_lock() {
-            Ok(slot) => !matches!(&*slot, CodeTextProjectionSlotV1::Idle),
-            Err(std::sync::TryLockError::WouldBlock) => true,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                !matches!(&*poisoned.into_inner(), CodeTextProjectionSlotV1::Idle)
-            }
-        }
+        // A read probe must not queue behind an advance, which holds the
+        // slot lock for its whole bounded slice. Nor may it read a held lock
+        // as work: another probe or an already-ready advance holds it too.
+        !self.text_projection_build.slot_is_idle()
     }
 
     pub(super) fn clone_index_status(
@@ -3257,7 +3274,8 @@ impl LatestCodeTextGenerationV1 {
             if self.query_owners_are_ready() {
                 return Ok(true);
             }
-            *slot = CodeTextProjectionSlotV1::HeadOpening;
+            self.text_projection_build
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::HeadOpening);
             drop(slot);
             let mut claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
             let outcome = {
@@ -3522,10 +3540,12 @@ impl LatestCodeTextGenerationV1 {
         // same discipline as the durable-head reopen. On failure the claim
         // restores `Idle` and the durable staging file resumes on a later
         // wake.
-        let CodeTextProjectionSlotV1::Building(finished) =
-            std::mem::replace(&mut *slot, CodeTextProjectionSlotV1::HeadOpening)
+        let CodeTextProjectionSlotV1::Building(finished) = self
+            .text_projection_build
+            .replace_slot(&mut slot, CodeTextProjectionSlotV1::HeadOpening)
         else {
-            *slot = CodeTextProjectionSlotV1::Idle;
+            self.text_projection_build
+                .replace_slot(&mut slot, CodeTextProjectionSlotV1::Idle);
             return Err(RetrievalPortError::Contract(
                 "code-index text artifact build state vanished during publication".to_owned(),
             ));

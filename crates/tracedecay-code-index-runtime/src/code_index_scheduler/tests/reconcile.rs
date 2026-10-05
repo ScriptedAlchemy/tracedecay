@@ -3789,6 +3789,14 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let (swap_entered, release_swap) = registry.pause_next_serving_swap(canonical_root);
+    // Hold admission until the complete-generation demand is posted, so it
+    // coalesces into the first pass. A demand arriving after that pass claims
+    // its wake queues a follow-up, which reads as `verifying` at the gate.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold worker before the complete-generation demand");
     registry
         .mount_worktree(
             test_project_id(),
@@ -3798,6 +3806,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
+    drop(admission);
     tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")

@@ -885,6 +885,33 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     );
 }
 
+/// A held slot lock is not projection work: concurrent probes and a no-op
+/// advance over ready owners take it too. Reading the contention as work
+/// stamped a phantom continuation that kept freshness `verifying`.
+#[test]
+fn a_held_idle_projection_slot_is_not_text_projection_work() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance text build");
+    }
+    assert!(!latest.text_projection_needs_work());
+
+    let held_slot = latest.text_projection_build.lock_slot();
+    assert!(
+        !latest.text_projection_needs_work(),
+        "another holder of an idle slot is not projection work"
+    );
+    drop(held_slot);
+}
+
 /// The artifact seals its clone index with its lexical rows, so the owners
 /// that serve search serve clone lookups at once: no work is left behind
 /// the first seal, and the clone status is ready (stale only when the source
