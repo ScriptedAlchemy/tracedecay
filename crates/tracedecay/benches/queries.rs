@@ -672,7 +672,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             )
         }),
     });
-    if crate::repos::small_fixture_enabled() {
+    if std::env::var_os("TRACEDECAY_BENCH_SMALL_FIXTURE").is_some() {
         groups.push(ToolGroup {
             tool: "tracedecay_callees",
             queries: vec![Query::prepared_read(
