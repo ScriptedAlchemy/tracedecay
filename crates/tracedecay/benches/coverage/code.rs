@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::queries::{
     EffectCleanup, PrimeStep, Query, QueryContext, ToolGroup, five, prime_class, prime_function,
-    prime_function_pair, prime_symbol, symbol_name,
+    prime_symbol, symbol_name,
 };
 
 use super::{eqc, rq};
@@ -771,7 +771,12 @@ fn prime_call_chain(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
             ),
         ]
     } else {
-        prime_function_pair(ctx, iteration)
+        let mut steps = prime_function(ctx, iteration);
+        steps.push(prime_symbol(
+            QueryContext::pick(&ctx.function_qnames, iteration as usize + 1),
+            &[("outcome.value.payload.items.0.node_id", "live_next_node")],
+        ));
+        steps
     }
 }
 
