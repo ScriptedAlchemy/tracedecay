@@ -11,8 +11,8 @@ use tree_sitter::{Node as TsNode, Parser, Point, Range, Tree};
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, ImportReexportScopeV1,
-    import_module_kind,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+    ImportNamespaceV1, ImportReexportScopeV1, import_module_kind,
 };
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -159,6 +159,7 @@ struct ExtractionState<'s> {
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     imports: Vec<ExtractedImportEvidenceV1>,
+    callable_arities: Vec<ExtractedCallableArityV1>,
     root_modules: BTreeMap<String, String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
@@ -202,6 +203,7 @@ impl<'s> ExtractionState<'s> {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             imports: Vec::new(),
+            callable_arities: Vec::new(),
             root_modules: BTreeMap::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
@@ -388,6 +390,9 @@ impl RustExtractor {
             updated_at: state.timestamp,
             parent_id: None,
         };
+        if graph_node.kind == NodeKind::Function {
+            Self::record_arity(state, node, &id);
+        }
         state.nodes.push(graph_node);
 
         if let Some(parent_id) = state.parent_node_id() {
@@ -429,6 +434,47 @@ impl RustExtractor {
         if let Some(ret) = node.child_by_field_name("return_type") {
             Self::emit_type_refs(state, ret, &id, EdgeKind::Returns);
         }
+    }
+
+    fn record_arity(state: &mut ExtractionState<'_>, node: TsNode<'_>, node_id: &str) {
+        let Some(parameters) = node
+            .child_by_field_name("parameters")
+            .filter(|parameters| !parameters.has_error())
+        else {
+            return;
+        };
+        let mut cursor = parameters.walk();
+        let count = parameters
+            .named_children(&mut cursor)
+            .filter(|parameter| !parameter.is_extra())
+            .try_fold(0_u32, |count, parameter| {
+                (parameter.kind() == "parameter")
+                    .then(|| count.checked_add(1))
+                    .flatten()
+            });
+        if let Some(parameters) = count {
+            state.callable_arities.push(ExtractedCallableArityV1 {
+                node_id: node_id.to_owned(),
+                arity: CallableArityV1 {
+                    parameters,
+                    variadic: false,
+                },
+            });
+        }
+    }
+
+    fn argument_count(node: TsNode<'_>) -> Option<u32> {
+        let arguments = node
+            .child_by_field_name("arguments")
+            .filter(|arguments| !arguments.has_error())?;
+        let mut cursor = arguments.walk();
+        u32::try_from(
+            arguments
+                .named_children(&mut cursor)
+                .filter(|argument| !argument.is_extra())
+                .count(),
+        )
+        .ok()
     }
 
     /// Extract a struct node and its fields.
@@ -1898,7 +1944,7 @@ impl RustExtractor {
                                 column: position.column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
-                                argument_count: None,
+                                argument_count: Self::argument_count(child),
                             });
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
@@ -1916,7 +1962,7 @@ impl RustExtractor {
                                     column: position.column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
-                                    argument_count: None,
+                                    argument_count: Self::argument_count(child),
                                 });
                             }
                         }
@@ -3085,7 +3131,7 @@ impl RustExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
-            callable_arities: Vec::new(),
+            callable_arities: state.callable_arities,
             go_method_sets: Vec::new(),
         }
     }
