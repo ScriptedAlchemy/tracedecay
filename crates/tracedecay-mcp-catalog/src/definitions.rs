@@ -134,6 +134,12 @@ fn project_selector_properties() -> Value {
     })
 }
 
+/// Copies `project_selector` into each tool schema.
+///
+/// A `$ref` would shrink `tools/list`, and a host would still send the same
+/// `project_selector.project_id` object. Hosts that do not resolve `$ref`
+/// would drop the field from the schema they show the agent, so the copy
+/// stays inline.
 fn with_project_selector_properties(mut properties: Value) -> Value {
     let Some(target) = properties.as_object_mut() else {
         return properties;
