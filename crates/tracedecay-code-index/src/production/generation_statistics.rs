@@ -17,7 +17,7 @@ pub struct CodeIndexGenerationStatisticsV1 {
     pub edge_count: u64,
     /// References the generic name resolver dropped for multiple matching definitions.
     /// Excludes module-specific resolution. `None` means the count was not measured.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ambiguous_name_drops: Option<u64>,
 }
 
