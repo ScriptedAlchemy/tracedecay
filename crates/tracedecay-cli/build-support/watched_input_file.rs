@@ -5,14 +5,17 @@ pub struct WatchedInputFile {
 }
 
 impl WatchedInputFile {
+    #[cfg(not(test))]
     pub fn from_env(env_name: &'static str) -> Self {
-        Self {
-            env_name,
-            path: std::env::var_os(env_name).map(std::path::PathBuf::from),
-        }
+        Self::new(env_name, std::env::var_os(env_name))
     }
 
+    #[cfg(test)]
     pub fn from_value(env_name: &'static str, value: Option<std::ffi::OsString>) -> Self {
+        Self::new(env_name, value)
+    }
+
+    fn new(env_name: &'static str, value: Option<std::ffi::OsString>) -> Self {
         Self {
             env_name,
             path: value.map(std::path::PathBuf::from),
@@ -27,6 +30,7 @@ impl WatchedInputFile {
         directives
     }
 
+    #[cfg(not(test))]
     pub fn emit(&self) {
         for directive in self.cargo_directives() {
             println!("{directive}");
