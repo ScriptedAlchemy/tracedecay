@@ -672,24 +672,6 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             )
         }),
     });
-    if std::env::var_os("TRACEDECAY_BENCH_SMALL_FIXTURE").is_some() {
-        groups.push(ToolGroup {
-            tool: "tracedecay_callees",
-            queries: vec![Query::prepared_read(
-                "fixture_callees",
-                "tracedecay_callees",
-                json!({"node_id": "{{live_node}}", "maximum_depth": 3}),
-                0,
-                |_ctx, _iteration| {
-                    vec![prime_symbol(
-                        "src/report.ts::buildFixtureReport".to_owned(),
-                        &[("outcome.value.payload.items.0.node_id", "live_node")],
-                    )]
-                },
-            )],
-        });
-    }
-
     groups.push(ToolGroup {
         tool: "tracedecay_node",
         queries: five(|i| {
