@@ -13,7 +13,8 @@ mod work;
 pub(crate) use admin_fixture::verify_admin_fixture;
 
 pub(crate) use admin::{
-    verify_context_scout_fixture, verify_github_stack_signal_fixture, verify_native_fixture,
+    finish_context_scout_fixture, verify_context_scout_fixture, verify_github_stack_signal_fixture,
+    verify_native_fixture,
 };
 #[cfg(unix)]
 pub(crate) use code::prepare_source_reconciliation;
