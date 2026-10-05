@@ -922,9 +922,9 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
 /// receipt, and the message's Git evidence span before the host is
 /// acknowledged. The drain commits the external-source replay, the
 /// observation projection, and the Git evidence convergence. The temporal
-/// refresh commits its operation, the projected batch, the pending relation
-/// receipt the native graph write recovers from, and the activation that
-/// settles that receipt.
+/// refresh commits its projected batch: the operation's begin folds into
+/// that same commit, the pending relation receipt the native graph write
+/// recovers from, and the activation that settles that receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamed_message_commits_once_per_durability_boundary() {
     const MESSAGES: u64 = 8;
@@ -970,7 +970,7 @@ async fn streamed_message_commits_once_per_durability_boundary() {
         "most messages must land within one log generation: {measured:?}"
     );
     assert!(
-        measured.iter().all(|commits| *commits == (4, 3, 4)),
+        measured.iter().all(|commits| *commits == (4, 3, 3)),
         "one streamed message must commit once per durability boundary: {measured:?}"
     );
 }
