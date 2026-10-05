@@ -745,6 +745,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                    request_cancellation,
                 ))
                 .await
             }
