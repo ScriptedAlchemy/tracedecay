@@ -300,9 +300,7 @@ impl RetrievalExecutionControl for ActiveControl {
         0
     }
 }
-// ---------------------------------------------------------------------------
 // Workload
-// ---------------------------------------------------------------------------
 
 fn run(options: &Options) -> Result<String, String> {
     let started = Instant::now();
@@ -788,9 +786,7 @@ fn ingest_artifact(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scratch directory
-// ---------------------------------------------------------------------------
 
 struct Scratch {
     path: PathBuf,
