@@ -18,6 +18,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutSuggestionProjectionV1, ContextScoutSurfaceRequestV1,
 };
 use tracedecay_domain::sha256_hex_suffix;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod context_scout_registry;
@@ -489,6 +490,7 @@ pub(super) async fn execute_context_scout(
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
+    request_cancellation: CancellationToken,
 ) -> DaemonInvocationResponse {
     let Some(registered) = registered else {
         return DaemonInvocationResponse::problem(
@@ -496,6 +498,18 @@ pub(super) async fn execute_context_scout(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
+    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        );
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        );
+    }
     let current = match registered.runtime.client().current().await {
         Ok(current) => current.into_current_state(),
         Err(error) => {
@@ -601,7 +615,7 @@ pub(super) async fn execute_context_scout(
         surface_operation,
         observed_at,
         deadline.clone(),
-        cancellation,
+        cancellation.clone(),
     ) {
         Ok(authority) => authority,
         Err(problem) => return application_problem(wire_request_id, problem),
@@ -619,9 +633,11 @@ pub(super) async fn execute_context_scout(
             owner,
             request,
             authority,
-            configuration.control().configuration_revision,
+            configuration,
             observed_at,
             deadline,
+            cancellation,
+            request_cancellation,
         )
         .await;
     }
@@ -686,10 +702,12 @@ async fn execute_context_scout_mutation(
     registered: RegisteredConfigurationRuntime,
     owner: Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
     request: ContextScoutSurfaceRequestV1,
-    authority: ContextScoutRequestAuthorityV1,
-    configuration_revision: [u8; 32],
+    mut authority: ContextScoutRequestAuthorityV1,
+    configuration: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1,
     observed_at: UtcMicros,
     deadline: Deadline,
+    cancellation: CancellationContext,
+    request_cancellation: CancellationToken,
 ) -> DaemonInvocationResponse {
     let (operation, idempotency_key) = match &request {
         ContextScoutSurfaceRequestV1::Cancel(request) => (
@@ -728,7 +746,17 @@ async fn execute_context_scout_mutation(
         Ok(identity) => identity,
         Err(_) => return concealed_application_problem(wire_request_id),
     };
-    let mutation = match request {
+    let explicit_claim = match &request {
+        ContextScoutSurfaceRequestV1::Claim(request)
+            if request.window
+                == tracedecay_contracts::context_scout::ContextScoutClaimWindowV1::OnRequest =>
+        {
+            Some(request.clone())
+        }
+        _ => None,
+    };
+    let configuration_revision = configuration.control().configuration_revision;
+    let mut mutation = match request {
         ContextScoutSurfaceRequestV1::Cancel(request)
             if request.work.address == request.address =>
         {
@@ -794,7 +822,120 @@ async fn execute_context_scout_mutation(
         idempotency_key: idempotency_key.clone(),
         input_digest,
     };
-    let settlement = match owner.commit_public_mutation(binding, mutation).await {
+    let store = owner.store();
+    let retained = store.retained_public_mutation(&binding).await;
+    let settlement = match retained {
+        Some(settlement) => settlement,
+        None => {
+            if let Some(claim) = explicit_claim {
+                match store
+                    .needs_explicit_production(claim.address, configuration_revision, now_micros())
+                    .await
+                {
+                    Some(true) => {
+                        let Some((hook, lifecycle, hook_revision)) = owner
+                            .current_producer_input(
+                                claim.address,
+                                &configuration,
+                                &registered.scope,
+                            )
+                            .await
+                        else {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        };
+                        let now = now_micros();
+                        let expires_at = deadline.expires_at.0.min(registered.grants.expires_at.0);
+                        let Ok(remaining) = u64::try_from(expires_at.saturating_sub(now.0)) else {
+                            return application_problem(
+                                wire_request_id,
+                                ApplicationProblem::timed_out_before_admission(),
+                            );
+                        };
+                        let producer_deadline =
+                            tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_micros(remaining),
+                            );
+                        if let Err(problem) = super::types::run_registered_context_scout_request(
+                            hook,
+                            lifecycle,
+                            hook_revision,
+                            effect_identity.clone(),
+                            producer_deadline,
+                            request_cancellation.clone(),
+                        )
+                        .await
+                        {
+                            return application_problem(wire_request_id, problem);
+                        }
+                        let current = match registered.runtime.client().current().await {
+                            Ok(current) => current.into_current_state(),
+                            Err(error) => {
+                                return application_problem(
+                                    wire_request_id,
+                                    configuration_problem(error),
+                                );
+                            }
+                        };
+                        if !configuration.matches_current(&current)
+                            || owner
+                                .current_producer_input(
+                                    claim.address,
+                                    &configuration,
+                                    &registered.scope,
+                                )
+                                .await
+                                .is_none()
+                        {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        }
+                        let now = now_micros();
+                        authority = match context_scout_request_authority(
+                            &registered,
+                            &current,
+                            &wire_request_id,
+                            ApplicationSurfaceOperation::ContextScoutClaim,
+                            now,
+                            deadline.clone(),
+                            cancellation.clone(),
+                        ) {
+                            Ok(authority) => authority,
+                            Err(problem) => return application_problem(wire_request_id, problem),
+                        };
+                        let Some(refreshed_mutation) = owner
+                            .public_claim_mutation(
+                                &claim,
+                                now,
+                                UtcMicros(
+                                    deadline.expires_at.0.min(now.0.saturating_add(30_000_000)),
+                                ),
+                            )
+                            .await
+                        else {
+                            return context_scout_mutation_unavailable(wire_request_id);
+                        };
+                        mutation = refreshed_mutation;
+                    }
+                    Some(false) => {}
+                    None => return context_scout_mutation_unavailable(wire_request_id),
+                }
+            }
+            if request_cancellation.is_cancelled() {
+                return application_problem(
+                    wire_request_id,
+                    ApplicationProblem::cancelled_before_admission(),
+                );
+            }
+            if deadline.is_elapsed_at(now_micros()) {
+                return application_problem(
+                    wire_request_id,
+                    ApplicationProblem::timed_out_before_admission(),
+                );
+            }
+            owner.commit_public_mutation(binding, mutation).await
+        }
+    };
+    let settlement = match settlement {
         ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => settlement,
         ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict => {
             return application_problem(

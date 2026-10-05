@@ -2351,10 +2351,11 @@ fn resolve_file_references(
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
-                            && reference
-                                .argument_count
-                                .zip(target.arity)
-                                .is_none_or(|(arguments, arity)| arity.accepts(arguments))
+                            && (language != "java"
+                                || reference
+                                    .argument_count
+                                    .zip(target.arity)
+                                    .is_none_or(|(arguments, arity)| arity.accepts(arguments)))
                             && !(typescript
                                 && target.kind == NodeKind::Function.as_str()
                                 && target

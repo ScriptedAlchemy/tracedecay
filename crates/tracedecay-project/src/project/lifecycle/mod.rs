@@ -1008,6 +1008,7 @@ mod tests {
                 .mount_current_claim_authority(
                     registry,
                     &hook,
+                    1,
                     pin,
                     context,
                     lifecycle.clone(),

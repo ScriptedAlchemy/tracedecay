@@ -555,6 +555,20 @@ pub struct HealthDimensions {
     pub coverage_discipline: f64,
 }
 
+/// Dimension names, worst score first. Equal scores break ties by name.
+pub fn health_panel(dims: &HealthDimensions) -> Vec<&'static str> {
+    let mut rows = [
+        ("acyclicity", dims.acyclicity),
+        ("coverage_discipline", dims.coverage_discipline),
+        ("depth", dims.depth),
+        ("equality", dims.equality),
+        ("modularity", dims.modularity),
+        ("redundancy", dims.redundancy),
+    ];
+    rows.sort_by(|left, right| left.1.total_cmp(&right.1).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter().map(|(name, _)| name).collect()
+}
+
 /// Computes quality signal (0–10000) from geometric mean of all five dimensions.
 /// Formula: `(product of all 5).powf(1.0/5.0) * 10000.0`, rounded.
 /// Zero in any dimension → 0.
@@ -570,6 +584,34 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     let base = (product.powf(1.0 / 5.0) * 10_000.0).round();
     let penalized = base * (0.98 + 0.02 * dims.coverage_discipline);
     penalized.round() as u32
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::{HealthDimensions, health_panel};
+
+    #[test]
+    fn the_panel_lists_the_worst_dimension_first() {
+        let dims = HealthDimensions {
+            acyclicity: 0.9,
+            depth: 0.2,
+            equality: 0.8,
+            redundancy: 0.1,
+            modularity: 0.7,
+            coverage_discipline: 1.0,
+        };
+        assert_eq!(
+            health_panel(&dims),
+            [
+                "redundancy",
+                "depth",
+                "modularity",
+                "equality",
+                "acyclicity",
+                "coverage_discipline",
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
