@@ -35,6 +35,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       - name: Install ajv-cli
         run: npm install --no-save ajv-cli@5.0.0 ajv-formats@2.1.1

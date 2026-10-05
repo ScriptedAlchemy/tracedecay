@@ -31,10 +31,11 @@ use super::{
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
     ContextScoutExplanationV1, ContextScoutModelAssistantV1, ContextScoutModelErrorV1,
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelRequestV1,
-    ContextScoutMutationBindingV1, ContextScoutMutationSettlementOutcomeV1,
-    ContextScoutPublicMutationV1, ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1,
-    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
-    ContextScoutStatusV1, ProjectContextScoutDurableStoreV1,
+    ContextScoutMutationBindingV1, ContextScoutMutationResultV1,
+    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
+    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
+    ProjectContextScoutDurableStoreV1,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -59,6 +60,8 @@ pub enum ContextScoutClaimAdmissionV1 {
 struct MountedContextScoutClaimV1 {
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
     pin: ContextScoutAuthorityPinV1,
+    hook: AdmittedContextScoutHookV1,
+    hook_configuration_revision: u64,
     context: RequestContext,
     lifecycle: ContextScoutLifecycleAddressV1,
     address: ContextScoutAddressV1,
@@ -195,6 +198,7 @@ impl ProjectContextScoutOwnerV1 {
         &self,
         registry: Arc<ProjectContextScoutAddressRegistryV1>,
         hook: &AdmittedContextScoutHookV1,
+        hook_configuration_revision: u64,
         pin: ContextScoutAuthorityPinV1,
         context: RequestContext,
         lifecycle: ContextScoutLifecycleAddressV1,
@@ -204,6 +208,7 @@ impl ProjectContextScoutOwnerV1 {
         configuration_is_current: bool,
     ) -> ContextScoutClaimAdmissionV1 {
         if input_watermark == [0; 32]
+            || hook_configuration_revision == 0
             || !configuration_is_current
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
@@ -219,6 +224,8 @@ impl ProjectContextScoutOwnerV1 {
         {
             existing.registry = registry;
             existing.pin = pin;
+            existing.hook = hook.clone();
+            existing.hook_configuration_revision = hook_configuration_revision;
             existing.context = context;
             existing.address = address;
             existing.input_watermark = input_watermark;
@@ -230,6 +237,8 @@ impl ProjectContextScoutOwnerV1 {
         authorities.push(MountedContextScoutClaimV1 {
             registry,
             pin,
+            hook: hook.clone(),
+            hook_configuration_revision,
             context,
             lifecycle,
             address,
@@ -339,6 +348,44 @@ impl ProjectContextScoutOwnerV1 {
             .iter()
             .find(|mounted| mounted.lifecycle == *lifecycle)
             .map(|mounted| (mounted.address, mounted.input_watermark))
+    }
+
+    /// Supplies the original admitted hook only after the current public
+    /// request has proved its exact address, configuration, and routed scope.
+    /// The producer obtains fresh feedback authorization when it runs.
+    pub async fn current_producer_input(
+        &self,
+        address: ContextScoutAddressV1,
+        configuration: &ContextScoutConfigurationPinV1,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<(
+        AdmittedContextScoutHookV1,
+        ContextScoutLifecycleAddressV1,
+        u64,
+    )> {
+        if self.configuration.read().await.as_ref() != Some(configuration) {
+            return None;
+        }
+        let mounted = self
+            .claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.address == address)
+            .cloned()?;
+        if mounted.pin.configuration() != configuration
+            || !mounted
+                .registry
+                .authorize_current_exact_address(address, configuration, scope)
+                .await
+        {
+            return None;
+        }
+        Some((
+            mounted.hook,
+            mounted.lifecycle,
+            mounted.hook_configuration_revision,
+        ))
     }
 
     pub fn startup_outcome(&self) -> &ContextScoutDurableStartupOutcomeV1 {
@@ -954,7 +1001,47 @@ impl ProjectContextScoutOwnerV1 {
         binding: ContextScoutMutationBindingV1,
         mutation: ContextScoutPublicMutationV1,
     ) -> ContextScoutMutationSettlementOutcomeV1 {
-        self.store.commit_public_mutation(binding, mutation).await
+        // Serialize durable settlement with production so a completed public
+        // lease cannot retain a slot or retire a newer producer generation.
+        let mut runtime = self.runtime.lock().await;
+        let settlement = self
+            .store
+            .commit_public_mutation(binding, mutation.clone())
+            .await;
+        if let ContextScoutMutationSettlementOutcomeV1::Reconciled(receipt) = &settlement {
+            let retired = match (&mutation, &receipt.result) {
+                (
+                    ContextScoutPublicMutationV1::Cancel { work },
+                    ContextScoutMutationResultV1::Cancel(
+                        ContextScoutDurableStoreOutcomeV1::Stored
+                        | ContextScoutDurableStoreOutcomeV1::Duplicate,
+                    ),
+                ) => Some((*work, None)),
+                (
+                    ContextScoutPublicMutationV1::Delivery { work, .. },
+                    ContextScoutMutationResultV1::Delivery {
+                        outcome:
+                            ContextScoutDurableStoreOutcomeV1::Stored
+                            | ContextScoutDurableStoreOutcomeV1::Duplicate,
+                        receipt,
+                    },
+                ) => Some((*work, Some(receipt.outcome))),
+                _ => None,
+            };
+            if let Some((work, delivery)) = retired
+                && runtime.coalescer.is_current(work)
+            {
+                if runtime.coalescer.cancel(work).is_err() {
+                    return ContextScoutMutationSettlementOutcomeV1::Unavailable;
+                }
+                if let Some(outcome) = delivery {
+                    runtime.last_delivery_outcome = Some(outcome);
+                } else {
+                    runtime.last_suppression = Some(super::ContextScoutSuppressionV1::Cancelled);
+                }
+            }
+        }
+        settlement
     }
 }
 
@@ -1522,6 +1609,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_producer_input_requires_current_exact_scope_and_configuration() {
+        let owner = test_owner([39; 16]).await;
+        let (_temporary, database) = test_database().await;
+        let (registry, hook, pin, context, observed_at) = claim_mount_authority(database);
+        let configuration = pin.configuration().clone();
+        owner
+            .install_configuration(configuration.clone(), None)
+            .await
+            .unwrap();
+        let lifecycle = claim_lifecycle(1);
+        let ContextScoutAddressBindOutcomeV1::Bound(address) =
+            registry.bind(&hook, &pin, lifecycle.clone()).await
+        else {
+            panic!("bind exact lifecycle");
+        };
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    registry,
+                    &hook,
+                    7,
+                    pin,
+                    context.clone(),
+                    lifecycle.clone(),
+                    address,
+                    [1; 32],
+                    observed_at,
+                    true,
+                )
+                .await,
+            ContextScoutClaimAdmissionV1::Mounted
+        );
+        let (admitted, retained_lifecycle, revision) = owner
+            .current_producer_input(address, &configuration, context.scope())
+            .await
+            .unwrap();
+        assert_eq!(admitted.envelope(), hook.envelope());
+        assert_eq!(retained_lifecycle, lifecycle);
+        assert_eq!(revision, 7);
+        let mut foreign_address = address;
+        foreign_address.turn_id = [99; 16];
+        assert!(
+            owner
+                .current_producer_input(foreign_address, &configuration, context.scope())
+                .await
+                .is_none()
+        );
+        let foreign_scope = ResolvedScope::new(
+            context.scope().project_id.clone(),
+            context.scope().repository_id.clone(),
+            WorktreeId::new("worktree.foreign").unwrap(),
+            context.scope().reference.clone(),
+        )
+        .unwrap();
+        assert!(
+            owner
+                .current_producer_input(address, &configuration, &foreign_scope)
+                .await
+                .is_none()
+        );
+        // Configuration unavailability cannot turn a retained hook into
+        // independent production authority.
+        *owner.configuration.write().await = None;
+        assert!(
+            owner
+                .current_producer_input(address, &configuration, context.scope())
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn later_session_event_resolves_one_retained_exact_claim_and_refuses_ambiguity() {
         let project_id = [40; 16];
         let owner = test_owner(project_id).await;
@@ -1537,6 +1696,7 @@ mod tests {
                 .mount_current_claim_authority(
                     Arc::clone(&registry),
                     &hook,
+                    1,
                     pin.clone(),
                     context.clone(),
                     producer_lifecycle,
@@ -1572,6 +1732,7 @@ mod tests {
                 .mount_current_claim_authority(
                     registry,
                     &hook,
+                    1,
                     pin.clone(),
                     context,
                     later_lifecycle.clone(),
@@ -1597,6 +1758,92 @@ mod tests {
             "more than one mounted producer in the session must remain ambiguous"
         );
         unregister(project_id, &owner);
+    }
+
+    #[tokio::test]
+    async fn public_settlement_retires_exact_runtime_work_without_exhausting_capacity() {
+        let (_temporary, database) = test_database().await;
+        let owner = ProjectContextScoutOwnerV1::startup(database, [10; 16], UtcMicros(1), None)
+            .await
+            .unwrap();
+        for marker in 1..=34 {
+            let mut entry = super::super::store_tests::entry([10; 16], 1);
+            entry.work.address.logical_message_id = [marker; 16];
+            entry.envelope.address = entry.work.address;
+            owner
+                .runtime
+                .lock()
+                .await
+                .coalescer
+                .restore(entry.work)
+                .unwrap();
+            assert_eq!(
+                owner.store.enqueue(entry.clone()).await,
+                ContextScoutDurableStoreOutcomeV1::Stored
+            );
+            let mutation = ContextScoutPublicMutationV1::Cancel { work: entry.work };
+            let binding =
+                super::super::store_tests::mutation_binding(&mutation, &format!("cancel-{marker}"));
+            assert!(matches!(
+                owner.commit_public_mutation(binding, mutation).await,
+                ContextScoutMutationSettlementOutcomeV1::Reconciled(_)
+            ));
+            assert!(!owner.runtime.lock().await.coalescer.is_current(entry.work));
+        }
+        let mut entry = super::super::store_tests::entry([10; 16], 1);
+        entry.work.address.logical_message_id = [99; 16];
+        entry.envelope.address = entry.work.address;
+        owner
+            .runtime
+            .lock()
+            .await
+            .coalescer
+            .restore(entry.work)
+            .unwrap();
+        assert_eq!(
+            owner.store.enqueue(entry.clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        let lease = ContextScoutLeaseV1 {
+            lease_id: [81; 16],
+            expires_at: UtcMicros(900),
+        };
+        assert!(matches!(
+            owner
+                .store
+                .claim(entry.work.address, UtcMicros(20), lease)
+                .await,
+            ContextScoutDurableClaimOutcomeV1::Claimed(_)
+        ));
+        let mutation = ContextScoutPublicMutationV1::Delivery {
+            work: entry.work,
+            envelope_id: entry.envelope.envelope_id,
+            lease,
+            configuration_revision: entry.envelope.configuration_revision,
+            receipt: ContextScoutDeliveryReceiptV1 {
+                receipt_id: [82; 16],
+                envelope_id: entry.envelope.envelope_id,
+                delivered_at: UtcMicros(30),
+                outcome: super::super::ContextScoutDeliveryOutcomeV1::Displayed,
+            },
+        };
+        let binding = super::super::store_tests::mutation_binding(&mutation, "delivery-retirement");
+        assert!(matches!(
+            owner
+                .commit_public_mutation(binding.clone(), mutation.clone())
+                .await,
+            ContextScoutMutationSettlementOutcomeV1::Reconciled(_)
+        ));
+        assert!(!owner.runtime.lock().await.coalescer.is_current(entry.work));
+        let mut newer = entry.work;
+        newer.generation += 1;
+        owner.runtime.lock().await.coalescer.restore(newer).unwrap();
+        assert!(matches!(
+            owner.commit_public_mutation(binding, mutation).await,
+            ContextScoutMutationSettlementOutcomeV1::Reconciled(_)
+        ));
+        assert!(owner.runtime.lock().await.coalescer.is_current(newer));
+        unregister([10; 16], &owner);
     }
 
     #[tokio::test]
@@ -1718,6 +1965,7 @@ mod tests {
                     .mount_current_claim_authority(
                         Arc::clone(&registry),
                         &hook,
+                        1,
                         pin.clone(),
                         context.clone(),
                         lifecycle,
@@ -1749,6 +1997,7 @@ mod tests {
                 .mount_current_claim_authority(
                     overflow_registry,
                     &overflow_hook,
+                    1,
                     overflow_pin,
                     overflow_context,
                     overflow_lifecycle,

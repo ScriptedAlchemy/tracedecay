@@ -1154,6 +1154,7 @@ async fn run_production_hook_cycle(
                 .mount_current_context_scout_claim_authority(
                     Arc::clone(&producer.scout_registry),
                     &request.hook,
+                    request.hook_configuration_revision,
                     pin,
                     execution.context,
                     lifecycle,
