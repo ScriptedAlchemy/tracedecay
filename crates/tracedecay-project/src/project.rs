@@ -149,6 +149,7 @@ impl TraceDecay {
         &self,
         registry: Arc<tracedecay_agent_hosts::agents::context_scout::address_registry::ProjectContextScoutAddressRegistryV1>,
         hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
+        hook_configuration_revision: u64,
         pin: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAuthorityPinV1,
         context: tracedecay_contracts::RequestContext,
         lifecycle: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
@@ -165,6 +166,7 @@ impl TraceDecay {
                 .mount_current_claim_authority(
                     registry,
                     hook,
+                    hook_configuration_revision,
                     pin,
                     context,
                     lifecycle,

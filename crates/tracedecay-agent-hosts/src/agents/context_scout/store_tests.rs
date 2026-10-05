@@ -36,7 +36,7 @@ fn address(project_id: [u8; 16]) -> ContextScoutAddressV1 {
     }
 }
 
-fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurableQueueEntryV1 {
+pub(super) fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurableQueueEntryV1 {
     let address = address(project_id);
     ContextScoutDurableQueueEntryV1 {
         work: ContextScoutWorkV1 {
@@ -72,7 +72,7 @@ fn lease(id: u8, expires_at: i64) -> ContextScoutLeaseV1 {
     }
 }
 
-fn mutation_binding(
+pub(super) fn mutation_binding(
     mutation: &ContextScoutPublicMutationV1,
     key: &str,
 ) -> ContextScoutMutationBindingV1 {
@@ -114,12 +114,19 @@ async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
         lease: lease(70, 40),
     };
     let empty_binding = mutation_binding(&empty, "scout-empty-replay");
+    assert_eq!(store.retained_public_mutation(&empty_binding).await, None);
     let first = store
         .commit_public_mutation(empty_binding.clone(), empty.clone())
         .await;
     let ContextScoutMutationSettlementOutcomeV1::Reconciled(first) = first else {
         panic!("empty claim must retain a reconciled settlement");
     };
+    assert_eq!(
+        store.retained_public_mutation(&empty_binding).await,
+        Some(ContextScoutMutationSettlementOutcomeV1::Reconciled(
+            first.clone()
+        ))
+    );
     assert_eq!(
         first.result,
         ContextScoutMutationResultV1::Claim(Box::new(ContextScoutDurableClaimOutcomeV1::Empty))
@@ -142,9 +149,14 @@ async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
     conflicting_binding.input_digest = conflicting.input_digest().unwrap();
     assert_eq!(
         store
-            .commit_public_mutation(conflicting_binding, conflicting.clone())
+            .commit_public_mutation(conflicting_binding.clone(), conflicting.clone())
             .await,
         ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict
+    );
+
+    assert_eq!(
+        store.retained_public_mutation(&conflicting_binding).await,
+        Some(ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict)
     );
 
     let mut pending = entry(project_id, 1);
@@ -1044,5 +1056,76 @@ async fn concurrent_read_first_startups_discover_one_entry_and_claim_it_once() {
             truncated: false,
         },
         "the claimed entry must not be offered again before its lease expires"
+    );
+}
+
+#[tokio::test]
+async fn explicit_production_preserves_live_leases_and_ready_request_windows() {
+    let (_temporary, database) = database().await;
+    let project_id = [68; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let mut pending = entry(project_id, 1);
+    pending.envelope.delivery_window = ContextScoutDeliveryWindowV1::NextBoundary;
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    assert_eq!(
+        store
+            .needs_explicit_production(address(project_id), [16; 32], UtcMicros(10))
+            .await,
+        Some(true)
+    );
+    let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = store
+        .claim(address(project_id), UtcMicros(10), lease(77, 40))
+        .await
+    else {
+        panic!("native delivery lease");
+    };
+    assert_eq!(
+        store
+            .needs_explicit_production(address(project_id), [16; 32], UtcMicros(11))
+            .await,
+        Some(false)
+    );
+    assert_eq!(
+        store
+            .needs_explicit_production(address(project_id), [16; 32], UtcMicros(40))
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        store.requeue(claim).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    pending.work.generation = 2;
+    pending.envelope.envelope_id = [99; 16];
+    pending.envelope.delivery_window = ContextScoutDeliveryWindowV1::OnRequest;
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    assert_eq!(
+        store
+            .needs_explicit_production(address(project_id), [16; 32], UtcMicros(11))
+            .await,
+        Some(false)
+    );
+    assert_eq!(
+        store
+            .needs_explicit_production(
+                address(project_id),
+                [16; 32],
+                pending.envelope.candidate.expires_at
+            )
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        store
+            .needs_explicit_production(address([69; 16]), [16; 32], UtcMicros(11))
+            .await,
+        None
     );
 }

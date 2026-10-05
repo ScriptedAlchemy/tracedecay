@@ -61,12 +61,12 @@ const RELATION_OWNER_LABEL_PREFIX: &str = "__tracedecay_graph_db_relation_owner_
 const RELATION_TYPE_PREFIX: &str = "__tracedecay_graph_db_relation_";
 const PROPERTY_PREFIX: &str = "__tracedecay_graph_db_property_";
 
-/// The unique-key indexes every native lookup resolves through.
+/// The property indexes native lookups resolve through.
 ///
-/// Each one addresses exactly one record kind, so a hit is a point read rather
-/// than a scan the caller has to filter. They replaced a synthetic key *label*
-/// per record: labels become columnar node tables, and one table per entity
-/// exhausts grafeo's `u16` table id (32,767) on any real repository graph.
+/// Compact identity keys select candidate buckets; callers verify complete
+/// identities. These indexes replaced a synthetic key label per record:
+/// labels become columnar node tables, and one table per entity exhausts
+/// grafeo's `u16` table id (32,767) on a real repository graph.
 pub(crate) const INDEXED_PROPERTIES: [&str; 6] = [
     ENTITY_KEY_PROPERTY,
     RELATION_KEY_PROPERTY,

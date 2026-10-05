@@ -4695,7 +4695,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols_count": 0,
             "impacted_symbols": [],
             "impact_complete": true,
-            "affected_tests": []
+            "affected_tests": [],
+            "test_gate": {"verdict": "pass", "exit_code": 0, "untested": []}
         })
     );
 
@@ -4716,7 +4717,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols_count": 0,
             "impacted_symbols": [],
             "impact_complete": true,
-            "affected_tests": []
+            "affected_tests": [],
+            "test_gate": {"verdict": "pass", "exit_code": 0, "untested": []}
         })
     );
 
@@ -5689,4 +5691,110 @@ fn fs_write_fixture(project_root: &Path) {
     std::fs::write(project_root.join("src/direct.rs"), DIRECT_SOURCE).unwrap();
     std::fs::write(project_root.join("src/mutual.rs"), MUTUAL_SOURCE).unwrap();
     std::fs::write(project_root.join("src/noise.rs"), NOISE_SOURCE).unwrap();
+}
+
+#[tokio::test]
+async fn diff_context_gate_reaches_cross_file_inline_tests_without_covering_their_neighbors() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        for (path, source) in [
+            ("src/lib.rs", "mod logic; mod uncovered; #[cfg(test)] mod checks;\n"),
+            ("src/logic.rs", "pub fn covered(value: u32) -> u32 { value + 1 }\n"),
+            ("src/uncovered.rs", "pub fn uncovered(value: u32) -> u32 { value + 2 }\n"),
+            ("src/checks.rs", "#[test]\nfn verifies_logic() { let observed = crate::logic::covered(4); assert_eq!(observed, 5); }\nfn untested_neighbor() -> u32 { 9 }\n"),
+        ] {
+            fs::write(project.join(path), source).unwrap();
+        }
+    }).await;
+    wait_for_current_graph(&fixture).await;
+    for (path, expected) in [
+        (
+            "src/logic.rs",
+            json!({"verdict":"pass","exit_code":0,"untested":[]}),
+        ),
+        (
+            "src/uncovered.rs",
+            json!({"verdict":"fail","exit_code":4,"untested":["uncovered"]}),
+        ),
+        (
+            "src/checks.rs",
+            json!({"verdict":"fail","exit_code":4,"untested":["untested_neighbor"]}),
+        ),
+    ] {
+        let result = call_production_tool(
+            &fixture.harness,
+            &fixture.project_root,
+            "tracedecay_diff_context",
+            json!({"files":[path],"depth":3,"format":"json"}),
+        )
+        .await
+        .expect("real diff context");
+        assert_eq!(
+            result.value.pointer("/structuredContent/test_gate"),
+            Some(&expected)
+        );
+        let result = extract_json(&result.value);
+        assert_eq!(result["impact_complete"], true, "{result}");
+        assert_eq!(result["test_gate"], expected, "{result}");
+    }
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn diff_context_signature_edits_keep_nested_arguments_and_exact_callers() {
+    const LOCAL: &str = "mod target;\nmod calls;\npub fn local_target(pair: (u32, u32), extra: u32) {}\npub fn first() {\n    local_target(\n        (1, 2)\n    );\n    local_target((3, 4), 5);\n}\npub fn second() { local_target((3, 4), 5); }\n";
+    const REMOTE: &str = "pub fn remote_target(pair: (u32, u32), extra: u32) {}\n";
+    const CALLERS: &str = "pub fn cross_first() {\n    crate::target::remote_target(\n        (1, 2)\n    );\n    crate::target::remote_target((3, 4), 5);\n}\npub fn cross_second() { crate::target::remote_target((3, 4), 5); }\n";
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        for (path, source) in [
+            ("src/lib.rs", LOCAL),
+            ("src/target.rs", REMOTE),
+            ("src/calls.rs", CALLERS),
+        ] {
+            fs::write(
+                project.join(path),
+                source
+                    .replace(", extra: u32", "")
+                    .replace("(3, 4), 5", "(3, 4)"),
+            )
+            .unwrap();
+        }
+        crate::support::commit_worktree(project, "one-parameter baseline");
+        for (path, source) in [
+            ("src/lib.rs", LOCAL),
+            ("src/target.rs", REMOTE),
+            ("src/calls.rs", CALLERS),
+        ] {
+            fs::write(project.join(path), source).unwrap();
+        }
+    })
+    .await;
+    git_run(&fixture.project_root, &["reset", "--soft", "HEAD^"]);
+    wait_for_current_graph(&fixture).await;
+    let response = call_production_tool(
+        &fixture.harness,
+        &fixture.project_root,
+        "tracedecay_diff_context",
+        json!({"files":["src/lib.rs", "src/target.rs"], "depth":3, "format":"json"}),
+    )
+    .await
+    .expect("real signature edit analysis");
+    let payload = extract_json(&response.value);
+    let mut edits = payload["signature_edits"]
+        .as_array()
+        .expect("signature edits")
+        .clone();
+    edits.sort_by(|left, right| left["symbol"].as_str().cmp(&right["symbol"].as_str()));
+    assert_eq!(
+        edits,
+        vec![
+            json!({"symbol":"local_target", "file":"src/lib.rs", "status":"contract_change", "old_parameters":1, "new_parameters":2,
+            "incompatible":[{"name":"first", "file":"src/lib.rs", "line":5, "arguments":1}]}),
+            json!({"symbol":"remote_target", "file":"src/target.rs", "status":"contract_change", "old_parameters":1, "new_parameters":2,
+            "incompatible":[{"name":"cross_first", "file":"src/calls.rs", "line":2, "arguments":1}]}),
+        ],
+        "{payload}"
+    );
+    fixture.harness.shutdown().await;
 }
