@@ -922,8 +922,8 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
 /// receipt, and the message's Git evidence span before the host is
 /// acknowledged. The drain commits the external-source replay, the
 /// observation projection, and the Git evidence convergence. The temporal
-/// refresh commits its projected batch — the operation's begin folds into
-/// that same commit — the pending relation receipt the native graph write
+/// refresh commits its projected batch: the operation's begin folds into
+/// that same commit, the pending relation receipt the native graph write
 /// recovers from, and the activation that settles that receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamed_message_commits_once_per_durability_boundary() {
