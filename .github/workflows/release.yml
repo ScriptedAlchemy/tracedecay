@@ -389,7 +389,7 @@ jobs:
         if: needs.validate-release.outputs.build_required == 'true'
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Revalidate release tag target
         env:
@@ -772,7 +772,7 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
 
