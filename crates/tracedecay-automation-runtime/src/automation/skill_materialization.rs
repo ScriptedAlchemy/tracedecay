@@ -218,9 +218,7 @@ impl ReconcileReport {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Provenance parsing / fork detection
-// ---------------------------------------------------------------------------
 
 /// The provenance a materialized file carries in its frontmatter.
 struct FileProvenance {
@@ -1038,9 +1036,7 @@ fn initial_support_path_conflicts(
     Ok(false)
 }
 
-// ---------------------------------------------------------------------------
 // Single-skill operations
-// ---------------------------------------------------------------------------
 
 /// Materializes one active skill into one scope. Never clobbers a foreign or
 /// user-forked file. Idempotent: an already-current managed file is left as
@@ -1283,9 +1279,7 @@ fn prune_skill_dir(scope: &MaterializationScope, slug: &str) {
     let _ = fs::remove_dir(dir);
 }
 
-// ---------------------------------------------------------------------------
 // Scope reconciliation
-// ---------------------------------------------------------------------------
 
 /// Short, stable disambiguator derived from a full skill id, used to suffix a
 /// host slug when two distinct ids collide on the same base slug.
@@ -1403,9 +1397,7 @@ fn managed_slugs_in_scope(scope: &MaterializationScope) -> Result<Vec<(String, S
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
 // Scope detection + profile-driven reconcile
-// ---------------------------------------------------------------------------
 
 /// Loads the active managed skills for materialization. Only `Active` skills
 /// that target Claude are materialized to Claude scopes, Codex to Codex, the
