@@ -4489,6 +4489,9 @@ async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
                 (Some("warming"), _, _, _)
                 | (Some("stale"), Some("ready"), _, Some("verifying"))
                 | (_, Some("pending"), _, _)
+                // The interactive catalog warms lazily after the verified
+                // snapshot lands; like "pending" it resolves to "ready".
+                | (_, Some("warming"), _, _)
                 | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
                     tokio::task::yield_now().await;
                 }

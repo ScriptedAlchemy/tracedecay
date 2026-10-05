@@ -1,0 +1,14 @@
+node_modules
+dashboard/node_modules
+sdks/typescript/node_modules
+plugin/cursor-native-extension/node_modules
+plugin/chatgpt-extension/node_modules
+target
+.pnpm
+.worktrees
+.codex-worktrees
+.claude-worktrees
+.claude/worktrees
+evals
+mockups
+vendor
