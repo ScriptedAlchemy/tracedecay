@@ -821,9 +821,7 @@ impl PythonExtractor {
         }
     }
 
-    // ----------------------------
     // Helper extraction methods
-    // ----------------------------
 
     /// Extract base classes from a class definition's `argument_list`.
     fn extract_base_classes(state: &mut ExtractionState<'_>, node: TsNode<'_>, class_id: &str) {

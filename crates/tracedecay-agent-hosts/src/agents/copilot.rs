@@ -253,9 +253,7 @@ fn vscode_mcp_servers_has_tracedecay(settings_path: &Path) -> bool {
         .is_some()
 }
 
-// ---------------------------------------------------------------------------
 // Registration paths
-// ---------------------------------------------------------------------------
 
 /// VS Code user settings. Neither a host CLI nor TraceDecay writes this
 /// file; see the module documentation.
@@ -306,9 +304,7 @@ fn copilot_context_mcp_registration_state(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Host-CLI-driven MCP registry lifecycle
-// ---------------------------------------------------------------------------
 
 /// Resolve Copilot's own CLI, or fail with the typed requirement.
 ///
@@ -431,9 +427,7 @@ fn run_mcp_registry_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Resu
     )
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 /// True when a registered server's `args` array carries every argument in
 /// [`MCP_SERVER_ARGS`].
