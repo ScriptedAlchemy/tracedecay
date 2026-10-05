@@ -696,9 +696,7 @@ pub(super) fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Shared MCP server registration
-// ---------------------------------------------------------------------------
 //
 // Every JSON/JSONC-configured host registers tracedecay the same way: one
 // entry named `tracedecay` under a root key (`mcpServers` for the Cline
@@ -1136,6 +1134,4 @@ fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
     Ok(toml::Value::Table(table))
 }
 
-// ---------------------------------------------------------------------------
 // Git post-commit hook
-// ---------------------------------------------------------------------------

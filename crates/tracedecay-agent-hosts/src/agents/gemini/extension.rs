@@ -85,9 +85,7 @@ const EXTENSION_MANIFEST_TEMPLATE: &str = r#"{
 }
 "#;
 
-// ---------------------------------------------------------------------------
 // Paths
-// ---------------------------------------------------------------------------
 
 /// TraceDecay's own Gemini profile root. Every path below is derived from the
 /// admitted `home` rather than an ambient environment variable, because the
@@ -138,9 +136,7 @@ pub(super) fn settings_path(home: &Path) -> PathBuf {
     gemini_home(home).join("settings.json")
 }
 
-// ---------------------------------------------------------------------------
 // Staging
-// ---------------------------------------------------------------------------
 
 /// Every file the staged extension consists of, already rendered.
 ///
@@ -219,9 +215,7 @@ pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
         == Some(EXTENSION_NAME)
 }
 
-// ---------------------------------------------------------------------------
 // Installed-extension observation
-// ---------------------------------------------------------------------------
 
 /// What TraceDecay can actually see of the host's installed extension.
 ///
@@ -314,9 +308,7 @@ pub(super) fn installed_extension_is_present(home: &Path) -> bool {
     installed_extension_dir(home).exists()
 }
 
-// ---------------------------------------------------------------------------
 // Host CLI lifecycle
-// ---------------------------------------------------------------------------
 
 /// Resolve Gemini CLI's own binary, or fail with the typed requirement.
 ///
