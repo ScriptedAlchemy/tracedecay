@@ -4,7 +4,7 @@
 //! identifier splitting, and configured aliases are visible additive routes.
 //! The preferred-symbol route runs when the query's shape clears the name
 //! gate (see [`classify_query_shape`]) unless the caller decides explicitly;
-//! the decision and its margin ride the receipt.
+//! the receipt carries the decision and its margin.
 //! Each route is ranked through the ordinary lexical lane against the same
 //! pinned generation, then merged into the single lexical lane input that
 //! composition admits. Strict hits retain precedence without alternative-score
