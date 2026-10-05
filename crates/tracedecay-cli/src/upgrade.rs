@@ -1318,8 +1318,8 @@ mod tests {
         use tracedecay_runtime_core::git::GitCommandError;
 
         use super::super::{
-            UpgradeOutcome, VersionProbeError, finish_versioned_upgrade, installed_binary_version,
-            installed_binary_version_within,
+            UpgradeOutcome, VERSION_PROBE_DEADLINE, VersionProbeError, finish_versioned_upgrade,
+            installed_binary_version, installed_binary_version_within,
         };
         use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -1395,7 +1395,11 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(
+                started.elapsed() < VERSION_PROBE_DEADLINE,
+                "the byte bound must refuse the flood before the deadline a \
+                 blocked pipe would reach"
+            );
         }
 
         #[test]
@@ -1481,10 +1485,16 @@ mod tests {
 
         #[test]
         fn a_descendant_holding_stdout_cannot_hold_the_probe_past_its_deadline() {
+            // The descendant keeps the inherited pipe open this long, so a probe
+            // that returns at or after it waited for the pipe, not its deadline.
+            const DESCENDANT_PIPE_HOLD: Duration = Duration::from_secs(30);
             let dir = tempfile::tempdir().unwrap();
             let leaky = script(
                 dir.path(),
-                "printf 'tracedecay 1.2.3\\n'; sleep 20 & exit 0",
+                &format!(
+                    "printf 'tracedecay 1.2.3\\n'; sleep {} & exit 0",
+                    DESCENDANT_PIPE_HOLD.as_secs()
+                ),
             );
             let started = Instant::now();
 
@@ -1499,7 +1509,7 @@ mod tests {
                 "{error}"
             );
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                started.elapsed() < DESCENDANT_PIPE_HOLD,
                 "a successful parent exit does not close an inherited pipe; the deadline must"
             );
         }
