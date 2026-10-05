@@ -570,15 +570,6 @@ pub(crate) fn prime_function(ctx: &QueryContext, iteration: u64) -> Vec<PrimeSte
     )]
 }
 
-pub(crate) fn prime_function_pair(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
-    let mut steps = prime_function(ctx, iteration);
-    steps.push(prime_symbol(
-        QueryContext::pick(&ctx.function_qnames, iteration as usize + 1),
-        &[("outcome.value.payload.items.0.node_id", "live_next_node")],
-    ));
-    steps
-}
-
 pub(crate) fn prime_class(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
     vec![prime_symbol(
         QueryContext::pick(&ctx.struct_qnames, iteration as usize),
