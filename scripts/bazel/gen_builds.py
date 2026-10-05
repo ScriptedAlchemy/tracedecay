@@ -476,8 +476,8 @@ def main():
         out.append(
             'load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")\n'
             'load("@rules_rust//cargo:defs.bzl", "cargo_build_script")\n'
-            'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", '
-            '"rust_test")\n'
+            'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
+            'load("//scripts:bazel/rust_test.bzl", "rust_test")\n'
         )
 
         if lib_t:

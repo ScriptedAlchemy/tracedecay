@@ -11,6 +11,8 @@ use source_provenance::{ProvenanceOrigin, ResolvedSourceProvenance, resolve, wat
 
 #[path = "../../build-support/source_provenance.rs"]
 mod source_provenance;
+#[path = "../../build-support/watched_input_file.rs"]
+mod watched_input_file;
 
 const ENV_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const VCS_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
@@ -146,10 +148,19 @@ fn the_release_env_sha_names_a_clean_exact_commit() {
 
     assert_eq!(resolved.origin, ProvenanceOrigin::ReleaseEnv);
     assert_eq!(resolved.full_sha, ENV_SHA);
-    assert!(
-        !resolved.dirty,
-        "a release sha names an exact commit; there is no worktree to be dirty"
-    );
+    assert!(!resolved.dirty);
+}
+
+#[test]
+fn the_release_env_sha_preserves_a_dirty_workspace_status() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let value = format!("{ENV_SHA}.dirty");
+
+    let resolved = resolve(dir.path(), dir.path(), Some(&value)).expect("dirty status resolves");
+
+    assert_eq!(resolved.origin, ProvenanceOrigin::ReleaseEnv);
+    assert_eq!(resolved.full_sha, ENV_SHA);
+    assert!(resolved.dirty);
 }
 
 #[test]
@@ -161,6 +172,7 @@ fn a_malformed_release_env_sha_fails_quoting_the_value() {
         "0123456789ABCDEF0123456789ABCDEF01234567",
         "g123456789abcdef0123456789abcdef01234567",
         "0123456789abcdef0123456789abcdef012345678",
+        "0123456789abcdef0123456789abcdef01234567.dirty.dirty",
     ] {
         let error = resolve(dir.path(), dir.path(), Some(malformed))
             .expect_err("a malformed release sha must fail the build");
@@ -310,6 +322,41 @@ fn probing_identity_does_not_rewrite_the_index_it_watches() {
     );
 }
 
+#[test]
+fn supplied_input_files_emit_environment_and_content_rerun_edges() {
+    for (env_name, path) in [
+        (
+            "TRACEDECAY_RELEASE_GIT_SHA_FILE",
+            "/generated/product-git-sha",
+        ),
+        (
+            "TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE",
+            "/generated/dashboard-sha256",
+        ),
+    ] {
+        let watched = watched_input_file::WatchedInputFile::from_value(
+            env_name,
+            Some(std::ffi::OsString::from(path)),
+        );
+        assert_eq!(
+            watched.cargo_directives(),
+            [
+                format!("cargo::rerun-if-env-changed={env_name}"),
+                format!("cargo::rerun-if-changed={path}"),
+            ]
+        );
+    }
+
+    let absent = watched_input_file::WatchedInputFile::from_value(
+        "TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE",
+        None,
+    );
+    assert_eq!(
+        absent.cargo_directives(),
+        ["cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE"]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Cargo rerun semantics, exercised through a real nested cargo build
 // ---------------------------------------------------------------------------
@@ -353,6 +400,7 @@ struct CargoFixture {
     root: std::path::PathBuf,
     target: std::path::PathBuf,
     cargo_home: std::path::PathBuf,
+    watched_input: std::path::PathBuf,
     rustup_toolchain: Option<String>,
 }
 
@@ -367,7 +415,9 @@ impl CargoFixture {
         let root = directory.path().join("repository");
         let target = directory.path().join("target");
         let cargo_home = directory.path().join("cargo-home");
+        let watched_input = directory.path().join("release-sha.txt");
         std::fs::create_dir_all(&cargo_home).expect("fixture cargo home");
+        std::fs::write(&watched_input, ENV_SHA).expect("write watched input");
         std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
 
         for relative in ["Cargo.toml", "Cargo.lock", "README.md"] {
@@ -390,13 +440,18 @@ impl CargoFixture {
 
         let shared_provenance = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("build-support/source_provenance.rs");
+        let watched_input_module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("build-support/watched_input_file.rs");
         std::fs::write(
             root.join("build.rs"),
             format!(
                 "#[path = {shared_provenance:?}]\n\
                  mod source_provenance;\n\
+                 #[path = {watched_input_module:?}]\n\
+                 mod watched_input_file;\n\
                  \n\
                  fn main() {{\n\
+                     watched_input_file::WatchedInputFile::from_env(\"FIXTURE_WATCHED_INPUT\").emit();\n\
                      let manifest_dir = std::env::var(\"CARGO_MANIFEST_DIR\").expect(\"manifest directory\");\n\
                      let root = std::path::Path::new(&manifest_dir);\n\
                      let resolved = source_provenance::resolve(root, root, None).expect(\"fixture provenance\");\n\
@@ -417,6 +472,7 @@ impl CargoFixture {
             root,
             target,
             cargo_home,
+            watched_input,
             rustup_toolchain: workspace_rustup_toolchain(),
         }
     }
@@ -490,6 +546,10 @@ impl CargoFixture {
             .to_string()
     }
 
+    fn write_watched_input(&self, value: &str) {
+        std::fs::write(&self.watched_input, value).expect("write watched input");
+    }
+
     fn build_script_runs(&self) -> u32 {
         let build_directory = self.target.join("debug/build");
         let counters = std::fs::read_dir(build_directory)
@@ -529,12 +589,26 @@ impl CargoFixture {
             .args(args)
             .current_dir(&self.root)
             .env("CARGO_HOME", &self.cargo_home)
-            .env("CARGO_TARGET_DIR", &self.target);
+            .env("CARGO_TARGET_DIR", &self.target)
+            .env("FIXTURE_WATCHED_INPUT", &self.watched_input);
         if let Some(toolchain) = &self.rustup_toolchain {
             command.env("RUSTUP_TOOLCHAIN", toolchain);
         }
         command.output().expect("fixture cargo should run")
     }
+}
+
+#[test]
+fn cargo_reruns_after_a_supplied_file_changes_at_the_same_path() {
+    let fixture = CargoFixture::new();
+    fixture.commit_sources();
+    fixture.build();
+    assert_eq!(fixture.build_script_runs(), 1);
+
+    fixture.write_watched_input(VCS_SHA);
+    fixture.build();
+
+    assert_eq!(fixture.build_script_runs(), 2);
 }
 
 #[test]

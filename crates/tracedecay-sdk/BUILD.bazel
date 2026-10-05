@@ -5,7 +5,8 @@ package(default_visibility = ["//visibility:public"])
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//scripts:bazel/rust_test.bzl", "rust_test")
 
 rust_library(
     name = "tracedecay-sdk",
@@ -17,7 +18,7 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-api:tracedecay-api", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog", ":build_script_build"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-api:tracedecay-api", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     crate_features = [],
@@ -33,23 +34,10 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev", ":build_script_build"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     crate_features = [],
-)
-
-cargo_build_script(
-    name = "build_script_build",
-    crate_name = "build_script_build",
-    crate_root = "build.rs",
-    srcs = ["build.rs", "src/codegen.rs"],
-    deps = all_crate_deps(build = True, build_proc_macro = True) + ["//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
-    edition = crate_edition(),
-    pkg_name = "tracedecay-sdk",
-    version = "0.1.0",
-    crate_features = [],
-    data = ["//:Cargo.toml"],
 )
 
 rust_test(
@@ -58,7 +46,7 @@ rust_test(
     crate_root = "tests/remote_client_proxy.rs",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sdk:tracedecay-sdk__dev", "//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev", ":build_script_build"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sdk:tracedecay-sdk__dev", "//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     crate_features = [],
@@ -72,7 +60,7 @@ rust_test(
     crate_root = "tests/sdk_suite/main.rs",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sdk:tracedecay-sdk__dev", "//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev", ":build_script_build"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sdk:tracedecay-sdk__dev", "//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     crate_features = [],
@@ -85,7 +73,7 @@ rust_test(
     crate = ":tracedecay-sdk__dev",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev", ":build_script_build"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)

@@ -10,3 +10,15 @@ filegroup(
 exports_files(["claude-observation/workload-v1.json"],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "runtime_fixtures_project_src",
+    srcs = glob(["runtime/fixtures/project/src/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "runtime_fixtures_project_tests",
+    srcs = glob(["runtime/fixtures/project/tests/**"]),
+    visibility = ["//visibility:public"],
+)

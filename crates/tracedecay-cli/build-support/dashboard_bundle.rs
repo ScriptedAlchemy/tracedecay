@@ -234,8 +234,7 @@ pub fn stage_copy_build_output(
     store: &std::path::Path,
     source: &std::path::Path,
 ) -> Result<StagedBundle, Box<dyn std::error::Error>> {
-    let asset_paths =
-        super::dashboard_manifest::dashboard_asset_paths_build_output(source)?;
+    let asset_paths = super::dashboard_manifest::dashboard_asset_paths_build_output(source)?;
     stage_copy_validated(store, source, &asset_paths)
 }
 

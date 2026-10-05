@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# This script is the lane's --workspace_status_command. It prints product
-# provenance that //:product_git_sha and crates/tracedecay-cli's build
-# script consume.
 set -euo pipefail
-echo "STABLE_PRODUCT_GIT_SHA $(git rev-parse HEAD)"
+
+sha=$(git rev-parse HEAD)
+if [[ -n $(git status --porcelain --untracked-files=normal) ]]; then
+  sha="${sha}.dirty"
+fi
+printf 'STABLE_PRODUCT_GIT_SHA %s\n' "$sha"
