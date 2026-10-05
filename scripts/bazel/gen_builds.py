@@ -835,6 +835,23 @@ def main():
             for path in stale:
                 print(f"  {path.relative_to(REPO)}")
             print("rerun: python3 scripts/bazel/gen_builds.py")
+            # Show the first diffs so CI output explains the divergence.
+            import difflib
+            shown = 0
+            for path in stale:
+                if shown >= 60:
+                    break
+                if path not in outputs:
+                    print(f"--- {path.relative_to(REPO)}: generated file with no source member")
+                    continue
+                diff = list(difflib.unified_diff(
+                    path.read_text().splitlines(),
+                    outputs[path].splitlines(),
+                    str(path.relative_to(REPO)), "regenerated", lineterm="",
+                ))
+                for line in diff[:60 - shown]:
+                    print(line)
+                shown += len(diff[:60 - shown])
             sys.exit(1)
         print(f"all {len(outputs)} generated BUILD.bazel files are current")
         return
