@@ -222,6 +222,28 @@ pub fn stage_copy(
     source: &std::path::Path,
 ) -> Result<StagedBundle, Box<dyn std::error::Error>> {
     let asset_paths = super::dashboard_manifest::dashboard_asset_paths(source)?;
+    stage_copy_validated(store, source, &asset_paths)
+}
+
+/// Same staging contract as `stage_copy` for a source whose entries may be
+/// symlinks to build outputs (Bazel action trees materialize inputs as
+/// symlinks). The promoted bundle is still validated by `promote` and the
+/// caller still compares `StagedBundle::digest_hex` against the digest the
+/// producer advertised, so a symlink resolving to foreign bytes fails closed.
+pub fn stage_copy_build_output(
+    store: &std::path::Path,
+    source: &std::path::Path,
+) -> Result<StagedBundle, Box<dyn std::error::Error>> {
+    let asset_paths =
+        super::dashboard_manifest::dashboard_asset_paths_build_output(source)?;
+    stage_copy_validated(store, source, &asset_paths)
+}
+
+fn stage_copy_validated(
+    store: &std::path::Path,
+    source: &std::path::Path,
+    asset_paths: &[String],
+) -> Result<StagedBundle, Box<dyn std::error::Error>> {
     let staging = prepare_staging(store)
         .map_err(|error| format!("failed to prepare {}: {error}", store.display()))?;
     let manifest = super::dashboard_manifest::DASHBOARD_ASSET_MANIFEST.to_owned();

@@ -20,6 +20,9 @@ packages:
   - "!.claude-worktrees/**"
   - "!.claude/worktrees/**"
 
+onlyBuiltDependencies:
+  - esbuild
+
 allowBuilds:
   esbuild: true
   core-js: false
