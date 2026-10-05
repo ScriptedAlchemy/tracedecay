@@ -1,0 +1,17 @@
+seq	phase	decision	evidence	result
+1	scaffold	bzlmod + bazelisk pin 9.2.0 via .bazelversion	.bazelversion + MODULE.bazel	VERIFIED
+2	deps	crate_universe from Cargo.lock replaces .pnpm/crates vendoring	crate.from_cargo cargo_lockfile pin in MODULE.bazel	VERIFIED
+3	deps	npm_translate_lock consumes derived single-doc pnpm-lock.bazel.yaml	scripts/bazel/sync-pnpm-lock.sh strips pnpm 12 lead document	VERIFIED
+4	targets	gen_builds.py emits BUILD files from cargo metadata not hand edits	scripts/bazel/gen_builds.py + generated crates/*/BUILD.bazel	VERIFIED
+5	features	one rust_library per cargo resolution context	duplicate-rlib E0464 before variants keyed by feature set	VERIFIED
+6	features	variant identity includes transitive member-dep closure signature	trait-split E0277 resolved only after __d<sha1> suffix	VERIFIED
+7	features	dev deps feed test/bench/example targets only	cycle store-runtime sessions privacy gone from lib deps	VERIFIED
+8	build scripts	build-script binaries run outside the sandbox	arborium env! baked execroot path until _bs_ strategy local	VERIFIED
+9	dashboard	rules_js rsbuild produces //dashboard:app_dist tree output	rsbuild_bin.rsbuild out_dirs app-dist	VERIFIED
+10	dashboard	build script stages bundle only when digest matches	TRACEDECAY_DASHBOARD_BUNDLE_SHA256 abf66b3e via check-dashboard-bundle.py	VERIFIED
+11	escapes	#[path] and include_str! outside package become compile_data filegroups	missing-input errors on tests/common and agent-hosts templates	VERIFIED
+12	linker	gold and parallel ld.bfd OOM on full-workspace test links	dmesg oom-kill ld.bfd at 4 GB each over 8 jobs	VERIFIED
+13	linker	force bfd plus cap --jobs=4	-Clink-arg=-fuse-ld=bfd and jobs cap in .bazelrc	VERIFIED
+14	scope	pnpm lane stays intact until Bazel proven	cargo check -p tracedecay-cli green and bazel build //... green	VERIFIED
+15	verify	bazel build //... covers the workspace	677 targets built end to end	VERIFIED
+16	verify	shipped binary serves the embedded Bazel dashboard	tracedecay --version + dashboard index 200 on demo project	VERIFIED
