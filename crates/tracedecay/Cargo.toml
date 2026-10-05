@@ -1,5 +1,6 @@
 [package]
 name = "tracedecay"
+autobenches = false
 version.workspace = true
 publish = false
 edition.workspace = true
@@ -371,11 +372,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fau
 name = "large_repos"
 path = "benches/large_repos.rs"
 harness = false
-required-features = ["test-transport"]
-
-[[bench]]
-name = "queries"
-path = "benches/queries.rs"
 required-features = ["test-transport"]
 
 [[bench]]
