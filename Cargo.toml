@@ -470,4 +470,3 @@ opt-level = 0
 
 [profile.perf.package.tracedecay-tool-catalog]
 opt-level = 1
-
