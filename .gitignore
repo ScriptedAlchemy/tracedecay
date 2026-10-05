@@ -49,3 +49,7 @@ mockups/ui-concept-v2/app/profile-pack/
 # from inside its own directory; the workspace lock is the one that matters
 vendor/grafeo/*/Cargo.lock
 .target.durable-directory.lock
+
+# Bazel
+bazel-*
+MODULE.bazel.lock

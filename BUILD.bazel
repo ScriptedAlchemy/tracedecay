@@ -1,0 +1,24 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages(name = "node_modules")
+
+exports_files(
+    [
+        "version.txt",
+        "Cargo.toml",
+        "pnpm-lock.yaml",
+        "pnpm-lock.bazel.yaml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Product provenance for crates/tracedecay-cli's build script: the exact
+# commit this binary compiles, written by --workspace_status_command.
+genrule(
+    name = "product_git_sha",
+    srcs = [],
+    outs = ["product_git_sha.txt"],
+    cmd = "grep '^STABLE_PRODUCT_GIT_SHA ' bazel-out/stable-status.txt | cut -d' ' -f2 > $@",
+    stamp = True,
+    visibility = ["//visibility:public"],
+)

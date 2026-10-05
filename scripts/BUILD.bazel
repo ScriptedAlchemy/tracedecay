@@ -1,0 +1,4 @@
+exports_files(
+    ["check-dashboard-bundle.py"],
+    visibility = ["//visibility:public"],
+)

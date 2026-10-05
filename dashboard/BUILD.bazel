@@ -1,0 +1,59 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//dashboard:@rsbuild/core/package_json.bzl", rsbuild_bin = "bin")
+
+package(default_visibility = ["//visibility:public"])
+
+npm_link_all_packages(name = "node_modules")
+
+filegroup(
+    name = "dashboard_sources",
+    srcs = glob(
+        [
+            "src/**",
+            "public/**",
+            "*.ts",
+            "*.mjs",
+            "*.json",
+            "*.html",
+        ],
+        allow_empty = True,
+    ),
+)
+
+rsbuild_bin.rsbuild(
+    name = "app_dist",
+    srcs = [
+        ":dashboard_sources",
+        ":node_modules",
+    ],
+    args = ["build"],
+    chdir = package_name(),
+    out_dirs = ["app-dist"],
+)
+
+genrule(
+    name = "bundle_sha256",
+    srcs = [
+        ":app_dist",
+        "//scripts:check-dashboard-bundle.py",
+    ],
+    outs = ["bundle_sha256.txt"],
+    cmd = "python3 $(location //scripts:check-dashboard-bundle.py) $(location :app_dist) --print-digest > $@",
+)
+
+filegroup(
+    name = "hermes_wrapper",
+    srcs = glob(["hermes-wrapper/**"]),
+)
+
+filegroup(
+    name = "hermes-wrapper",
+    srcs = glob(["hermes-wrapper/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "hermes-wrapper_src",
+    srcs = glob(["hermes-wrapper/src/**"]),
+    visibility = ["//visibility:public"],
+)
