@@ -69,9 +69,7 @@ pub(crate) fn require_runtime_ports() -> Result<DaemonClientPortsV1> {
         })
 }
 
-// ---------------------------------------------------------------------------
 // tracedecay_sessions::host_ports
-// ---------------------------------------------------------------------------
 
 fn register_session_ports() {
     use tracedecay_sessions::host_ports;
@@ -99,9 +97,7 @@ fn unregistered_admission(
     Box::new(HostAdmissionFacade::new(authorities))
 }
 
-// ---------------------------------------------------------------------------
 // tracedecay_agent_hosts::ports
-// ---------------------------------------------------------------------------
 
 fn register_agent_host_ports() {
     use tracedecay_automation_runtime::ports as automation_ports;

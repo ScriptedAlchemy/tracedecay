@@ -459,9 +459,7 @@ function gradeDetail(grade: EvidenceState, wire: DashboardDomainStateV1): string
   }
 }
 
-// ---------------------------------------------------------------------------
 // Per-source summaries
-// ---------------------------------------------------------------------------
 
 export function observationsSummary(read: EvidenceRead<ObservatoryReadModelV1>): EvidenceSummary {
   return envelopeSummary(SOURCE_IDENTITY.observations, read, (model) => ({
@@ -774,9 +772,7 @@ export function diagnosticsWindowWord(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Timeline
-// ---------------------------------------------------------------------------
 
 export interface TimelineMark {
   id: EvidenceSourceId;
