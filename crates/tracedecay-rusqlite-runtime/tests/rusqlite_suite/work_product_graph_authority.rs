@@ -1116,7 +1116,7 @@ fn fastest_current_read_after(versions: u64) -> std::time::Duration {
 
 /// Every Work mutation reads its current head first, so a current read that
 /// re-derived every historical version would make each mutation cost the
-/// whole history again and a long-running Work product wedge its daemon.
+/// whole history again and stall a long-running Work product's daemon.
 /// Growing the history eightfold grows a single fold of the journal near
 /// quadratically, while refolding it once per version grows it near cubically.
 /// A read's fixed cost dilutes both: one fold measures about 15x and refolding
