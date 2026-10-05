@@ -16,9 +16,7 @@ use super::{
 #[cfg(test)]
 mod tests;
 
-// ---------------------------------------------------------------------------
 // Registry reap contract
-// ---------------------------------------------------------------------------
 //
 // `plan_registry_reap` below is the only producer of these values, so the
 // contract lives beside its producer. The root re-exports these names through
