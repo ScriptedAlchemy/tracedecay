@@ -516,7 +516,7 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "circular" => {
             "Report file-level dependency cycles, largest first, each bounded to its listed members with its true size stated."
         }
-        "hotspots" => "Rank symbols by total incoming plus outgoing graph relations.",
+        "hotspots" => "Rank symbols by graph relations weighted by file churn.",
         "unmounted_files" => {
             "Find source files on disk that no compiler, bundler, or test runner reaches from its entry points, per ecosystem, with each ecosystem's verdict and blind spots."
         }
