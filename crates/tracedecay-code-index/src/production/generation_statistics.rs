@@ -68,22 +68,6 @@ impl CodeIndexGenerationStatisticsV1 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CodeIndexGenerationStatisticsV1;
-
-    #[test]
-    fn a_census_sealed_before_the_field_decodes_as_not_counted() {
-        let statistics: CodeIndexGenerationStatisticsV1 =
-            serde_json::from_str(r#"{"source_total_bytes":1,"symbol_count":2,"edge_count":3}"#)
-                .expect("old census");
-        assert_eq!(statistics.source_total_bytes, 1);
-        assert_eq!(statistics.symbol_count, 2);
-        assert_eq!(statistics.edge_count, 3);
-        assert_eq!(statistics.ambiguous_name_drops, None);
-    }
-}
-
 fn checked_source_total<'a>(
     mut coverages: impl Iterator<Item = &'a ExtractionCoverageV1>,
 ) -> Result<u64, CodeIndexProductionErrorV1> {
@@ -103,4 +87,20 @@ fn checked_source_total<'a>(
             )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodeIndexGenerationStatisticsV1;
+
+    #[test]
+    fn a_census_sealed_before_the_field_decodes_as_not_counted() {
+        let statistics: CodeIndexGenerationStatisticsV1 =
+            serde_json::from_str(r#"{"source_total_bytes":1,"symbol_count":2,"edge_count":3}"#)
+                .expect("old census");
+        assert_eq!(statistics.source_total_bytes, 1);
+        assert_eq!(statistics.symbol_count, 2);
+        assert_eq!(statistics.edge_count, 3);
+        assert_eq!(statistics.ambiguous_name_drops, None);
+    }
 }
