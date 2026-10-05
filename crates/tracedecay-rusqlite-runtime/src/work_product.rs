@@ -293,24 +293,53 @@ pub(crate) fn fold_graph(
     journal: &[WorkProductJournalEntryV1],
     through_sequence: WorkProductEventSequenceV1,
 ) -> Option<WorkProductGraphV1> {
-    let mut graph: Option<WorkProductGraphV1> = None;
-    for entry in journal {
-        if entry.sequence.get() > through_sequence.get() {
-            break;
+    let mut fold = JournalFoldV1::new(journal);
+    fold.advance_to(through_sequence)?;
+    fold.graph
+}
+
+/// One forward pass over a journal that yields the graph at each requested
+/// sequence, so reading several versions folds every event once instead of
+/// refolding the whole prefix per version.
+pub(crate) struct JournalFoldV1<'a> {
+    remaining: &'a [WorkProductJournalEntryV1],
+    graph: Option<WorkProductGraphV1>,
+}
+
+impl<'a> JournalFoldV1<'a> {
+    pub(crate) const fn new(journal: &'a [WorkProductJournalEntryV1]) -> Self {
+        Self {
+            remaining: journal,
+            graph: None,
         }
-        let folded = match (graph.take(), entry.event.payload()) {
-            (None, WorkProductEventPayloadV1::Created { graph }) => graph.clone(),
-            (Some(current), WorkProductEventPayloadV1::Changed { change }) => {
-                current.apply(change.as_ref().clone()).ok()?
-            }
-            _ => return None,
-        };
-        if folded.version() != entry.event.result_graph_version() {
-            return None;
-        }
-        graph = Some(folded);
     }
-    graph
+
+    /// Folds forward through `through_sequence` with the same chain rules as
+    /// [`fold_graph`]. Requests must ascend: an earlier sequence answers the
+    /// graph already folded past it, which the caller's version check refuses.
+    pub(crate) fn advance_to(
+        &mut self,
+        through_sequence: WorkProductEventSequenceV1,
+    ) -> Option<&WorkProductGraphV1> {
+        while let Some((entry, rest)) = self.remaining.split_first() {
+            if entry.sequence.get() > through_sequence.get() {
+                break;
+            }
+            self.remaining = rest;
+            let folded = match (self.graph.take(), entry.event.payload()) {
+                (None, WorkProductEventPayloadV1::Created { graph }) => graph.clone(),
+                (Some(current), WorkProductEventPayloadV1::Changed { change }) => {
+                    current.apply(change.as_ref().clone()).ok()?
+                }
+                _ => return None,
+            };
+            if folded.version() != entry.event.result_graph_version() {
+                return None;
+            }
+            self.graph = Some(folded);
+        }
+        self.graph.as_ref()
+    }
 }
 
 /// The exact digest a verified version records for a folded graph.

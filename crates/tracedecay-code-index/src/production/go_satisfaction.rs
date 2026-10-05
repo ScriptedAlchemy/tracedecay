@@ -369,6 +369,7 @@ where
             evidence_span: interface.span,
             unmodeled_import: None,
             argument_count: None,
+            ambiguous_local: false,
         };
         let methods = match expansion {
             Ok(methods) => methods,

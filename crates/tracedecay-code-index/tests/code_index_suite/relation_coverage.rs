@@ -327,3 +327,111 @@ fn a_crlf_cargo_manifest_names_its_crate_for_cross_crate_calls() {
     );
     assert!(!graph.callers_partial("lib/src/lib.rs::helper"));
 }
+
+#[test]
+fn a_type_path_call_with_two_inherent_candidates_makes_both_callers_partial() {
+    let graph = sealed_graph_of(&[
+        (
+            "rs/src/lib.rs",
+            "mod unix;\nmod windows;\n\npub struct Clock;\n\npub fn now() -> u64 {\n    Clock::tick()\n}\n",
+        ),
+        (
+            "rs/src/unix.rs",
+            "use crate::Clock;\n\n#[cfg(unix)]\nimpl Clock {\n    pub fn tick() -> u64 {\n        1\n    }\n}\n",
+        ),
+        (
+            "rs/src/windows.rs",
+            "use crate::Clock;\n\n#[cfg(windows)]\nimpl Clock {\n    pub fn tick() -> u64 {\n        2\n    }\n}\n",
+        ),
+    ]);
+
+    for target in [
+        "rs/src/unix.rs::Clock::tick",
+        "rs/src/windows.rs::Clock::tick",
+    ] {
+        assert_eq!(graph.callers(target), Vec::<String>::new(), "{target}");
+        assert!(graph.callers_partial(target), "{target} callers partial");
+    }
+    assert!(graph.callees_partial("rs/src/lib.rs::now"));
+}
+
+#[test]
+fn a_same_file_call_with_two_candidates_makes_both_callers_partial() {
+    let graph = sealed_graph_of(&[(
+        "rb/units.rb",
+        "def scale(x)\n  3\nend\n\ndef scale(x)\n  1\nend\n\ndef total\n  scale(1)\nend\n",
+    )]);
+
+    let scales = graph
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.qualified_name == "rb/units.rb::scale")
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scales.len(), 2);
+    let caller_gaps = graph
+        .reader
+        .unresolved_caller_gaps(&scales, None, Arc::new(NeverCancelled))
+        .expect("unresolved caller probe");
+    assert!(!caller_gaps.is_empty());
+    assert!(graph.callees_partial("rb/units.rb::total"));
+}
+
+#[test]
+fn a_same_file_python_call_with_two_candidates_makes_its_callees_partial() {
+    let graph = sealed_graph_of(&[(
+        "py/units.py",
+        "def scale(x):\n    return x\n\ndef scale(x):\n    return x + 1\n\ndef total():\n    return scale(1)\n",
+    )]);
+
+    assert!(graph.callees_partial("py/units.py::total"));
+}
+
+#[test]
+fn locally_ambiguous_definitions_shadow_an_imported_name() {
+    let graph = sealed_graph_of(&[
+        ("py/pkg/__init__.py", ""),
+        ("py/pkg/lib.py", "def scale(x):\n    return x * 2\n"),
+        (
+            "py/pkg/app.py",
+            "from pkg.lib import scale\n\ndef scale(x):\n    return x\n\ndef scale(x):\n    return x + 1\n\ndef total():\n    return scale(1)\n",
+        ),
+    ]);
+
+    assert_eq!(graph.callers("py/pkg/lib.py::scale"), Vec::<String>::new());
+    assert!(graph.callees_partial("py/pkg/app.py::total"));
+}
+
+#[test]
+fn go_ambiguous_local_calls_disclose_gaps_beside_bound_calls() {
+    let graph = sealed_graph_of(&[(
+        "go/units.go",
+        "package units\n\nfunc scale(x int) int { return x }\nfunc scale(x int) int { return x + 1 }\nfunc known(x int) int { return x * 2 }\nfunc total() int { return scale(1) + known(1) }\n",
+    )]);
+
+    assert_eq!(graph.callers("go/units.go::known"), ["go/units.go::total"]);
+    assert!(graph.callers_partial("go/units.go::scale"));
+    assert!(graph.callees_partial("go/units.go::total"));
+}
+
+#[test]
+fn typescript_ambiguous_local_calls_do_not_poison_imported_call_resolution() {
+    let shadowed = "describe('scope', () => {\n  function scale(x: number) { return x; }\n  function scale(x: number) { return x + 1; }\n  it('shadowed', () => { scale(1); });\n});\n";
+    let clear = "export function clear(): number { return scale(1); }\n";
+    for functions in [format!("{shadowed}{clear}"), format!("{clear}{shadowed}")] {
+        let app = format!("import {{ scale }} from './lib';\n{functions}");
+        let graph = sealed_graph_of(&[
+            (
+                "ts/lib.ts",
+                "export function scale(x: number) { return x * 2; }\n",
+            ),
+            ("ts/app.ts", &app),
+        ]);
+
+        assert_eq!(graph.callers("ts/lib.ts::scale"), ["ts/app.ts::clear"]);
+        assert!(graph.callees_partial("ts/app.ts::scope::shadowed"));
+        assert!(!graph.callees_partial("ts/app.ts::clear"));
+    }
+}

@@ -17,8 +17,8 @@ pub enum ProvenanceOrigin {
     /// Git reports `repository_root` as its own worktree top level; the
     /// repo-wide [`watch_paths`] watcher applies.
     VerifiedGit,
-    /// `TRACEDECAY_RELEASE_GIT_SHA` named the commit (release builds from an
-    /// exported tree). A release sha names an exact commit, so it is clean.
+    /// `TRACEDECAY_RELEASE_GIT_SHA` named the commit and optional dirty state
+    /// for an exported or externally orchestrated build.
     ReleaseEnv,
     /// `.cargo_vcs_info.json` from `cargo package` named the commit; the file
     /// itself becomes a rerun edge.
@@ -39,8 +39,8 @@ pub struct ResolvedSourceProvenance {
 
 /// Resolves the commit identity of the crate rooted at `repository_root`,
 /// consulting three sources in strict order, verified git worktree,
-/// `TRACEDECAY_RELEASE_GIT_SHA` (passed in by the build script so this stays
-/// testable without process-global env mutation), then the `cargo package`
+/// `TRACEDECAY_RELEASE_GIT_SHA` plus its optional `.dirty` marker, then the
+/// `cargo package`
 /// VCS journal adjacent to `manifest_dir`, and failing when none applies.
 ///
 /// A registry install unpacks the crate into a directory that can itself sit
@@ -51,13 +51,13 @@ pub struct ResolvedSourceProvenance {
 pub fn resolve(
     repository_root: &std::path::Path,
     manifest_dir: &std::path::Path,
-    release_env_sha: Option<&str>,
+    release_env_provenance: Option<&str>,
 ) -> Result<ResolvedSourceProvenance, String> {
     if let Some(resolved) = resolve_from_git(repository_root)? {
         return Ok(resolved);
     }
-    if let Some(sha) = release_env_sha {
-        return resolve_from_release_env(sha);
+    if let Some(value) = release_env_provenance {
+        return resolve_from_release_env(value);
     }
     let vcs_info = manifest_dir.join(CARGO_VCS_INFO_FILE);
     if vcs_info.is_file() {
@@ -106,18 +106,20 @@ fn resolve_from_git(root: &std::path::Path) -> Result<Option<ResolvedSourceProve
     }))
 }
 
-fn resolve_from_release_env(sha: &str) -> Result<ResolvedSourceProvenance, String> {
+fn resolve_from_release_env(value: &str) -> Result<ResolvedSourceProvenance, String> {
+    let (sha, dirty) = match value.strip_suffix(".dirty") {
+        Some(sha) => (sha, true),
+        None => (value, false),
+    };
     if !is_full_sha(sha) {
         return Err(format!(
-            "TRACEDECAY_RELEASE_GIT_SHA is set to {sha:?}, which is not a 40-character \
-             lowercase hex commit sha",
+            "TRACEDECAY_RELEASE_GIT_SHA is set to {value:?}, which is not a 40-character \
+             lowercase hex commit sha optionally followed by `.dirty`",
         ));
     }
     Ok(ResolvedSourceProvenance {
         full_sha: sha.to_string(),
-        // A release sha names an exact exported commit; there is no worktree
-        // whose drift could be observed.
-        dirty: false,
+        dirty,
         origin: ProvenanceOrigin::ReleaseEnv,
     })
 }

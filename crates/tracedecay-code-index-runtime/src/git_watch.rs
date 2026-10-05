@@ -749,6 +749,8 @@ async fn debounce_loop(
             // If an operation is in flight, do not fire yet, wait for the next
             // event (marker removal wakes us) or a short recheck tick.
             if operation_state == OperationState::InFlight {
+                #[cfg(test)]
+                state.operation_held.notify_one();
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return DebounceExit::Cancelled,

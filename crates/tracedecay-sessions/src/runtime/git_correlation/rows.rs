@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::attribution::{merge_commit, merge_span, transcript_spans_from_observations};
+use super::attribution::{
+    infer_captured_branch, merge_commit, merge_span, transcript_spans_from_observations,
+};
 use super::{
     CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
     GitCorrelationError, GitRefFilter, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan,
@@ -161,7 +163,9 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
 
     /// Start replacement of one retained-history revision. Explicit capture
     /// and hook observations remain facts; inferred backfill evidence is
-    /// retracted before this revision's staged pages are published.
+    /// retracted before this revision's staged pages are published: inferred
+    /// spans are deleted and a branch inferred onto a captured span is
+    /// cleared, keeping the captured span.
     pub async fn replace_backfill_session(
         &mut self,
         provider: &str,
@@ -198,6 +202,28 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         }
         let (spans, commits) =
             load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
+        let mut cleared = BTreeSet::new();
+        for span in spans.values().filter(|span| {
+            span.provider == provider
+                && (span.branch_provenance == super::BranchProvenance::Inferred
+                    || span.capture_window.is_some())
+        }) {
+            if span.source == super::SpanSource::Backfill {
+                continue;
+            }
+            cleared.insert(span.span_id.clone());
+            let mut captured = span.clone();
+            if captured.branch_provenance == super::BranchProvenance::Inferred {
+                captured.branch = None;
+                captured.branch_provenance = super::BranchProvenance::Captured;
+            }
+            if let Some(capture) = captured.capture_window.take() {
+                captured.first_ts = capture.first_ts;
+                captured.last_ts = capture.last_ts;
+                captured.event_count = capture.event_count;
+            }
+            self.upsert_span(&captured).await?;
+        }
         let removed = spans
             .values()
             .filter(|span| span.provider == provider && span.source == super::SpanSource::Backfill)
@@ -214,13 +240,24 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             self.change_digest
                 .push(serde_json::to_string(&("delete_span", span_id))?);
         }
+        // A relation dies with the evidence it was derived from: every record
+        // on a removed inferred span goes, and so does any record the
+        // inference itself produced (a branchless ReflogOverlap, or the
+        // TimeOverlap the inferred branch admitted). Captured evidence linked
+        // to a surviving captured span stays. The span keeps its identity,
+        // only its inferred branch is cleared.
         for record in commits.values().filter(|record| {
             record.provider == provider
                 && (record.evidence == super::CommitEvidence::ReflogOverlap
-                    || record
-                        .span_id
-                        .as_ref()
-                        .is_some_and(|id| removed.contains(id)))
+                    || record.span_id.as_ref().is_some_and(|id| {
+                        removed.contains(id)
+                            || (cleared.contains(id)
+                                && matches!(
+                                    record.evidence,
+                                    super::CommitEvidence::ReflogOverlap
+                                        | super::CommitEvidence::TimeOverlap
+                                ))
+                    }))
         }) {
             self.transaction
                 .execute(
@@ -240,6 +277,40 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
              ON CONFLICT(provider, session_id) DO UPDATE SET sequence = excluded.sequence",
             params![provider, session_id, revision],
         ).await?;
+        Ok(())
+    }
+
+    async fn upsert_span(&mut self, span: &SessionGitSpan) -> Result<(), GitCorrelationError> {
+        let record = serde_json::to_string(span)?;
+        self.transaction
+            .execute(
+                "INSERT INTO git_evidence_span(
+                             span_id, session_id, provider, branch, worktree,
+                             first_ts, last_ts, sequence, record
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                         ON CONFLICT(span_id) DO UPDATE SET
+                             session_id = excluded.session_id,
+                             provider = excluded.provider,
+                             branch = excluded.branch,
+                             worktree = excluded.worktree,
+                             first_ts = excluded.first_ts,
+                             last_ts = excluded.last_ts,
+                             sequence = excluded.sequence,
+                             record = excluded.record",
+                params![
+                    span.span_id.as_str(),
+                    span.session_id.as_str(),
+                    span.provider.as_str(),
+                    span.branch.as_deref(),
+                    span.worktree.as_str(),
+                    span.first_ts,
+                    span.last_ts,
+                    self.sequence,
+                    record.as_str()
+                ],
+            )
+            .await?;
+        self.change_digest.push(record);
         Ok(())
     }
 
@@ -283,10 +354,13 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         for mut incoming in candidates {
             validate_span(&incoming)?;
             incoming.worktree = normalize_worktree(&incoming.worktree);
-            merge_span(
-                spans.entry(incoming.session_id.clone()).or_default(),
-                &incoming,
-            );
+            let session_spans = spans.entry(incoming.session_id.clone()).or_default();
+            if incoming.source == super::SpanSource::Backfill
+                && infer_captured_branch(session_spans, &incoming)
+            {
+                continue;
+            }
+            merge_span(session_spans, &incoming);
         }
         for mut incoming in incoming_commits {
             validate_commit_record(&incoming)?;
@@ -319,36 +393,7 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
                 if !stored_spans.contains_key(&span.span_id) {
                     self.spans_added = self.spans_added.saturating_add(1);
                 }
-                let record = serde_json::to_string(span)?;
-                self.transaction
-                    .execute(
-                        "INSERT INTO git_evidence_span(
-                             span_id, session_id, provider, branch, worktree,
-                             first_ts, last_ts, sequence, record
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                         ON CONFLICT(span_id) DO UPDATE SET
-                             session_id = excluded.session_id,
-                             provider = excluded.provider,
-                             branch = excluded.branch,
-                             worktree = excluded.worktree,
-                             first_ts = excluded.first_ts,
-                             last_ts = excluded.last_ts,
-                             sequence = excluded.sequence,
-                             record = excluded.record",
-                        params![
-                            span.span_id.as_str(),
-                            span.session_id.as_str(),
-                            span.provider.as_str(),
-                            span.branch.as_deref(),
-                            span.worktree.as_str(),
-                            span.first_ts,
-                            span.last_ts,
-                            self.sequence,
-                            record.as_str()
-                        ],
-                    )
-                    .await?;
-                self.change_digest.push(record);
+                self.upsert_span(span).await?;
                 write.spans_changed += 1;
             }
             for record in session_commits.iter() {

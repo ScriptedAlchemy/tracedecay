@@ -26,7 +26,7 @@ const MIGRATION_NAME: &str = "git_correlation";
 /// Schema version of the Git evidence rows, convergence receipts and
 /// watermarks. A store recorded at any other version is refused with a typed
 /// reset; nothing converts an older shape.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 7;
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 9;
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
@@ -42,6 +42,15 @@ pub enum SpanSource {
     HookRoute,
     Ingest,
     Backfill,
+}
+
+/// Who asserted a span's `branch`: the host that captured the activity, or
+/// the reflog inference that a session revisit replaces wholesale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchProvenance {
+    Captured,
+    Inferred,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +132,35 @@ pub struct SessionGitSpan {
     pub last_ts: i64,
     pub event_count: i64,
     pub source: SpanSource,
+    pub branch_provenance: BranchProvenance,
+    /// Capture-only bounds held before an inference fold unioned a reflog
+    /// segment's window into this span. `replace_backfill_session` restores
+    /// them when the inference is retracted, so segment-covered time never
+    /// outlives the evidence it came from. `None` while no inference is
+    /// folded in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_window: Option<CaptureWindow>,
+}
+
+/// The `first_ts`/`last_ts`/`event_count` a captured span had before an
+/// inference unioned its segment window in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWindow {
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub event_count: i64,
+}
+
+impl SessionGitSpan {
+    /// The branch the capturing host observed; an inferred branch is never
+    /// reported as captured.
+    pub fn captured_branch(&self) -> Option<&str> {
+        match self.branch_provenance {
+            BranchProvenance::Captured => self.branch.as_deref(),
+            BranchProvenance::Inferred => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1177,7 +1215,12 @@ fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
         .collect::<BTreeSet<_>>();
     let sources = spans
         .iter()
-        .map(|span| format!("{:?}", span.source).to_ascii_lowercase())
+        .flat_map(|span| {
+            let inferred = (span.branch_provenance == BranchProvenance::Inferred)
+                .then_some(SpanSource::Backfill);
+            std::iter::once(span.source).chain(inferred)
+        })
+        .map(|source| format!("{source:?}").to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     SessionGitCorrelationHit {
         provider: providers

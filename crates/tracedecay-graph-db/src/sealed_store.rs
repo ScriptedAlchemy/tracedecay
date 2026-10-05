@@ -69,8 +69,8 @@ use crate::schema::{
     relation_type_for_kind,
 };
 use crate::sealed_layer::{
-    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
-    LayeredReads, SealedBaseFilesV1, SealedBaseReceiptV1, SealedLayer,
+    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, GraphSiblingSealedBaseV1,
+    LayeredGraphGeneration, LayeredReads, SealedBaseFilesV1, SealedBaseReceiptV1, SealedLayer,
 };
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation_by_locator_cached,
@@ -1449,6 +1449,54 @@ impl GraphDb {
         base: GraphSealedBaseV1,
     ) -> Result<GraphLayeredRowSpill, GraphDbError> {
         GraphLayeredRowSpill::create(self.row_spill_directory()?, projection, base)
+    }
+
+    /// The cold bases a first generation of `projection` may layer over:
+    /// every flat sealed generation of the same projector this store has
+    /// installed for another scope. Linked worktrees share one store, so a
+    /// worktree at its sibling's tree finds that sibling's graph here.
+    pub(crate) fn sibling_sealed_bases(
+        &self,
+        projection: &GraphProjectionIdentity,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Vec<GraphSiblingSealedBaseV1>, GraphDbError> {
+        let siblings = self
+            .inner
+            .sealed_generations
+            .read()
+            .map_err(|_| GraphDbError::unavailable("sealed generation map lock is poisoned"))?
+            .iter()
+            .filter(|(locator, store)| {
+                locator.projection.projection == projection.projection
+                    && locator.projection.namespace != projection.namespace
+                    && store.layer.is_none()
+            })
+            .map(|(_, store)| Arc::clone(store))
+            .collect::<Vec<_>>();
+        let mut bases = Vec::new();
+        for store in siblings {
+            if let Ok(base) = store.sealed_base(check)? {
+                bases.push(GraphSiblingSealedBaseV1 {
+                    base,
+                    engine: Arc::clone(&store.database),
+                });
+            }
+        }
+        Ok(bases)
+    }
+
+    /// A row spill for a delta of `projection` over a sibling scope's base.
+    pub(crate) fn sibling_layered_row_spill(
+        &self,
+        projection: GraphProjectionIdentity,
+        sibling: GraphSiblingSealedBaseV1,
+    ) -> Result<GraphLayeredRowSpill, GraphDbError> {
+        GraphLayeredRowSpill::create_over_sibling(
+            self.row_spill_directory()?,
+            projection,
+            sibling.base,
+            sibling.engine,
+        )
     }
 
     /// Opens an existing sealed store for `identity` without building one.

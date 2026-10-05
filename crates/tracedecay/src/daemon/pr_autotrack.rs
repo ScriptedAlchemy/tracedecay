@@ -108,9 +108,7 @@ impl<'a> PrStoreAdministration<'a> {
 /// 100 open PRs ramps up gradually instead of forking 100 syncs at once.
 const MAX_NEW_TRACKS_PER_CYCLE: usize = 10;
 
-// ---------------------------------------------------------------------------
 // Lifecycle reconciliation
-// ---------------------------------------------------------------------------
 
 /// Logs a `pr_autotrack` "skipped" daemon event with the optional branch label
 /// and PR number. Every skip path (persistence failure, track failure, fork,

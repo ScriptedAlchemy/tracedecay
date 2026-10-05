@@ -286,7 +286,8 @@ pub use search_surface::{
     SearchDisplayUnavailableV1, SearchExternalImportCandidatesV1, SearchExternalImportHintV1,
     SearchExternalImportV1, SearchLaneStateV1, SearchLaneStatusV1, SearchLexicalAliasV1,
     SearchLexicalAlternativeReasonV1, SearchLexicalFieldFilterV1, SearchLexicalFieldV1,
-    SearchLexicalProximityV1, SearchLexicalRouteV1, SearchResultDisplayV1, SearchResultRowV1,
+    SearchLexicalProximityV1, SearchLexicalRouteV1, SearchQueryRouteDeciderV1,
+    SearchQueryRouteKindV1, SearchQueryRouteV1, SearchResultDisplayV1, SearchResultRowV1,
     SearchResultV1, SearchRouteMatchV1, SearchSpellingVariantV1, SearchSurfaceRequestV1,
     SearchUnavailableV1,
 };

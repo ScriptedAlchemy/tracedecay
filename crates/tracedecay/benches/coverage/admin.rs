@@ -1500,12 +1500,14 @@ fn wt_inspection_prime(ctx: &QueryContext, iter: u64) -> Vec<PrimeStep> {
 /// inspection digest, confirm mints the confirmation digest + timestamp the
 /// downstream reconcile/remove calls consume.
 fn wt_cleanup_primes(_ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
-    let claim = json!({
+    let mut claim = json!({
         "scope_set_id": "{{wt_scope_set_id}}",
         "scope_set_revision": "{{wt_scope_set_revision}}",
         "scope_set_digest": "{{wt_scope_set_digest}}",
         "target": "{{wt_target}}",
     });
+    // Application surfaces default to markdown; the prime chain parses JSON.
+    claim["format"] = json!("json");
     let mut confirm_args = claim.clone();
     confirm_args["inspection_digest"] = json!("{{wt_inspection_digest}}");
     vec![

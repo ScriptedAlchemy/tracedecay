@@ -92,13 +92,14 @@ impl SealedBaseReceiptV1 {
         &self,
         projection: &GraphProjectionIdentity,
     ) -> Result<GraphGenerationManifestIdentity, GraphDbError> {
-        Ok(GraphGenerationManifestIdentity::new(
+        GraphGenerationManifestIdentity::new(
             projection.clone(),
             GraphGenerationId::new(self.generation.clone())?,
             SourceGeneration::new(self.source_generation.clone())?,
             GraphWatermark::new(self.watermark.clone())?,
             Vec::new(),
-        ))
+        )
+        .stored_under(GraphNamespace::new(self.physical_namespace.clone())?)
     }
 }
 
@@ -286,6 +287,64 @@ impl GraphSealedBaseV1 {
         }))
     }
 
+    /// This base as `projection` reads it: the same stored rows, with each
+    /// relation's endpoints under `projection`, which changes its frame.
+    /// `engine` serves the base's proven rows; their relation lanes under
+    /// `projection` replace those of the index pinned in `directory`, and
+    /// the row sum and digest follow from it, exactly what a cold build of
+    /// these rows under `projection` records. Only the pinned files are
+    /// read, so the sibling may retire its own meanwhile.
+    fn reattested(
+        &self,
+        projection: &GraphProjectionIdentity,
+        engine: &GraphDb,
+        directory: &Path,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Self, GraphDbError> {
+        let base = &self.inner;
+        let index_path = directory.join(LAYERED_BASE_ROW_INDEX_FILE);
+        let entity_rows = directory.join(LAYERED_BASE_ENTITY_ROWS_FILE);
+        let identity = GraphGenerationManifestIdentity::new(
+            projection.clone(),
+            base.identity.generation.clone(),
+            base.identity.source_generation.clone(),
+            base.identity.watermark.clone(),
+            Vec::new(),
+        )
+        .stored_under(base.physical_namespace.clone())?;
+        let staged = index_path.with_extension("reattested");
+        let relaned = RowIndex::open(&index_path)?.write_relaned(&staged, |emit| {
+            engine.read_intact(&NeverCancelled, |native| {
+                crate::generation::recovered_relation_lanes(native, &identity, check, emit)
+            })
+        });
+        let _ = engine.hibernate_if_lazy_when_idle();
+        relaned?;
+        std::fs::rename(&staged, &index_path)
+            .map_err(|error| layered_io("reattested row index install", error))?;
+        let index = RowIndex::open(&index_path)?;
+        let row_sum = index.row_sum(check)?;
+        let recovered_digest = recovered_digest_from_row_sum(&identity, row_sum, check)?;
+        Ok(Self {
+            inner: Arc::new(SealedBaseInner {
+                physical_namespace: base.physical_namespace.clone(),
+                recovered_digest: recovered_digest.as_str().to_owned(),
+                entities: base.entities,
+                relations: base.relations,
+                row_sum,
+                container: base.container.clone(),
+                attachment: base.attachment.clone(),
+                index,
+                entity_row_offsets: EntityRowOffsets::open(
+                    &directory.join(LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE),
+                    &entity_rows,
+                )?,
+                entity_rows,
+                identity,
+            }),
+        })
+    }
+
     /// The base's graph generation.
     #[must_use]
     pub fn generation(&self) -> &GraphGenerationId {
@@ -312,6 +371,31 @@ fn generation_relation(
     )
 }
 
+/// A sealed cold generation of the same projector that another scope of
+/// this graph store serves, with the engine serving it: a linked worktree's
+/// candidate base.
+pub struct GraphSiblingSealedBaseV1 {
+    pub(crate) base: GraphSealedBaseV1,
+    pub(crate) engine: Arc<GraphDb>,
+}
+
+impl std::fmt::Debug for GraphSiblingSealedBaseV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphSiblingSealedBaseV1")
+            .field("base", &self.base)
+            .field("namespace", &self.base.inner.identity.projection.namespace)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GraphSiblingSealedBaseV1 {
+    #[must_use]
+    pub fn base(&self) -> &GraphSealedBaseV1 {
+        &self.base
+    }
+}
+
 /// Rows a refresh changes relative to a sealed base, spilled like a cold
 /// generation's rows, plus the base identities it removes.
 ///
@@ -321,6 +405,9 @@ fn generation_relation(
 pub struct GraphLayeredRowSpill {
     spill: GraphGenerationRowSpill,
     base: GraphSealedBaseV1,
+    /// The engine serving a sibling scope's base, whose relations the
+    /// finished layer re-attests under its own projection.
+    sibling: Option<Arc<GraphDb>>,
     hidden_entities: BTreeSet<GraphEntityId>,
     hidden_relations: BTreeSet<GraphRelationId>,
 }
@@ -347,6 +434,35 @@ impl GraphLayeredRowSpill {
                 "a layered generation names a projection its base does not serve",
             ));
         }
+        Self::pin(directory, projection, base, None)
+    }
+
+    /// A delta of `projection` over `base`, a generation another scope of
+    /// the same projector sealed and `engine` serves: a linked worktree at
+    /// the same tree layers over its sibling's graph instead of sealing the
+    /// same rows again.
+    pub(crate) fn create_over_sibling(
+        directory: PathBuf,
+        projection: GraphProjectionIdentity,
+        base: GraphSealedBaseV1,
+        engine: Arc<GraphDb>,
+    ) -> Result<Self, GraphDbError> {
+        if projection.projection != base.inner.identity.projection.projection
+            || projection.namespace == base.inner.identity.projection.namespace
+        {
+            return Err(GraphDbError::invalid(
+                "a sibling base must serve the same projector under another namespace",
+            ));
+        }
+        Self::pin(directory, projection, base, Some(engine))
+    }
+
+    fn pin(
+        directory: PathBuf,
+        projection: GraphProjectionIdentity,
+        base: GraphSealedBaseV1,
+        sibling: Option<Arc<GraphDb>>,
+    ) -> Result<Self, GraphDbError> {
         let spill = GraphGenerationRowSpill::create_layered(directory, projection)?;
         let pinned_container = spill.directory().join(LAYERED_BASE_CONTAINER_FILE);
         std::fs::hard_link(&base.inner.container, &pinned_container)
@@ -380,6 +496,7 @@ impl GraphLayeredRowSpill {
         Ok(Self {
             spill,
             base,
+            sibling,
             hidden_entities: BTreeSet::new(),
             hidden_relations: BTreeSet::new(),
         })
@@ -492,6 +609,14 @@ impl GraphLayeredRowSpill {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<LayeredGraphGeneration, GraphDbError> {
         check()?;
+        if let Some(engine) = self.sibling.take() {
+            self.base = self.base.reattested(
+                &identity.projection,
+                &engine,
+                self.spill.directory(),
+                check,
+            )?;
+        }
         if identity.projection != self.base.inner.identity.projection {
             return Err(GraphDbError::invalid(
                 "a layered generation names a projection its base does not serve",
@@ -505,6 +630,7 @@ impl GraphLayeredRowSpill {
         let Self {
             spill,
             base,
+            sibling: _,
             hidden_entities,
             hidden_relations,
         } = self;

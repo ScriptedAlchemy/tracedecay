@@ -103,6 +103,7 @@ fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchO
                 anchors: Vec::new(),
                 dropped_sites: std::collections::BTreeMap::new(),
                 declaring_sites: std::collections::BTreeSet::new(),
+                decision: tracedecay_query::retrieval::lexical::LexicalRouteDecisionV1::default(),
             },
         },
     )

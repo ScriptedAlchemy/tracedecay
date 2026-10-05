@@ -292,13 +292,26 @@ impl RowIndex {
         count: u64,
         key: RowKey,
     ) -> Result<Option<(RowLanes, u32, u32)>, GraphDbError> {
+        Ok(self
+            .position(first, count, key)?
+            .map(|(_, lanes, first_word, second_word)| (lanes, first_word, second_word)))
+    }
+
+    fn position(
+        &self,
+        first: u64,
+        count: u64,
+        key: RowKey,
+    ) -> Result<Option<(u64, RowLanes, u32, u32)>, GraphDbError> {
         let (mut low, mut high) = (0_u64, count);
         while low < high {
             let middle = low + (high - low) / 2;
             let (found, lanes, first_word, second_word) =
                 record_parts(&self.record(first + middle)?);
             match found.cmp(&key) {
-                std::cmp::Ordering::Equal => return Ok(Some((lanes, first_word, second_word))),
+                std::cmp::Ordering::Equal => {
+                    return Ok(Some((first + middle, lanes, first_word, second_word)));
+                }
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
             }
@@ -320,6 +333,50 @@ impl RowIndex {
         Ok(self
             .find(self.entities, self.relations, row_key("relation", identity))?
             .map(|(lanes, from, to)| IndexedRelation { lanes, from, to }))
+    }
+
+    /// Writes this index to `path` with every relation's lanes replaced by
+    /// the lanes `relane` emits for it, entity records and endpoint ordinals
+    /// unchanged: the index of the same rows read under another projection.
+    /// `relane` streams each recorded relation exactly once, in strictly
+    /// increasing identity order, so only one record is resident at a time.
+    pub(crate) fn write_relaned(
+        &self,
+        path: &Path,
+        relane: impl FnOnce(
+            &mut dyn FnMut(&str, RowLanes) -> Result<(), GraphDbError>,
+        ) -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        std::fs::copy(&self.path, path).map_err(|error| index_io("copy", error))?;
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| index_io("open", error))?;
+        let mut relaned = 0_u64;
+        let mut previous: Option<String> = None;
+        relane(&mut |identity, lanes| {
+            if previous.as_deref().is_some_and(|last| last >= identity) {
+                return Err(corrupt("relanes relations out of identity order"));
+            }
+            previous = Some(identity.to_owned());
+            let Some((position, ..)) =
+                self.position(self.entities, self.relations, row_key("relation", identity))?
+            else {
+                return Err(corrupt("relanes a relation it does not record"));
+            };
+            target
+                .seek(SeekFrom::Start(HEADER_BYTES + position * RECORD_BYTES + 16))
+                .map_err(|error| index_io("seek", error))?;
+            target
+                .write_all(&lanes_bytes(lanes))
+                .map_err(|error| index_io("write", error))?;
+            relaned += 1;
+            Ok(())
+        })?;
+        if relaned != self.relations {
+            return Err(corrupt("relanes a different relation set than it records"));
+        }
+        target.sync_all().map_err(|error| index_io("sync", error))
     }
 
     /// The sum of every recorded row: equal to the generation's row sum

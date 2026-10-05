@@ -386,9 +386,7 @@ impl AgentIntegration for DroidIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Host-CLI-driven MCP registry lifecycle
-// ---------------------------------------------------------------------------
 
 /// Resolve Droid's own CLI, or fail with the typed requirement. Droid owns
 /// `~/.factory/mcp.json` through `droid mcp`; its CLI is a hard requirement
@@ -488,9 +486,7 @@ fn droid_mcp_remove_with(droid_cli: &Path, home: &Path) -> Result<()> {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 /// True when a registered server's `args` array carries every argument in
 /// [`MCP_SERVER_ARGS`]. Binding the doctor's expectation to the same constant
