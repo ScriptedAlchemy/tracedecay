@@ -480,9 +480,7 @@ impl NixExtractor {
         }
     }
 
-    // ----------------------------
     // Classification helpers
-    // ----------------------------
 
     /// Classify a binding's value expression.
     fn classify_expression(node: TsNode<'_>) -> BindingKind {
@@ -690,9 +688,7 @@ impl NixExtractor {
         }
     }
 
-    // ----------------------------
     // Name/signature extraction
-    // ----------------------------
 
     /// Extract the name from a binding's attrpath.
     fn extract_binding_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {

@@ -142,9 +142,7 @@ impl AgentIntegration for KiloIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     doctor_check_mcp_registration(
