@@ -401,6 +401,7 @@ pub fn project_code_index_generation_census_reader(
                                 source_total_bytes: statistics.source_total_bytes,
                                 symbol_count: statistics.symbol_count,
                                 edge_count: statistics.edge_count,
+                                ambiguous_name_drops: statistics.ambiguous_name_drops,
                             },
                     }
                 }

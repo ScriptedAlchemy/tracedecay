@@ -206,6 +206,16 @@ pub struct AffectedResultV1 {
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
 }
 
+/// A file that shares commits with one changed file and is outside the diff.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoChangePartnerV1 {
+    pub file: String,
+    pub partner: String,
+    /// Commits in the measured window that contain both `file` and `partner`.
+    pub together: usize,
+}
+
 /// A verified-graph symbol a git-context read reports.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +241,21 @@ pub struct DiffContextResultV1 {
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    /// Partners that share at least three commits with a changed file in the
+    /// last 18 months and are not part of this diff. At most eight. Omitted
+    /// when history has none, so a diff with no partners keeps its old shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_change_partners: Vec<CoChangePartnerV1>,
+}
+
+impl DiffContextResultV1 {
+    pub fn co_change_partner(file: String, partner: String, together: usize) -> CoChangePartnerV1 {
+        CoChangePartnerV1 {
+            file,
+            partner,
+            together,
+        }
+    }
 }
 
 /// A symbol the exact base/head branch-generation comparison reports.
