@@ -312,7 +312,7 @@ impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
 impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for DaemonFeedbackNoticeDeliveryPort<'_>
 {
-    fn deliver_hook_v2<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
         feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
@@ -381,7 +381,7 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
 impl AsyncHookFeedbackDeliveryPortV1<ContextScoutDeliveryReceiptHookV1>
     for DaemonDeliveryReceiptPort<'_>
 {
-    fn deliver_hook_v2<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
         feedback: &'a ContextScoutDeliveryReceiptHookV1,

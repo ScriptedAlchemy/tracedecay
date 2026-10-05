@@ -158,13 +158,11 @@ function isTaggedUnion(schema: JsonSchema): boolean {
   return schema.oneOf.every((v) => discriminantOf(v) !== null);
 }
 
-// ---------------------------------------------------------------------------
 // Type/decoder resolution for a single (possibly nested) schema.
 // Returns the structural type, the decoder expression, and a shallow
 // annotation so checkers do not infer the expression.
 // `generic` supplies the payload param name + schema identifier when inside a
 // generic type (DashboardEnvelope<TPayload>).
-// ---------------------------------------------------------------------------
 
 interface ResolveCtx {
   genericParam?: string;
@@ -366,9 +364,7 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   return { ts, zod, ann };
 }
 
-// ---------------------------------------------------------------------------
 // Tagged union: discriminated + exhaustive.
-// ---------------------------------------------------------------------------
 
 function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   const variants = (schema.oneOf ?? [])
@@ -391,9 +387,7 @@ function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   return { ts, zod, ann: "" };
 }
 
-// ---------------------------------------------------------------------------
 // Named def emission.
-// ---------------------------------------------------------------------------
 
 interface EmittedDef {
   typeName: string;
@@ -447,9 +441,7 @@ function emitAlias(desc: string, name: string, ann: string, zod: string, ts: str
   };
 }
 
-// ---------------------------------------------------------------------------
 // Bundle -> files.
-// ---------------------------------------------------------------------------
 
 export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   const defs: Array<[string, JsonSchema]> = [];

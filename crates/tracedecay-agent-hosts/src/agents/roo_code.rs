@@ -118,9 +118,7 @@ impl AgentIntegration for RooCodeIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = roo_settings_path(home);
