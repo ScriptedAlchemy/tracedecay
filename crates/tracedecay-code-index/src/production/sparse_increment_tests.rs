@@ -462,3 +462,97 @@ fn a_large_change_builds_cold() {
         Some(CodeIndexColdBuildReasonV1::ChangedShare)
     );
 }
+
+fn ambiguous_rust_tree<'a>(main: &'a str, b: &'a str) -> Vec<(&'a str, &'a str, &'a str)> {
+    let mut tree = rust_tree(UTIL, main);
+    tree[0].2 = "pub mod main; pub mod util; pub mod a;";
+    tree[4].2 = "pub fn choice() -> u32 { 1 }";
+    tree[5] = ("src/a/mod.rs", RUST, b);
+    tree
+}
+
+const AMBIGUOUS_CALL: &str = "mod a; pub fn run() -> u32 { crate::a::choice() }";
+const NO_AMBIGUOUS_CALL: &str = "mod a; pub fn run() -> u32 { 0 }";
+
+#[test]
+fn ambiguity_census_tracks_edited_references() {
+    let empty = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let called = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let added = assert_sparse_matches_cold(&empty, &called);
+    assert_eq!(
+        added
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(1)
+    );
+    let removed = assert_sparse_matches_cold(&called, &empty);
+    assert_eq!(
+        removed
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(0)
+    );
+}
+
+#[test]
+fn ambiguity_census_tracks_carried_references() {
+    let unique = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn different() -> u32 { 2 }");
+    let ambiguous = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let added = assert_sparse_matches_cold(&unique, &ambiguous);
+    assert_eq!(
+        added
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(1)
+    );
+    let removed = assert_sparse_matches_cold(&ambiguous, &unique);
+    assert_eq!(
+        removed
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(0)
+    );
+}
+
+#[test]
+fn ambiguity_census_preserves_unknown_parent_count() {
+    let mut store = MemorySealedPublicationStoreV1::default();
+    let before = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let initial = publish(&mut owner(&store), &before, 1_100_000);
+    let mut legacy = store
+        .decode_active(&scope())
+        .expect("decode")
+        .expect("active");
+    assert_eq!(legacy.statistics.ambiguous_name_drops, Some(1));
+    let mut statistics = serde_json::to_value(&legacy.statistics).expect("statistics encode");
+    statistics
+        .as_object_mut()
+        .expect("statistics object")
+        .remove("ambiguous_name_drops");
+    legacy.statistics = serde_json::from_value(statistics).expect("legacy statistics decode");
+    store
+        .publish_atomically(
+            &scope(),
+            Some(&initial.manifest().generation_id),
+            &CodeIndexSealedPublicationV1::Cold(
+                Arc::new(legacy),
+                CodeIndexColdBuildReasonV1::NoParent,
+            ),
+        )
+        .expect("legacy publication");
+    let after = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let sparse = publish(&mut owner(&store), &after, 1_200_000);
+    assert_eq!(sparse.cold_reason(), None);
+    assert_eq!(
+        sparse
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        None
+    );
+    assert_eq!(answers(&store).statistics.ambiguous_name_drops, None);
+}

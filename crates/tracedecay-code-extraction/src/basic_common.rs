@@ -6,6 +6,9 @@
 
 use tree_sitter::Node as TsNode;
 
+use crate::common::ExtractionState;
+use crate::traversal::find_direct_child_by_kind;
+
 /// Represents a collected line from the BASIC program for subroutine synthesis.
 pub(crate) struct BasicLine<'a> {
     /// The `line` AST node.
@@ -16,6 +19,45 @@ pub(crate) struct BasicLine<'a> {
     pub(crate) statement_kind: String,
     /// The text of the REM comment, if this line is a REM.
     pub(crate) comment_text: Option<String>,
+}
+
+/// Parse a single `line` node into a `BasicLine` struct.
+pub(crate) fn parse_line<'a>(state: &ExtractionState, node: TsNode<'a>) -> Option<BasicLine<'a>> {
+    let line_number_node = find_direct_child_by_kind(node, "line_number")?;
+    let line_number_text = state.node_text(line_number_node);
+    let line_number: u32 = line_number_text.trim().parse().unwrap_or(0);
+
+    // Navigate: line -> statement_list -> statement -> specific_kind
+    let statement_list = find_direct_child_by_kind(node, "statement_list")?;
+    let statement = find_direct_child_by_kind(statement_list, "statement")?;
+
+    let mut stmt_cursor = statement.walk();
+    let mut statement_kind = String::new();
+    let mut comment_text = None;
+    if stmt_cursor.goto_first_child() {
+        let child = stmt_cursor.node();
+        statement_kind = child.kind().to_string();
+        if child.kind() == "comment" {
+            let text = state.node_text(child);
+            // Strip a leading "REM" keyword (case-insensitive) when present.
+            // Content-checked so non-ASCII text never lands the byte cut
+            // inside a multi-byte character.
+            let stripped = text
+                .get(..3)
+                .filter(|p| p.eq_ignore_ascii_case("REM"))
+                .map_or(text, |_| &text[3..])
+                .trim()
+                .to_string();
+            comment_text = Some(stripped);
+        }
+    }
+
+    Some(BasicLine {
+        node,
+        line_number,
+        statement_kind,
+        comment_text,
+    })
 }
 
 /// Find ranges of lines that belong to subroutines (REM ... RETURN blocks).

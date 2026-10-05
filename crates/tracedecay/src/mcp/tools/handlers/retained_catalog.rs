@@ -7,14 +7,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_tool_catalog::{BindingSurface, ProfileId, SurfaceOperationName};
 
-use tracedecay_contracts::catalog_composition::{
-    ApplicationCatalogComposition, compose_application_catalog,
-};
+use tracedecay_contracts::catalog_composition::application_catalog_snapshot;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-static RETAINED_MCP_COMPOSITION: OnceLock<
-    std::result::Result<ApplicationCatalogComposition<()>, String>,
-> = OnceLock::new();
 const RETAINED_OPERATION_COUNT: usize = RetainedSurfaceOperation::ALL.len();
 type RetainedMcpBindingCache =
     [OnceLock<std::result::Result<RetainedMcpBindingContract, String>>; RETAINED_OPERATION_COUNT];
@@ -37,23 +32,15 @@ fn retained_catalog_error(error: impl std::fmt::Display) -> TraceDecayError {
     }
 }
 
-fn retained_mcp_composition() -> Result<&'static ApplicationCatalogComposition<()>> {
-    RETAINED_MCP_COMPOSITION
-        .get_or_init(|| compose_application_catalog(()).map_err(|error| error.to_string()))
-        .as_ref()
-        .map_err(retained_catalog_error)
-}
-
 fn resolve_retained_mcp_binding(
     operation: RetainedSurfaceOperation,
 ) -> Result<RetainedMcpBindingContract> {
-    let composition = retained_mcp_composition()?;
+    let catalog = application_catalog_snapshot().map_err(retained_catalog_error)?;
     let profile_id =
         ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(retained_catalog_error)?;
     let operation_name =
         SurfaceOperationName::new(operation.as_str()).map_err(retained_catalog_error)?;
-    let capability = composition
-        .snapshot()
+    let capability = catalog
         .resolve_binding(
             &profile_id,
             BindingSurface::Mcp,

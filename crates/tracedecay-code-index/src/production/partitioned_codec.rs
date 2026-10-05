@@ -2782,6 +2782,7 @@ impl CodeIndexPublishedGenerationV1 {
                 projection_receipt,
                 cross_file_edges,
                 unresolved_calls,
+                ambiguous_name_drops: generation.statistics.ambiguous_name_drops,
             },
             probe,
         )
