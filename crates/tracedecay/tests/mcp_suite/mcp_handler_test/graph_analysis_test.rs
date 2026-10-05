@@ -5372,7 +5372,7 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     assert_eq!(
         body_text(&chain_markdown),
         format!(
-            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n  **churn:** 1\n"
+            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **churn:** 1\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
         )
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());
