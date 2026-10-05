@@ -105,6 +105,10 @@ pub struct HotspotV1 {
     pub incoming: u64,
     pub outgoing: u64,
     pub total: u64,
+    /// Commits touching `file` in the last 90 days. Absent when git history
+    /// could not be read; `0` means the file had no commits in that window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub churn: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -112,6 +116,10 @@ pub struct HotspotV1 {
 pub struct HotspotsResultV1 {
     pub hotspot_count: u64,
     pub hotspots: Vec<HotspotV1>,
+    /// Names a measurement this result could not make. `churn` means the
+    /// ranking is connectivity alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_fields: Vec<String>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,

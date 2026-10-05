@@ -462,3 +462,149 @@ fn a_large_change_builds_cold() {
         Some(CodeIndexColdBuildReasonV1::ChangedShare)
     );
 }
+
+fn ambiguous_rust_tree<'a>(main: &'a str, b: &'a str) -> Vec<(&'a str, &'a str, &'a str)> {
+    let mut tree = rust_tree(UTIL, main);
+    tree[0].2 = "pub mod main; pub mod util; pub mod a;";
+    tree[4].2 = "pub fn choice() -> u32 { 1 }";
+    tree[5] = ("src/a/mod.rs", RUST, b);
+    tree
+}
+
+const AMBIGUOUS_CALL: &str = "mod a; pub fn run() -> u32 { crate::a::choice() }";
+const NO_AMBIGUOUS_CALL: &str = "mod a; pub fn run() -> u32 { 0 }";
+
+#[test]
+fn ambiguity_census_tracks_edited_references() {
+    let empty = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let called = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let added = assert_sparse_matches_cold(&empty, &called);
+    assert_eq!(
+        added
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(1)
+    );
+    let removed = assert_sparse_matches_cold(&called, &empty);
+    assert_eq!(
+        removed
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(0)
+    );
+}
+
+#[test]
+fn ambiguity_census_tracks_carried_references() {
+    let unique = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn different() -> u32 { 2 }");
+    let ambiguous = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let added = assert_sparse_matches_cold(&unique, &ambiguous);
+    assert_eq!(
+        added
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(1)
+    );
+    let removed = assert_sparse_matches_cold(&ambiguous, &unique);
+    assert_eq!(
+        removed
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        Some(0)
+    );
+}
+
+#[test]
+fn ambiguity_census_preserves_unknown_parent_count() {
+    let mut store = MemorySealedPublicationStoreV1::default();
+    let before = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let initial = publish(&mut owner(&store), &before, 1_100_000);
+    let mut legacy = store
+        .decode_active(&scope())
+        .expect("decode")
+        .expect("active");
+    assert_eq!(legacy.statistics.ambiguous_name_drops, Some(1));
+    let mut statistics = serde_json::to_value(&legacy.statistics).expect("statistics encode");
+    statistics
+        .as_object_mut()
+        .expect("statistics object")
+        .remove("ambiguous_name_drops");
+    legacy.statistics = serde_json::from_value(statistics).expect("legacy statistics decode");
+    store
+        .publish_atomically(
+            &scope(),
+            Some(&initial.manifest().generation_id),
+            &CodeIndexSealedPublicationV1::Cold(
+                Arc::new(legacy),
+                CodeIndexColdBuildReasonV1::NoParent,
+            ),
+        )
+        .expect("legacy publication");
+    let after = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
+    let sparse = publish(&mut owner(&store), &after, 1_200_000);
+    assert_eq!(sparse.cold_reason(), None);
+    assert_eq!(
+        sparse
+            .metadata()
+            .generation_statistics()
+            .ambiguous_name_drops,
+        None
+    );
+    assert_eq!(answers(&store).statistics.ambiguous_name_drops, None);
+}
+
+#[test]
+fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
+    let clear =
+        "import { scale } from './lib';\nexport function clear(): number { return scale(1); }\n";
+    let shadowed = "import { scale } from './lib';\ndescribe('scope', () => {\n  function scale(x: number) { return x; }\n  function scale(x: number) { return x + 1; }\n  it('shadowed', () => { scale(1); });\n});\nexport function clear(): number { return scale(1); }\n";
+    let tree = |app| {
+        vec![
+            ("web/app.ts", "typescript", app),
+            (
+                "web/lib.ts",
+                "typescript",
+                "export function scale(x: number) { return x * 2; }\n",
+            ),
+            ("web/a.ts", "typescript", "export const a = 1;\n"),
+            ("web/b.ts", "typescript", "export const b = 1;\n"),
+            ("web/c.ts", "typescript", "export const c = 1;\n"),
+            ("web/d.ts", "typescript", "export const d = 1;\n"),
+            ("web/e.ts", "typescript", "export const e = 1;\n"),
+            ("web/f.ts", "typescript", "export const f = 1;\n"),
+            ("web/g.ts", "typescript", "export const g = 1;\n"),
+        ]
+    };
+    assert_sparse_matches_cold(&tree(clear), &tree(shadowed));
+    assert_sparse_matches_cold(&tree(shadowed), &tree(clear));
+
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    publish(&mut incremental, &tree(clear), 1_100_000);
+    for (app, expected_gaps, sealed_at) in [(shadowed, 1, 1_200_000), (clear, 0, 1_300_000)] {
+        let successor = publish(&mut incremental, &tree(app), sealed_at);
+        assert_eq!(successor.cold_reason(), None);
+        let restored = answers(&store);
+        assert_eq!(restored.statistics.ambiguous_name_drops, Some(0));
+        assert_eq!(
+            restored
+                .unresolved_calls
+                .iter()
+                .filter(|call| call.ambiguous_local && call.reference_name == "scale")
+                .count(),
+            expected_gaps
+        );
+        assert_eq!(
+            restored
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+                .count(),
+            1
+        );
+    }
+}

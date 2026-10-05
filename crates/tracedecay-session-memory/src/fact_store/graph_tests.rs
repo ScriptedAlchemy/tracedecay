@@ -101,7 +101,7 @@ fn source_watermark_observes_live_cancellation_inside_the_entity_loop() {
     };
 
     assert!(matches!(
-        source_watermark(&FactOwnerV1::Profile, &source, Some(&control)),
+        source_watermark(&FactOwnerV1::Profile, &source, None, Some(&control)),
         Err(FactStoreError::ReadCancelled)
     ));
     assert!(checks.load(Ordering::Acquire) > 4);

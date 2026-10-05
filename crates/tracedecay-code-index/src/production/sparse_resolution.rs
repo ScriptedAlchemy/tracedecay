@@ -366,6 +366,8 @@ pub(super) struct ResolvedFileV1 {
 /// The edit's resolution: every successor file whose evidence it re-decided.
 pub(super) struct SparseResolutionV1 {
     pub(super) files: BTreeMap<usize, ResolvedFileV1>,
+    pub(super) ambiguous_before: u64,
+    pub(super) ambiguous_after: u64,
 }
 
 /// Re-decide the sites the edited files can move. `files` is the successor's
@@ -379,6 +381,8 @@ pub(super) fn resolve_edit(
     index: &ResolutionIndexReaderV1<'_>,
     files: &[SparseFileV1<'_>],
     by_name: &SparseSymbolsByNameV1<'_>,
+    before_files: &[SparseFileV1<'_>],
+    before_by_name: &SparseSymbolsByNameV1<'_>,
     edited: &[(
         usize,
         Arc<FileGenerationArtifactsV1>,
@@ -494,7 +498,26 @@ pub(super) fn resolve_edit(
                 .flat_map(|(_, before, _)| before.artifacts.unresolved_references.iter().map(site)),
         )
         .collect::<HashSet<_>>();
-    let resolution = resolve_selected_cross_file_references(files, by_name, &selection)?;
+    let ambiguous_before = if parent.statistics().ambiguous_name_drops.is_some() {
+        let mut before_selection = selection
+            .iter()
+            .filter(|(file_index, _)| !edited_indices.contains(file_index))
+            .cloned()
+            .collect::<Vec<_>>();
+        before_selection.extend(edited.iter().map(|(file_index, before, _)| {
+            (
+                *file_index,
+                (0..before.artifacts.unresolved_references.len()).collect(),
+            )
+        }));
+        before_selection.sort_by_key(|(file_index, _)| *file_index);
+        resolve_selected_cross_file_references(before_files, before_by_name, &before_selection)?
+            .ambiguous_name_drops
+    } else {
+        0
+    };
+    let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
+    let ambiguous_after = resolved.ambiguous_name_drops;
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.
@@ -521,7 +544,7 @@ pub(super) fn resolve_edit(
         })
         .collect::<HashMap<_, _>>();
     let mut result = BTreeMap::<usize, ResolvedFileV1>::new();
-    for edge in resolution.edges {
+    for edge in resolved.edges {
         let owner = owner_of
             .get(&edge.from_occurrence)
             .ok_or_else(|| contract("a re-resolved edge leaves a file the edit did not select"))?;
@@ -617,7 +640,7 @@ pub(super) fn resolve_edit(
         &|| Ok(()),
     )
     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-    for call in rederived.into_iter().chain(resolution.gaps) {
+    for call in rederived.into_iter().chain(resolved.gaps) {
         let owner = owner_of
             .get(&call.from_occurrence)
             .ok_or_else(|| contract("a re-derived call limitation leaves the selection"))?;
@@ -631,5 +654,9 @@ pub(super) fn resolve_edit(
         entry.unresolved_calls.sort();
         entry.unresolved_calls.dedup();
     }
-    Ok(SparseResolutionV1 { files: result })
+    Ok(SparseResolutionV1 {
+        files: result,
+        ambiguous_before,
+        ambiguous_after,
+    })
 }

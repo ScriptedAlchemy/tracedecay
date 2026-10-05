@@ -403,3 +403,35 @@ fn locally_ambiguous_definitions_shadow_an_imported_name() {
     assert_eq!(graph.callers("py/pkg/lib.py::scale"), Vec::<String>::new());
     assert!(graph.callees_partial("py/pkg/app.py::total"));
 }
+
+#[test]
+fn go_ambiguous_local_calls_disclose_gaps_beside_bound_calls() {
+    let graph = sealed_graph_of(&[(
+        "go/units.go",
+        "package units\n\nfunc scale(x int) int { return x }\nfunc scale(x int) int { return x + 1 }\nfunc known(x int) int { return x * 2 }\nfunc total() int { return scale(1) + known(1) }\n",
+    )]);
+
+    assert_eq!(graph.callers("go/units.go::known"), ["go/units.go::total"]);
+    assert!(graph.callers_partial("go/units.go::scale"));
+    assert!(graph.callees_partial("go/units.go::total"));
+}
+
+#[test]
+fn typescript_ambiguous_local_calls_do_not_poison_imported_call_resolution() {
+    let shadowed = "describe('scope', () => {\n  function scale(x: number) { return x; }\n  function scale(x: number) { return x + 1; }\n  it('shadowed', () => { scale(1); });\n});\n";
+    let clear = "export function clear(): number { return scale(1); }\n";
+    for functions in [format!("{shadowed}{clear}"), format!("{clear}{shadowed}")] {
+        let app = format!("import {{ scale }} from './lib';\n{functions}");
+        let graph = sealed_graph_of(&[
+            (
+                "ts/lib.ts",
+                "export function scale(x: number) { return x * 2; }\n",
+            ),
+            ("ts/app.ts", &app),
+        ]);
+
+        assert_eq!(graph.callers("ts/lib.ts::scale"), ["ts/app.ts::clear"]);
+        assert!(graph.callees_partial("ts/app.ts::scope::shadowed"));
+        assert!(!graph.callees_partial("ts/app.ts::clear"));
+    }
+}

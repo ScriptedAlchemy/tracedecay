@@ -311,6 +311,7 @@ type EdgeEvidenceV1 = (
     Vec<CanonicalRelationEdgeV1>,
     Vec<CodeIndexEdgeAbstentionV1>,
     Vec<CodeIndexUnresolvedReferenceV1>,
+    u64,
 );
 
 /// `files`' edge evidence resolved whole, with the references the seal
@@ -324,9 +325,13 @@ where
     // Resolution's whole-set indexes are gone before the per-file copies are
     // made, and the one exact-capacity vector never regrows, so the peak is
     // the edges this returns plus one sort buffer.
-    let CrossFileResolutionV1 { edges, gaps } = resolve_cross_file_references(files)?;
+    let CrossFileResolutionV1 {
+        edges,
+        gaps,
+        ambiguous_name_drops,
+    } = resolve_cross_file_references(files)?;
     let (edges, abstentions) = edge_evidence(files, edges);
-    Ok((edges, abstentions, gaps))
+    Ok((edges, abstentions, gaps, ambiguous_name_drops))
 }
 
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
@@ -414,6 +419,7 @@ where
 pub(crate) struct CrossFileResolutionV1 {
     pub(crate) edges: Vec<CanonicalRelationEdgeV1>,
     pub(crate) gaps: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(crate) ambiguous_name_drops: u64,
 }
 
 /// `selection`'s references, or every retained reference, as `(file index,
@@ -500,6 +506,9 @@ where
         };
         resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
     })?;
+    let ambiguous_name_drops = per_file
+        .iter()
+        .fold(0_u64, |total, (_, _, drops)| total.saturating_add(*drops));
     // Satisfaction needs every Go method set, so only a whole-set pass
     // decides it, and only a file set with Go types builds the module index.
     let satisfaction = if selection.is_none()
@@ -515,12 +524,12 @@ where
     let mut edges = Vec::with_capacity(
         per_file
             .iter()
-            .map(|(edges, _)| edges.len())
+            .map(|(edges, _, _)| edges.len())
             .sum::<usize>()
             .saturating_add(satisfaction.edges.len()),
     );
     let mut gaps = satisfaction.gaps;
-    for (file_edges, file_gaps) in per_file {
+    for (file_edges, file_gaps, _) in per_file {
         edges.extend(file_edges);
         gaps.extend(file_gaps);
     }
@@ -532,7 +541,11 @@ where
             edges.dedup();
         }
     };
-    Ok(CrossFileResolutionV1 { edges, gaps })
+    Ok(CrossFileResolutionV1 {
+        edges,
+        gaps,
+        ambiguous_name_drops,
+    })
 }
 
 /// Retained call sites whose import binding names project code the seal
@@ -684,6 +697,7 @@ fn resolve_one_file_cross_file_references<T>(
 ) -> (
     Vec<CanonicalRelationEdgeV1>,
     Vec<CodeIndexUnresolvedReferenceV1>,
+    u64,
 )
 where
     T: ResolutionFileV1,
@@ -693,7 +707,8 @@ where
     let same_file_binds = is_module_import_language(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
-    let mut ambiguous = Vec::new();
+    let mut gaps = Vec::new();
+    let mut ambiguous_name_drops = 0_u64;
     let references = &files[index].as_ref().artifacts.unresolved_references;
     let every = picks.is_none().then(|| references.iter());
     let picked = picks.into_iter().flatten().map(|&pick| &references[pick]);
@@ -703,23 +718,36 @@ where
             reference.reference_name.as_str(),
             reference.kind,
             reference.argument_count,
+            reference.ambiguous_local,
         );
-        let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
+        let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
         } else {
             let resolved = {
                 let _span =
                     tracing::trace_span!("code_index.seal.reference_candidate_lookup").entered();
-                resolve_cross_file_reference(files, by_simple_name, modules, index, reference)
+                let mut ambiguous = false;
+                let resolved = resolve_cross_file_reference(
+                    files,
+                    by_simple_name,
+                    modules,
+                    index,
+                    reference,
+                    &mut ambiguous,
+                );
+                (resolved, ambiguous)
             };
             resolved_references.insert(cache_key, resolved.clone());
             resolved
         };
+        if ambiguous {
+            ambiguous_name_drops = ambiguous_name_drops.saturating_add(1);
+        }
         let (target_index, targets) = match resolved {
             Some(ReferenceResolutionV1::Bound(target_index, targets)) => (target_index, targets),
             Some(ReferenceResolutionV1::Ambiguous) => {
                 if reference.kind == RelationEdgeKindV1::Calls {
-                    ambiguous.push(reference.clone());
+                    gaps.push(reference.clone());
                 }
                 continue;
             }
@@ -736,7 +764,7 @@ where
             evidence_span: reference.evidence_span,
         }));
     }
-    (edges, ambiguous)
+    (edges, gaps, ambiguous_name_drops)
 }
 
 #[cfg(test)]
@@ -749,8 +777,10 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.replace(0))
 }
 
-type ResolvedReferenceCacheV1<'a> =
-    HashMap<(usize, &'a str, RelationEdgeKindV1, Option<u32>), Option<ReferenceResolutionV1>>;
+type ResolvedReferenceCacheV1<'a> = HashMap<
+    (usize, &'a str, RelationEdgeKindV1, Option<u32>, bool),
+    (Option<ReferenceResolutionV1>, bool),
+>;
 
 /// What one retained reference resolves to; `None` beside it is a reference
 /// with no cross-file binding.
@@ -768,6 +798,7 @@ fn resolve_cross_file_reference<T>(
     modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
+    ambiguous: &mut bool,
 ) -> Option<ReferenceResolutionV1>
 where
     T: ResolutionFileV1,
@@ -964,7 +995,10 @@ where
                 .collect::<Vec<_>>();
             match inherent.as_slice() {
                 [_] => inherent,
-                _ => return Some(ReferenceResolutionV1::Ambiguous),
+                _ => {
+                    *ambiguous = true;
+                    return Some(ReferenceResolutionV1::Ambiguous);
+                }
             }
         }
     };
