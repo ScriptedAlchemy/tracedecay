@@ -167,6 +167,23 @@ async fn prepare_repo(
         .map_err(|error| format!("resample {} after seeding: {error}", repo.name))?;
     ctx.seeds = seeds;
     let mut groups = build_queries(&ctx);
+    if small_fixture_enabled() {
+        groups.push(ToolGroup {
+            tool: "tracedecay_callees",
+            queries: vec![Query::prepared_read(
+                "fixture_callees",
+                "tracedecay_callees",
+                json!({"node_id": "{{live_node}}", "maximum_depth": 3}),
+                0,
+                |_ctx, _iteration| {
+                    vec![queries::prime_symbol(
+                        "src/report.ts::buildFixtureReport".to_owned(),
+                        &[("outcome.value.payload.items.0.node_id", "live_node")],
+                    )]
+                },
+            )],
+        });
+    }
     groups.extend(coverage::coverage_groups(&ctx));
     Ok(RepoBench {
         dir,
