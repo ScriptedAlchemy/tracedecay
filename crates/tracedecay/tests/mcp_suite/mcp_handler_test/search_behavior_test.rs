@@ -146,8 +146,6 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
         "{hit}"
     );
 
-    // Without `prefer_symbol` the name-shaped query takes the same symbol-name
-    // route on its shape alone and says so.
     let automatic = handle_real_server_tool_call(
         &server,
         "tracedecay_search",
