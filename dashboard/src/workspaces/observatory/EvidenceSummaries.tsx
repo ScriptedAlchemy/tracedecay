@@ -106,8 +106,6 @@ function Kicker({ children, tone }: { children: ReactNode; tone?: string }) {
   );
 }
 
-// Dimension bands (adoption, retrieval, budgets)
-
 function dimensionRows(
   dimensions: readonly PlanDimension[],
   anchors: ReadAnchors,
