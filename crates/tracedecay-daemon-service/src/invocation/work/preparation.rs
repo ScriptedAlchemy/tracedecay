@@ -82,21 +82,12 @@ pub(super) fn current_duplicate_adjudication_evidence(
 ) -> Result<tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1, ApplicationProblem> {
     let snapshot =
         current_work_product_snapshot(registered, context, capability, use_case, observed_at)?;
-    let topology_generation = match current_work_product_attempt_topology(
-        registered,
-        context,
-        capability,
-        use_case,
-        observed_at,
-    )? {
-        tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding) => {
-            tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
-                .map_err(|_| work_product_authority_unavailable())?
-        }
-        tracedecay_contracts::WorkAttemptTopologyStateV1::Absent => {
-            return Err(work_product_authority_unavailable());
-        }
-    };
+    let topology =
+        tracedecay_contracts::work_product::work_product_attempt_topology_binding(&snapshot)
+            .map_err(work_product_problem)?;
+    let topology_generation =
+        tracedecay_domain::WorkTopologyGenerationRefV1::new(topology.generation)
+            .map_err(|_| work_product_authority_unavailable())?;
     Ok(tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1 {
         work_generation: tracedecay_contracts::work_product_projection_generation(&snapshot)
             .map_err(work_product_problem)?,
