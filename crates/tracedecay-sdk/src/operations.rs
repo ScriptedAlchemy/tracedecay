@@ -1984,4 +1984,3 @@ pub mod workflow_validate_definition {
 typed_operation!(
     WorkflowValidateDefinition, workflow_validate_definition, "operation.workflow.validate_definition", OperationTransport::Http { route: "/application/workflow/validate-definition" }, "binding.http.workflow.validate_definition", EffectClass::Read, IdempotencyContract::NotRequired, SdkRequestIdControlV1::ServerMinted, SdkResultSemanticsV1::SchemaOnly, true, &[CancellationPoint::BeforeAdmission, CancellationPoint::BeforeRead, CancellationPoint::DuringRead], 30000, DeadlineBehavior::ReturnOperationReceipt, ReconciliationContract::NotRequired, ReceiptContract::Operation, &[TerminalState::Completed, TerminalState::Cancelled, TerminalState::TimedOut, TerminalState::Failed, TerminalState::Partial], "schema.workflow.validate_definition.result", 1
 );
-

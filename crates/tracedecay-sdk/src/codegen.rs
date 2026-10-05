@@ -1025,6 +1025,9 @@ fn render_rust_operations(
             revision = operation.result_schema.revision,
         );
     }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     Ok(out)
 }
 
