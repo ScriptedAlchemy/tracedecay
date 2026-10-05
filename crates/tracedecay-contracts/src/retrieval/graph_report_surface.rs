@@ -162,9 +162,13 @@ pub struct HealthWeightsV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthResultV1 {
-    /// Geometric mean of the dimensions, scaled to 0-10000.
+    /// Geometric mean of the dimensions, scaled to 0-10000. A breakdown of
+    /// `panel`, not a number to maximize.
     pub quality_signal: u32,
     pub files_analyzed: u64,
+    /// Dimension names, worst score first.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub panel: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<HealthDimensionsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

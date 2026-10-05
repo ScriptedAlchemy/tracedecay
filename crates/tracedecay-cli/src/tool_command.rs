@@ -1197,22 +1197,10 @@ fn seed_registry_context_path(tool_args: &mut Value, explicit_project: &Path) {
     }
 }
 
-/// The process outcome for a completed MCP tool result: `Ok` (exit 0) for a
-/// successful call, `Err` (nonzero exit) for one the daemon classified as an
-/// application failure.
-///
-/// `isError` is the daemon's own authoritative classification, set by
-/// `mark_semantic_tool_error` from either a handler's structural
-/// `with_semantic_error` marker or the rendered-payload failure heuristic, and
-/// is the same field an MCP client reads, so the CLI and MCP transports agree
-/// on what "this tool failed" means.
-///
-/// A *degraded but truthful* answer is deliberately not a failure: a partial
-/// coverage report, a warming generation, or an `unavailable` retrieval lane
-/// described inside an otherwise successful payload never carries `isError`, so
-/// it keeps exit 0. Only an outcome the daemon itself marked as failed changes
-/// the status, which mirrors what the typed application-surface path already
-/// does in [`print_cli_application_surface`].
+pub(crate) const TEST_GATE_REFUSAL: &str = "test_gate";
+
+pub(crate) const TEST_GATE_EXIT_CODE: u8 = 4;
+
 fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<()> {
     if let Some(wait) = result_value.pointer("/structuredContent/wait") {
         let wait: CodeIndexReadinessWaitOutcomeV1 = serde_json::from_value(wait.clone())?;
@@ -1238,6 +1226,29 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
                 Some(reason),
             ));
         }
+    }
+    if result_value
+        .pointer("/structuredContent/test_gate/verdict")
+        .and_then(Value::as_str)
+        == Some("fail")
+    {
+        let untested = result_value
+            .pointer("/structuredContent/test_gate/untested")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        std::io::stdout().flush()?;
+        return Err(TraceDecayError::tool_refused(
+            tool_name,
+            Some(TEST_GATE_REFUSAL.to_owned()),
+            Some(format!("untested blast radius: {untested}")),
+        ));
     }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
         return Ok(());
