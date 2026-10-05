@@ -1,15 +1,8 @@
-//! Coverage extension: per-tool query groups for the canonical catalog
-//! surface beyond the original ~25-tool bench slice, plus the seeded entity
-//! state those tools need (facts, configuration revisions, LCM sessions,
-//! code-query node identities, git preview inputs).
-//!
-//! Seeds are minted through the same producer calls the catalog sweep uses
-//! (tests/tool_sweep_suite): real `fact_store_add`, `configuration_set`, and
-//! `git_hunks` producers, never fabricated ids. A seed that cannot mint its
-//! state records `seeds.skipped` and its groups are omitted rather than
-//! measuring a degraded path.
+//! Stateful benchmark fixtures use canonical producer receipts. Setup failures
+//! remain visible in the finite audit rather than becoming success timings.
 
 mod admin;
+mod admin_fixture;
 mod code;
 mod effects;
 mod git;
@@ -17,6 +10,23 @@ mod graph;
 mod memory;
 mod session;
 mod work;
+pub(crate) use admin_fixture::verify_admin_fixture;
+
+pub(crate) use admin::{
+    verify_context_scout_fixture, verify_github_stack_signal_fixture, verify_native_fixture,
+};
+#[cfg(unix)]
+pub(crate) use code::prepare_source_reconciliation;
+pub(crate) use code::{verify_code_fixture_effect, verify_code_fixture_read};
+pub(crate) use effects::{configuration_effect_key, verify_configuration_effect};
+pub(crate) use git::verify_git_fixture;
+pub(crate) use graph::verify_fixture_read;
+pub(crate) use memory::{
+    configuration_read_prime, follow_fact_curate_completion, verify_fact_curate_admission,
+    verify_feedback_fixture, verify_memory_fixture,
+};
+pub(crate) use session::verify_session_fixture;
+pub(crate) use work::{verify_work_fixture, verify_work_read_fixture};
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -24,15 +34,40 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_application::stack_coordinator::{StackSignalDraftV1, StackSignalV1};
+use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillReadError, ManagedSkillSource,
+    ManagedSupportFile, ManagedSupportFileExt, create_managed_skill, default_managed_skill_targets,
+    load_managed_skill,
+};
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    append_run_record, write_run_artifact,
+};
+use tracedecay_contracts::git::{
+    GitHubStackSignalEvidenceRefV1, GitHubStackSignalExpandSurfaceResultV1,
+    GitHubStackSignalExpandUnavailableV1, GitHubStackSignalNativePreviewV1,
+    GitHubStackSignalNativeSourceV1,
+};
+use tracedecay_contracts::{
+    MultiRootScopeSetCasRequestV1, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationSelectionDeclarationV1, NativeIntegrationStackSnapshotSurfaceRequest,
+    NativeIntegrationSurfaceResultV1, RegisteredRootSelectorV1, ResolvedScope,
+};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
     WorkExecutableCapabilityV1,
 };
 use tracedecay_domain::{
-    ManifestDigestHasher, WorkApprovalPolicy, WorkContentLocationClassV1, WorkEffortClassV1,
+    BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId, CommitId, GitOidV1,
+    ManifestDigest, ManifestDigestHasher, NativeIntegrationDirectionV1,
+    NativeIntegrationPreviewDispositionV1, ProjectId, RefId, RepositoryId, StackNodeId,
+    StackSignalKindV1, WorkApprovalPolicy, WorkContentLocationClassV1, WorkEffortClassV1,
     WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkFallbackTopology,
     WorkFilesystemPolicy, WorkOrdinalBandV1, WorkProviderBackendV1, WorkRouteCandidateV1,
-    WorkRouteExecutionProfileV1, WorkSandboxPolicy,
+    WorkRouteExecutionProfileV1, WorkSandboxPolicy, WorktreeId, WorktreeInventoryEpoch,
+    WorktreeInventorySnapshotId,
 };
 
 use crate::queries::{
@@ -42,6 +77,199 @@ use crate::queries::{
 /// Deterministic codex rollout session id seeded per repo before `open`.
 pub(crate) fn bench_session_id(repo_name: &str) -> String {
     format!("td-bench-{repo_name}")
+}
+
+const NATIVE_LINKED_BRANCH: &str = "bench-native-source";
+
+fn native_linked_root(project_root: &Path) -> Option<std::path::PathBuf> {
+    project_root
+        .parent()
+        .map(|parent| parent.join(".tracedecay-bench-native-source"))
+}
+
+async fn prepare_native_linked_worktree(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    base_branch: Option<&str>,
+    project_id: &str,
+    seeds: &mut Seeds,
+) -> Option<std::path::PathBuf> {
+    if !crate::repos::small_fixture_enabled() {
+        seeds.skipped.push(
+            "native_integration_*: linked source worktree requires the isolated small fixture"
+                .to_owned(),
+        );
+        return None;
+    }
+    let Some(base_branch) = base_branch else {
+        seeds
+            .skipped
+            .push("native_integration_*: no base branch for linked source worktree".to_owned());
+        return None;
+    };
+    let Some(linked_root) = native_linked_root(project_root) else {
+        seeds
+            .skipped
+            .push("native_integration_*: fixture has no staging parent".to_owned());
+        return None;
+    };
+    let was_existing = linked_root.exists();
+    let linked_root = match std::fs::canonicalize(&linked_root) {
+        Ok(existing) => {
+            let listed = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(project_root)
+                .args(["worktree", "list", "--porcelain"])
+                .output();
+            let valid = listed
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    let listing = String::from_utf8_lossy(&output.stdout);
+                    listing.split("\n\n").any(|entry| {
+                        entry
+                            .lines()
+                            .any(|line| line == format!("worktree {}", existing.to_string_lossy()))
+                            && entry.lines().any(|line| {
+                                line == format!("branch refs/heads/{NATIVE_LINKED_BRANCH}")
+                            })
+                    })
+                })
+                .unwrap_or(false);
+            if !valid {
+                seeds.skipped.push(
+                    "native_integration_*: existing linked source path is not the owned worktree"
+                        .to_owned(),
+                );
+                return None;
+            }
+            existing
+        }
+        Err(_) => {
+            let output = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(project_root)
+                .args(["worktree", "add", "-b", NATIVE_LINKED_BRANCH])
+                .arg(&linked_root)
+                .arg(base_branch)
+                .output();
+            let Ok(output) = output else {
+                seeds.skipped.push(
+                    "native_integration_*: git could not create linked source worktree".to_owned(),
+                );
+                return None;
+            };
+            if !output.status.success() {
+                seeds.skipped.push(format!(
+                    "native_integration_*: linked source worktree creation failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+                return None;
+            }
+            linked_root
+        }
+    };
+    // The fixture destination is the checked-out `bench` branch. Start the
+    // enrolled source from `bench-base`, then give it one real source-only
+    // commit so the native adapter has a meaningful dependency to integrate.
+    // Reused runs already have a distinct source tip and must not append more
+    // commits to the disposable branch.
+    let source_tip = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(&linked_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    let base_tip = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", base_branch])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    if source_tip.is_some() && source_tip == base_tip {
+        let marker = linked_root.join("src/native_integration_source.rs");
+        if let Err(error) = std::fs::write(
+            &marker,
+            "pub const BENCH_NATIVE_SOURCE: &str = \"source\";\n",
+        ) {
+            seeds.skipped.push(format!(
+                "native_integration_*: source commit file setup failed: {error}"
+            ));
+            return None;
+        }
+        for args in [
+            vec!["add", "--", "src/native_integration_source.rs"],
+            vec!["commit", "-m", "bench native source"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&linked_root)
+                .args(args)
+                .output();
+            if !output.as_ref().is_ok_and(|output| output.status.success()) {
+                let detail = output
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                    .unwrap_or_else(|| "git command failed to start".to_owned());
+                seeds.skipped.push(format!(
+                    "native_integration_*: source commit setup failed: {detail}"
+                ));
+                return None;
+            }
+        }
+    }
+    if !was_existing {
+        let revision = match harness.configuration_revision(project_root).await {
+            Ok(revision) => revision,
+            Err(error) => {
+                seeds.skipped.push(format!(
+                    "native_integration_*: linked-worktree opt-in revision unavailable: {error}"
+                ));
+                return None;
+            }
+        };
+        if let Err(error) = call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_configuration_set",
+            json!({
+                "layer": {"kind": "project", "project_id": project_id},
+                "key": tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+                "value": {"kind": "boolean", "value": true},
+                "expected_revision": revision,
+                "idempotency_key": format!("configuration.idempotency.native-bench.{}", now_micros()),
+                "format": "json",
+            }),
+        )
+        .await
+        {
+            seeds.skipped.push(format!(
+                "native_integration_*: linked-worktree opt-in failed: {error}"
+            ));
+            return None;
+        }
+        seeds.additional_project_roots.push(linked_root.clone());
+        seeds.needs_reopen_for_native_worktree = true;
+        seeds.skipped.push(
+            "native_integration_*: linked route created; deferring enrollment until composition reopen"
+                .to_owned(),
+        );
+        return Some(linked_root);
+    }
+    if let Err(error) = harness
+        .track_worktree_branch(project_root, &linked_root, NATIVE_LINKED_BRANCH)
+        .await
+    {
+        seeds.skipped.push(format!(
+            "native_integration_*: linked source worktree enrollment failed: {error}"
+        ));
+        return None;
+    }
+    Some(linked_root)
 }
 
 /// Writes one provider rollout per repo into the composition's isolated
@@ -55,6 +283,21 @@ pub(crate) fn seed_transcripts(isolation_root: &Path, repos: &[(String, std::pat
         return;
     };
     for (name, dir) in repos {
+        if crate::repos::small_fixture_enabled() {
+            let skill = home.join(".hermes/skills/fixture-inventory/SKILL.md");
+            let seeded = skill.parent().ok_or_else(|| std::io::Error::other("Hermes fixture has no parent"))
+                .and_then(std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&skill, "---\nname: fixture-inventory\ndescription: Inspect the isolated runtime fixture.\n---\nRead the fixture catalog before editing it.\n"));
+            if let Err(error) = seeded {
+                eprintln!("[bench] Hermes skill fixture: {error}");
+            }
+        }
+        if crate::repos::small_fixture_enabled()
+            && let Err(error) =
+                session::seed_host_workflow(&home, dir, session::WORKFLOW_SESSION_ID)
+        {
+            eprintln!("[bench] workflow transcript fixture: {error}");
+        }
         let session = bench_session_id(name);
         let rollout_dir = home.join(".codex/sessions/2026/09/12");
         if let Err(e) = std::fs::create_dir_all(&rollout_dir) {
@@ -79,11 +322,10 @@ pub(crate) fn seed_transcripts(isolation_root: &Path, repos: &[(String, std::pat
             }),
             json!({
                 "timestamp": "2026-09-12T00:00:02.000Z",
-                "type": "response_item",
+                "type": "event_msg",
                 "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "bench sweep assistant reply"}],
+                    "type": "agent_message",
+                    "message": "bench sweep assistant reply",
                 },
             }),
         ]
@@ -130,6 +372,24 @@ pub(crate) fn dig_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     dig(value, field).and_then(Value::as_str)
 }
 
+/// The session refresh status result is an evidence envelope.  Do not use
+/// `dig_str` here: the envelope itself has an `outcome` object, while the
+/// refresh state lives in the canonical surface payload.
+fn session_refresh_outcome(value: &Value) -> Option<&str> {
+    value
+        .pointer("/outcome/value/payload/outcome")
+        .and_then(Value::as_str)
+}
+
+fn bounded_json(value: &Value) -> String {
+    let rendered = value.to_string();
+    let mut preview = rendered.chars().take(512).collect::<String>();
+    if rendered.chars().count() > 512 {
+        preview.push_str("…");
+    }
+    preview
+}
+
 /// Dot-path lookup with numeric segments, for PrimeStep captures:
 /// `structuredContent.facts.0.fact_id`.
 pub fn extract_path(root: &Value, path: &str) -> Option<Value> {
@@ -142,6 +402,26 @@ pub fn extract_path(root: &Value, path: &str) -> Option<Value> {
         };
     }
     Some(cur.clone())
+}
+
+/// Read the identity from the canonical multi-root CAS result payload.  A
+/// recursive lookup is unsafe here because the evidence envelope also carries
+/// policy and scope digests with different authority.
+fn scope_set_cas_identity(value: &Value) -> Option<(i64, String)> {
+    let scope_set = value.pointer("/application/outcome/value/payload/scope_set")?;
+    Some((
+        scope_set.get("revision")?.as_i64()?,
+        scope_set.get("digest")?.as_str()?.to_owned(),
+    ))
+}
+
+/// Read the identity from the canonical multi-root read result payload.
+fn scope_set_read_identity(value: &Value) -> Option<(i64, String)> {
+    let payload = value.pointer("/application/outcome/value/payload")?;
+    Some((
+        payload.get("revision")?.as_i64()?,
+        payload.get("digest")?.as_str()?.to_owned(),
+    ))
 }
 
 /// Resolve one PrimeStep capture spec against a step response:
@@ -180,6 +460,13 @@ pub fn extract_token(root: &Value, spec: &str) -> Option<Value> {
                 .cloned()
                 .unwrap_or(Value::Null),
         }));
+    }
+    if spec == "transform:toggle_boolean" {
+        let current = dig(root, "effective_value")?;
+        if current.get("kind").and_then(Value::as_str) != Some("boolean") {
+            return None;
+        }
+        return Some(json!({"kind": "boolean", "value": !current.get("value")?.as_bool()?}));
     }
     if spec == "transform:trim_review_allowed" {
         // Alternate the allowed review modes: pop when >1, add back when
@@ -451,19 +738,50 @@ pub(crate) async fn seed_all(
     // ── session refresh handle ───────────────────────────────────────────
     seed_refresh(harness, project_root, &mut seeds).await;
 
-    // ── automation run id (only present if a run exists) ──────────────────
-    if let Ok(v) = call(
-        "tracedecay_automation_run_list",
-        json!({"limit": 1, "format": "json"}),
-    )
-    .await
+    // ── automation run id and artifact: append a real durable ledger row ──
+    seed_automation_run(harness, project_root, &mut seeds).await;
+
+    seeds.head_commit = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+    seeds.parent_commit = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", "HEAD~1"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+
+    // The pinned bench clone sits detached at FETCH_HEAD with no branch refs;
+    // branch-scoped surfaces need one real ref, so mint bench refs before the
+    // authorized scope set is persisted.
+    if seeds.branch.is_none()
+        && std::process::Command::new("git")
+            .args(["-C"])
+            .arg(project_root)
+            .args(["branch", "-f", "bench", "HEAD"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     {
-        seeds.automation_run_id = dig_str(&v, "run_id").map(str::to_owned);
+        seeds.branch = Some("bench".to_owned());
     }
-    if seeds.automation_run_id.is_none() {
-        seeds
-            .skipped
-            .push("automation_run_*: no automation runs in a fresh composition".to_owned());
+    if seeds.parent_commit.is_some()
+        && std::process::Command::new("git")
+            .args(["-C"])
+            .arg(project_root)
+            .args(["branch", "-f", "bench-base", "HEAD~1"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    {
+        seeds.base_branch = Some("bench-base".to_owned());
     }
 
     // ── multi_root scope_set: CAS-commit the project root once so the
@@ -472,70 +790,61 @@ pub(crate) async fn seed_all(
         seeds.project_id.clone(),
         project_root.to_str().map(str::to_owned),
     ) {
-        // Persisted scope sets are actor-sealed (only the persisting actor may
-        // read them back), and the bench profile survives runs — a fixed id
-        // collides with an earlier actor's set and stays invisible forever.
-        // Mint a per-run identity so the set is always ours.
-        let scope_set_id = format!("scope-set.bench.{project_id}.{}", now_micros());
-        match call(
-            "tracedecay_multi_root_scope_set_compare_and_swap",
-            json!({
-                "scope_set_id": scope_set_id,
-                "expected_revision": null,
-                "roots": [{"project_id": project_id, "root": root}],
-            }),
+        let base_branch = seeds.base_branch.clone();
+        let linked_root = prepare_native_linked_worktree(
+            harness,
+            project_root,
+            base_branch.as_deref(),
+            &project_id,
+            &mut seeds,
         )
-        .await
-        {
+        .await;
+        let mut scope_roots = vec![json!({"project_id": project_id, "root": root})];
+        if let Some(linked_root) = linked_root {
+            scope_roots.push(json!({
+                "project_id": project_id,
+                "root": linked_root,
+            }));
+        }
+        // Bind this enrollment's current exact roots to a fresh scope set.
+        let scope_set_id = format!("scope-set.bench.{project_id}.{}", now_micros());
+        // The wire contract requires canonical ordering even when both roots
+        // share one project. Let its constructor order the exact selectors.
+        let request = (|| -> Result<Value, String> {
+            let roots =
+                serde_json::from_value::<Vec<RegisteredRootSelectorV1>>(Value::Array(scope_roots))
+                    .map_err(|error| error.to_string())?;
+            let request = MultiRootScopeSetCasRequestV1::new(
+                tracedecay_domain::ScopeSetId::new(scope_set_id.clone())
+                    .map_err(|error| error.to_string())?,
+                None,
+                roots,
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_value(request).map_err(|error| error.to_string())
+        })();
+        let result = match request {
+            Ok(request) => call("tracedecay_multi_root_scope_set_compare_and_swap", request).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(v) => {
                 seeds.scope_set_id = Some(scope_set_id.clone());
-                seeds.scope_set_revision = dig(&v, "scope_set_revision")
-                    .or_else(|| dig(&v, "revision"))
-                    .and_then(Value::as_i64);
-                seeds.scope_set_digest = dig_str(&v, "scope_set_digest")
-                    .or_else(|| dig_str(&v, "digest"))
-                    .map(str::to_owned);
+                if let Some((revision, digest)) = scope_set_cas_identity(&v) {
+                    seeds.scope_set_revision = Some(revision);
+                    seeds.scope_set_digest = Some(digest);
+                }
                 if seeds.scope_set_revision.is_none() || seeds.scope_set_digest.is_none() {
                     seeds
                         .skipped
                         .push("multi_root_execute: CAS omitted revision/digest".to_owned());
                 }
             }
-            Err(_) => {
-                // Persisted from a prior run (or a pre-reopen build): adopt the
-                // committed set's identities instead of minting a duplicate.
-                match call(
-                    "tracedecay_multi_root_scope_set_read",
-                    json!({"scope_set_id": scope_set_id, "format": "json"}),
-                )
-                .await
-                {
-                    Ok(v) => {
-                        seeds.scope_set_id = Some(scope_set_id.clone());
-                        seeds.scope_set_revision = dig(&v, "scope_set_revision")
-                            .or_else(|| dig(&v, "revision"))
-                            .and_then(Value::as_i64);
-                        seeds.scope_set_digest = dig_str(&v, "scope_set_digest")
-                            .or_else(|| dig_str(&v, "digest"))
-                            .map(str::to_owned);
-                        if seeds.scope_set_revision.is_none() || seeds.scope_set_digest.is_none() {
-                            seeds.skipped.push(
-                                "multi_root_execute: scope_set read omitted revision/digest"
-                                    .to_owned(),
-                            );
-                        }
-                    }
-                    Err(e) => seeds
-                        .skipped
-                        .push(format!("multi_root_scope_set_compare_and_swap: {e}")),
-                }
-            }
+            Err(error) => seeds
+                .skipped
+                .push(format!("multi_root_scope_set_compare_and_swap: {error}")),
         }
     }
-
-    // ── git preview input: dirty one tracked file now so the git watcher
-    // has the whole remaining seed window to observe it; hunk poll runs last
-    seed_dirty_worktree(project_root, files, &mut seeds).await;
 
     // Some read surfaces mount their application authority lazily; probe the
     // ones seen cold in runs so an unmountable lane degrades to a named skip
@@ -569,51 +878,13 @@ pub(crate) async fn seed_all(
         }
     }
 
-    seeds.head_commit = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(project_root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
-    seeds.parent_commit = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(project_root)
-        .args(["rev-parse", "HEAD~1"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
-
-    // The pinned bench clone sits detached at FETCH_HEAD with no branch refs;
-    // branch-scoped surfaces need one real ref, so mint a bench branch at
-    // HEAD (the clone is bench-owned scratch).
-    if seeds.branch.is_none()
-        && std::process::Command::new("git")
-            .args(["-C"])
-            .arg(project_root)
-            .args(["branch", "-f", "bench", "HEAD"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    {
-        seeds.branch = Some("bench".to_owned());
-    }
-    if seeds.parent_commit.is_some()
-        && std::process::Command::new("git")
-            .args(["-C"])
-            .arg(project_root)
-            .args(["branch", "-f", "bench-base", "HEAD~1"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    {
-        seeds.base_branch = Some("bench-base".to_owned());
-    }
-
     // ── native integration: inventory → stack_snapshot → preflight/approve ─
-    seed_native_integration(harness, project_root, &mut seeds).await;
+    // A newly-created linked route is not mounted until the parent reopens the
+    // composition with its additional root. Defer all native reads to that
+    // clean second pass rather than recording scheduler-unavailable noise.
+    if !seeds.needs_reopen_for_native_worktree {
+        seed_native_integration(harness, project_root, &mut seeds).await;
+    }
 
     // ── work/workflow lifecycle: one disposable task graph + workflow run ──
     seed_work(harness, project_root, &mut seeds).await;
@@ -621,14 +892,49 @@ pub(crate) async fn seed_all(
     // ── affected-tests result read: find a changed path that maps to tests ─
     seed_affected_tests(harness, project_root, files, &mut seeds).await;
 
-    // ── managed skill: drop a skill into the profile skills dir ──────────
-    seed_skill(&mut seeds);
+    if crate::repos::small_fixture_enabled()
+        && !seeds.needs_reopen_for_native_worktree
+        && !seeds.needs_reopen_for_provider
+        && let Err(error) = memory::seed_feedback_fixture(harness, project_root, &mut seeds).await
+    {
+        seeds
+            .skipped
+            .push(format!("feedback compiler fixture: {error}"));
+    }
+
+    if crate::repos::small_fixture_enabled()
+        && !seeds.needs_reopen_for_native_worktree
+        && !seeds.needs_reopen_for_provider
+    {
+        if let Err(error) = session::prepare_host_workflow(harness, project_root).await {
+            seeds
+                .skipped
+                .push(format!("host workflow fixture: {error}"));
+        }
+        match seed_context_scout_address(harness, project_root).await {
+            Ok(address) => seeds.context_scout_address = Some(address),
+            Err(error) => seeds
+                .skipped
+                .push(format!("context scout hook fixture: {error}")),
+        }
+    }
+
+    seed_skill(harness, &mut seeds).await;
 
     // ── response handle: a fat search truncates → reversible handle ──────
     seed_retrieve_handle(harness, project_root, &mut seeds).await;
 
-    // ── hunk poll last: the worktree has been dirty since seed start ──────
-    seed_git_preview(harness, project_root, &mut seeds).await;
+    // Native inventory and blame require the committed worktree state. Dirty
+    // the tracked fixture only after those reads, then mint the hunk input
+    // from the exact working-tree diff.
+    if !seeds.needs_reopen_for_native_worktree {
+        seed_dirty_worktree(project_root, files, &mut seeds).await;
+    }
+
+    // ── hunk poll last: the worktree is dirty before this poll ────────────
+    if !seeds.needs_reopen_for_native_worktree {
+        seed_git_preview(harness, project_root, &mut seeds).await;
+    }
 
     if !seeds.skipped.is_empty() {
         eprintln!(
@@ -795,12 +1101,14 @@ async fn seed_facts(
     .await;
     match (first, second) {
         (Ok(a), Ok(b)) => {
-            let fid = dig_str(&a, "fact_id")
-                .map(str::to_owned)
-                .or_else(|| dig_str(&a, "id").map(str::to_owned));
-            let rid = dig_str(&b, "fact_id")
-                .map(str::to_owned)
-                .or_else(|| dig_str(&b, "id").map(str::to_owned));
+            let fid = a
+                .pointer("/outcome/value/payload/result/fact/fact/fact_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let rid = b
+                .pointer("/outcome/value/payload/result/fact/fact/fact_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             match (fid, rid) {
                 (Some(f), Some(r)) => {
                     seeds.fact_pair = Some((
@@ -917,9 +1225,58 @@ async fn seed_refresh(
     {
         Ok(v) => match dig_str(&v, "handle").map(str::to_owned) {
             Some(h) if !h.is_empty() => {
-                seeds.refresh_handle = Some(h);
-                seeds.refresh_operation_id = dig_str(&v, "operation_id").map(str::to_owned);
-                seeds.refresh_selectors = Some(selectors);
+                let operation_id = dig_str(&v, "operation_id").map(str::to_owned);
+                let mut status_args = selectors.clone();
+                status_args["handle"] = json!(h);
+                status_args["format"] = json!("json");
+                let mut complete = false;
+                for _ in 0..60 {
+                    match call_json_tool(
+                        harness,
+                        project_root,
+                        "tracedecay_session_refresh_status",
+                        status_args.clone(),
+                    )
+                    .await
+                    {
+                        Ok(status) => match session_refresh_outcome(&status) {
+                            Some("complete") => {
+                                complete = true;
+                                break;
+                            }
+                            Some("running") => {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                            Some(outcome) => {
+                                seeds.skipped.push(format!(
+                                    "session_refresh_*: refresh ended before completion ({outcome}); payload={}",
+                                    bounded_json(&status)
+                                ));
+                                break;
+                            }
+                            None => {
+                                seeds.skipped.push(format!(
+                                    "session_refresh_status: missing canonical outcome payload; response={}",
+                                    bounded_json(&status)
+                                ));
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            seeds.skipped.push(format!("session_refresh_status: {e}"));
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    seeds.refresh_handle = Some(h);
+                    seeds.refresh_operation_id = operation_id;
+                    seeds.refresh_selectors = Some(selectors);
+                } else {
+                    seeds
+                        .skipped
+                        .push("session_refresh_*: refresh did not reach complete".to_owned());
+                }
             }
             _ => seeds
                 .skipped
@@ -969,50 +1326,29 @@ async fn seed_dirty_worktree(project_root: &Path, files: &[Value], seeds: &mut S
     };
     let abs = project_root.join(&rel);
     let original = std::fs::read_to_string(&abs).unwrap_or_default();
-    if std::fs::write(&abs, format!("{original}\n// bench hunk line\n")).is_err() {
+    let marker = match rel.rsplit('.').next() {
+        Some("py" | "toml") => "# bench hunk line",
+        _ => "// bench hunk line",
+    };
+    if std::fs::write(&abs, format!("{original}\n{marker}\n")).is_err() {
         seeds
             .skipped
             .push(format!("git_preview/apply: cannot dirty {rel}"));
         return;
     }
-    // Hunk evidence omits paths carrying text/eol normalization attributes,
-    // and corpora like scipy blanket everything with `* text=auto`. A
-    // per-path `-text` override in `.git/info/attributes` (repo-local
-    // metadata, never committed) un-filters exactly the dirty file.
-    let info_dir = project_root.join(".git/info");
-    let info_attrs = info_dir.join("attributes");
-    let override_line = format!("{rel} -text");
-    let existing = std::fs::read_to_string(&info_attrs).unwrap_or_default();
-    if !existing.lines().any(|line| line == override_line) {
-        let mut merged = existing;
-        if !merged.is_empty() && !merged.ends_with('\n') {
-            merged.push('\n');
-        }
-        merged.push_str(&override_line);
-        merged.push('\n');
-        if std::fs::create_dir_all(&info_dir)
-            .and_then(|_| std::fs::write(&info_attrs, merged))
-            .is_err()
-        {
-            seeds
-                .skipped
-                .push("git_preview/apply: cannot write .git/info/attributes".to_owned());
-            return;
-        }
-    }
     seeds.dirty_file = Some(rel);
 }
 
-/// affected_tests/test_results consume a request handle minted by a
-/// run_affected_tests call whose changed path maps to covering tests. Probe
-/// test-shaped paths first — a test file is covered by itself — then a few
-/// ordinary corpus files.
+/// Retain a changed path only after the real runner executes covering tests.
+/// Feedback handles belong to advisory publications, not this runner.
 async fn seed_affected_tests(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     files: &[Value],
     seeds: &mut Seeds,
 ) {
+    let mut last_error = None;
+    let mut runner_failure = false;
     let mut candidates: Vec<String> = files
         .iter()
         .filter_map(|f| f.get("path").and_then(Value::as_str))
@@ -1020,6 +1356,9 @@ async fn seed_affected_tests(
         .take(3)
         .map(str::to_owned)
         .collect();
+    if crate::repos::small_fixture_enabled() {
+        candidates.insert(0, "src/lib.rs".to_owned());
+    }
     candidates.extend(
         files
             .iter()
@@ -1027,6 +1366,26 @@ async fn seed_affected_tests(
             .take(2)
             .map(str::to_owned),
     );
+    // The files surface may intentionally omit test-only targets while the
+    // graph has already indexed them. Recover only tracked Rust test files;
+    // this keeps the changed path canonical instead of inventing a test name.
+    let has_test_candidate = candidates.iter().any(|path| path.contains("test"));
+    if !has_test_candidate
+        && let Ok(output) = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(project_root)
+            .args(["ls-files"])
+            .output()
+        && output.status.success()
+    {
+        candidates.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|path| path.starts_with("tests/") && path.ends_with(".rs"))
+                .take(3)
+                .map(str::to_owned),
+        );
+    }
     for path in candidates {
         match call_json_tool(
             harness,
@@ -1041,53 +1400,86 @@ async fn seed_affected_tests(
         )
         .await
         {
-            Ok(v)
-                if extract_token(&v, "digany:request_handle,handle,run_handle,result_handle")
-                    .is_some() =>
-            {
-                seeds.test_results_path = Some(path);
-                return;
+            Ok(v) => {
+                let payload = v.pointer("/outcome/value/payload").unwrap_or(&v);
+                let results = payload.get("results").and_then(Value::as_array);
+                let ran_tests = results.is_some_and(|results| !results.is_empty());
+                let fixture_passed = !crate::repos::small_fixture_enabled()
+                    || (payload.get("passed") == Some(&json!(1))
+                        && payload.get("failed") == Some(&json!(0))
+                        && results.is_some_and(|results| {
+                            results.iter().any(|result| {
+                                result.get("test").and_then(Value::as_str)
+                                    == Some("fixture_catalog_has_stable_total")
+                                    && result.get("passed") == Some(&json!(true))
+                            })
+                        }));
+                if ran_tests && fixture_passed {
+                    seeds.test_results_path = Some(path);
+                    return;
+                }
+                last_error = Some(format!(
+                    "runner returned no verified covering test for {path}"
+                ));
             }
-            _ => {}
+            Err(error) => {
+                runner_failure |= error.contains("cargo")
+                    || error.contains("rustup")
+                    || error.contains("toolchain");
+                last_error = Some(error);
+            }
         }
     }
-    seeds
-        .skipped
-        .push("affected_tests/test_results: no changed path maps to covering tests".to_owned());
+    seeds.skipped.push(format!(
+        "test_results: {}{}",
+        if runner_failure {
+            "covering test mapped but runner failed"
+        } else {
+            "no changed path maps to covering tests"
+        },
+        last_error
+            .as_deref()
+            .map(|error| format!(" ({error})"))
+            .unwrap_or_default()
+    ));
 }
 
-/// Mint a reversible response handle: `tracedecay_search` over the indexed
-/// corpus returns a payload past the 15KB truncation budget, so the envelope
-/// stores the full response and emits `handle` for `tracedecay_retrieve`.
+const BENCH_RETRIEVE_MARKER: &str = "bench-retrieve-payload-4a71c8";
+
+/// Mint a reversible response handle through the production response-handle
+/// store. This keeps the retrieve journey independent of corpus size while
+/// preserving the same durable authority used by truncated MCP responses.
 async fn seed_retrieve_handle(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     seeds: &mut Seeds,
 ) {
-    for query in ["test", "the", "data"] {
-        match call_json_tool(
-            harness,
-            project_root,
-            "tracedecay_search",
-            json!({"query": query, "limit": 50, "format": "json"}),
-        )
-        .await
-        {
-            Ok(v) => {
-                if let Some(handle) = dig_str(&v, "handle") {
-                    seeds.retrieve_handle = Some(handle.to_owned());
-                    return;
-                }
-            }
-            Err(e) => {
-                seeds.skipped.push(format!("retrieve: {e}"));
-                return;
-            }
+    let server = match harness.server(project_root) {
+        Ok(server) => server,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("retrieve: server unavailable: {error}"));
+            return;
         }
+    };
+    let response_handle_root = server
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone();
+    let content = format!(
+        "{{\"marker\":\"{BENCH_RETRIEVE_MARKER}\",\"items\":[\"real production response handle\"]}}"
+    );
+    match tracedecay_mcp::response_handles::store_response_handle(
+        &response_handle_root,
+        &content,
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
+    ) {
+        Ok(record) => seeds.retrieve_handle = Some(record.handle),
+        Err(error) => seeds.skipped.push(format!("retrieve: {error}")),
     }
-    seeds
-        .skipped
-        .push("retrieve: no search response truncated".to_owned());
 }
 
 /// Poll the hunk lane at the end of seeding; the dirty file has been in the
@@ -1120,9 +1512,9 @@ async fn seed_git_preview(
                     return;
                 }
                 if std::time::Instant::now() >= deadline {
-                    seeds
-                        .skipped
-                        .push(format!("git_preview/apply: hunks stayed empty: {v}"));
+                    seeds.skipped.push(
+                        "git_preview/apply: hunk producer returned no applicable hunks".to_owned(),
+                    );
                     return;
                 }
             }
@@ -1142,6 +1534,445 @@ async fn seed_git_preview(
 /// seeded transaction backs the status read. Any leg's failure is an honest
 /// family skip — the sealed-stack authority needs the multi_root scope set
 /// plus real branch refs to validate.
+pub(crate) async fn prepare_native_snapshot(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    ctx: &QueryContext,
+    advance_source: bool,
+) -> Result<Value, String> {
+    if !crate::repos::small_fixture_enabled() {
+        return Err("native preparation requires the isolated small fixture".into());
+    }
+    let git = |root: &Path, args: &[&str]| -> Result<Vec<u8>, String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "native fixture git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(output.stdout)
+    };
+    if let Some(path) = &ctx.seeds.dirty_file {
+        let original = git(project_root, &["show", &format!("HEAD:{path}")])?;
+        let current = std::fs::read(project_root.join(path)).map_err(|error| error.to_string())?;
+        let indexed = git(project_root, &["show", &format!(":{path}")])?;
+        let marker = match path.rsplit('.').next() {
+            Some("py" | "toml") => b"\n# bench hunk line\n".as_slice(),
+            _ => b"\n// bench hunk line\n".as_slice(),
+        };
+        let mut owned = original.clone();
+        owned.extend_from_slice(marker);
+        if current == owned && (indexed == original || indexed == owned) {
+            git(
+                project_root,
+                &[
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    path,
+                ],
+            )?;
+        } else if current != original || indexed != original {
+            return Err(format!(
+                "native preparation refuses non-marker changes in {path}"
+            ));
+        }
+    }
+    if !git(project_root, &["status", "--porcelain"])?.is_empty() {
+        return Err(
+            "native preparation requires a clean fixture after exact marker cleanup".into(),
+        );
+    }
+    let template = ctx
+        .seeds
+        .native
+        .as_ref()
+        .ok_or("native seed route is absent")?;
+    let mut request: NativeIntegrationStackSnapshotSurfaceRequest =
+        serde_json::from_value(template.snapshot_body.clone())
+            .map_err(|error| error.to_string())?;
+    if advance_source {
+        let source_root =
+            native_linked_root(project_root).ok_or("native linked fixture root is absent")?;
+        let source_ref = request
+            .source
+            .reference
+            .as_ref()
+            .ok_or("native source reference is absent")?;
+        let destination_ref = request
+            .destination
+            .reference
+            .as_ref()
+            .ok_or("native destination reference is absent")?;
+        let listed = String::from_utf8(git(project_root, &["worktree", "list", "--porcelain"])?)
+            .map_err(|error| error.to_string())?;
+        if !listed.split("\n\n").any(|entry| {
+            entry
+                .lines()
+                .any(|line| line == format!("worktree {}", source_root.display()))
+                && entry
+                    .lines()
+                    .any(|line| line == format!("branch {}", source_ref.as_str()))
+        }) || !git(&source_root, &["status", "--porcelain"])?.is_empty()
+        {
+            return Err("native source is not the clean owned linked worktree".into());
+        }
+        let ancestry = std::process::Command::new("git")
+            .arg("-C")
+            .arg(project_root)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                source_ref.as_str(),
+                destination_ref.as_str(),
+            ])
+            .status()
+            .map_err(|error| error.to_string())?;
+        match ancestry.code() {
+            Some(0) => {
+                let path = source_root.join("src/native_integration_source.rs");
+                if !std::fs::symlink_metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .file_type()
+                    .is_file()
+                {
+                    return Err("native fixture source is not a regular file".into());
+                }
+                let mut source =
+                    std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+                let original = "pub const BENCH_NATIVE_SOURCE: &str = \"source\";\n";
+                let marker = "// benchmark integration update\n";
+                if !source
+                    .strip_prefix(original)
+                    .is_some_and(|suffix| suffix.lines().all(|line| line == marker.trim_end()))
+                {
+                    return Err(
+                        "native source contains changes outside the owned fixture marker".into(),
+                    );
+                }
+                source.push_str(marker);
+                std::fs::write(&path, source).map_err(|error| error.to_string())?;
+                git(
+                    &source_root,
+                    &["add", "--", "src/native_integration_source.rs"],
+                )?;
+                git(
+                    &source_root,
+                    &[
+                        "commit",
+                        "--only",
+                        "-m",
+                        "test(bench): advance native source fixture",
+                        "--",
+                        "src/native_integration_source.rs",
+                    ],
+                )?;
+            }
+            Some(1) => {}
+            _ => return Err("native fixture ancestry observation failed".into()),
+        }
+    }
+    let scope = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_multi_root_scope_set_read",
+        json!({"scope_set_id": request.authorized_scope_set_id}),
+    )
+    .await?;
+    let (revision, digest) =
+        scope_set_read_identity(&scope).ok_or("current scope-set identity is absent")?;
+    request.authorized_scope_set_revision = tracedecay_domain::ScopeSetRevision::new(
+        u64::try_from(revision).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    request.authorized_scope_set_digest =
+        ManifestDigest::new(digest).map_err(|error| error.to_string())?;
+    let inventory = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_worktree_inventory",
+        json!({
+            "scope_set_id": request.authorized_scope_set_id,
+            "scope_set_revision": request.authorized_scope_set_revision,
+            "scope_set_digest": request.authorized_scope_set_digest,
+            "target": {"kind":"repository", "project_id": request.source.project_id,
+                       "repository_id": request.source.repository_id},
+        }),
+    )
+    .await?;
+    let payload = inventory
+        .pointer("/outcome/value/payload")
+        .ok_or("current inventory omitted evidence payload")?;
+    request.inventory_snapshot_id = WorktreeInventorySnapshotId::new(
+        dig_str(payload, "snapshot_id").ok_or("current inventory omitted snapshot_id")?,
+    )
+    .map_err(|error| error.to_string())?;
+    request.inventory_epoch = WorktreeInventoryEpoch::new(
+        dig(payload, "epoch")
+            .and_then(Value::as_u64)
+            .ok_or("current inventory omitted epoch")?,
+    )
+    .map_err(|error| error.to_string())?;
+    request.grant_digest = ManifestDigest::new(
+        inventory
+            .pointer("/outcome/value/authority/grant_digest")
+            .and_then(Value::as_str)
+            .ok_or("current inventory omitted grant_digest")?,
+    )
+    .map_err(|error| error.to_string())?;
+    request.policy_digest = ManifestDigest::new(
+        inventory
+            .pointer("/outcome/value/authority/policy/digest")
+            .and_then(Value::as_str)
+            .ok_or("current inventory omitted policy digest")?,
+    )
+    .map_err(|error| error.to_string())?;
+    let entries = dig(payload, "entries")
+        .and_then(Value::as_array)
+        .ok_or("current inventory omitted entries")?;
+    let NativeIntegrationSelectionDeclarationV1::DeclaredStackEdge {
+        nodes, revision_id, ..
+    } = &mut request.selection
+    else {
+        return Err("native fixture requires its declared stack edge".into());
+    };
+    *revision_id = BranchStackRevisionId::new(format!("stack-revision.bench.{}", now_micros()))
+        .map_err(|error| error.to_string())?;
+    for node in nodes {
+        let scope = if request.source.reference.as_ref() == Some(&node.reference) {
+            &request.source
+        } else if request.destination.reference.as_ref() == Some(&node.reference) {
+            &request.destination
+        } else {
+            return Err("native route template contains an unrelated node".into());
+        };
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry["reference"].as_str() == Some(node.reference.as_str())
+                    && entry["worktree_id"].as_str() == Some(scope.worktree_id.as_str())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "current inventory omitted enrolled reference {}",
+                    node.reference.as_str()
+                )
+            })?;
+        node.tip = CommitId::new(
+            entry["head"]
+                .as_str()
+                .ok_or("current inventory entry omitted head")?,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    request.clone().seal().map_err(|error| error.to_string())?;
+    let mut body = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    body["format"] = json!("json");
+    Ok(body)
+}
+
+/// The first public expansion waits for durable host publication and settles
+/// the real recipient delivery. The measured request replays that exact handle.
+#[tracing::instrument(name = "bench.setup.github_stack_signal", skip_all)]
+pub(crate) async fn prepare_github_stack_signal(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    ctx: &QueryContext,
+) -> Result<(Value, Value), String> {
+    let body = prepare_native_snapshot(harness, project_root, ctx, true).await?;
+    let snapshot = call_json_tool(harness, project_root, "tracedecay_stack_snapshot", body).await?;
+    let snapshot = serde_json::from_value::<NativeIntegrationSurfaceResultV1>(
+        snapshot
+            .pointer("/outcome/value/payload")
+            .ok_or("stack signal snapshot omitted its canonical payload")?
+            .clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let NativeIntegrationSurfaceResultV1::StackSnapshot(snapshot) = snapshot else {
+        return Err("stack signal preparation did not resolve its native snapshot".into());
+    };
+    let preflight = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_preflight_native_integration",
+        json!({"snapshot": snapshot.sealed_snapshot}),
+    )
+    .await?;
+    let preflight = serde_json::from_value::<NativeIntegrationSurfaceResultV1>(
+        preflight
+            .pointer("/outcome/value/payload")
+            .ok_or("stack signal preflight omitted its canonical payload")?
+            .clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let NativeIntegrationSurfaceResultV1::Preview(preview) = preflight else {
+        return Err("stack signal preparation did not produce a native preview".into());
+    };
+    if !matches!(
+        preview.disposition,
+        NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+    ) {
+        return Err(format!(
+            "stack signal fixture is not mechanically eligible: {:?}",
+            preview.disposition
+        ));
+    }
+    let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+        revision_id,
+        revision_digest,
+        declared_revision,
+        source_node_id,
+        destination_node_id,
+        direction,
+        ..
+    } = &snapshot.sealed_snapshot.selection
+    else {
+        return Err("stack signal fixture has no declared stack edge".into());
+    };
+    // Preflight enqueued this transition through the daemon coordinator. Its
+    // canonical constructor derives handles from the returned evidence only.
+    let signal = StackSignalV1::seal(
+        &snapshot.sealed_snapshot.destination,
+        StackSignalDraftV1 {
+            stack_revision_id: revision_id.clone(),
+            stack_revision_digest: revision_digest.clone(),
+            kind: StackSignalKindV1::DependencyReady,
+            state_digest: preview.preview_digest.clone(),
+            github_stack_digest: None,
+            observed_at: preview.created_at,
+        },
+    )
+    .map_err(|error| format!("stack signal sealing failed: {error:?}"))?;
+    let source = declared_revision
+        .nodes
+        .iter()
+        .find(|node| node.node_id == *source_node_id)
+        .ok_or("stack signal source node is absent")?;
+    let destination = declared_revision
+        .nodes
+        .iter()
+        .find(|node| node.node_id == *destination_node_id)
+        .ok_or("stack signal destination node is absent")?;
+    let args = json!({
+        "signal_id": signal.signal_id,
+        "expected_watermark_id": signal.watermark_id,
+        "format": "json",
+    });
+    let expected = GitHubStackSignalEvidenceRefV1::new(
+        signal.signal_id,
+        signal.watermark_id,
+        signal.kind,
+        signal.stack_revision_id,
+        signal.stack_revision_digest,
+        signal.state_digest,
+        signal.github_stack_digest,
+        signal.observed_at,
+        GitHubStackSignalNativeSourceV1::Preflight {
+            preview: GitHubStackSignalNativePreviewV1 {
+                preview_id: preview.preview_id,
+                preview_digest: preview.preview_digest,
+                direction: *direction,
+                source_ref: source.reference.clone(),
+                destination_ref: destination.reference.clone(),
+                source_tip: GitOidV1::new(source.tip.as_str())
+                    .map_err(|error| error.to_string())?,
+                destination_tip: GitOidV1::new(destination.tip.as_str())
+                    .map_err(|error| error.to_string())?,
+                disposition: preview.disposition,
+            },
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let expected = serde_json::to_value(expected).map_err(|error| error.to_string())?;
+    let expected_scope = serde_json::to_value(&snapshot.sealed_snapshot.destination.scope_digest)
+        .map_err(|error| error.to_string())?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut readiness = tokio::time::interval(Duration::from_millis(50));
+    readiness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let response = tokio::time::timeout_at(
+            deadline,
+            call_json_tool(
+                harness,
+                project_root,
+                "tracedecay_github_stack_signal_expand",
+                args.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| "stack signal host publication exceeded its setup deadline".to_owned())??;
+        let result = serde_json::from_value::<GitHubStackSignalExpandSurfaceResultV1>(
+            response
+                .pointer("/outcome/value/payload")
+                .ok_or("stack signal expansion omitted its canonical payload")?
+                .clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        match result {
+            GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence } => {
+                if serde_json::to_value(evidence).map_err(|error| error.to_string())? != expected
+                    || response.pointer("/outcome/value/authority/authorized_scope_digest")
+                        != Some(&expected_scope)
+                {
+                    return Err(
+                        "initial stack signal expansion differs from its real native preview"
+                            .into(),
+                    );
+                }
+                return Ok((
+                    args,
+                    json!({
+                        "evidence": expected,
+                        "authorized_scope_digest": expected_scope,
+                    }),
+                ));
+            }
+            GitHubStackSignalExpandSurfaceResultV1::Unavailable {
+                reason: GitHubStackSignalExpandUnavailableV1::AuthorityUnmounted,
+            } => {
+                // The adapter reports unavailable while its durable recipient
+                // row is awaiting host publication. Other refusal states fail.
+                tracing::debug!("stack signal expansion awaits durable host publication");
+                tokio::time::timeout_at(deadline, readiness.tick())
+                    .await
+                    .map_err(|_| {
+                        "stack signal remained authority_unmounted through its setup deadline"
+                            .to_owned()
+                    })?;
+            }
+            GitHubStackSignalExpandSurfaceResultV1::Unavailable { reason } => {
+                return Err(format!("stack signal expansion refused setup: {reason:?}"));
+            }
+        }
+    }
+}
+
+pub(crate) async fn prepare_worktree_claim(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    ctx: &QueryContext,
+) -> Result<Value, String> {
+    let body = prepare_native_snapshot(harness, project_root, ctx, false).await?;
+    Ok(json!({
+        "scope_set_id": body["authorized_scope_set_id"],
+        "scope_set_revision": body["authorized_scope_set_revision"],
+        "scope_set_digest": body["authorized_scope_set_digest"],
+        "target": {
+            "kind": "worktree", "project_id": body["source"]["project_id"],
+            "repository_id": body["source"]["repository_id"],
+            "worktree_id": body["source"]["worktree_id"],
+        },
+    }))
+}
+
 async fn seed_native_integration(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1153,20 +1984,14 @@ async fn seed_native_integration(
         Some(scope_set_id),
         Some(scope_set_revision),
         Some(scope_set_digest),
-        Some(head),
-        Some(parent),
         Some(branch),
-        Some(base_branch),
     ) = (
         seeds.project_id.clone(),
         seeds.repository_id.clone(),
         seeds.scope_set_id.clone(),
         seeds.scope_set_revision,
         seeds.scope_set_digest.clone(),
-        seeds.head_commit.clone(),
-        seeds.parent_commit.clone(),
         seeds.branch.clone(),
-        seeds.base_branch.clone(),
     )
     else {
         seeds
@@ -1185,49 +2010,68 @@ async fn seed_native_integration(
     .await
     {
         Ok(v) => (
-            dig(&v, "scope_set_revision")
-                .or_else(|| dig(&v, "revision"))
-                .and_then(Value::as_i64)
+            scope_set_read_identity(&v)
+                .map(|(revision, _)| revision)
                 .unwrap_or(scope_set_revision),
-            dig_str(&v, "scope_set_digest")
-                .or_else(|| dig_str(&v, "digest"))
-                .map(str::to_owned)
+            scope_set_read_identity(&v)
+                .map(|(_, digest)| digest)
                 .unwrap_or(scope_set_digest),
         ),
         Err(_) => (scope_set_revision, scope_set_digest),
     };
-    let inventory = match call_json_tool(
-        harness,
-        project_root,
-        "tracedecay_worktree_inventory",
-        json!({
-            "scope_set_id": scope_set_id,
-            "scope_set_revision": scope_set_revision,
-            "scope_set_digest": scope_set_digest,
-            "target": {
-                "kind": "repository",
-                "project_id": project_id,
-                "repository_id": repository_id,
-            },
-            "format": "json",
-        }),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            seeds
-                .skipped
-                .push(format!("native_integration_*: worktree_inventory: {e}"));
-            return;
+    let inventory_args = json!({
+        "scope_set_id": scope_set_id,
+        "scope_set_revision": scope_set_revision,
+        "scope_set_digest": scope_set_digest,
+        "target": {
+            "kind": "repository",
+            "project_id": project_id,
+            "repository_id": repository_id,
+        },
+        "format": "json",
+    });
+    let mut inventory = None;
+    let mut inventory_error = None;
+    for _ in 0..30 {
+        match call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_worktree_inventory",
+            inventory_args.clone(),
+        )
+        .await
+        {
+            Ok(v)
+                if dig_str(&v, "snapshot_id").is_some()
+                    || dig_str(&v, "inventory_snapshot_id").is_some() =>
+            {
+                inventory = Some(v);
+                break;
+            }
+            Ok(v) if dig_str(&v, "state") == Some("stale") => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Ok(v) => {
+                inventory = Some(v);
+                break;
+            }
+            Err(e) => inventory_error = Some(e),
         }
+    }
+    let Some(inventory) = inventory else {
+        seeds.skipped.push(format!(
+            "native_integration_*: worktree_inventory: {}",
+            inventory_error.unwrap_or_else(|| "inventory remained stale".to_owned())
+        ));
+        return;
     };
     let Some(inventory_snapshot_id) = dig_str(&inventory, "snapshot_id")
         .or_else(|| dig_str(&inventory, "inventory_snapshot_id"))
         .map(str::to_owned)
     else {
+        let state = dig_str(&inventory, "state").unwrap_or("unknown");
         seeds.skipped.push(format!(
-            "native_integration_*: inventory returned no snapshot id: {inventory}"
+            "native_integration_*: inventory returned no snapshot id (state={state})"
         ));
         return;
     };
@@ -1235,77 +2079,189 @@ async fn seed_native_integration(
         .and_then(Value::as_i64)
         .or_else(|| dig(&inventory, "inventory_epoch").and_then(Value::as_i64))
     else {
+        let state = dig_str(&inventory, "state").unwrap_or("unknown");
         seeds.skipped.push(format!(
-            "native_integration_*: inventory returned no epoch: {inventory}"
+            "native_integration_*: inventory returned no epoch (state={state})"
         ));
         return;
     };
-    let worktree_id = dig_str(&inventory, "worktree_id")
-        .map(str::to_owned)
-        .unwrap_or_else(|| "worktree.bench".to_owned());
-    seeds.worktree_id = Some(worktree_id.clone());
-    let grant_digest = dig_str(&inventory, "grant_digest")
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("sha256:{}", "0".repeat(64)));
-    let policy_digest = dig_str(&inventory, "policy_digest")
-        .map(str::to_owned)
-        .unwrap_or_else(|| grant_digest.clone());
-    let scope_digest = dig_str(&inventory, "scope_digest")
-        .map(str::to_owned)
-        .unwrap_or_else(|| scope_set_digest.clone());
-
-    let worktree = worktree_id.clone();
-    let project = project_id.clone();
-    let repo = repository_id.clone();
-    let stack_node = |reference: &str| {
-        json!({
-            "project_id": project,
-            "repository_id": repo,
-            "worktree_id": worktree,
-            "reference": reference,
-            "scope_digest": scope_digest,
-        })
+    let source_ref = format!("refs/heads/{NATIVE_LINKED_BRANCH}");
+    let destination_ref = format!("refs/heads/{branch}");
+    let Some(entries) = dig(&inventory, "entries").and_then(Value::as_array) else {
+        seeds
+            .skipped
+            .push("native_integration_*: inventory omitted entry list".to_owned());
+        return;
     };
-    let graph_node = |node_id: &str, reference: &str, tip: &str| {
-        json!({
-            "node_id": node_id,
-            "project_id": project_id,
-            "repository_id": repository_id,
-            "reference": reference,
-            "tip": tip,
-            "worktree_id": worktree_id,
-        })
+    let entry_for = |reference: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.get("reference").and_then(Value::as_str) == Some(reference))
     };
-    let body = json!({
-        "source": stack_node(&format!("refs/heads/{base_branch}")),
-        "destination": stack_node(&format!("refs/heads/{branch}")),
-        "authorized_scope_set_id": scope_set_id,
-        "authorized_scope_set_revision": scope_set_revision,
-        "authorized_scope_set_digest": scope_set_digest,
-        "inventory_snapshot_id": inventory_snapshot_id,
-        "inventory_epoch": inventory_epoch,
-        "selection": {
-            "kind": "declared_stack_edge",
-            "binding": {
-                "stack_id": "stack.bench",
-                "revision_id": format!("stack-revision.bench.{}", now_micros()),
-                "nodes": [
-                    graph_node("node.destination", &format!("refs/heads/{branch}"), &head),
-                    graph_node("node.source", &format!("refs/heads/{base_branch}"), &parent),
-                ],
-                "edges": [{
-                    "dependency": "node.source",
-                    "dependent": "node.destination",
-                }],
-                "source_node_id": "node.source",
-                "destination_node_id": "node.destination",
-                "direction": "propagate_dependency_to_dependent",
-            },
-        },
-        "grant_digest": grant_digest,
-        "policy_digest": policy_digest,
-        "format": "json",
-    });
+    let Some(destination_entry) = entry_for(&destination_ref) else {
+        seeds.skipped.push(format!(
+            "native_integration_*: inventory omitted destination reference {destination_ref}"
+        ));
+        return;
+    };
+    let Some(source_entry) = entry_for(&source_ref) else {
+        seeds.skipped.push(format!(
+            "native_integration_*: inventory omitted linked source reference {source_ref}"
+        ));
+        return;
+    };
+    let Some(destination_worktree_id) = destination_entry
+        .get("worktree_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        seeds.skipped.push(
+            "native_integration_*: destination inventory entry omitted worktree_id".to_owned(),
+        );
+        return;
+    };
+    let Some(source_worktree_id) = source_entry
+        .get("worktree_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        seeds
+            .skipped
+            .push("native_integration_*: source inventory entry omitted worktree_id".to_owned());
+        return;
+    };
+    let (Some(destination_head), Some(source_head)) = (
+        destination_entry.get("head").and_then(Value::as_str),
+        source_entry.get("head").and_then(Value::as_str),
+    ) else {
+        seeds.skipped.push(
+            "native_integration_*: current inventory omitted source or destination tip".into(),
+        );
+        return;
+    };
+    seeds.cleanup_worktree_id = Some(source_worktree_id.clone());
+    let Some(grant_digest) = inventory
+        .pointer("/outcome/value/authority/grant_digest")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        seeds
+            .skipped
+            .push("native_integration_*: inventory omitted grant_digest".to_owned());
+        return;
+    };
+    let Some(policy_digest) = inventory
+        .pointer("/outcome/value/authority/policy/digest")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        seeds
+            .skipped
+            .push("native_integration_*: inventory omitted policy_digest".to_owned());
+        return;
+    };
+    let typed_body = (|| {
+        let project = ProjectId::new(project_id.clone())?;
+        let repository = RepositoryId::new(repository_id.clone())?;
+        let source_worktree = WorktreeId::new(source_worktree_id.clone())?;
+        let destination_worktree = WorktreeId::new(destination_worktree_id.clone())?;
+        let source = ResolvedScope::new(
+            project.clone(),
+            repository.clone(),
+            source_worktree.clone(),
+            Some(RefId::new(source_ref.clone())?),
+        )?;
+        let destination = ResolvedScope::new(
+            project.clone(),
+            repository.clone(),
+            destination_worktree.clone(),
+            Some(RefId::new(destination_ref.clone())?),
+        )?;
+        let source_node = StackNodeId::new("node.source")?;
+        let destination_node = StackNodeId::new("node.destination")?;
+        let selection = NativeIntegrationSelectionDeclarationV1::DeclaredStackEdge {
+            stack_id: BranchStackId::new("stack.bench")?,
+            revision_id: BranchStackRevisionId::new(format!(
+                "stack-revision.bench.{}",
+                now_micros()
+            ))?,
+            nodes: vec![
+                BranchStackNodeV1 {
+                    node_id: destination_node.clone(),
+                    project_id: project.clone(),
+                    repository_id: repository.clone(),
+                    reference: RefId::new(destination_ref.clone())?,
+                    tip: CommitId::new(destination_head)?,
+                    // The primary destination is the checked-out repository
+                    // root. Omitting this optional worktree identity tells
+                    // the native adapter to operate on that clean root;
+                    // supplying it would classify the destination as an
+                    // occupied linked worktree and make apply a no-op.
+                    worktree_id: None,
+                },
+                BranchStackNodeV1 {
+                    node_id: source_node.clone(),
+                    project_id: project.clone(),
+                    repository_id: repository.clone(),
+                    reference: RefId::new(source_ref.clone())?,
+                    tip: CommitId::new(source_head)?,
+                    worktree_id: Some(source_worktree),
+                },
+            ],
+            edges: vec![BranchStackEdgeV1 {
+                dependency: source_node.clone(),
+                dependent: destination_node.clone(),
+            }],
+            source_node_id: source_node,
+            destination_node_id: destination_node,
+            direction: NativeIntegrationDirectionV1::PropagateDependencyToDependent,
+        };
+        Ok::<_, Box<dyn std::error::Error>>(NativeIntegrationStackSnapshotSurfaceRequest {
+            source,
+            destination,
+            authorized_scope_set_id: tracedecay_domain::ScopeSetId::new(scope_set_id.clone())?,
+            authorized_scope_set_revision: tracedecay_domain::ScopeSetRevision::new(
+                scope_set_revision as u64,
+            )?,
+            authorized_scope_set_digest: ManifestDigest::new(scope_set_digest.clone())?,
+            inventory_snapshot_id: WorktreeInventorySnapshotId::new(inventory_snapshot_id.clone())?,
+            inventory_epoch: WorktreeInventoryEpoch::new(inventory_epoch as u64)?,
+            selection,
+            grant_digest: ManifestDigest::new(grant_digest.clone())?,
+            policy_digest: ManifestDigest::new(policy_digest.clone())?,
+        })
+    })();
+    let typed_request = match typed_body {
+        Ok(request) => request,
+        Err(error) => {
+            seeds.skipped.push(format!(
+                "native_integration_*: invalid typed snapshot seed: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = typed_request.clone().seal() {
+        seeds.skipped.push(format!(
+            "native_integration_*: stack snapshot declaration rejected: {error}"
+        ));
+        return;
+    }
+    if typed_request.source.worktree_id == typed_request.destination.worktree_id {
+        seeds.skipped.push(
+            "native_integration_*: declared stack requires two distinct enrolled worktrees"
+                .to_owned(),
+        );
+        return;
+    }
+    let body = match serde_json::to_value(typed_request) {
+        Ok(body) => body,
+        Err(error) => {
+            seeds.skipped.push(format!(
+                "native_integration_*: stack snapshot request serialization failed: {error}"
+            ));
+            return;
+        }
+    };
     let snapshot = match call_json_tool(
         harness,
         project_root,
@@ -1346,16 +2302,170 @@ async fn seed_native_integration(
             return;
         }
     };
-    let Some(transaction_id) = dig_str(&preflight, "transaction_id").map(str::to_owned) else {
+    let Some(preview_id) = dig_str(&preflight, "preview_id").map(str::to_owned) else {
+        let state = dig_str(&preflight, "state").unwrap_or("unknown");
         seeds.skipped.push(format!(
-            "native_integration_*: preflight returned no transaction_id: {preflight}"
+            "native_integration_*: preflight returned no preview (state={state})"
         ));
         return;
     };
+    let Some(preview_digest) = dig_str(&preflight, "preview_digest").map(str::to_owned) else {
+        seeds.skipped.push(format!(
+            "native_integration_*: preflight preview {preview_id} omitted preview_digest"
+        ));
+        return;
+    };
+    // Keep the valid snapshot capability even when approval/apply cannot
+    // advance this fixture. A preflight preview is not a transaction receipt.
     seeds.native = Some(NativeSeeds {
         snapshot_body: body,
-        transaction_id,
+        transaction_id: None,
     });
+    let approval = match call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_approve_native_integration",
+        json!({
+            "preview_id": preview_id.clone(),
+            "preview_digest": preview_digest.clone(),
+            "format": "json",
+        }),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("native_integration_*: seed approval: {error}"));
+            return;
+        }
+    };
+    let Some(approval_id) = dig_str(&approval, "approval_id").map(str::to_owned) else {
+        seeds
+            .skipped
+            .push("native_integration_*: seed approval omitted approval_id".to_owned());
+        return;
+    };
+    let Some(approval_digest) = dig_str(&approval, "approval_digest").map(str::to_owned) else {
+        seeds
+            .skipped
+            .push("native_integration_*: seed approval omitted approval_digest".to_owned());
+        return;
+    };
+    let approval = approval
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&approval);
+    let Some(transaction_id) = approval
+        .get("transaction_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        seeds
+            .skipped
+            .push("native_integration_*: approval omitted daemon transaction_id".to_owned());
+        return;
+    };
+    let apply = match call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_apply_native_integration",
+        json!({
+            "preview_id": preview_id,
+            "preview_digest": preview_digest,
+            "approval_id": approval_id,
+            "approval_digest": approval_digest,
+            "transaction_id": transaction_id.clone(),
+            "format": "json",
+        }),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("native_integration_*: seed apply: {error}"));
+            return;
+        }
+    };
+    let apply = apply.pointer("/outcome/value/payload").unwrap_or(&apply);
+    let receipt_tx = apply
+        .pointer("/status/transaction_id")
+        .and_then(Value::as_str)
+        .or_else(|| apply.get("transaction_id").and_then(Value::as_str));
+    let terminal = apply
+        .get("terminal_outcome")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            apply
+                .pointer("/status/terminal_outcome")
+                .and_then(Value::as_str)
+        });
+    if apply.get("outcome").and_then(Value::as_str) != Some("receipt")
+        || receipt_tx != Some(transaction_id.as_str())
+        || terminal != Some("committed")
+    {
+        seeds.skipped.push(format!(
+            "native_integration_*: seed apply was not a committed receipt (outcome={}, transaction_id={:?}, terminal={:?})",
+            apply.get("outcome").and_then(Value::as_str).unwrap_or("missing"),
+            receipt_tx,
+            terminal,
+        ));
+        return;
+    }
+    let Some(final_ref_tip) = apply.get("final_ref_tip").and_then(Value::as_str) else {
+        seeds
+            .skipped
+            .push("native_integration_*: committed receipt omitted final_ref_tip".to_owned());
+        return;
+    };
+    let observed_tip = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    if observed_tip.as_deref() != Some(final_ref_tip) {
+        seeds.skipped.push(format!(
+            "native_integration_*: committed receipt ref tip mismatch (receipt={final_ref_tip}, observed={observed_tip:?})"
+        ));
+        return;
+    }
+    let Some(final_tree) = apply.get("final_tree").and_then(Value::as_str) else {
+        seeds
+            .skipped
+            .push("native_integration_*: committed receipt omitted final_tree".to_owned());
+        return;
+    };
+    let observed_tree = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", &format!("refs/heads/{branch}^{{tree}}")])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    if observed_tree.as_deref() != Some(final_tree) {
+        seeds.skipped.push(format!("native_integration_*: committed receipt tree mismatch (receipt={final_tree}, observed={observed_tree:?})"));
+        return;
+    }
+    if let Some(head) = observed_tip {
+        seeds.head_commit = Some(head);
+    }
+    seeds.parent_commit = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project_root)
+        .args(["rev-parse", "HEAD~1"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    if let Some(native) = seeds.native.as_mut() {
+        native.transaction_id = Some(transaction_id);
+    }
 }
 
 fn collect_hunk_digests(value: &Value, out: &mut Vec<String>) {
@@ -1379,14 +2489,299 @@ fn collect_hunk_digests(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-fn seed_skill(seeds: &mut Seeds) {
-    // Managed skills live in the composed profile; creating one requires the
-    // automation CLI which the bench process cannot drive mid-mount. Probe
-    // `skill_list` instead — only skips cleanly if the surface is empty.
-    seeds.skill_id = None;
-    seeds
-        .skipped
-        .push("skill_view: no profile skill seed (CLI-only producer)".to_owned());
+/// Admit a native saved-edit callback through the production hook runtime.
+/// The native lifecycle is committed by host admission; the background producer
+/// then binds its exact address and queues the real compiler finding. Reading
+/// the mounted authority leaves the suggestion available for the public tools.
+pub(crate) async fn seed_context_scout_address(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Result<Value, String> {
+    use tracedecay_domain::configuration::{
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ContextScoutConfigurationStateV1,
+        ContextScoutSettingsV1,
+    };
+
+    let project_id = harness
+        .project_id(project_root)
+        .await
+        .map_err(|error| format!("context scout project identity unavailable: {error}"))?;
+    let mut settings = ContextScoutSettingsV1::disabled();
+    settings.state = ContextScoutConfigurationStateV1::Active;
+    let expected = serde_json::to_value(ConfigurationValueV1::ContextScoutSettings(settings))
+        .map_err(|error| format!("context scout settings encode failed: {error}"))?;
+    let current = call_json_tool(
+        harness,
+        project_root,
+        "tracedecay_configuration_get",
+        json!({"key": CONTEXT_SCOUT_SETTINGS_SETTING_KEY, "format": "json"}),
+    )
+    .await?;
+    if dig(&current, "effective_value") != Some(&expected) {
+        let revision = current
+            .pointer("/outcome/value/payload/revision_id")
+            .and_then(Value::as_str)
+            .ok_or("context scout configuration omitted current revision")?;
+        call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_configuration_set",
+            json!({
+                "layer": {"kind": "project", "project_id": project_id},
+                "key": CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+                "value": expected,
+                "expected_revision": revision,
+                "idempotency_key": format!("bench-context-scout-enable-{}", now_micros()),
+                "format": "json",
+            }),
+        )
+        .await?;
+    }
+
+    let project_id = ProjectId::new(project_id)
+        .map_err(|error| format!("context scout project identity invalid: {error}"))?;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| format!("context scout native scope unavailable: {error:?}"))?;
+    let (_, worktree_id) = tracedecay_agent_hosts::hooks::hook_scope_locators(&scope);
+    let data_root = harness
+        .project_data_root(project_root)
+        .await
+        .map_err(|error| format!("context scout data root unavailable: {error}"))?;
+    let host = tracedecay_domain::NativeHostIdentityV1::KimiCode;
+    let path = tracedecay_hooks::hook_configuration_path(&data_root, worktree_id, host);
+    let snapshot = tracedecay_hooks::HookConfigurationFileReaderV1::new(path)
+        .load(host)
+        .map_err(|error| format!("context scout hook binding decode failed: {error}"))?
+        .ok_or("context scout hook admission has no daemon-published Kimi binding")?;
+
+    let session_id = format!("bench-context-scout-{}", now_micros());
+    let call_id = format!("{session_id}-edit");
+    let mut payload: Value = serde_json::from_slice(include_bytes!(
+        "../../../tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+    ))
+    .map_err(|error| format!("context scout native fixture decode failed: {error}"))?;
+    payload["session_id"] = json!(session_id);
+    payload["tool_call_id"] = json!(call_id);
+    payload["cwd"] = json!(project_root);
+    payload["tool_input"]["path"] = json!(project_root.join("src/lib.rs"));
+    let payload = serde_json::to_vec(&payload)
+        .map_err(|error| format!("context scout native fixture encode failed: {error}"))?;
+    let observed_at = tracedecay_domain::UtcMicros(now_micros());
+    let material = tracedecay_agent_hosts::hooks::native_capture_material(
+        tracedecay_hooks::NativeHookCaptureSourceV1::Host(host),
+        &payload,
+        observed_at,
+    )
+    .map_err(|error| format!("context scout native fixture material failed: {error}"))?;
+    let lifecycle = tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1::new(
+        &session_id,
+        &call_id,
+        material.event_id,
+    )
+    .ok_or("context scout native lifecycle identity invalid")?;
+    let envelope = tracedecay_hooks::decode_native_hook_event(host, &payload)
+        .map_err(|error| format!("context scout native fixture decode failed: {error}"))?
+        .into_envelope(&snapshot.binding, material)
+        .map_err(|error| format!("context scout hook envelope rejected: {error}"))?;
+    let response = call_lenient(
+        harness,
+        project_root,
+        "tracedecay_hook_runtime",
+        json!({
+            "action": "hook_v2_admit",
+            "envelope": envelope,
+            "native_session_id": session_id,
+            "native_lifecycle": lifecycle,
+            "format": "json",
+        }),
+    )
+    .await?;
+    if dig_str(&response, "disposition") != Some("accepted") {
+        return Err(format!(
+            "context scout native admission failed: {}",
+            bounded_json(&response)
+        ));
+    }
+    let session_id = tracedecay_domain::SessionId::new(session_id)
+        .map_err(|error| format!("context scout native session invalid: {error}"))?;
+    let lifecycle = tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+        envelope.project_id,
+        envelope.worktree_id,
+        &session_id,
+    )
+    .await
+    .ok_or("context scout native admission did not commit a complete canonical lifecycle")?;
+    let graph = harness
+        .server(project_root)
+        .map_err(|error| format!("context scout project route unavailable: {error}"))?
+        .cg()
+        .await;
+    let owner = graph
+        .context_scout_owner()
+        .ok_or("context scout runtime owner unavailable")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some((address, _)) = graph
+            .resolve_mounted_context_scout_claim_authority(&lifecycle)
+            .await
+            && let Ok(recent) = owner.recent_exact(address, 1).await
+            && recent
+                .pending
+                .iter()
+                .any(|entry| entry.work.address == address)
+        {
+            return serde_json::to_value(address)
+                .map_err(|error| format!("context scout address encode failed: {error}"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "context scout native producer did not mount a queued suggestion: {:?}",
+                owner.configured_status().await,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn seed_skill(harness: &ProductionProjectCompositionHarnessV1, seeds: &mut Seeds) {
+    const SKILL_ID: &str = "bench-skill-4a71c8";
+    let support_file = match ManagedSupportFile::new(
+        "references/bench.md",
+        b"bench managed skill support marker\n".to_vec(),
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("skill_view: support file: {error}"));
+            return;
+        }
+    };
+    let draft = ManagedSkillDraft {
+        id: SKILL_ID.to_owned(),
+        title: "Bench Skill".to_owned(),
+        summary: "Read the benchmark checklist.".to_owned(),
+        routing_description: "Use for benchmark coverage.".to_owned(),
+        category: "maintenance".to_owned(),
+        targets: default_managed_skill_targets(),
+        body_markdown: "Benchmark managed skill body marker.".to_owned(),
+        support_files: vec![support_file],
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::AutomationRun,
+            actor: "tracedecay-tool-performance".to_owned(),
+            run_id: Some("bench-run-skill-4a71c8".to_owned()),
+        },
+    };
+    match load_managed_skill(harness.profile_root(), SKILL_ID).await {
+        Ok(skill)
+            if skill.metadata.title == draft.title
+                && skill.metadata.summary == draft.summary
+                && skill.metadata.routing_description == draft.routing_description
+                && skill.metadata.category == draft.category
+                && skill.metadata.targets == draft.targets
+                && skill.body_markdown == draft.body_markdown
+                && skill.support_files == draft.support_files
+                && skill.metadata.provenance == draft.provenance =>
+        {
+            seeds.skill_id = Some(SKILL_ID.to_owned());
+            return;
+        }
+        Ok(_) => {
+            seeds.skipped.push(
+                "skill_view: existing benchmark skill does not match expected draft".to_owned(),
+            );
+            return;
+        }
+        Err(ManagedSkillReadError::NotFound { .. }) => {}
+        Err(error) => {
+            seeds.skipped.push(format!("skill_view: {error}"));
+            return;
+        }
+    }
+    match create_managed_skill(harness.profile_root(), draft).await {
+        Ok(skill) => seeds.skill_id = Some(skill.metadata.id),
+        Err(error) => seeds.skipped.push(format!("skill_view: {error}")),
+    }
+}
+
+async fn seed_automation_run(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    seeds: &mut Seeds,
+) {
+    const RUN_ID: &str = "bench-run-performance-4a71c8";
+    const MARKER: &str = "bench-automation-artifact-4a71c8";
+    let server = match harness.server(project_root) {
+        Ok(server) => server,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("automation_run_*: server unavailable: {error}"));
+            return;
+        }
+    };
+    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    let artifact = match write_run_artifact(
+        &dashboard_root,
+        RUN_ID,
+        AutomationRunArtifactKind::Traces,
+        &json!({"marker": MARKER, "status": "captured"}),
+        Some("benchmark trace artifact".to_owned()),
+        "1782283200",
+    )
+    .await
+    {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            seeds
+                .skipped
+                .push(format!("automation_run_artifact_view: {error}"));
+            return;
+        }
+    };
+    let record = AutomationRunLedgerRecord {
+        schema_version: 2,
+        run_id: RUN_ID.to_owned(),
+        trigger: AutomationTrigger::ManualCli,
+        task: AgentTaskKind::MemoryCurator,
+        task_key: Some("memory_curator".to_owned()),
+        backend: "codex_app_server".to_owned(),
+        backend_identity: None,
+        host_mode: Some("standalone".to_owned()),
+        prompt_version: Some("memory_curator:v1".to_owned()),
+        response_schema: None,
+        strict_json: Some(true),
+        model: Some("bench-model".to_owned()),
+        status: AutomationRunStatus::Succeeded,
+        evidence_hash: None,
+        input_hash: None,
+        output_hash: None,
+        proposed_ops: Some(json!({"ops": []})),
+        applied_ops: None,
+        rejected_ops: None,
+        validation_report: Some(json!({"passed": true})),
+        reviewed_count: 1,
+        accepted_count: 1,
+        rejected_count: 0,
+        skipped_count: 0,
+        error: None,
+        error_classification: None,
+        error_retryable: None,
+        backend_attempt_count: 1,
+        backend_attempts: Vec::new(),
+        fallback_status: None,
+        session_evidence_budget_stage: None,
+        report_ref: None,
+        artifacts: vec![artifact],
+        started_at: "1782283199".to_owned(),
+        completed_at: "1782283200".to_owned(),
+        completed_at_micros: Some(1_782_283_200_000_000),
+    };
+    match append_run_record(&dashboard_root, &record).await {
+        Ok(()) => seeds.automation_run_id = Some(RUN_ID.to_owned()),
+        Err(error) => seeds.skipped.push(format!("automation_run_*: {error}")),
+    }
 }
 
 /// Every object value reachable in `value` (pre-order), for producer
@@ -1444,6 +2839,12 @@ async fn call_lenient(
 /// family silently unmeasured. The budget is time, not attempts — a slow
 /// call (proposal generation can outlive the transport's own deadline)
 /// converges or is recorded, it cannot grind retries for hours.
+#[tracing::instrument(
+    name = "bench.setup.call",
+    level = "trace",
+    skip_all,
+    fields(tool = tool)
+)]
 async fn call_transient(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1534,9 +2935,6 @@ fn repair_definition_pins(response: &Value, pins: &mut serde_json::Map<String, V
     found
 }
 
-/// Configure one Work executable binding (a no-op provider script + CodexCli
-/// route) so a generated proposal names a route and execution can be
-/// admitted — an abstained route refuses `admit_execution` outright.
 async fn seed_work_attempt_provider(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1549,7 +2947,7 @@ async fn seed_work_attempt_provider(
     // to operate on (`not-cancellable`). Eight seconds keeps the attempt
     // running when cancel lands but frees the topology's single parallel
     // slot well inside the prime's transient-retry window.
-    let executable_bytes: &[u8] = b"#!/bin/sh\nsleep 8\n";
+    let executable_bytes: &[u8] = b"#!/bin/sh\nIFS= read -r instruction\ncase \"$instruction\" in\n  'Bench lifecycle failure.') exit 17 ;;\n  'Bench lifecycle source.') printf '%s' 'TraceDecay lifecycle source evidence.'; exit 0 ;;\nesac\nsleep 8\n";
     // Keep the provider outside the clone: `restore_repo` stashes and drops
     // untracked files between runs, which would leave the persisted
     // binding's canonical_path dangling and fail the next open's route
@@ -1763,8 +3161,46 @@ fn work_create_change(suffix: &str, occurred_at: Value) -> Value {
     })
 }
 
-/// Start one observational attempt, ride the spawn boundary, cancel it into a
-/// terminal state, and return (start result, identity, terminal state).
+pub(crate) const WORK_FAILURE_INSTRUCTIONS: &str = "Bench lifecycle failure.";
+pub(crate) const WORK_SOURCE_INSTRUCTIONS: &str = "Bench lifecycle source.";
+
+pub(crate) async fn wait_work_attempt(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    identity: Value,
+    expected_states: &[&str],
+) -> Result<Value, String> {
+    let mut state = String::new();
+    for _ in 0..250 {
+        let status = call_json_tool(
+            harness,
+            project_root,
+            "tracedecay_work_attempt_status",
+            identity.clone(),
+        )
+        .await?;
+        state = dig_str(&status, "state")
+            .ok_or_else(|| format!("Work attempt status omitted state: {status}"))?
+            .to_owned();
+        if expected_states.contains(&state.as_str()) {
+            return Ok(status);
+        }
+        if matches!(
+            state.as_str(),
+            "succeeded" | "failed" | "timed_out" | "cancelled"
+        ) {
+            return Err(format!(
+                "Work attempt became {state}; expected {expected_states:?}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(format!(
+        "Work attempt remained {state}; expected {expected_states:?}"
+    ))
+}
+
+/// Start an observational attempt, await readiness, then cancel it to release capacity.
 async fn settle_attempt(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1802,21 +3238,27 @@ async fn settle_attempt(
         .ok()
         .and_then(|v| dig(v, "identity").cloned())
         .unwrap_or(Value::Null);
+    if started.is_err() {
+        return (started, identity, String::new());
+    }
     let terminal =
         |state: &str| matches!(state, "succeeded" | "failed" | "timed_out" | "cancelled");
-    let mut state = String::new();
-    // Lease-fence conflicts retry the running transition asynchronously for
-    // tens of seconds; the attempt stays non-terminal meanwhile and occupies
-    // the topology's single parallel-attempt slot. The poll budget covers
-    // that retry window without starving the daemon's idle watchdog.
-    for _ in 0..250 {
-        if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await {
-            state = dig_str(&s, "state").unwrap_or("").to_owned();
-            if state == "running" || terminal(&state) {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    let settled = wait_work_attempt(
+        harness,
+        project_root,
+        status(attempt_id),
+        &["running", "succeeded", "failed", "timed_out", "cancelled"],
+    )
+    .await;
+    let mut state = match settled {
+        Ok(status) => dig_str(&status, "state").unwrap_or("").to_owned(),
+        Err(error) => return (Err(error), identity, String::new()),
+    };
+    // Never cancel a lease that has not crossed the running boundary. A
+    // cancellation request racing mark-running can invalidate the original
+    // lease and leaves retry evidence unusable.
+    if state != "running" && !terminal(&state) {
+        return (started, identity, state);
     }
     // The topology admits a single global active attempt: any non-terminal
     // residue here, not just a running one, occupies that slot for every
@@ -2125,7 +3567,7 @@ async fn seed_work(
         ));
     }
 
-    // ── current graph read for verified versions + generation ids ────────
+    // ── current verified graph version ──────────────────────────────────
     if let Ok(v) = call(
         "tracedecay_work_views",
         json!({
@@ -2138,8 +3580,6 @@ async fn seed_work(
     .await
     {
         work.current_version = dig(&v, "verified_version").cloned().unwrap_or(Value::Null);
-        work.work_generation = dig(&v, "work_generation").cloned();
-        work.topology_generation = dig(&v, "topology_generation").cloned();
     }
 
     // ── workflow: repair environment pins, register + activate + run ─────
@@ -2322,6 +3762,9 @@ pub fn coverage_groups(ctx: &QueryContext) -> Vec<ToolGroup> {
     session::groups(ctx, &mut groups);
     memory::groups(ctx, &mut groups);
     admin::groups(ctx, &mut groups);
+    admin::context_scout_groups(&mut groups);
+    admin::context_scout_control_groups(&mut groups);
+    admin::context_scout_mutation_groups(&mut groups);
     effects::groups(ctx, &mut groups);
     work::groups(ctx, &mut groups);
     groups
@@ -2334,8 +3777,7 @@ pub(crate) fn rq(tool: &'static str, label: &'static str, extra: Value) -> Query
     Query::read(label, tool, args)
 }
 
-/// Read query without a `format` arg — the work/workflow/multi_root surfaces
-/// reject `format` (they emit one structured wire shape).
+/// Read query using the adapter's default presentation.
 pub(crate) fn rqn(tool: &'static str, label: &'static str, args: Value) -> Query {
     Query::read(label, tool, args)
 }
@@ -2356,6 +3798,7 @@ pub(crate) fn eq(
         kind: crate::queries::QueryKind::Effect {
             prime,
             cleanup: None,
+            repeatable: true,
         },
     }
 }
@@ -2374,6 +3817,7 @@ pub(crate) fn eqn(
         kind: crate::queries::QueryKind::Effect {
             prime,
             cleanup: None,
+            repeatable: true,
         },
     }
 }
@@ -2409,6 +3853,7 @@ pub(crate) fn eqc(
         kind: crate::queries::QueryKind::Effect {
             prime,
             cleanup: Some(cleanup),
+            repeatable: true,
         },
     }
 }
