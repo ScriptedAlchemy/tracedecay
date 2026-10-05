@@ -234,16 +234,13 @@ fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
         None => {
             // Build systems that produce the digest as an action output
             // (Bazel) hand over a file path, not a literal value.
-            let Some(file) = std::env::var_os("TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE")
-            else {
-                return Err(
-                    "TRACEDECAY_SKIP_DASHBOARD_BUILD is set but neither \
+            let Some(file) = std::env::var_os("TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE") else {
+                return Err("TRACEDECAY_SKIP_DASHBOARD_BUILD is set but neither \
                      TRACEDECAY_DASHBOARD_BUNDLE_SHA256 nor \
                      TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE is; skipping the dashboard \
                      build requires the expected 64-hex sha256 bundle digest so the \
                      embedded bytes are proven, not assumed"
-                        .into(),
-                );
+                    .into());
             };
             let contents = fs::read_to_string(&file).map_err(|error| {
                 format!(
