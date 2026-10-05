@@ -566,10 +566,6 @@ fn registered_hook_orchestrator(
         .upgrade()
 }
 
-/// An authenticated explicit claim joins the same bounded producer as native
-/// hooks. Its effect identity distinguishes it from the original saved edit;
-/// retries of that one request coalesce while unrelated successors supersede.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_registered_context_scout_request(
     hook: AdmittedContextScoutHookV1,
     lifecycle: ContextScoutLifecycleAddressV1,

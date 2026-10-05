@@ -25,5 +25,3 @@ pub fn fixture_unsafe_probe() -> u8 {
     // SAFETY: pointer is derived from a live local for this read.
     unsafe { *pointer }
 }
-
-// TODO(fixture): replace this probe after the benchmark exercises TODO reads.

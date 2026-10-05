@@ -805,7 +805,6 @@ pub async fn compute_changelog(
     let ChangelogSurfaceRequestV1 { from_ref, to_ref } =
         decode_primitive_request(&args, "tracedecay_changelog")?;
 
-    // Use gix to diff the two trees, off the request runtime's workers.
     let changes = {
         let project_root = ctx.project_root().to_path_buf();
         let from_ref = from_ref.clone();

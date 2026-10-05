@@ -739,7 +739,6 @@ pub(crate) async fn seed_all(
     // ── session refresh handle ───────────────────────────────────────────
     seed_refresh(harness, project_root, &mut seeds).await;
 
-    // ── automation run id and artifact: append a real durable ledger row ──
     seed_automation_run(harness, project_root, &mut seeds).await;
 
     seeds.head_commit = std::process::Command::new("git")
@@ -932,7 +931,6 @@ pub(crate) async fn seed_all(
         seed_dirty_worktree(project_root, files, &mut seeds).await;
     }
 
-    // ── hunk poll last: the worktree is dirty before this poll ────────────
     if !seeds.needs_reopen_for_native_worktree {
         seed_git_preview(harness, project_root, &mut seeds).await;
     }
@@ -3568,7 +3566,6 @@ async fn seed_work(
         ));
     }
 
-    // ── current verified graph version ──────────────────────────────────
     if let Ok(v) = call(
         "tracedecay_work_views",
         json!({
