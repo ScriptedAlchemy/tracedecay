@@ -29,7 +29,7 @@ use crate::runtime::snapshot_observation::{
 use crate::runtime::source::{
     FileDiscoveryLimit, HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, bound_path_list, canonical_framed_sha256, jsonl_file_identity,
-    persist_host_provider_coverage, run_blocking_transcript_section,
+    persist_host_provider_coverage, revise_host_record, run_blocking_transcript_section,
 };
 
 mod discovery;
@@ -837,29 +837,27 @@ pub async fn capture_kimi_observations(
                 && !cancellation.is_cancelled()
             {
                 let next_frontier = if discovery.reached_end {
-                    Some(ParseOffset {
-                        byte_offset: 0,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: 0,
-                    })
+                    Some((0, 0))
                 } else {
-                    last_discovered_entry.map(|entry| ParseOffset {
-                        byte_offset: entry.sequence,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: entry.sequence,
-                    })
+                    last_discovered_entry.map(|entry| (entry.sequence, entry.sequence))
                 };
-                if let Some(next_frontier) = next_frontier
+                if let Some((byte_offset, file_id)) = next_frontier
                     && !cancellation.is_cancelled()
                 {
-                    facade
-                        .advance_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY, next_frontier)
-                        .await
-                        .map_err(|outcome| {
-                            crate::runtime::snapshot_observation::host_admission_error(
-                                PROVIDER, outcome,
-                            )
-                        })?;
+                    revise_host_record(
+                        facade,
+                        &scope,
+                        KIMI_DISCOVERY_FRONTIER_KEY,
+                        discovery_frontier,
+                        byte_offset,
+                        file_id,
+                    )
+                    .await
+                    .map_err(|outcome| {
+                        crate::runtime::snapshot_observation::host_admission_error(
+                            PROVIDER, outcome,
+                        )
+                    })?;
                 }
             }
             let deferred_units = outcome
