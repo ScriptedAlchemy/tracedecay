@@ -127,8 +127,7 @@ fn health_description_points_agents_at_the_weakest_dimension() {
         "health must not tell agents to maximize the composite: {description}"
     );
     assert!(
-        description.contains("pass details=true")
-            && description.contains("fix that dimension"),
+        description.contains("pass details=true") && description.contains("fix that dimension"),
         "health must send agents to the per-dimension breakdown: {description}"
     );
     assert_eq!(
