@@ -69,7 +69,27 @@ async fn store_fact(server: &McpServer, body: Value) -> String {
     let payload: Value =
         serde_json::from_str(extract_real_server_text(&result)).expect("fact add JSON");
     assert_eq!(payload["outcome"], "committed", "{payload}");
-    assert_eq!(payload["result"]["disposition"], "added", "{payload}");
+    assert!(
+        matches!(
+            payload["result"]["disposition"].as_str(),
+            Some("added") | Some("near_duplicate")
+        ),
+        "unexpected committed fact disposition: {payload}"
+    );
+    assert_eq!(
+        payload["result"]["commit"]["disposition"], "committed",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["result"]["commit"]["fact_id"], payload["result"]["fact"]["fact"]["fact_id"],
+        "committed fact identity diverged: {payload}"
+    );
+    if payload["result"]["closest_fact_id"].is_string() {
+        assert_ne!(
+            payload["result"]["closest_fact_id"], payload["result"]["fact"]["fact"]["fact_id"],
+            "near-duplicate candidate replaced the committed fact id: {payload}"
+        );
+    }
     payload["result"]["fact"]["fact"]["fact_id"]
         .as_str()
         .expect("stored fact id")
@@ -834,6 +854,156 @@ async fn fact_store_search_keeps_complete_graph_after_successive_supersedes() {
             successor["graph_coverage"]["kind"], "complete",
             "{successor}"
         );
+    }
+    fixture.harness.shutdown().await;
+}
+
+async fn assert_seeded_fact_graph_is_complete(server: &McpServer) {
+    let seeded = "bench constellation bench-alpha-0 bench-beta-0";
+    let page = search_payload(server, json!({"query": seeded, "limit": 1})).await;
+    assert!(
+        contents(&page).iter().any(|content| content == seeded),
+        "seeded fact missing from search page: {page}"
+    );
+    assert_eq!(page["graph_coverage"]["kind"], "complete", "{page}");
+}
+
+#[tokio::test]
+async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mutations() {
+    let (fixture, project) = open_search_project().await;
+    let server = &project.server;
+    let markers = [
+        "amber observatory calibrates a lunar compass",
+        "bravo orchard archives rainfall ledgers",
+        "cinder railway schedules a northern cargo",
+        "delta workshop replaces cracked ceramic valves",
+        "ember harbor records a tide warning",
+    ];
+    store_fact(
+        server,
+        json!({
+            "content": "bench constellation bench-alpha-0 bench-beta-0",
+            "category": "tool",
+            "entities": ["bench-alpha-0", "bench-beta-0"],
+            "trust": 0.8,
+            "source_label": "bench"
+        }),
+    )
+    .await;
+    store_fact(
+        server,
+        json!({
+            "content": "bench constellation bench-beta-0 bench-gamma-0",
+            "category": "tool",
+            "entities": ["bench-beta-0", "bench-gamma-0"],
+            "trust": 0.7,
+            "source_label": "bench"
+        }),
+    )
+    .await;
+
+    for i in 0..5 {
+        store_fact(
+            server,
+            json!({
+                "content": format!("bench added fact {}", markers[i]),
+                "category": "tool",
+                "entities": [format!("bench-alpha-{i}"), format!("bench-beta-{i}")],
+                "trust": 0.9,
+                "source_label": "bench"
+            }),
+        )
+        .await;
+        assert_seeded_fact_graph_is_complete(server).await;
+    }
+
+    for i in 0..5 {
+        let iteration = 1_791_165_733_039_380_u64 + i as u64;
+        let id = store_fact(
+            server,
+            json!({
+                "content": format!("bench seeded fact update {}", markers[i]),
+                "category": "tool",
+                "entities": ["bench-update-a", format!("bench-update-b-{iteration}")],
+                "trust": 0.9,
+                "source_label": "bench"
+            }),
+        )
+        .await;
+        let updated = handle_real_server_tool_call(
+            server,
+            "tracedecay_fact_store_update",
+            json!({
+                "fact_id": id,
+                "content": format!("bench updated fact {iteration}"),
+                "entities": [format!("bench-updated-{iteration}")],
+                "trust": 0.95,
+                "source_label": {"kind": "set", "value": "bench"}
+            }),
+        )
+        .await;
+        let updated = parse_text(&updated);
+        assert_eq!(updated["commit"]["disposition"], "committed", "{updated}");
+        assert_seeded_fact_graph_is_complete(server).await;
+    }
+
+    for i in 0..5 {
+        let iteration = 1_791_165_733_039_385_u64 + i as u64;
+        let fact_id = store_fact(
+            server,
+            json!({
+                "content": format!("bench seeded fact remove {}", markers[i]),
+                "category": "tool",
+                "entities": ["bench-remove-a", format!("bench-remove-b-{iteration}")],
+                "trust": 0.9,
+                "source_label": "bench"
+            }),
+        )
+        .await;
+        let removed = handle_real_server_tool_call(
+            server,
+            "tracedecay_fact_store_remove",
+            json!({"fact_id": fact_id}),
+        )
+        .await;
+        let removed = parse_text(&removed);
+        assert_eq!(removed["outcome"], "removed", "{removed}");
+        assert_seeded_fact_graph_is_complete(server).await;
+    }
+
+    for i in 0..5 {
+        let iteration = 1_791_165_733_039_390_u64 + i as u64;
+        let old_id = store_fact(
+            server,
+            json!({
+                "content": format!("bench seeded fact sup-old {}", markers[i]),
+                "category": "tool",
+                "entities": ["bench-sup-old-a", format!("bench-sup-old-b-{iteration}")],
+                "trust": 0.9,
+                "source_label": "bench"
+            }),
+        )
+        .await;
+        let new_id = store_fact(
+            server,
+            json!({
+                "content": format!("bench seeded fact sup-new {}", markers[i]),
+                "category": "tool",
+                "entities": ["bench-sup-new-a", format!("bench-sup-new-b-{iteration}")],
+                "trust": 0.9,
+                "source_label": "bench"
+            }),
+        )
+        .await;
+        let superseded = handle_real_server_tool_call(
+            server,
+            "tracedecay_fact_store_supersede",
+            json!({"fact_id": old_id, "superseded_by": new_id}),
+        )
+        .await;
+        let superseded = parse_text(&superseded);
+        assert_eq!(superseded["outcome"], "superseded", "{superseded}");
+        assert_seeded_fact_graph_is_complete(server).await;
     }
     fixture.harness.shutdown().await;
 }
