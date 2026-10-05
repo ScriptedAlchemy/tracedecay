@@ -821,8 +821,6 @@ mod tests {
             HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
             HookDeliverySpoolError::Busy
         );
-        // A spent budget still takes the free staging lease; only the held
-        // publish lock is out of reach, so the receipt stages.
         let writer = HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::ZERO).unwrap();
         assert_eq!(
             writer.retain(&receipt()).unwrap(),
