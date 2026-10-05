@@ -1906,24 +1906,34 @@ impl RetainedCodeGraphRuntimeV1 {
         check: &dyn Fn() -> std::result::Result<(), GraphDbError>,
     ) -> std::result::Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError>
     {
-        let layered_spill = |parent: &CodeGenerationId| {
-            let parent = tracedecay_code_index::graph_projection::code_graph_generation_id(
-                parent,
-                projector_revision,
-            )
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            match self.graph_registry.sealed_generation_base(
-                registration(),
-                projection.clone(),
-                parent,
-                check,
-            )? {
-                Ok(base) => self
-                    .graph_registry
-                    .layered_row_spill(registration(), projection.clone(), base)
-                    .map(Ok),
-                Err(absence) => Ok(Err(absence)),
+        let layered_spill = |base: super::code_graph_manifest::LayeredBaseV1<'_>| match base {
+            super::code_graph_manifest::LayeredBaseV1::Parent(parent) => {
+                let parent = tracedecay_code_index::graph_projection::code_graph_generation_id(
+                    parent,
+                    projector_revision,
+                )
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                match self.graph_registry.sealed_generation_base(
+                    registration(),
+                    projection.clone(),
+                    parent,
+                    check,
+                )? {
+                    Ok(base) => self
+                        .graph_registry
+                        .layered_row_spill(registration(), projection.clone(), base)
+                        .map(Ok),
+                    Err(absence) => Ok(Err(absence)),
+                }
             }
+            super::code_graph_manifest::LayeredBaseV1::Sibling(sibling) => self
+                .graph_registry
+                .sibling_layered_row_spill(registration(), projection.clone(), sibling)
+                .map(Ok),
+        };
+        let sibling_bases = || {
+            self.graph_registry
+                .sibling_sealed_bases(registration(), projection, check)
         };
         let cold_spill = || {
             self.graph_registry
@@ -1937,6 +1947,7 @@ impl RetainedCodeGraphRuntimeV1 {
             projection.clone(),
             projector_revision,
             &layered_spill,
+            &sibling_bases,
             &cold_spill,
             admit,
             check,

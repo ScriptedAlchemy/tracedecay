@@ -1315,6 +1315,32 @@ impl GraphDbRegistry {
         operation.database().layered_row_spill(projection, base)
     }
 
+    /// The sealed cold bases other scopes of this store serve for the same
+    /// projector, which a scope with no parent graph may layer over.
+    pub fn sibling_sealed_bases(
+        &self,
+        registration: GraphDbRegistration,
+        projection: &GraphProjectionIdentity,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Vec<crate::GraphSiblingSealedBaseV1>, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation.database().sibling_sealed_bases(projection, check)
+    }
+
+    /// A row spill for a delta over a sibling scope's base, which it pins
+    /// until it seals.
+    pub fn sibling_layered_row_spill(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        sibling: crate::GraphSiblingSealedBaseV1,
+    ) -> Result<crate::GraphLayeredRowSpill, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation
+            .database()
+            .sibling_layered_row_spill(projection, sibling)
+    }
+
     /// Publishes through an already-issued, registry-validated graph lease.
     ///
     /// The caller retains the exact operation lease through the publication;

@@ -49,6 +49,7 @@ pub use identity::{
 #[cfg(test)]
 pub(crate) use recovered::recovered_generation_digest_chunked;
 pub(crate) use recovered::recovered_generation_digest_from_database;
+pub(crate) use recovered::recovered_relation_lanes;
 pub(crate) use replay::InlineOnlyGraphGenerationManifestProvider;
 use replay::validate_sealed_replay;
 pub use replay::{
@@ -157,6 +158,10 @@ pub struct GraphGenerationManifestIdentity {
     /// it. Re-validated against `dependencies` on every read and invisible to
     /// equality and clones.
     digest_memo: DependencyClosureDigestMemo,
+    /// The namespace this identity's rows are stored under when another
+    /// projection sealed them: a sibling scope's base, read and proven
+    /// under this projection. `None` for rows stored under their own.
+    stored_namespace: Option<GraphNamespace>,
 }
 
 impl GraphGenerationManifestIdentity {
@@ -177,7 +182,18 @@ impl GraphGenerationManifestIdentity {
             watermark,
             dependencies,
             digest_memo: DependencyClosureDigestMemo::default(),
+            stored_namespace: None,
         }
+    }
+
+    /// This identity over rows stored under `physical`, the namespace its
+    /// generation was sealed under, possibly by another projection.
+    pub(crate) fn stored_under(mut self, physical: GraphNamespace) -> Result<Self, GraphDbError> {
+        self.stored_namespace = None;
+        if physical != self.physical_namespace()? {
+            self.stored_namespace = Some(physical);
+        }
+        Ok(self)
     }
 
     pub fn dependency_closure_digest(
@@ -188,6 +204,9 @@ impl GraphGenerationManifestIdentity {
     }
 
     pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
+        if let Some(stored) = &self.stored_namespace {
+            return Ok(stored.clone());
+        }
         physical_namespace(
             &self.projection.namespace,
             &self.projection.projection,
@@ -592,6 +611,7 @@ impl GraphGenerationManifest {
                 .digest_memo
                 .dependency_closure
                 .propagated(&self.dependencies),
+            stored_namespace: None,
         }
     }
 

@@ -323,6 +323,35 @@ impl RefreshFixture {
         fixture
     }
 
+    /// A linked worktree of this fixture's repository at its `main` tree,
+    /// indexed into its own scope of the same code-index store.
+    fn linked(&self, name: &str) -> Self {
+        let project_root = self.root.join(name);
+        git(
+            &self.project_root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                project_root.to_str().expect("linked worktree path"),
+                "main",
+            ],
+        );
+        let canonical_project = project_root.canonicalize().expect("canonical linked root");
+        Self {
+            scoped_store: scoped_code_index_store_root(
+                &self.root.join("code-index-store"),
+                &canonical_project,
+            ),
+            root: self.root.clone(),
+            project_root,
+            canonical_project,
+            project_id: self.project_id.clone(),
+        }
+    }
+
     fn commit(&self, message: &str) {
         git(&self.project_root, &["add", "-A"]);
         git(&self.project_root, &["commit", "-qm", message]);
@@ -693,6 +722,141 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     )
     .await;
     drop((base_runtime, child_runtime, grandchild_runtime));
+}
+
+/// The sealed receipt of `generation` in `profile` sealed as `form`.
+fn receipt_in_form(profile: &Path, generation: &str, form: &str) -> (PathBuf, serde_json::Value) {
+    sealed_receipts(profile)
+        .into_iter()
+        .find(|(_, receipt)| receipt["generation"] == generation && receipt["form"] == form)
+        .unwrap_or_else(|| panic!("no {form} sealed receipt for {generation}"))
+}
+
+/// Fails when a linked worktree at its sibling's tree seals the whole graph
+/// again (#2402): its first generation must layer over the sibling's sealed
+/// container by hard link with a delta of just its generation marker, and
+/// still record the digest, serve the rows, and answer every read exactly as
+/// a cold build in its own namespace. Its later edits stay deltas over that
+/// base and leave the sibling's graph untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_worktree_at_the_same_tree_layers_over_its_siblings_sealed_graph() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let primary_fixture = RefreshFixture::create(&root, MODULES);
+    let (primary_source, primary_generation, _, primary_binding) = primary_fixture.seal();
+    let (_scope, registry, database) = primary_fixture.open_profile("profile", 45).await;
+    let primary_runtime = primary_source
+        .retain(&registry, &database, &primary_generation, primary_binding)
+        .await
+        .expect("retain the primary graph runtime");
+    let primary = primary_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the primary graph cold");
+    let profile = root.join("profile");
+    let (primary_directory, _) =
+        receipt_in_form(&profile, primary.generation().as_str(), "compact");
+    #[cfg(unix)]
+    let primary_container = file_identity(&primary_directory.join("generation.grafeo"));
+    #[cfg(not(unix))]
+    let _ = primary_directory;
+    let primary_rows = scan_rows(&primary);
+
+    let linked_fixture = primary_fixture.linked("linked");
+    let (linked_source, linked_generation, linked_parent, linked_binding) = linked_fixture.seal();
+    assert_eq!(linked_parent, None, "a new worktree's first generation");
+    assert_ne!(linked_source.worktree, primary_source.worktree);
+    let linked_runtime = linked_source
+        .retain(
+            &registry,
+            &database,
+            &linked_generation,
+            linked_binding.clone(),
+        )
+        .await
+        .expect("retain the linked graph runtime");
+    let report =
+        layered_report(&linked_runtime).expect("the linked worktree layers over its sibling");
+    assert_eq!(report.reextracted_files, 0, "{report:?}");
+    assert_eq!(report.removed_files, 0, "{report:?}");
+    let linked = linked_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the linked worktree's graph");
+    assert_ne!(linked.projection(), primary.projection());
+    let (linked_directory, receipt) =
+        receipt_in_form(&profile, linked.generation().as_str(), "layered");
+    #[cfg(not(unix))]
+    let _ = linked_directory;
+    assert_eq!(receipt["base"]["generation"], primary.generation().as_str());
+    #[cfg(unix)]
+    assert_eq!(
+        file_identity(&linked_directory.join("base.grafeo")),
+        primary_container,
+        "the linked worktree references its sibling's container instead of re-encoding it"
+    );
+    let delta = rows_in(&receipt["row_sum"]) + rows_in(&receipt["base"]["hidden_row_sum"])
+        - rows_in(&receipt["base"]["row_sum"]);
+    assert_eq!(
+        delta, 1,
+        "the delta is the linked generation's marker alone"
+    );
+    assert_matches_cold_build(
+        &linked_fixture,
+        &linked_source,
+        &linked_runtime,
+        linked,
+        linked_binding,
+        "profile-linked-cold",
+        46,
+    )
+    .await;
+
+    // The linked worktree diverges: still a delta over the shared base, and
+    // the primary serves exactly what it served.
+    edit_three_files(&linked_fixture.project_root, MODULES);
+    linked_fixture.commit("edit three files in the linked worktree");
+    let (linked_source, edited_generation, edited_parent, edited_binding) = linked_fixture.seal();
+    assert_eq!(edited_parent.as_ref(), Some(&linked_generation));
+    let edited_runtime = linked_source
+        .retain(
+            &registry,
+            &database,
+            &edited_generation,
+            edited_binding.clone(),
+        )
+        .await
+        .expect("retain the edited linked graph runtime");
+    let edited = edited_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the linked worktree's edit");
+    let edited_rows = scan_rows(&edited);
+    assert_layered_over(
+        &profile,
+        edited.generation().as_str(),
+        primary.generation().as_str(),
+        #[cfg(unix)]
+        primary_container,
+    );
+    assert_ne!(edited_rows, primary_rows, "the linked edit diverges");
+    assert_eq!(
+        scan_rows(&primary),
+        primary_rows,
+        "the primary is untouched"
+    );
+    assert_matches_cold_build(
+        &linked_fixture,
+        &linked_source,
+        &edited_runtime,
+        edited,
+        edited_binding,
+        "profile-linked-edit-cold",
+        47,
+    )
+    .await;
+
+    drop((primary, primary_runtime, linked_runtime, edited_runtime));
 }
 
 /// A serving store over `snapshot` whose interactive catalog is warmed from
