@@ -107,6 +107,39 @@ fn health_read_accepts_the_empty_argument_object_on_every_surface() {
     assert!(request.matches(ApplicationSurfaceOperation::HealthRead));
 }
 
+/// Agents read tool descriptions as instructions. The health description
+/// must steer them to the per-dimension breakdown it advertises, not to
+/// maximizing the composite that hides which dimension failed.
+#[test]
+fn health_description_points_agents_at_the_weakest_dimension() {
+    let definition = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_health")
+        .expect("health is advertised");
+    let description = definition.description.to_lowercase();
+
+    assert!(
+        !description.contains("maximize"),
+        "health must not tell agents to maximize the composite: {description}"
+    );
+    assert!(
+        description.contains("pass details=true")
+            && description.contains("fix the lowest-scoring dimension"),
+        "health must send agents to the per-dimension breakdown: {description}"
+    );
+    assert_eq!(
+        definition.input_schema["properties"]["details"]["type"],
+        json!(["boolean", "null"]),
+        "the details flag the description names must be advertised: {}",
+        definition.input_schema
+    );
+    assert!(
+        description.contains("up to 2%"),
+        "health must state the coverage-discipline penalty the score applies: {description}"
+    );
+}
+
 #[test]
 fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
     let definitions = get_tool_definitions().expect("tool definitions");

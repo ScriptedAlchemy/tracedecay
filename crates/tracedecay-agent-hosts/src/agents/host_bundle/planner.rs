@@ -14,7 +14,9 @@ use tracedecay_domain::canonical_json_bytes;
 use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
-use super::control::{read_receipt_at, validate_component_set_request};
+use super::control::{
+    read_receipt_at, validate_component_set_request, validate_hermes_profile_bindings,
+};
 use super::model::{
     CompetingHostExtensionClaimV1, HostBundleExecutionRequestV1, HostBundleLifecyclePreviewV1,
     HostBundleRollbackSeamV1, HostComponentSetExecutionRequestV1,
@@ -162,16 +164,7 @@ pub fn plan_lifecycle_mutation(
     if !request.explicit_confirmation {
         return Err(HostBundleError::ConfirmationRequired);
     }
-    match manifest.host {
-        HostKindV1::Hermes if request.hermes_profile_bindings != 1 => {
-            return Err(HostBundleError::InvalidHermesProfileBinding);
-        }
-        HostKindV1::Hermes => {}
-        _ if request.hermes_profile_bindings != 0 => {
-            return Err(HostBundleError::InvalidHermesProfileBinding);
-        }
-        _ => {}
-    }
+    validate_hermes_profile_bindings(manifest.host, request.hermes_profile_bindings)?;
 
     for (index, state) in observed.iter().enumerate() {
         validate_relative_install_path(Path::new(&state.relative_path))?;
