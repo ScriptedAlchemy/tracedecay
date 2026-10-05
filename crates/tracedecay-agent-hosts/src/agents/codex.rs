@@ -459,9 +459,7 @@ impl AgentIntegration for CodexIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Install helpers
-// ---------------------------------------------------------------------------
 
 /// The Codex plugin's composed deploy set, sourced from the shared `plugin/`
 /// tree via [`crate::agents::plugin_bundle::codex_files`]. Each entry is
@@ -2078,9 +2076,7 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, profile_root: &Path, home: &Path) {
     match codex_foreign_bundle_entrypoints(profile_root, home) {
