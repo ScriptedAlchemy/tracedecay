@@ -131,7 +131,7 @@ pub async fn compute_rename_preview(
             let Some(node) = graph.symbol_summary(&occurrence)? else {
                 return Ok(graph_tool_completion(
                     GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(
-                        node_not_found_result(&request.node_id),
+                        node_not_found_result(graph, &request.node_id, &occurrence)?,
                     )),
                     Vec::new(),
                 ));

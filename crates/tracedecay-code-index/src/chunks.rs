@@ -2351,10 +2351,11 @@ fn resolve_file_references(
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
-                            && reference
-                                .argument_count
-                                .zip(target.arity)
-                                .is_none_or(|(arguments, arity)| arity.accepts(arguments))
+                            && (language != "java"
+                                || reference
+                                    .argument_count
+                                    .zip(target.arity)
+                                    .is_none_or(|(arguments, arity)| arity.accepts(arguments)))
                             && !(typescript
                                 && target.kind == NodeKind::Function.as_str()
                                 && target
@@ -2411,10 +2412,11 @@ fn resolve_file_references(
                     });
                 }
             }
-            // Java overloads the call's arguments cannot tell apart (equal
-            // arity, a variadic tail) stay a disclosed caller gap.
-            candidates if candidates.is_empty() || language == "java" => {
-                if let Some(candidate) = cross_file_reference_candidate(
+            // No candidate: the reference is retained for cross-file
+            // resolution. Several it cannot choose between: a disclosed
+            // caller gap. Java overloads resolve through Java's own rules.
+            _ => {
+                if let Some(mut candidate) = cross_file_reference_candidate(
                     source,
                     offsets,
                     &references_by_site,
@@ -2433,12 +2435,10 @@ fn resolve_file_references(
                         candidate.reference_name.clone(),
                     )))
                 {
+                    candidate.ambiguous_local = !compatible.is_empty() && language != "java";
                     retained.push(candidate);
                 }
             }
-            // Same-file ambiguity: adding cross-file candidates can only make
-            // it more ambiguous, so the reference stays unresolved.
-            _ => {}
         }
     }
     // The parser may describe one invocation both as a receiver expression
@@ -2538,6 +2538,7 @@ fn cross_file_reference_candidate(
             .unwrap_or(from.span),
         unmodeled_import: reference.unmodeled_import,
         argument_count: reference.argument_count,
+        ambiguous_local: false,
     })
 }
 
@@ -5288,7 +5289,14 @@ pub fn real_symbol() {}
             &[],
         );
         assert!(resolved.is_empty());
-        assert!(retained.is_empty());
+        assert_eq!(
+            retained
+                .iter()
+                .map(|reference| reference.reference_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Base"],
+            "an ambiguous bare name stays a retained reference, not a silent drop"
+        );
     }
 
     #[test]

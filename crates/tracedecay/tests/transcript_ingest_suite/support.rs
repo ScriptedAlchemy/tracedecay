@@ -41,6 +41,27 @@ pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
     assert_path_text_eq(actual, expected);
 }
 
+/// The observation sanitizer redacts high-entropy spans (session UUIDs live in
+/// real transcript filenames) before persistence, so a stored path names its
+/// file modulo those spans: every surviving span must appear in `expected` in
+/// order.
+pub fn assert_sanitized_path_text_eq(actual: &str, expected: &Path) {
+    const REDACTED: &str = "[TraceDecay redacted: high-entropy token]";
+    let expected_text = normalize_path_text(&expected.to_string_lossy());
+    let mut cursor = 0;
+    for part in actual.split(REDACTED).filter(|part| !part.is_empty()) {
+        let found = expected_text[cursor..]
+            .find(part)
+            .map(|index| cursor + index);
+        assert!(
+            found.is_some(),
+            "stored path {actual:?} does not name {} (span {part:?} absent)",
+            expected.display()
+        );
+        cursor = found.unwrap() + part.len();
+    }
+}
+
 /// Initializes `project` as a tracedecay project the ingest resolvers accept:
 /// a git worktree carrying a repository identity marker unique to its path.
 /// Runs the literal `git` binary so tests that point `GIT` at a stalling fake

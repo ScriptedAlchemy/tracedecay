@@ -35,11 +35,13 @@ use tracedecay_domain::{
 use tracedecay_global_db::observation::retention::ObservationRetentionConfig;
 use tracedecay_global_db::tests::harness::{HostAdmissionTestRuntimeV1, writer_telemetry};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_lcm::LcmRetentionConfig;
 use tracedecay_maintenance::retention::registered_store::run_registered_store_retention;
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_runtime::session_sync::test_harness::{
     SessionTemporalRefreshWakeState, run_session_temporal_refresh_pass,
 };
@@ -51,6 +53,9 @@ use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::runtime::{
+    TranscriptIngestOutcome, ingest_project_sources_for_provider, with_transcript_source_profile,
+};
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 const PROVIDER: &str = "codex";
@@ -922,9 +927,9 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
 /// receipt, and the message's Git evidence span before the host is
 /// acknowledged. The drain commits the external-source replay, the
 /// observation projection, and the Git evidence convergence. The temporal
-/// refresh commits its operation, the projected batch, the pending relation
-/// receipt the native graph write recovers from, and the activation that
-/// settles that receipt.
+/// refresh commits its projected batch: the operation's begin folds into
+/// that same commit, the pending relation receipt the native graph write
+/// recovers from, and the activation that settles that receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamed_message_commits_once_per_durability_boundary() {
     const MESSAGES: u64 = 8;
@@ -970,8 +975,73 @@ async fn streamed_message_commits_once_per_durability_boundary() {
         "most messages must land within one log generation: {measured:?}"
     );
     assert!(
-        measured.iter().all(|commits| *commits == (4, 3, 4)),
+        measured.iter().all(|commits| *commits == (4, 3, 3)),
         "one streamed message must commit once per durability boundary: {measured:?}"
+    );
+}
+
+/// One project history pass over every host provider, as the session
+/// temporal refresh runs it, reading transcripts under `home`.
+async fn project_history_pass(
+    fixture: &DrainFixture,
+    database: &RegisteredGlobalDbLeaseV1,
+    home: &Path,
+) -> TranscriptIngestOutcome {
+    let authority = GlobalDbSessionIngestAuthority::new(database.clone()).with_background_cpu(
+        Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(4).unwrap())),
+    );
+    let shard = &database.binding().shard_id;
+    with_transcript_source_profile(
+        ProfileRoot::under_home(home),
+        ingest_project_sources_for_provider(
+            &shard.brain_id,
+            &shard.profile_id,
+            &authority,
+            &fixture.project,
+            Some(fixture.project_id.clone()),
+            None,
+            true,
+        ),
+    )
+    .await
+}
+
+/// The daemon reruns the history pass every idle minute whether or not a
+/// host wrote anything. A pass that finds nothing new must leave the store
+/// as it was: every commit it makes is WAL every reader and checkpoint then
+/// rereads, for as long as the daemon idles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_history_pass_commits_nothing() {
+    let _measured = MEASURED.lock().await;
+    let fixture = DrainFixture::open().await;
+    let database = fixture
+        .runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .unwrap();
+    let store = session_store_path(&fixture);
+    let home = fixture._tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let start = wal_mark(&store);
+    let first = project_history_pass(&fixture, &database, &home).await;
+    let settled = wal_mark(&store);
+    let idle = project_history_pass(&fixture, &database, &home).await;
+    let idled = wal_mark(&store);
+
+    assert!(
+        first.failures.is_empty() && idle.failures.is_empty(),
+        "history passes must not fail: first={:?} idle={:?}",
+        first.failures,
+        idle.failures,
+    );
+    assert!(
+        wal_commits(&store, start, settled).is_some_and(|commits| commits > 0),
+        "the first pass records each provider's coverage"
+    );
+    assert_eq!(
+        wal_commits(&store, settled, idled),
+        Some(0),
+        "a history pass that finds nothing new must commit nothing"
     );
 }
 

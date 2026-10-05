@@ -15,6 +15,7 @@ use tracedecay_store::runtime::{
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
 };
 
+use super::code_graph_namespace::is_code_graph_shard_namespace;
 use super::path::canonical_graph_database_file;
 use super::publication_support::{
     RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
@@ -409,10 +410,18 @@ impl GraphDbRegistry {
             .iter()
             .map(|(locator, _, _)| locator.clone())
             .collect::<BTreeSet<_>>();
+        // Every verified head is serving authority. A code-shard head stays
+        // authority even while its generation is deleted, because one shared
+        // projection serves every generation of the scope until a successor
+        // publish supersedes it; only per-generation namespaces make a
+        // deleted generation's head disposable.
         retained.extend(
             heads
                 .keys()
-                .filter(|locator| !candidate_locators.contains(*locator))
+                .filter(|locator| {
+                    !candidate_locators.contains(*locator)
+                        || is_code_graph_shard_namespace(&locator.projection.namespace)
+                })
                 .cloned(),
         );
         if candidates.is_empty() {
@@ -1304,6 +1313,32 @@ impl GraphDbRegistry {
     ) -> Result<crate::GraphLayeredRowSpill, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         operation.database().layered_row_spill(projection, base)
+    }
+
+    /// The sealed cold bases other scopes of this store serve for the same
+    /// projector, which a scope with no parent graph may layer over.
+    pub fn sibling_sealed_bases(
+        &self,
+        registration: GraphDbRegistration,
+        projection: &GraphProjectionIdentity,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Vec<crate::GraphSiblingSealedBaseV1>, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation.database().sibling_sealed_bases(projection, check)
+    }
+
+    /// A row spill for a delta over a sibling scope's base, which it pins
+    /// until it seals.
+    pub fn sibling_layered_row_spill(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        sibling: crate::GraphSiblingSealedBaseV1,
+    ) -> Result<crate::GraphLayeredRowSpill, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation
+            .database()
+            .sibling_layered_row_spill(projection, sibling)
     }
 
     /// Publishes through an already-issued, registry-validated graph lease.

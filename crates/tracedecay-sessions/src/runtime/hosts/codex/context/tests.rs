@@ -35,7 +35,7 @@ fn message(index: usize) -> String {
 }
 
 /// A rollout whose session meta sets `/a`, followed by a long first turn,
-/// a turn context setting `/b`, records that leave the cwd alone, and a
+/// a turn context setting `/b`, records that leave the context alone, and a
 /// final turn context setting `/d`. Returns the offsets of the `/b` turn
 /// context and the start and end of the `/d` one.
 fn rollout(path: &Path) -> (u64, u64, u64) {
@@ -45,15 +45,21 @@ fn rollout(path: &Path) -> (u64, u64, u64) {
     }));
     contents.extend((0..300).map(message));
     let set_b = contents.len() as u64;
-    contents += &line(json!({"type": "turn_context", "payload": {"cwd": "/b"}}));
+    contents += &line(json!({
+        "type": "turn_context",
+        "payload": {"cwd": "/b", "model": "m-b"}
+    }));
     contents += &line(json!({"type": "turn_context", "payload": {"turn_id": "turn.2"}}));
     contents += &line(json!({
         "type": "session_meta",
-        "payload": {"id": "session.other", "cwd": "/c"}
+        "payload": {"id": "session.other", "cwd": "/c", "model": "m-c"}
     }));
     contents.extend((300..310).map(message));
     let set_d = contents.len() as u64;
-    contents += &line(json!({"type": "turn_context", "payload": {"cwd": "/d"}}));
+    contents += &line(json!({
+        "type": "turn_context",
+        "payload": {"cwd": "/d", "model": "m-d"}
+    }));
     let after_d = contents.len() as u64;
     contents += &message(310);
     std::fs::write(path, contents).unwrap();
@@ -69,6 +75,7 @@ fn prior_context_is_the_last_cwd_set_before_the_cursor() {
 
     let (state, read) = CodexContextState::scan_prior(&path, GENERATION, set_d, &meta);
     assert_eq!(state.cwd, Path::new("/b"));
+    assert_eq!(state.model.as_deref(), Some("m-b"));
     assert_eq!(
         read, PRIOR_CONTEXT_CHUNK_BYTES,
         "the walk stops at the current turn instead of reading the {set_d}-byte prefix"
@@ -81,10 +88,12 @@ fn prior_context_is_the_last_cwd_set_before_the_cursor() {
         Path::new("/b"),
         "the record the cursor sits inside is not prior context"
     );
+    assert_eq!(inside_record.model.as_deref(), Some("m-b"));
 
     evict_prior_context_for_test(&path);
     let (first_turn, read) = CodexContextState::scan_prior(&path, GENERATION, set_b, &meta);
     assert_eq!(first_turn.cwd, Path::new("/a"));
+    assert_eq!(first_turn.model, None);
     assert_eq!(
         read, set_b,
         "without a turn context the walk reaches the session meta"
@@ -92,6 +101,7 @@ fn prior_context_is_the_last_cwd_set_before_the_cursor() {
 
     let (replayed, read) = CodexContextState::scan_prior(&path, GENERATION, after_d, &meta);
     assert_eq!(replayed.cwd, Path::new("/d"));
+    assert_eq!(replayed.model.as_deref(), Some("m-d"));
     assert_eq!(
         read,
         after_d - set_b,
@@ -119,6 +129,7 @@ fn another_generation_does_not_resume_the_cached_context() {
         Path::new("/e"),
         "a rewrite's generation reads the cwd from its own bytes, not the cached one"
     );
+    assert_eq!(rewound.model.as_deref(), Some("m-b"));
     assert_eq!(read, PRIOR_CONTEXT_CHUNK_BYTES);
 }
 
@@ -132,12 +143,17 @@ fn turn_context_without_cwd_keeps_the_current_one() {
         &meta,
     ));
     assert!(state.observe_context_record(
+        &json!({"type": "turn_context", "payload": {"model": "m-new"}}),
+        Path::new("/tmp/rollout.jsonl"),
+        &meta,
+    ));
+    assert!(state.observe_context_record(
         &json!({"type": "turn_context", "payload": {}}),
         Path::new("/tmp/rollout.jsonl"),
         &meta,
     ));
     assert!(state.observe_context_record(
-        &json!({"type": "session_meta", "payload": {"id": "session.other", "cwd": "/c"}}),
+        &json!({"type": "session_meta", "payload": {"id": "session.other", "cwd": "/c", "model": "m-c"}}),
         Path::new("/tmp/rollout.jsonl"),
         &meta,
     ));
@@ -147,4 +163,5 @@ fn turn_context_without_cwd_keeps_the_current_one() {
         &meta,
     ));
     assert_eq!(state.cwd, Path::new("/b"));
+    assert_eq!(state.model.as_deref(), Some("m-new"));
 }

@@ -34,8 +34,8 @@ use crate::restart_atomicity::{
     open_sibling_project_session_db, set_projection_failure,
 };
 use crate::support::{
-    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
-    normalize_path_text,
+    assert_metadata_path_eq, assert_path_text_eq, create_git_repo_with_linked_worktree,
+    init_git_repo, normalize_path_text,
 };
 
 const SESSION_ID: &str = "20260101_000000_abc123";
@@ -272,7 +272,7 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
     let (hermes_home, project) = setup(&tmp);
     let linked_worktree = tmp.path().join("linked-worktree");
     create_git_repo_with_linked_worktree(&project, &linked_worktree);
-    write_hermes_profile(&hermes_home, "test", Some(&linked_worktree)).await;
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&linked_worktree)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -285,6 +285,13 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
         .get_session("hermes", SESSION_ID)
         .await
         .expect("hermes session should be stored");
+    assert_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &state_db,
+    );
     let project_path = normalize_path_text(&project.to_string_lossy());
     let results = db
         .search_session_messages("hermes", Some(&project_path), "billing pipeline", 10)

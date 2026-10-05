@@ -1,9 +1,7 @@
 use crate::db::engine::{Error, Row, Value};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-// ---------------------------------------------------------------------------
 // Helper: build SQL placeholder string `?, ?, ?, …` in one allocation.
-// ---------------------------------------------------------------------------
 
 /// Returns a SQL placeholder string of `n` anonymous `?` markers separated by
 /// `, `. Used to construct `IN ($qmarks)` clauses without allocating one
@@ -21,9 +19,7 @@ pub fn build_qmark_placeholders(n: usize) -> String {
     s
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// Rows requested per keyset page of a whole-table scan.
 ///

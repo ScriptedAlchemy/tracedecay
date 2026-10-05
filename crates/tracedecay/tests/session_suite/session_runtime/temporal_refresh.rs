@@ -509,8 +509,14 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
         .unwrap();
     transaction.commit().await.unwrap();
 
-    let mut recovered = SessionTemporalRefreshPassReport::default();
-    process_refresh_begin_requests(&store, &state, 1, &mut recovered).await;
+    let state = Arc::new(state);
+    let recovered = authority
+        .run_pass(
+            &state,
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
     assert_eq!(
         recovered.begun, 1,
         "the exact retained request must admit once"

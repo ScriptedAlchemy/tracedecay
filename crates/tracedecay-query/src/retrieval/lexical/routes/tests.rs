@@ -14,9 +14,11 @@ use tracedecay_domain::{
 
 use super::{
     LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1,
-    LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteOutcomeV1,
-    LexicalRoutePlanV1, LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
-    MAX_PREFERRED_SYMBOL_TOKENS_V1, merge_lexical_routes, preferred_symbol_tokens,
+    LexicalAnchorV1, LexicalQueryRouteV1, LexicalRouteDeciderV1, LexicalRouteDecisionV1,
+    LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
+    LexicalRoutingV1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,
+    MAX_PREFERRED_SYMBOL_TOKENS_V1, SymbolRoutePreferenceV1, classify_query_shape,
+    merge_lexical_routes, preferred_symbol_tokens,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalProximityV1,
@@ -121,13 +123,16 @@ fn routing_rejects_empty_multi_term_control_and_duplicate_anchors() {
     let accepted = LexicalRoutingV1::new(anchors(&["Foo::bar", "p/q.rs", "E0308"]), true)
         .expect("qualified names, paths, and codes are one technical term each");
     assert_eq!(accepted.anchors.len(), 3);
-    assert!(accepted.prefer_symbol);
+    assert_eq!(accepted.prefer_symbol, SymbolRoutePreferenceV1::Always);
     assert_ne!(accepted, LexicalRoutingV1::default());
     assert_ne!(
         LexicalRoutingV1::prefer_symbol(),
         LexicalRoutingV1::default()
     );
-    assert!(LexicalRoutingV1::prefer_symbol().prefer_symbol);
+    assert_eq!(
+        LexicalRoutingV1::prefer_symbol().prefer_symbol,
+        SymbolRoutePreferenceV1::Always
+    );
 }
 
 #[test]
@@ -249,8 +254,8 @@ fn route_plan_exposes_identifier_and_path_splits_as_alternatives() {
             vec!["vector", "watermark", "merge", "max"],
         ),
     ] {
-        let plan =
-            LexicalRoutePlanV1::plan(query, &LexicalRoutingV1::default()).expect("route plan");
+        let routing = LexicalRoutingV1::new(Vec::new(), false).expect("routing");
+        let plan = LexicalRoutePlanV1::plan(query, &routing).expect("route plan");
         assert_eq!(plan.routes()[0].kind, LexicalRouteKindV1::Query);
         assert_eq!(
             plan.routes()[1].kind,
@@ -1172,5 +1177,106 @@ fn anchor_receipt_counts_only_the_sites_the_response_carries() {
             ),
             matched(1, 0, &[(LexicalAnchorDropReasonV1::OutOfScope, 1)]),
         ]
+    );
+}
+
+#[test]
+fn query_shape_gate_routes_name_shaped_queries_and_reports_its_margin() {
+    let cases: &[(&str, LexicalQueryRouteV1, i32)] = &[
+        ("getUserById", LexicalQueryRouteV1::Name, 500_000),
+        ("Foo::bar", LexicalQueryRouteV1::Name, 500_000),
+        ("users.getUserById", LexicalQueryRouteV1::Name, 500_000),
+        // A dot is a filename as often as member access, so only an
+        // identifier-shaped segment makes a dotted word a name.
+        ("README.md", LexicalQueryRouteV1::Prose, -500_000),
+        ("Widget.render", LexicalQueryRouteV1::Prose, -500_000),
+        (
+            "userService.getUserById session",
+            LexicalQueryRouteV1::Name,
+            0,
+        ),
+        ("where is parse_config called", LexicalQueryRouteV1::Name, 0),
+        ("getUserById handler", LexicalQueryRouteV1::Name, 0),
+        (
+            "how does inventory allocation work",
+            LexicalQueryRouteV1::Prose,
+            -500_000,
+        ),
+        (
+            "why does the cache drop entries before reserve_stock returns",
+            LexicalQueryRouteV1::Prose,
+            -357_142,
+        ),
+        (
+            "what is the type of a",
+            LexicalQueryRouteV1::Prose,
+            -500_000,
+        ),
+        ("", LexicalQueryRouteV1::Prose, -500_000),
+    ];
+    for (query, route, margin_micros) in cases {
+        assert_eq!(
+            classify_query_shape(query),
+            (*route, *margin_micros),
+            "{query:?}"
+        );
+    }
+}
+
+#[test]
+fn route_plan_follows_the_shape_gate_unless_the_caller_decides() {
+    let by_shape = LexicalRoutingV1::default();
+    let name = LexicalRoutePlanV1::plan("getUserById", &by_shape).expect("plan");
+    assert_eq!(
+        name.descriptors()[..2],
+        [
+            LexicalRouteKindV1::Query,
+            LexicalRouteKindV1::PreferredSymbol {
+                tokens: vec!["getUserById".to_owned()],
+            },
+        ]
+    );
+    assert_eq!(
+        name.decision(),
+        LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Name,
+            margin_micros: 500_000,
+            decided_by: LexicalRouteDeciderV1::QueryShape,
+        }
+    );
+
+    let prose =
+        LexicalRoutePlanV1::plan("how does inventory allocation work", &by_shape).expect("plan");
+    assert_eq!(prose.descriptors(), vec![LexicalRouteKindV1::Query]);
+    assert_eq!(prose.decision().route, LexicalQueryRouteV1::Prose);
+
+    let never = LexicalRoutingV1::new(Vec::new(), Some(false)).expect("routing");
+    let suppressed = LexicalRoutePlanV1::plan("getUserById", &never).expect("plan");
+    assert!(
+        !suppressed
+            .descriptors()
+            .iter()
+            .any(|kind| matches!(kind, LexicalRouteKindV1::PreferredSymbol { .. }))
+    );
+    assert_eq!(
+        suppressed.decision(),
+        LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Prose,
+            margin_micros: 500_000,
+            decided_by: LexicalRouteDeciderV1::Caller,
+        },
+        "the classifier margin is still reported when the caller decides"
+    );
+
+    let always = LexicalRoutingV1::new(Vec::new(), Some(true)).expect("routing");
+    let forced =
+        LexicalRoutePlanV1::plan("how does inventory allocation work", &always).expect("plan");
+    assert_eq!(
+        forced.decision(),
+        LexicalRouteDecisionV1 {
+            route: LexicalQueryRouteV1::Name,
+            margin_micros: -500_000,
+            decided_by: LexicalRouteDeciderV1::Caller,
+        }
     );
 }

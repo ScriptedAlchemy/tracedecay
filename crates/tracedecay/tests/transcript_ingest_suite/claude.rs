@@ -497,6 +497,47 @@ fn write_claude_transcript_with_thinking(
     path
 }
 
+/// The session row records which source file its canonical projection was
+/// read from.
+#[tokio::test]
+async fn claude_transcript_projects_session_transcript_path() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    let transcript = write_claude_transcript(&home, &project, "claude-transcript-path");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    try_ingest_claude_source(&db, &source, &project)
+        .await
+        .unwrap();
+
+    let session = db
+        .get_session("claude", "claude-transcript-path")
+        .await
+        .expect("claude session should be stored");
+    crate::support::assert_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &transcript,
+    );
+    let hit = db
+        .search_session_messages("claude", None, "billing pipeline", 10)
+        .await
+        .into_iter()
+        .next()
+        .expect("session message should be searchable");
+    crate::support::assert_path_text_eq(
+        hit.session
+            .transcript_path
+            .as_deref()
+            .expect("search-hit transcript path"),
+        &transcript,
+    );
+}
+
 #[tokio::test]
 async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
     let tmp = TempDir::new().unwrap();

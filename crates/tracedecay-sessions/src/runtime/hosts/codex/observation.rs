@@ -11,8 +11,8 @@ pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
-    CodexObservationLocation, codex_observation_record_supported,
-    normalize_codex_observation_with_location,
+    CodexObservationContext, codex_observation_record_supported,
+    normalize_codex_observation_with_context,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
@@ -443,19 +443,24 @@ impl CodexObservationAdmission<'_> {
     /// profile rollout's on its session cwd, while each record's location is
     /// the cwd in effect when it was written. That is the linked worktree the
     /// record ran in whenever it differs from the root, and a `turn_context`
-    /// can move it mid-rollout.
-    fn projection_location<'b>(
+    /// can move it mid-rollout. The source file the record was read from and
+    /// the turn's model complete the projection context.
+    fn observation_context<'b>(
         &'b self,
         session_cwd: &'b Path,
         record_cwd: &'b Path,
-    ) -> CodexObservationLocation<'b> {
+        transcript_path: &'b Path,
+        model: Option<&'b str>,
+    ) -> CodexObservationContext<'b> {
         let project_path = match self {
             Self::Project { root, .. } => *root,
             Self::Profile { .. } => session_cwd,
         };
-        CodexObservationLocation {
+        CodexObservationContext {
             project_path: Some(project_path),
             location_path: Some(record_cwd),
+            transcript_path: Some(transcript_path),
+            model,
         }
     }
 }
@@ -719,14 +724,18 @@ async fn admit_codex_jsonl_page(
                 }
                 let record_id = codex_native_record_id(&meta.session_id, native)
                     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                let envelope = normalize_codex_observation_with_location(
+                let envelope = normalize_codex_observation_with_context(
                     native,
                     &meta.session_id,
                     native_thread_id,
                     record_id.clone(),
                     range,
-                    admission_scope
-                        .projection_location(meta.cwd.as_path(), state.context.cwd.as_path()),
+                    admission_scope.observation_context(
+                        meta.cwd.as_path(),
+                        state.context.cwd.as_path(),
+                        path,
+                        state.context.model.as_deref(),
+                    ),
                 )?;
                 stable_record_id = Some(record_id);
                 Ok(envelope)

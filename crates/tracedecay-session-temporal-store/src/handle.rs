@@ -45,6 +45,8 @@ pub trait SessionTemporalExec: SessionTemporalQuery {
 /// Write transaction the session-temporal store can query, mutate, and commit.
 pub trait SessionTemporalWriteTxn: SessionTemporalExec {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn rollback(self) -> impl Future<Output = Result<(), EngineError>> + Send;
 }
 
 impl SessionTemporalQuery for DatabaseEngineReadSnapshot {

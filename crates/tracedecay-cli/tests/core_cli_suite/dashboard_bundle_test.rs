@@ -11,7 +11,7 @@
 use dashboard_bundle::{
     BUILD_RECORD_FILE, BUNDLE_DIGEST_PREFIX, BuildRecord, STAGING_DIR, bundle_digest,
     inputs_fingerprint, open, prepare_staging, promote, read_build_record, stage_copy,
-    write_build_record,
+    stage_copy_build_output, write_build_record,
 };
 use sha2::{Digest, Sha256};
 
@@ -241,5 +241,58 @@ fn inputs_fingerprint_tracks_content_presence_and_nesting_only() {
         inputs_fingerprint(root, &inputs).expect("fingerprint with build output present"),
         edited,
         "build output is not an input"
+    );
+}
+
+/// A build system hands us its output tree with every input materialized as a
+/// symlink into a store dir, the shape `TRACEDECAY_DASHBOARD_DIST_DIR` points
+/// at. The in-tree scan refuses that shape outright; the build-output path
+/// stages it and still lands real bytes under the advertised digest.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_build_output_tree_stages_the_advertised_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let producer = temp.path().join("producer");
+    producer_bundle(&producer, INDEX_CSS);
+    let app_dist = temp.path().join("app-dist");
+    let store = temp.path().join("store");
+    for relative in [
+        "asset-manifest.json",
+        "index.html",
+        "static/js/index.js",
+        "static/css/index.css",
+    ] {
+        let link = app_dist.join(relative);
+        std::fs::create_dir_all(link.parent().expect("asset link has a parent"))
+            .expect("create asset link parent");
+        std::os::unix::fs::symlink(producer.join(relative), &link)
+            .expect("link build output into the tree");
+    }
+
+    let refused = stage_copy(&store, &app_dist)
+        .expect_err("the strict producer scan must refuse a symlinked tree");
+    assert!(
+        refused.to_string().contains("must not be a symlink"),
+        "{refused}"
+    );
+
+    let staged =
+        stage_copy_build_output(&store, &app_dist).expect("stage a symlinked build-output tree");
+    assert_eq!(
+        staged.digest_hex,
+        expected_digest(&[
+            ("index.html", INDEX_HTML),
+            ("static/css/index.css", INDEX_CSS),
+            ("static/js/index.js", INDEX_JS),
+        ]),
+        "the staged digest is taken over the resolved bytes, not the links"
+    );
+    assert!(
+        !staged.root.join("index.html").is_symlink(),
+        "the staged bundle holds copies, not links into the output tree"
+    );
+    assert_eq!(
+        std::fs::read(staged.root.join("static/css/index.css")).expect("read staged css"),
+        INDEX_CSS
     );
 }

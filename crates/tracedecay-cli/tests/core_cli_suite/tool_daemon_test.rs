@@ -9,8 +9,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::common;
+#[cfg(target_os = "linux")]
+use crate::common::hermetic_path;
 use crate::common::{
-    canonical_existing_path, hermetic_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
+    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;

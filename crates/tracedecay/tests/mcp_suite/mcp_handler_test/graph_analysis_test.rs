@@ -4527,6 +4527,107 @@ async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
         .to_owned()
 }
 
+/// `tracedecay_diff_context` and `tracedecay_pr_context` warn when a change
+/// edits a file but leaves out the file history says changes with it: here
+/// every schema change on `master` shipped with its migration.
+#[tokio::test]
+async fn git_context_warns_about_co_change_partners_missing_from_the_change() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("migrations")).unwrap();
+    git_with_pinned_dates(project, &["init", "-b", "master"], None);
+    for version in 0..3 {
+        fs::write(
+            project.join("src/schema.rs"),
+            format!("pub const VERSION: u32 = {version};\n"),
+        )
+        .unwrap();
+        fs::write(
+            project.join("migrations/next.sql"),
+            format!("-- schema version {version}\n"),
+        )
+        .unwrap();
+        git_with_pinned_dates(
+            project,
+            &["add", "--", "src/schema.rs", "migrations/next.sql"],
+            None,
+        );
+        git_with_pinned_dates(project, &["commit", "-m", "bump schema"], None);
+    }
+    fs::write(project.join("src/lib.rs"), "pub mod schema;\n").unwrap();
+    git_with_pinned_dates(project, &["add", "--", "src/lib.rs"], None);
+    git_with_pinned_dates(project, &["commit", "-m", "expose schema"], None);
+    git_with_pinned_dates(project, &["switch", "-c", "feature"], None);
+    fs::write(
+        project.join("src/schema.rs"),
+        "pub const VERSION: u32 = 3;\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub mod schema;\n\npub fn version() -> u32 {\n    schema::VERSION\n}\n",
+    )
+    .unwrap();
+    git_with_pinned_dates(project, &["add", "--", "src/schema.rs", "src/lib.rs"], None);
+    git_with_pinned_dates(project, &["commit", "-m", "bump schema alone"], None);
+    let host = init_test_project(project).await;
+
+    let pr = pr_context_json(
+        &host,
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature"}),
+    )
+    .await;
+    assert_eq!(
+        pr["missing_co_change_partners"],
+        json!([{
+            "file": "migrations/next.sql",
+            "partner_of": "src/schema.rs",
+            "co_changes": 3,
+            "partner_of_changes": 3
+        }]),
+        "{pr}"
+    );
+
+    let diff = |files: Value| {
+        let host = &host;
+        async move {
+            let result = handle_tool_call(
+                host,
+                "tracedecay_diff_context",
+                json!({"files": files, "format": "json"}),
+                None,
+            )
+            .await
+            .expect("diff_context");
+            extract_json(&result.value)
+        }
+    };
+    let without_migration = diff(json!(["src/schema.rs", "src/lib.rs"])).await;
+    assert_eq!(
+        without_migration["missing_co_change_partners"],
+        json!([{
+            "file": "migrations/next.sql",
+            "partner_of": "src/schema.rs",
+            "co_changes": 3,
+            "partner_of_changes": 4
+        }]),
+        "HEAD history includes the feature commit that changed the schema alone: {without_migration}"
+    );
+    let with_migration = diff(json!([
+        "src/schema.rs",
+        "src/lib.rs",
+        "migrations/next.sql"
+    ]))
+    .await;
+    assert_eq!(
+        with_migration["missing_co_change_partners"],
+        json!([]),
+        "{with_migration}"
+    );
+}
+
 // `tracedecay_diff_context` as an agent host observes it: one production
 // MCP `tools/call`, then the JSON text the caller reads.
 //
@@ -4695,7 +4796,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols_count": 0,
             "impacted_symbols": [],
             "impact_complete": true,
-            "affected_tests": []
+            "affected_tests": [],
+            "missing_co_change_partners": []
         })
     );
 
@@ -4716,7 +4818,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols_count": 0,
             "impacted_symbols": [],
             "impact_complete": true,
-            "affected_tests": []
+            "affected_tests": [],
+            "missing_co_change_partners": []
         })
     );
 
@@ -5198,7 +5301,6 @@ fn assert_exact_hotspot(
             "incoming": incoming,
             "outgoing": outgoing,
             "total": total,
-            "churn": 1,
         }),
         "{row}"
     );
@@ -5372,7 +5474,7 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     assert_eq!(
         body_text(&chain_markdown),
         format!(
-            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **churn:** 1\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
+            "freshness: fresh\n**hotspot_count:** 1\n\n## hotspots\n- **mid**\n  **kind:** function\n  **file:** src/calls.ts\n  **line:** 9\n  **id:** `{mid_id}`\n  **incoming:** 1\n  **outgoing:** 1\n  **total:** 2\n"
         )
     );
     assert_savings_footer(&chain_markdown, CHAIN_SOURCE.len());

@@ -61,6 +61,10 @@ pub struct ContextSurfaceRequestV1 {
     /// Add a symbol-name lexical route for the identifier-shaped words of the
     /// task text.
     pub prefer_symbol: Option<bool>,
+    /// Cap the ranked sections of the answer at about this many tokens.
+    /// Quotas are fixed shares of the budget. The cut is reported on the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
 }
 
 /// Whether the served code generation is known current at serve time.
@@ -438,6 +442,30 @@ pub struct ContextResultV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<ContextPlanV1>,
     pub retrieval: ContextRetrievalPlanV1,
+    /// Budget accounting when the request supplies `budget_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<TokenBudgetCutV1>,
+}
+
+/// One section a token budget kept or cut.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBudgetSectionV1 {
+    pub section: String,
+    pub total: u32,
+    pub shown: u32,
+}
+
+/// What a token budget did to an answer. `est_tokens` is the kept rows.
+/// `over_ceiling` means a single row was larger than its section quota and
+/// was kept anyway.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBudgetCutV1 {
+    pub budget_tokens: u32,
+    pub est_tokens: u32,
+    pub over_ceiling: bool,
+    pub sections: Vec<TokenBudgetSectionV1>,
 }
 
 /// Related symbols `context` ranked but did not return.
@@ -597,6 +625,10 @@ pub struct PrimitiveNotFoundV1 {
     pub reason_code: String,
     pub node_id: String,
     pub message: String,
+    /// Nearest served symbols by edit distance to the requested id, by id,
+    /// simple name, or qualified name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<PrimitiveSymbolLocationV1>,
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
@@ -946,6 +978,7 @@ mod tests {
             memory_matches_error: None,
             verified_graph_evidence: None,
             plan: None,
+            token_budget: None,
             retrieval: ContextRetrievalPlanV1 {
                 search: ContextStageV1::ran(20, 0, false),
                 graph: ContextStageV1::Skipped,

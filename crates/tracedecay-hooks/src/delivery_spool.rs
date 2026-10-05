@@ -276,23 +276,10 @@ impl HookDeliveryReceiptSpoolV1 {
         let root = root.into();
         ensure_root(&root)?;
         let lock = open_lock_file(&root, LOCK_FILE)?;
-        let try_lock_result = {
-            let _span = tracing::trace_span!("hooks.delivery.lock.try_lock").entered();
-            lock.try_lock()
-        };
-        match try_lock_result {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                if wait_budget.is_zero() {
-                    return Err(HookDeliverySpoolError::Busy);
-                }
-                lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
-                    LockAdmissionError::TimedOut => HookDeliverySpoolError::Busy,
-                    LockAdmissionError::Io(_) => HookDeliverySpoolError::Io,
-                })?;
-            }
-            Err(std::fs::TryLockError::Error(_)) => return Err(HookDeliverySpoolError::Io),
-        }
+        lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
+            LockAdmissionError::TimedOut => HookDeliverySpoolError::Busy,
+            LockAdmissionError::Io(_) => HookDeliverySpoolError::Io,
+        })?;
         let spool = Self {
             root,
             _lock: FileLease::held(lock, "hooks.delivery.writer"),
@@ -834,13 +821,7 @@ mod tests {
             HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
             HookDeliverySpoolError::Busy
         );
-        // An exhausted budget never admits, even when the lease is free.
-        assert_eq!(
-            HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::ZERO).unwrap_err(),
-            HookDeliverySpoolError::AdmissionTimedOut
-        );
-        let writer =
-            HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::from_millis(20)).unwrap();
+        let writer = HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::ZERO).unwrap();
         assert_eq!(
             writer.retain(&receipt()).unwrap(),
             HookDeliveryRetentionV1::Staged

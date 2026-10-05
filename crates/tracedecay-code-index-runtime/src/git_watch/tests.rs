@@ -3,6 +3,7 @@ use super::identity::{
 };
 use super::*;
 
+use futures_util::FutureExt;
 use notify::event::EventAttributes;
 use std::process::Command;
 use tokio::sync::Notify;
@@ -591,7 +592,9 @@ async fn callback_failure_requests_conservative_reconciliation() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+// Real time: the live notify thread wakes this runtime, and a paused clock
+// would auto-advance past the test's own deadlines while that wake is in flight.
+#[tokio::test]
 async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
     let (_container, primary, linked) = linked_worktree_fixture();
     let watcher = GitWatcher::new(fast_watch_config());
@@ -616,11 +619,14 @@ async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
         attrs: EventAttributes::default(),
     };
     classify_and_mark(&state, &event);
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
-    tokio::task::yield_now().await;
+    tokio::time::timeout(TEST_READY_TIMEOUT, state.operation_held.notified())
+        .await
+        .expect("debounce must observe the linked-worktree operation marker");
+    tokio::time::sleep(Duration::from_millis(2 * max_delay_ms)).await;
+    let _ = state.operation_held.notified().now_or_never();
+    tokio::time::timeout(TEST_READY_TIMEOUT, state.operation_held.notified())
+        .await
+        .expect("the operation must keep holding past the hard deadline");
     assert_eq!(
         state.drained_plans.load(Ordering::Relaxed),
         0,
@@ -636,11 +642,12 @@ async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
             attrs: EventAttributes::default(),
         },
     );
-    tokio::time::advance(Duration::from_secs(1)).await;
     tokio::time::timeout(TEST_READY_TIMEOUT, state.plan_drained.notified())
         .await
         .expect("clearing the linked-worktree marker must release the debounce");
-    assert_eq!(state.drained_plans.load(Ordering::Relaxed), 1);
+    // The live watcher may still deliver its own copies of the marker writes
+    // after this drain; those are new evidence, so only the release is exact.
+    assert!(state.drained_plans.load(Ordering::Relaxed) >= 1);
     watcher.shutdown().await;
 }
 

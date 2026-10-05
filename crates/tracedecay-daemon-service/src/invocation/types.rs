@@ -24,6 +24,7 @@ pub struct HookOrchestrationRequestV1 {
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
     pub trigger: HookOrchestrationTriggerV1,
+    explicit_request_id: Option<ManifestDigest>,
     #[cfg(any(test, feature = "test-helpers"))]
     pub completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     #[cfg(not(any(test, feature = "test-helpers")))]
@@ -55,6 +56,7 @@ impl HookOrchestrationRequestV1 {
             lifecycle,
             hook_configuration_revision: configuration_revision,
             trigger,
+            explicit_request_id: None,
             completion: None,
         })
     }
@@ -80,10 +82,10 @@ type HookOrchestrationWorkV1 = dyn Fn(
     ) -> HookOrchestrationFutureV1
     + Send
     + Sync;
-/// Exact hook identity: one project, one worktree, one hook event. Two
-/// admissions that agree on all three describe the same boundary, so they must
-/// share one cycle rather than start a second.
-type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+/// Native admissions share one cycle for the same project, worktree, and
+/// hook event. An explicit request additionally carries its public effect
+/// identity, so its retries join each other without joining native delivery.
+type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>);
 /// Stable per-session work address. A newer boundary at the same address
 /// supersedes the running one instead of queueing behind it.
 type HookOrchestrationAddressV1 = String;
@@ -236,26 +238,44 @@ impl BoundedHookOrchestratorV1 {
     }
 
     #[tracing::instrument(name = "daemon.service.hooks.admit", level = "trace", skip_all)]
-    pub fn admit(&self, mut request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
+    pub fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
+        match self.admit_with_cancellation(request) {
+            Ok(_) => HookOrchestrationAdmissionV1::Enqueued,
+            Err(admission) => admission,
+        }
+    }
+
+    fn admit_with_cancellation(
+        &self,
+        mut request: HookOrchestrationRequestV1,
+    ) -> Result<
+        tracedecay_runtime_core::cancellation::CancellationToken,
+        HookOrchestrationAdmissionV1,
+    > {
         let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let envelope = request.hook.envelope();
-        let event = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let event = (
+            envelope.project_id,
+            envelope.worktree_id,
+            envelope.event_id,
+            request.explicit_request_id.clone(),
+        );
         let Some(address) = Self::stable_address(&request) else {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let Ok(mut task_owner) = self.task_owner.lock() else {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         task_owner.reap_finished();
         if !task_owner.accepting || task_owner.failed {
-            return HookOrchestrationAdmissionV1::Unavailable;
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
         }
         let completion = request.completion.take();
         let (permit, operation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
-                return HookOrchestrationAdmissionV1::Unavailable;
+                return Err(HookOrchestrationAdmissionV1::Unavailable);
             };
             if let Some(incumbent) = in_flight.events.get(&event).cloned() {
                 // The exact boundary is already running. Join it: one cycle
@@ -263,14 +283,26 @@ impl BoundedHookOrchestratorV1 {
                 // terminal, so a duplicate never consumes a second permit.
                 if let Some(completion) = completion {
                     let Ok(mut completions) = incumbent.completions.lock() else {
-                        return HookOrchestrationAdmissionV1::Unavailable;
+                        return Err(HookOrchestrationAdmissionV1::Unavailable);
                     };
                     if completions.len() >= MAX_COALESCED_HOOK_COMPLETIONS {
-                        return HookOrchestrationAdmissionV1::Backpressured;
+                        return Err(HookOrchestrationAdmissionV1::Backpressured);
                     }
                     completions.push(completion);
                 }
-                return HookOrchestrationAdmissionV1::Enqueued;
+                return Ok(incumbent.cancellation.clone());
+            }
+            // A public request may refer to the last mounted hook while a
+            // newer native edit is still producing its authority. It cannot
+            // discard that newer document's work; the caller can retry after
+            // the native producer mounts the current lifecycle.
+            if request.explicit_request_id.is_some()
+                && in_flight.addresses.get(&address).is_some_and(|incumbent| {
+                    (incumbent.event.0, incumbent.event.1, incumbent.event.2)
+                        != (event.0, event.1, event.2)
+                })
+            {
+                return Err(HookOrchestrationAdmissionV1::Backpressured);
             }
             let permit = if let Some(incumbent) = in_flight.addresses.remove(&address) {
                 // A newer boundary at the same stable address supersedes the
@@ -287,13 +319,13 @@ impl BoundedHookOrchestratorV1 {
                 None
             } else {
                 let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                    return HookOrchestrationAdmissionV1::Backpressured;
+                    return Err(HookOrchestrationAdmissionV1::Backpressured);
                 };
                 Some(permit)
             };
             let work_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
             let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
-                event,
+                event: event.clone(),
                 lifecycle: request.lifecycle.clone(),
                 cancellation: work_cancellation,
                 superseded: std::sync::atomic::AtomicBool::new(false),
@@ -309,6 +341,7 @@ impl BoundedHookOrchestratorV1 {
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
         let permits = Arc::clone(&self.permits);
+        let operation_cancellation = operation.cancellation.clone();
         let task = runtime_handle.spawn(async move {
             let work_cancellation = operation.cancellation.clone();
             let permit = match permit {
@@ -381,7 +414,7 @@ impl BoundedHookOrchestratorV1 {
             drop(permit);
         });
         task_owner.tasks.push(task);
-        HookOrchestrationAdmissionV1::Enqueued
+        Ok(operation_cancellation)
     }
 
     pub async fn shutdown(&self) -> bool {
@@ -516,23 +549,79 @@ pub fn admit_registered_hook_orchestration(
     ) else {
         return HookOrchestrationAdmissionV1::UnsupportedTrigger;
     };
-    let Some(runtime) = hook_orchestration_registry()
-        .lock()
-        .ok()
-        .and_then(|registry| {
-            registry
-                .get(&(
-                    request.hook.envelope().project_id,
-                    request.hook.envelope().worktree_id,
-                ))
-                .cloned()
-        })
-        .and_then(|runtime| runtime.upgrade())
-    else {
+    let Some(runtime) = registered_hook_orchestrator(request.hook.envelope()) else {
         return HookOrchestrationAdmissionV1::Unavailable;
     };
     request.completion = completion;
     runtime.admit(request)
+}
+
+fn registered_hook_orchestrator(
+    envelope: &HookEventEnvelopeV2,
+) -> Option<Arc<BoundedHookOrchestratorV1>> {
+    hook_orchestration_registry()
+        .lock()
+        .ok()?
+        .get(&(envelope.project_id, envelope.worktree_id))?
+        .upgrade()
+}
+
+/// An authenticated explicit claim joins the same bounded producer as native
+/// hooks. Its effect identity distinguishes it from the original saved edit;
+/// retries of that one request coalesce while unrelated successors supersede.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_registered_context_scout_request(
+    hook: AdmittedContextScoutHookV1,
+    lifecycle: ContextScoutLifecycleAddressV1,
+    hook_configuration_revision: u64,
+    effect_identity: ManifestDigest,
+    deadline: tracedecay_runtime_core::cancellation::MonotonicDeadline,
+    request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) -> Result<(), ApplicationProblem> {
+    let unavailable = || {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "context_scout.producer_unavailable".to_owned(),
+            message: "The current Context Scout producer did not complete the explicit request"
+                .to_owned(),
+        })
+    };
+    if request_cancellation.is_cancelled() {
+        return Err(ApplicationProblem::cancelled_before_admission());
+    }
+    if deadline.is_elapsed_at(std::time::Instant::now()) {
+        return Err(ApplicationProblem::timed_out_before_admission());
+    }
+    let runtime = registered_hook_orchestrator(hook.envelope()).ok_or_else(unavailable)?;
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let completed = StdMutex::new(Some(completed));
+    let request = HookOrchestrationRequestV1 {
+        hook,
+        lifecycle: Some(lifecycle),
+        hook_configuration_revision,
+        trigger: HookOrchestrationTriggerV1::Explicit,
+        explicit_request_id: Some(effect_identity),
+        completion: Some(Arc::new(move || {
+            if let Ok(mut completed) = completed.lock()
+                && let Some(completed) = completed.take()
+            {
+                let _ = completed.send(());
+            }
+        })),
+    };
+    let operation_cancellation = runtime
+        .admit_with_cancellation(request)
+        .map_err(|_| unavailable())?;
+    let outcome = tokio::select! {
+        biased;
+        () = request_cancellation.cancelled() => Err(ApplicationProblem::cancelled_before_admission()),
+        () = tokio::time::sleep_until(deadline.instant().into()) => Err(ApplicationProblem::timed_out_before_admission()),
+        () = operation_cancellation.cancelled() => Err(unavailable()),
+        completed = completion => completed.map_err(|_| unavailable()),
+    };
+    if outcome.is_err() {
+        operation_cancellation.cancel();
+    }
+    outcome
 }
 
 pub struct SwitchableFeedbackCycleRuntimeV1 {
@@ -1248,3 +1337,6 @@ impl GitIndexTransactionPort for SharedGitTransactionPort {
         self.service.recover(request)
     }
 }
+
+#[cfg(test)]
+mod context_scout_tests;

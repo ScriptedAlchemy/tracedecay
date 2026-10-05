@@ -11,6 +11,7 @@ packages:
   # `.claude/worktrees`) sit inside the repo and carry their own Cargo.toml.
   - "!crates/*/fixtures/**"
   - "!crates/*/tests/fixtures/**"
+  - "!benchmark_data/**/fixtures/**"
   - "!evals/**"
   - "!mockups/**"
   - "!tests/fixtures/**"
@@ -19,6 +20,9 @@ packages:
   - "!.codex-worktrees/**"
   - "!.claude-worktrees/**"
   - "!.claude/worktrees/**"
+
+onlyBuiltDependencies:
+  - esbuild
 
 allowBuilds:
   esbuild: true

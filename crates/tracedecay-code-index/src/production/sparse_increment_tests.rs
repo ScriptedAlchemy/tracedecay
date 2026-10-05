@@ -556,3 +556,55 @@ fn ambiguity_census_preserves_unknown_parent_count() {
     );
     assert_eq!(answers(&store).statistics.ambiguous_name_drops, None);
 }
+
+#[test]
+fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
+    let clear =
+        "import { scale } from './lib';\nexport function clear(): number { return scale(1); }\n";
+    let shadowed = "import { scale } from './lib';\ndescribe('scope', () => {\n  function scale(x: number) { return x; }\n  function scale(x: number) { return x + 1; }\n  it('shadowed', () => { scale(1); });\n});\nexport function clear(): number { return scale(1); }\n";
+    let tree = |app| {
+        vec![
+            ("web/app.ts", "typescript", app),
+            (
+                "web/lib.ts",
+                "typescript",
+                "export function scale(x: number) { return x * 2; }\n",
+            ),
+            ("web/a.ts", "typescript", "export const a = 1;\n"),
+            ("web/b.ts", "typescript", "export const b = 1;\n"),
+            ("web/c.ts", "typescript", "export const c = 1;\n"),
+            ("web/d.ts", "typescript", "export const d = 1;\n"),
+            ("web/e.ts", "typescript", "export const e = 1;\n"),
+            ("web/f.ts", "typescript", "export const f = 1;\n"),
+            ("web/g.ts", "typescript", "export const g = 1;\n"),
+        ]
+    };
+    assert_sparse_matches_cold(&tree(clear), &tree(shadowed));
+    assert_sparse_matches_cold(&tree(shadowed), &tree(clear));
+
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    publish(&mut incremental, &tree(clear), 1_100_000);
+    for (app, expected_gaps, sealed_at) in [(shadowed, 1, 1_200_000), (clear, 0, 1_300_000)] {
+        let successor = publish(&mut incremental, &tree(app), sealed_at);
+        assert_eq!(successor.cold_reason(), None);
+        let restored = answers(&store);
+        assert_eq!(restored.statistics.ambiguous_name_drops, Some(0));
+        assert_eq!(
+            restored
+                .unresolved_calls
+                .iter()
+                .filter(|call| call.ambiguous_local && call.reference_name == "scale")
+                .count(),
+            expected_gaps
+        );
+        assert_eq!(
+            restored
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+                .count(),
+            1
+        );
+    }
+}

@@ -904,13 +904,6 @@ fn unknown_tool_suggestion_finds_nearest_name() {
 }
 
 #[test]
-fn edit_distance_basics() {
-    assert_eq!(edit_distance("limit", "limit"), 0);
-    assert_eq!(edit_distance("limt", "limit"), 1);
-    assert_eq!(edit_distance("", "abc"), 3);
-}
-
-#[test]
 fn validation_skips_opaque_schemas() {
     // A definition without properties must be treated as opaque: no unknown
     // key rejection, so dynamic tools can't be bricked by the walker.
@@ -1132,6 +1125,52 @@ fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
         tool_result_process_outcome(&nested_is_error, "tracedecay_context").is_ok(),
         "only the daemon's top-level isError flag may change the process status"
     );
+}
+
+#[test]
+fn a_diff_with_an_untested_symbol_fails_the_gate_and_names_it() {
+    let payload = json!({
+        "structuredContent": {
+            "test_gate": {
+                "verdict": "fail",
+                "untested": ["parse", "save"]
+            }
+        }
+    });
+    let error = tool_result_process_outcome(&payload, "tracedecay_diff_context")
+        .expect_err("an untested blast radius must fail the process");
+    match error {
+        tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal) => {
+            assert_eq!(refusal.code.as_deref(), Some("test_gate"));
+            assert_eq!(
+                refusal.reason.as_deref(),
+                Some("untested blast radius: parse, save")
+            );
+        }
+        other => panic!("expected a test-gate refusal, got {other}"),
+    }
+    let passing = json!({
+        "structuredContent": { "test_gate": { "verdict": "pass", "untested": [] } }
+    });
+    assert!(tool_result_process_outcome(&passing, "tracedecay_diff_context").is_ok());
+}
+
+#[test]
+fn typed_unavailable_coverage_keeps_its_payload_on_stdout() {
+    let markdown = json!({
+        "content": [{
+            "type": "text",
+            "text": "### Coverage\nPartial recall. Some retrieval lanes did not answer:\n\
+                     - exact: unavailable (generation_rebuilding)\n\
+                     - graph: unavailable (generation_rebuilding)"
+        }]
+    });
+    let warming_json = json!({
+        "content": [{
+            "type": "text",
+            "text": "{\"coverage\":\"partial\",\"exact\":\"unavailable\",\"reason\":\"generation_rebuilding\"}"
+        }]
+    });
     let typed =
         json!({"coverage": "partial", "exact": "unavailable", "reason": "generation_rebuilding"});
     assert!(

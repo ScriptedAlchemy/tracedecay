@@ -240,6 +240,9 @@ jobs:
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
 
+      - name: Test Bazel workspace provenance
+        run: python3 scripts/test-bazel-workspace-status.py
+
       - name: Test the real-repository hot-path benchmark harness
         run: python3 scripts/test-bench-hot-paths.py
 
@@ -291,6 +294,11 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
+      # files; compare the committed files against a fresh generation.
+      - name: Check generated Bazel BUILD files are current
+        run: python3 scripts/bazel/gen_builds.py --check
 
       - name: Test and check dev skill host copies
         run: |

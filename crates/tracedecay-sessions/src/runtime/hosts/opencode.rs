@@ -868,6 +868,7 @@ fn load_record(
     let mut record = serde_json::json!({
         "message": message,
         "parts": parts.values,
+        "transcript_path": database_path.to_string_lossy(),
     });
     if let Some(parent_session_id) = parent_session_id {
         record["session"] = serde_json::json!({ "parentID": parent_session_id });

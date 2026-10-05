@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::text::edit_distance_within;
 use tracedecay_mcp::tool_errors::TOOL_ARGUMENTS_INVALID;
 use tracedecay_mcp::{ToolDefinition, resolve_property_schema, short_tool_name};
 
@@ -543,8 +544,10 @@ fn nearest_by_edit_distance(
     let max_distance = max_typo_distance(target);
     candidates
         .into_iter()
-        .map(|candidate| (edit_distance(target, &candidate), candidate))
-        .filter(|(distance, _)| *distance <= max_distance)
+        .filter_map(|candidate| {
+            edit_distance_within(target, &candidate, max_distance)
+                .map(|distance| (distance, candidate))
+        })
         .min_by_key(|(distance, _)| *distance)
         .map(|(_, candidate)| candidate)
 }
@@ -562,24 +565,6 @@ pub(crate) fn nearest_tool_name(canonical: &str, defs: &[ToolDefinition]) -> Opt
         defs.iter()
             .map(|def| short_tool_name(&def.name).to_string()),
     )
-}
-
-/// Classic two-row Levenshtein distance; property and tool names are short so
-/// the quadratic cost is irrelevant.
-pub(super) fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
 }
 
 /// A `-flag` (single dash) token whose name matches a known property is a

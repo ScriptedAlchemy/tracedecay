@@ -247,12 +247,13 @@ async fn assert_invalid_suffix_preserves_valid_prefix(
 
 #[tokio::test]
 async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_row() {
-    let fixture = Fixture::new("production-session");
+    let session_id = "7f3e2a1b-9c4d-4e5f-a6b7-c8d9e0f1a2b3";
+    let fixture = Fixture::new(session_id);
     fixture.write_record(
         "production vertical searchable",
         "never-persist-this-secret",
     );
-    let source = fixture.source("production-session");
+    let source = fixture.source(session_id);
     assert_eq!(
         source
             .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
@@ -312,7 +313,7 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     assert_eq!(
         normalized,
         format!(
-            r#"{{"evidence":{{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{{"end":{end},"start":0}}}},"facts":[{{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript"}},{{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}}],"native_record_kind":"user","provider":"claude","relations":{{"message_id":"message-production-vertical","session_id":"production-session"}},"stable_record_id":"message-production-vertical","version":1}}"#
+            r#"{{"evidence":{{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{{"end":{end},"start":0}}}},"facts":[{{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript","transcript_path":"/fixture/home/.[TraceDecay redacted: high-entropy token].jsonl"}},{{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}}],"native_record_kind":"user","provider":"claude","relations":{{"message_id":"message-production-vertical","session_id":"7f3e2a1b-9c4d-4e5f-a6b7-c8d9e0f1a2b3"}},"stable_record_id":"message-production-vertical","version":1}}"#
         )
     );
     assert!(!payload.contains("never-persist-this-secret"));

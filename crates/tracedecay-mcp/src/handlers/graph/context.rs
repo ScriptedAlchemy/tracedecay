@@ -16,7 +16,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
-use tracedecay_query::retrieval::lexical::task_is_name_shaped;
+use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -306,7 +306,7 @@ where
         .unwrap_or_else(|| task_is_name_shaped(task));
     let lexical_routing = lexical_routing::routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
-        prefer_symbol,
+        Some(prefer_symbol),
     )?
     .with_task_identifiers(task);
     let requested_anchors: Vec<String> = lexical_routing
@@ -530,13 +530,18 @@ where
     let cost = graph
         .as_ref()
         .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
-    let result = ContextResultV1 {
+    // Mirror the lexical planner's admission rule: a name preference only
+    // becomes a served name route when at least one eligible symbol token
+    // survives normalization and the stoplist.
+    let route = if prefer_symbol && !preferred_symbol_tokens(task).is_empty() {
+        ContextRetrievalRouteV1::Name
+    } else {
+        ContextRetrievalRouteV1::Prose
+    };
+    let budget_tokens = request.budget_tokens;
+    let mut result = ContextResultV1 {
         task: request.task,
-        route: if prefer_symbol {
-            ContextRetrievalRouteV1::Name
-        } else {
-            ContextRetrievalRouteV1::Prose
-        },
+        route,
         mode,
         freshness,
         code_generation,
@@ -553,7 +558,26 @@ where
         verified_graph_evidence,
         plan,
         retrieval,
+        token_budget: None,
     };
+    if let Some(budget) = budget_tokens {
+        let shares = crate::handlers::token_budget::quotas(budget, &[40, 25, 25, 10]);
+        let sections = vec![
+            crate::handlers::token_budget::trim_section("symbols", &mut result.symbols, shares[0])?,
+            crate::handlers::token_budget::trim_section(
+                "related_symbols",
+                &mut result.related_symbols,
+                shares[1],
+            )?,
+            crate::handlers::token_budget::trim_section("code", &mut result.code, shares[2])?,
+            crate::handlers::token_budget::trim_section(
+                "memory_matches",
+                &mut result.memory_matches,
+                shares[3],
+            )?,
+        ];
+        result.token_budget = Some(crate::handlers::token_budget::cut(budget, sections)?);
+    }
     Ok(GraphToolCompletionV1 {
         result: GraphToolResultV1::Context(Box::new(result)),
         touched_files,

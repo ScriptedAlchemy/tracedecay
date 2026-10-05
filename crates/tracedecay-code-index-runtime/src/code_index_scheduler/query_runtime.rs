@@ -751,6 +751,10 @@ where
             )
         }
     }?;
+    let lexical_routes = LexicalRouteReceiptV1 {
+        decision: route_plan.decision(),
+        ..lexical_routes
+    };
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
     let graph_activation_enabled = schedulers.graph_activation_enabled_for_scope(scope).await;
     let graph = {

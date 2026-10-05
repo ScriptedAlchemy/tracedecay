@@ -70,6 +70,7 @@ fn checked_in_workspace_fixture_preserves_private_kernel_payload() {
         text,
         kind: Some("message"),
         model: input["modelId"].as_str(),
+        transcript_path: None,
     });
 
     assert_eq!(

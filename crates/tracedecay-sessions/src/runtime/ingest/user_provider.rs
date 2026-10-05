@@ -210,16 +210,15 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 } else {
                     HostProviderCoverage::Complete
                 };
-                if stored_coverage != Some(coverage)
-                    && let Err(coverage_error) = persist_host_provider_coverage(
-                        self.facade,
-                        &ObservationScopeV1::Profile,
-                        "codex",
-                        coverage,
-                        u64::from(coverage != HostProviderCoverage::Complete),
-                        None,
-                    )
-                    .await
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    &ObservationScopeV1::Profile,
+                    "codex",
+                    coverage,
+                    u64::from(coverage != HostProviderCoverage::Complete),
+                    None,
+                )
+                .await
                 {
                     run.add_failure(warn_transcript_catch_up_failure(
                         "codex",

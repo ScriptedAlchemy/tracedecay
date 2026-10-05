@@ -3789,6 +3789,14 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let (swap_entered, release_swap) = registry.pause_next_serving_swap(canonical_root);
+    // Hold admission until the complete-generation demand is posted, so it
+    // coalesces into the first pass. A demand arriving after that pass claims
+    // its wake queues a follow-up, which reads as `verifying` at the gate.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold worker before the complete-generation demand");
     registry
         .mount_worktree(
             test_project_id(),
@@ -3798,6 +3806,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
+    drop(admission);
     tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")
@@ -4114,6 +4123,94 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
         simple_names(&reconciled),
         BTreeSet::from(["alpha".to_owned(), "edited_during_projection".to_owned()]),
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_during_text_projection_seals_its_successor_before_the_projection_finishes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (projection_started, release_projection) = registry
+        .pause_next_opened_published_text_projection(canonical_root)
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    tokio::time::timeout(Duration::from_secs(10), projection_started)
+        .await
+        .expect("publication did not reach text projection")
+        .expect("publication projection gate stays armed");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let active_pointer = || {
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publication
+            .read_publication_pointer()
+            .expect("read publication pointer")
+            .expect("publication pointer")
+    };
+    let projecting = active_pointer().generation_id;
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n",
+    );
+    registry
+        .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while active_pointer().generation_id == projecting {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the edit must seal its successor while the projection is still running");
+    let successor = active_pointer().generation_id;
+
+    // An edit after the early seal is not part of that successor and must
+    // still reach a generation of its own.
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn edited_during_projection() -> u32 { 2 }\n\
+         pub fn edited_after_seal() -> u32 { 3 }\n",
+    );
+    registry
+        .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+        .await;
+    release_projection
+        .send(())
+        .expect("release publication projection");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pointer = active_pointer();
+            let projected = |generation_id: &str| {
+                pointer.generation_index.iter().any(|entry| {
+                    entry.generation_id == generation_id && entry.text_artifact().is_some()
+                })
+            };
+            if projected(&projecting)
+                && projected(&successor)
+                && pointer.generation_id != successor
+                && projected(&pointer.generation_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both projections finish and the later edit seals and projects its own generation");
     registry.shutdown().await;
 }
 

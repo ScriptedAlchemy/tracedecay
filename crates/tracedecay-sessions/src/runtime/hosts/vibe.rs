@@ -291,11 +291,13 @@ async fn capture_vibe_path(
                 range,
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
+                    let transcript_path = path.to_string_lossy();
                     vibe_capture::normalize_observation(
                         &native,
                         &canonical_session_id,
                         model.as_deref(),
                         Some(location.as_str()),
+                        Some(transcript_path.as_ref()),
                         native_record_id.clone(),
                         range,
                     )

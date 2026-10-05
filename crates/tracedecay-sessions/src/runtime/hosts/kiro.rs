@@ -883,6 +883,7 @@ pub fn normalize_kiro_snapshot_observations(
                 text: &message.text,
                 kind: message.kind.as_deref(),
                 model: message.model.as_deref(),
+                transcript_path: message.source_path.as_deref(),
             });
             if let Some(map) = payload.as_object_mut() {
                 insert_snapshot_location(map, metadata.as_ref(), KIRO_LOCATION_KEYS);

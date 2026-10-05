@@ -1,16 +1,5 @@
-//! Static (per-repo) query catalog used by the criterion bench.
-//!
-//! Queries are constructed once after the production composition publishes a
-//! code-index generation. The `QueryContext` is sampled through mounted MCP
-//! reads, so top-ranked symbols, qualified names, and file prefixes all come
-//! from the same admitted, generation-pinned graph used by the timed calls.
-//!
-//! Write queries (`str_replace`, `multi_str_replace`, `insert_at`,
-//! `ast_grep_rewrite`) declare a `scratch_path` + `init_content`: the bench
-//! harness rewrites the scratch file before *every* timed iteration so the
-//! tool's "match must be unique" precondition keeps holding. A
-//! `git stash --include-untracked` at the end of the run reverts all
-//! scratch-file churn.
+//! Query catalog sampled from mounted reads; generation-bound claims are
+//! refreshed outside each timed invocation.
 
 #![allow(clippy::too_many_lines)]
 use std::fmt::Write as _;
@@ -43,12 +32,17 @@ pub type PrimeFn = fn(&QueryContext, u64) -> Vec<PrimeStep>;
 #[derive(Clone)]
 pub enum QueryKind {
     Read,
+    PreparedRead {
+        prime: PrimeFn,
+        selection: usize,
+    },
     Write {
         /// File path *relative to the project root* that must be (re)written
         /// before each timed iteration.
         scratch_path: String,
         /// Bytes the scratch file is reset to before each iter.
         init_content: String,
+        expected_content: String,
     },
     /// One-shot or stateful operations measured with fresh preconditions per
     /// iteration: the `prime` chain (untimed) recreates the entities the timed
@@ -58,6 +52,7 @@ pub enum QueryKind {
     Effect {
         prime: PrimeFn,
         cleanup: Option<EffectCleanup>,
+        repeatable: bool,
     },
 }
 
@@ -90,12 +85,30 @@ impl Query {
         }
     }
 
+    pub(crate) fn json_read(label: &'static str, tool: &'static str, mut args: Value) -> Self {
+        args["format"] = json!("json");
+        Self::read(label, tool, args)
+    }
+
+    pub(crate) fn prepared_read(
+        label: &'static str,
+        tool: &'static str,
+        args: Value,
+        selection: usize,
+        prime: PrimeFn,
+    ) -> Self {
+        let mut query = Self::json_read(label, tool, args);
+        query.kind = QueryKind::PreparedRead { prime, selection };
+        query
+    }
+
     pub(crate) fn write(
         label: &'static str,
         tool: &'static str,
         args: Value,
         scratch_path: String,
         init_content: String,
+        expected_content: String,
     ) -> Self {
         Self {
             label,
@@ -104,6 +117,7 @@ impl Query {
             kind: QueryKind::Write {
                 scratch_path,
                 init_content,
+                expected_content,
             },
         }
     }
@@ -113,7 +127,7 @@ impl Query {
 // constructor sugar lives there (`eq`/`eqc`), since this file is also the
 // standalone `queries` bench root where effect groups never exist.
 
-/// All queries we run for one tool. The harness invariant is `queries.len() == 5`.
+/// Concrete workloads for one catalog tool.
 pub struct ToolGroup {
     pub tool: &'static str,
     pub queries: Vec<Query>,
@@ -127,6 +141,12 @@ pub struct ToolGroup {
 /// `coverage` module, so every type it names must resolve in this crate root.
 #[derive(Default)]
 pub struct Seeds {
+    /// Temporary linked roots that must be included in the next composition
+    /// open before branch enrollment can reach the scheduler.
+    pub additional_project_roots: Vec<std::path::PathBuf>,
+    /// The current composition was opened before the linked route existed;
+    /// orchestration must reopen it with the additional roots.
+    pub needs_reopen_for_native_worktree: bool,
     pub project_id: Option<String>,
     pub repository_id: Option<String>,
     pub branch: Option<String>,
@@ -179,12 +199,15 @@ pub struct Seeds {
     pub dirty_file: Option<String>,
     /// Skill id minted via profile skill file drop (managed skills surface).
     pub skill_id: Option<String>,
-    /// First worktree entry id seen in the seeded worktree inventory (cleanup
-    /// lane targets `kind:"worktree"` objects).
-    pub worktree_id: Option<String>,
+    /// Canonical identity of the disposable linked worktree targeted by cleanup.
+    pub cleanup_worktree_id: Option<String>,
     /// Changed path whose run_affected_tests plan maps to covering tests
     /// (minted a request handle at seed time).
     pub test_results_path: Option<String>,
+    pub compiler_diagnostic: Option<String>,
+    pub compiler_diagnostic_path: Option<String>,
+    pub context_scout_address: Option<Value>,
+    pub feedback: Option<tracedecay_contracts::feedback::FeedbackAdvisoryCycleSurfaceResultV1>,
     /// Reversible-truncation handle (`rh_…`) minted by a deliberately fat
     /// search response at seed time; feeds `tracedecay_retrieve`.
     pub retrieve_handle: Option<String>,
@@ -215,11 +238,10 @@ pub struct Seeds {
 /// transaction the status lane reads.
 #[derive(Clone, Default)]
 pub struct NativeSeeds {
-    /// Validated `stack_snapshot` request body — the groups replay it to mint
-    /// fresh per-iteration transactions.
+    /// Validated route template; preparation refreshes its current claims.
     pub snapshot_body: Value,
-    /// transaction_id of the seed-minted (approved) transaction.
-    pub transaction_id: String,
+    /// Daemon-minted transaction identity retained after a real apply.
+    pub transaction_id: Option<String>,
 }
 
 /// Artifacts of one real disposable Work lifecycle plus one workflow
@@ -254,18 +276,13 @@ pub struct WorkSeeds {
     pub worktree_id: Option<String>,
     /// A live workflow run (id + current sequence) for run-control effects.
     pub wf_run_id: Option<String>,
-    /// Projection generation pair for duplicate-adjudication evidence.
-    pub work_generation: Option<Value>,
-    pub topology_generation: Option<Value>,
 }
 
 /// Sampled data drawn from a freshly indexed graph plus seeded entity state.
 /// Built once per repo.
 pub struct QueryContext {
-    pub function_ids: Vec<String>,
-    pub struct_ids: Vec<String>,
-    pub any_ids: Vec<String>,
     pub function_qnames: Vec<String>,
+    pub struct_qnames: Vec<String>,
     pub dir_prefixes: Vec<String>,
     /// Mounted repo root on disk (file URIs, worktree targets).
     pub project_root: PathBuf,
@@ -318,9 +335,8 @@ async fn try_build_context(
 ) -> Result<QueryContext, String> {
     let mut function_ids = Vec::new();
     let mut struct_ids = Vec::new();
-    let mut any_ids = Vec::new();
 
-    for kind in ["function", "method", "struct", "class", "module"] {
+    for kind in ["function", "method", "struct", "class"] {
         let payload = call_json_tool(
             harness,
             project_root,
@@ -336,7 +352,6 @@ async fn try_build_context(
             let Some(id) = symbol.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            push_unique(&mut any_ids, id);
             match kind {
                 "function" | "method" => push_unique(&mut function_ids, id),
                 "struct" | "class" => push_unique(&mut struct_ids, id),
@@ -347,10 +362,10 @@ async fn try_build_context(
 
     function_ids.truncate(64);
     struct_ids.truncate(64);
-    any_ids.truncate(64);
 
     let mut function_qnames = Vec::new();
-    for id in &function_ids {
+    let mut struct_qnames = Vec::new();
+    for id in function_ids.iter().chain(&struct_ids) {
         let payload = call_json_tool(
             harness,
             project_root,
@@ -361,11 +376,18 @@ async fn try_build_context(
         if let Some(qualified_name) = payload.get("qualified_name").and_then(Value::as_str)
             && !qualified_name.is_empty()
         {
-            push_unique(&mut function_qnames, qualified_name);
+            if function_ids.contains(id) {
+                push_unique(&mut function_qnames, qualified_name);
+            } else {
+                push_unique(&mut struct_qnames, qualified_name);
+            }
         }
     }
 
     let files: Vec<Value> = list_repo_files(harness, project_root).await?;
+    if files.is_empty() {
+        return Err("tracedecay_files returned no indexed files".to_owned());
+    }
 
     // Collect first-segment directory prefixes from the sample files (so
     // `path_prefix` queries are valid for *this* repo regardless of layout).
@@ -381,20 +403,16 @@ async fn try_build_context(
     dir_prefixes.dedup();
     dir_prefixes.truncate(5);
 
-    require_samples("functions or methods", &function_ids)?;
-    require_samples("structs or classes", &struct_ids)?;
-    require_samples("graph symbols", &any_ids)?;
     require_samples("qualified function names", &function_qnames)?;
+    require_samples("qualified struct or class names", &struct_qnames)?;
     require_samples("indexed directory prefixes", &dir_prefixes)?;
 
     // Seed producers live in `coverage/` (not compiled into the standalone
     // `queries` bench root): the caller wires `coverage::seed_all` when it
     // wants the sweep ledger.
     Ok(QueryContext {
-        function_ids,
-        struct_ids,
-        any_ids,
         function_qnames,
+        struct_qnames,
         dir_prefixes,
         project_root: project_root.to_path_buf(),
         files,
@@ -444,8 +462,9 @@ pub(crate) async fn call_json_tool(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
     tool_name: &str,
-    arguments: Value,
+    mut arguments: Value,
 ) -> Result<Value, String> {
+    arguments["format"] = json!("json");
     let response = harness
         .call_tool(project_root, tool_name, arguments)
         .await
@@ -503,27 +522,96 @@ pub(crate) fn dir(ctx: &QueryContext, i: usize) -> String {
     }
 }
 
-/// Root directory (relative to the project root) where all write-query
-/// scratch files live. Kept on a single path so `git stash --include-untracked`
-/// at end-of-bench reverts everything in one shot.
+/// Repository-relative scratch directory reset before each write iteration.
 pub const SCRATCH_DIR: &str = ".tracedecay-bench-scratch";
 
 pub(crate) fn scratch(name: &str) -> String {
     format!("{SCRATCH_DIR}/{name}")
 }
 
+pub(crate) fn symbol_name(ctx: &QueryContext, i: usize) -> String {
+    QueryContext::pick(&ctx.function_qnames, i)
+        .rsplit("::")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(crate) fn file_at(ctx: &QueryContext, i: usize) -> &Value {
+    &ctx.files[i % ctx.files.len()]
+}
+
+pub(crate) fn prime_symbol(
+    qname: String,
+    capture: &'static [(&'static str, &'static str)],
+) -> PrimeStep {
+    let (path, name) = qname.split_once("::").unwrap_or(("", &qname));
+    PrimeStep {
+        inject: vec![],
+        tool: "tracedecay_code_symbol_search",
+        args: json!({
+            "query": name.rsplit("::").next().unwrap_or(name),
+            "lazy_index_ignored_dependencies": false,
+            "scope": {"path_prefix": path},
+            "meta": {"projection": "summary", "order": "relevance", "cursor": null},
+            "format": "json",
+        }),
+        capture,
+    }
+}
+
+pub(crate) fn prime_function(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
+    vec![prime_symbol(
+        QueryContext::pick(&ctx.function_qnames, iteration as usize),
+        &[
+            ("outcome.value.payload.items.0.node_id", "live_node"),
+            ("outcome.value.payload.generation", "live_generation"),
+        ],
+    )]
+}
+
+pub(crate) fn prime_class(ctx: &QueryContext, iteration: u64) -> Vec<PrimeStep> {
+    vec![prime_symbol(
+        QueryContext::pick(&ctx.struct_qnames, iteration as usize),
+        &[("outcome.value.payload.items.0.node_id", "live_node")],
+    )]
+}
+
+fn ast_search_args(ctx: &QueryContext, i: usize) -> Option<Value> {
+    let files: Vec<_> = ctx
+        .files
+        .iter()
+        .filter_map(|file| {
+            let path = file["path"].as_str()?;
+            let language = match Path::new(path).extension()?.to_str()? {
+                "py" => "python",
+                "ts" => "typescript",
+                "tsx" => "tsx",
+                "js" | "jsx" => "javascript",
+                "rs" => "rust",
+                "c" => "c",
+                "cpp" | "cc" | "cxx" => "cpp",
+                "java" => "java",
+                _ => return None,
+            };
+            Some((path, language))
+        })
+        .collect();
+    let (path, language) = files.get(i % files.len().max(1))?;
+    Some(
+        json!({"pattern": "$FUNC($$$ARGS)", "lang": language, "path_glob": path, "max_results": 20}),
+    )
+}
+
 pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     // ── read query inputs ────────────────────────────────────────────────
-    let search_terms = ["main", "init", "parse", "error", "config"];
-    let context_tasks = [
-        "How is configuration loaded at startup?",
-        "Where are command-line arguments parsed?",
-        "How are errors defined and propagated?",
-        "How is logging configured?",
-        "How are tests organized?",
-    ];
+    let search_terms: Vec<_> = (0..5).map(|i| symbol_name(ctx, i)).collect();
+    let context_tasks: Vec<_> = search_terms
+        .iter()
+        .map(|name| format!("How does {name} work?"))
+        .collect();
     let kinds_for_largest = ["function", "method", "struct", "class", "module"];
-    let file_globs = ["**/*.rs", "**/*.c", "**/*.py", "**/*.js", "**/*.ts"];
+    let file_globs: Vec<_> = (0..5).map(|i| file_at(ctx, i)["path"].clone()).collect();
     let rank_kinds = ["calls", "uses", "contains", "type_of", "implements"];
 
     let mut groups: Vec<ToolGroup> = Vec::new();
@@ -531,7 +619,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_search",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "term",
                 "tracedecay_search",
                 json!({ "query": search_terms[i], "limit": 20 }),
@@ -542,7 +630,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_context",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "task",
                 "tracedecay_context",
                 json!({ "task": context_tasks[i], "max_nodes": 20 }),
@@ -553,10 +641,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_callers",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_callers",
-                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "maximum_depth": 3 }),
+                json!({ "node_id": "{{live_node}}", "maximum_depth": 3 }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -564,21 +654,24 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_callees",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_callees",
-                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "maximum_depth": 3 }),
+                json!({ "node_id": "{{live_node}}", "maximum_depth": 3 }),
+                i,
+                prime_function,
             )
         }),
     });
-
     groups.push(ToolGroup {
         tool: "tracedecay_node",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_node",
-                json!({ "node_id": QueryContext::pick(&ctx.any_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -586,7 +679,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_by_qualified_name",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "qname",
                 "tracedecay_by_qualified_name",
                 json!({ "qualified_name": QueryContext::pick(&ctx.function_qnames, i) }),
@@ -597,10 +690,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_signature",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_signature",
-                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -608,10 +703,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_impact",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_impact",
-                json!({ "node_id": QueryContext::pick(&ctx.seeds.code_node_ids, i), "max_depth": 2 }),
+                json!({ "node_id": "{{live_node}}", "max_depth": 2 }),
+                i,
+                prime_function,
             )
         }),
     });
@@ -619,7 +716,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_files",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "glob",
                 "tracedecay_files",
                 json!({ "pattern": file_globs[i] }),
@@ -631,13 +728,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         tool: "tracedecay_complexity",
         queries: {
             let mut v = Vec::with_capacity(5);
-            v.push(Query::read(
+            v.push(Query::json_read(
                 "all",
                 "tracedecay_complexity",
                 json!({ "limit": 20 }),
             ));
             for i in 0..4 {
-                v.push(Query::read(
+                v.push(Query::json_read(
                     "scoped",
                     "tracedecay_complexity",
                     json!({ "path": dir(ctx, i), "limit": 20 }),
@@ -650,9 +747,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_doc_coverage",
         queries: {
-            let mut v = vec![Query::read("all", "tracedecay_doc_coverage", json!({}))];
+            let mut v = vec![Query::json_read(
+                "all",
+                "tracedecay_doc_coverage",
+                json!({}),
+            )];
             for i in 0..4 {
-                v.push(Query::read(
+                v.push(Query::json_read(
                     "scoped",
                     "tracedecay_doc_coverage",
                     json!({ "path": dir(ctx, i) }),
@@ -665,7 +766,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_largest",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "by_kind",
                 "tracedecay_largest",
                 json!({ "node_kind": kinds_for_largest[i], "limit": 20 }),
@@ -676,7 +777,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_hotspots",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "limit",
                 "tracedecay_hotspots",
                 json!({ "limit": 10 + (i as u32) * 10 }),
@@ -687,7 +788,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_god_class",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "limit",
                 "tracedecay_god_class",
                 json!({ "limit": 5 + (i as u32) * 5 }),
@@ -698,7 +799,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_module_api",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_module_api",
                 json!({ "path": dir(ctx, i) }),
@@ -709,10 +810,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_derives",
         queries: five(|i| {
-            Query::read(
+            Query::prepared_read(
                 "by_id",
                 "tracedecay_derives",
-                json!({ "node_id": QueryContext::pick(&ctx.struct_ids, i) }),
+                json!({ "node_id": "{{live_node}}" }),
+                i,
+                prime_class,
             )
         }),
     });
@@ -720,7 +823,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_dead_code",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_dead_code",
                 json!({ "path": dir(ctx, i) }),
@@ -731,7 +834,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_rank",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "by_kind",
                 "tracedecay_rank",
                 json!({ "edge_kind": rank_kinds[i], "limit": 20 }),
@@ -742,7 +845,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_coupling",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "scoped",
                 "tracedecay_coupling",
                 json!({ "path": dir(ctx, i), "limit": 20 }),
@@ -753,7 +856,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups.push(ToolGroup {
         tool: "tracedecay_circular",
         queries: five(|i| {
-            Query::read(
+            Query::json_read(
                 "limit",
                 "tracedecay_circular",
                 json!({ "limit": 5 + (i as u32) * 5 }),
@@ -782,9 +885,11 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                     "path": path,
                     "old_str": format!("TARGET_{i}"),
                     "new_str": format!("REPLACED_{i}"),
+                    "format": "json",
                 }),
                 path.clone(),
                 content,
+                format!("{body}REPLACED_{i}\nTAIL\n"),
             )
         }),
     });
@@ -803,9 +908,12 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::write(
                 "n_repls",
                 "tracedecay_multi_str_replace",
-                json!({ "path": path, "replacements": replacements }),
+                json!({ "path": path, "replacements": replacements, "format": "json" }),
                 path.clone(),
                 content,
+                (0..n)
+                    .map(|k| format!("DONE_{k}\nfiller line {k}\n"))
+                    .collect(),
             )
         }),
     });
@@ -825,30 +933,53 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                     "anchor": format!("LINE_{i}"),
                     "content": "// inserted by bench\n",
                     "before": false,
+                    "format": "json",
                 }),
                 path.clone(),
                 content,
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(k, line)| {
+                        if k == i {
+                            format!("{line}\n// inserted by bench\n")
+                        } else {
+                            format!("{line}\n")
+                        }
+                    })
+                    .collect(),
             )
         }),
     });
 
     if ast_grep_on_path() {
         groups.push(ToolGroup {
-            tool: "tracedecay_ast_grep_search",
+            tool: "tracedecay_ast_grep_rewrite",
             queries: five(|i| {
-                Query::read(
-                    "search_fn",
-                    "tracedecay_ast_grep_search",
-                    json!({
-                        "pattern": *["fn $NAME($$$ARGS)", "let $X = $Y", "impl $T { $$$B }", "pub fn $NAME($$$A)", "match $E { $$$ARMS }"].get(i).unwrap_or(&""),
-                        "lang": *["rust", "python", "rust", "rust", "python"].get(i).unwrap_or(&"rust"),
-                        "max_results": 20,
-                    }),
+                let path = scratch(&format!("rewrite_{i}.rs"));
+                Query::write(
+                    "replace_call",
+                    "tracedecay_ast_grep_rewrite",
+                    json!({"path": path, "pattern": "old()", "rewrite": "new()", "format": "json"}),
+                    path.clone(),
+                    "fn run() { old(); }\n".to_owned(),
+                    "fn run() { new(); }\n".to_owned(),
                 )
             }),
         });
     }
-
+    let queries = (0..5)
+        .filter_map(|i| {
+            ast_search_args(ctx, i)
+                .map(|args| Query::json_read("calls_in_file", "tracedecay_ast_grep_search", args))
+        })
+        .collect::<Vec<_>>();
+    if !queries.is_empty() {
+        groups.push(ToolGroup {
+            tool: "tracedecay_ast_grep_search",
+            queries,
+        });
+    }
     groups
 }
 

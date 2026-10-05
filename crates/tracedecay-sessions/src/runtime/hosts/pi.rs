@@ -38,7 +38,8 @@ use crate::runtime::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, HostProviderCoverage, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptIngestResult, bound_path_list, canonical_framed_sha256,
-    jsonl_file_identity, persist_host_provider_coverage, run_blocking_transcript_section,
+    jsonl_file_identity, persist_host_provider_coverage, revise_host_record,
+    run_blocking_transcript_section,
 };
 
 /// Environment override Pi reads for its agent directory.
@@ -657,23 +658,21 @@ pub async fn capture_pi_observations(
                 && !cancellation.is_cancelled()
             {
                 let next_frontier = if discovery.reached_end {
-                    Some(ParseOffset {
-                        byte_offset: 0,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: 0,
-                    })
+                    Some((0, 0))
                 } else {
-                    last_discovered_entry.map(|entry| ParseOffset {
-                        byte_offset: entry.sequence,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: entry.sequence,
-                    })
+                    last_discovered_entry.map(|entry| (entry.sequence, entry.sequence))
                 };
-                if let Some(next_frontier) = next_frontier {
-                    facade
-                        .advance_parse_offset(&scope, PI_DISCOVERY_FRONTIER_KEY, next_frontier)
-                        .await
-                        .map_err(admission_error)?;
+                if let Some((byte_offset, file_id)) = next_frontier {
+                    revise_host_record(
+                        facade,
+                        &scope,
+                        PI_DISCOVERY_FRONTIER_KEY,
+                        discovery_frontier,
+                        byte_offset,
+                        file_id,
+                    )
+                    .await
+                    .map_err(admission_error)?;
                 }
             }
             persist_coverage(facade, &scope, &outcome).await?;
@@ -834,8 +833,13 @@ async fn admit_session_file(
                 range,
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
-                    let envelope =
-                        pi_capture::normalize_observation(&native, &canonical_session_id, range)?;
+                    let transcript_path = path.to_string_lossy();
+                    let envelope = pi_capture::normalize_observation(
+                        &native,
+                        &canonical_session_id,
+                        Some(transcript_path.as_ref()),
+                        range,
+                    )?;
                     native_record_id = Some(envelope.stable_record_id().clone());
                     Ok(envelope)
                 },

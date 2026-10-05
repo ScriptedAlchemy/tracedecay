@@ -33,6 +33,8 @@ mod dashboard_bundle;
 mod dashboard_manifest;
 #[path = "build-support/source_provenance.rs"]
 mod source_provenance;
+#[path = "build-support/watched_input_file.rs"]
+mod watched_input_file;
 
 const DASHBOARD_BUILD_INPUTS: &[&str] = &[
     "dashboard/src",
@@ -133,6 +135,9 @@ fn embed_dashboard(
     }
     println!("cargo::rerun-if-env-changed=TRACEDECAY_SKIP_DASHBOARD_BUILD");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_BUNDLE_SHA256");
+    watched_input_file::WatchedInputFile::from_env("TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE")
+        .emit();
+    println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_DIST_DIR");
 
     let store = out_dir.join(BUNDLE_STORE_DIR);
     fs::create_dir_all(&store)
@@ -146,7 +151,31 @@ fn embed_dashboard(
         if let Some(bundle) = dashboard_bundle::open(&store, &expected)? {
             return Ok(EmbeddedDashboard::staged(bundle));
         }
-        let app_dist = dashboard.join("app-dist");
+        // TRACEDECAY_DASHBOARD_DIST_DIR names a prebuilt bundle outside the
+        // checkout layout (Bazel's js_run_binary output tree). Without it the
+        // staged copy comes from dashboard/app-dist as usual.
+        let app_dist = match std::env::var_os("TRACEDECAY_DASHBOARD_DIST_DIR") {
+            Some(dir) => {
+                let dir = PathBuf::from(dir);
+                // A build system's output tree materializes its inputs as
+                // symlinks; the digest compare below still fails closed on
+                // any byte that is not the bundle the digest was taken over.
+                let bundle = dashboard_bundle::stage_copy_build_output(&store, &dir)?;
+                if bundle.digest_hex != expected {
+                    return Err(format!(
+                        "TRACEDECAY_SKIP_DASHBOARD_BUILD is set but the prebuilt dashboard bundle \
+                         at {} has digest {}, not the expected \
+                         TRACEDECAY_DASHBOARD_BUNDLE_SHA256={expected}; rebuild the dashboard or \
+                         fix the expected digest",
+                        dir.display(),
+                        bundle.digest_hex,
+                    )
+                    .into());
+                }
+                return Ok(EmbeddedDashboard::staged(bundle));
+            }
+            None => dashboard.join("app-dist"),
+        };
         let bundle = dashboard_bundle::stage_copy(&store, &app_dist)?;
         if bundle.digest_hex != expected {
             return Err(format!(
@@ -198,20 +227,32 @@ fn embed_dashboard(
 }
 
 fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
-    let Some(raw) = std::env::var_os("TRACEDECAY_DASHBOARD_BUNDLE_SHA256") else {
-        return Err(
-            "TRACEDECAY_SKIP_DASHBOARD_BUILD is set but TRACEDECAY_DASHBOARD_BUNDLE_SHA256 \
-             is not; skipping the dashboard build requires the expected 64-hex sha256 \
-             bundle digest so the embedded bytes are proven, not assumed"
-                .into(),
-        );
-    };
-    let Some(expected) = raw.to_str().map(str::to_owned) else {
-        return Err(format!(
-            "TRACEDECAY_DASHBOARD_BUNDLE_SHA256 is set to non-UTF-8 value {raw:?}; \
-             expected a 64-character lowercase hex sha256 digest"
-        )
-        .into());
+    let expected = match std::env::var_os("TRACEDECAY_DASHBOARD_BUNDLE_SHA256") {
+        Some(raw) => raw.into_string().map_err(|raw| {
+            format!(
+                "TRACEDECAY_DASHBOARD_BUNDLE_SHA256 is set to non-UTF-8 value {raw:?}; \
+                 expected a 64-character lowercase hex sha256 digest"
+            )
+        })?,
+        None => {
+            // Build systems that produce the digest as an action output
+            // (Bazel) hand over a file path, not a literal value.
+            let Some(file) = std::env::var_os("TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE") else {
+                return Err("TRACEDECAY_SKIP_DASHBOARD_BUILD is set but neither \
+                     TRACEDECAY_DASHBOARD_BUNDLE_SHA256 nor \
+                     TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE is; skipping the dashboard \
+                     build requires the expected 64-hex sha256 bundle digest so the \
+                     embedded bytes are proven, not assumed"
+                    .into());
+            };
+            let contents = fs::read_to_string(&file).map_err(|error| {
+                format!(
+                    "failed to read TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE {}: {error}",
+                    Path::new(&file).display()
+                )
+            })?;
+            contents.trim().to_owned()
+        }
     };
     let well_formed = expected.len() == 64
         && expected
@@ -327,18 +368,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Source provenance: the exact commit this binary compiles, in strict
     // source order, verified git worktree, release env, packaged VCS journal.
     println!("cargo::rerun-if-env-changed=TRACEDECAY_RELEASE_GIT_SHA");
+    watched_input_file::WatchedInputFile::from_env("TRACEDECAY_RELEASE_GIT_SHA_FILE").emit();
     println!("cargo::rerun-if-changed=build-support/source_provenance.rs");
-    let release_env_sha = match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA") {
-        None => None,
+    println!("cargo::rerun-if-changed=build-support/watched_input_file.rs");
+    let release_env_provenance = match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA") {
+        None => match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA_FILE") {
+            // Same provenance source, carried by a file so build systems can
+            // pass an action output instead of a literal env value.
+            None => None,
+            Some(file) => Some(
+                fs::read_to_string(&file)
+                    .map_err(|error| {
+                        format!(
+                            "failed to read TRACEDECAY_RELEASE_GIT_SHA_FILE {}: {error}",
+                            Path::new(&file).display()
+                        )
+                    })?
+                    .trim()
+                    .to_owned(),
+            ),
+        },
         Some(raw) => Some(raw.into_string().map_err(|raw| {
             format!(
                 "TRACEDECAY_RELEASE_GIT_SHA is set to non-UTF-8 value {raw:?}; expected a \
-                 40-character lowercase hex commit sha"
+                 40-character lowercase hex commit sha optionally followed by `.dirty`"
             )
         })?),
     };
-    let provenance =
-        source_provenance::resolve(&repository_root, &manifest_dir, release_env_sha.as_deref())?;
+    let provenance = source_provenance::resolve(
+        &repository_root,
+        &manifest_dir,
+        release_env_provenance.as_deref(),
+    )?;
     match &provenance.origin {
         source_provenance::ProvenanceOrigin::VerifiedGit => {
             // Repo-wide watch: the baked commit must track commits, staging,

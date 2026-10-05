@@ -140,6 +140,29 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
         ]),
         "{hit}"
     );
+    assert_eq!(
+        hit["query_route"],
+        json!({ "route": "name", "margin": 0.5, "decided_by": "caller" }),
+        "{hit}"
+    );
+
+    let automatic = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "ledger_post_entry", "format": "json" }),
+    )
+    .await;
+    let automatic: Value =
+        serde_json::from_str(extract_real_server_text(&automatic)).expect("search JSON");
+    assert_eq!(
+        automatic["lexical_routes"], hit["lexical_routes"],
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["query_route"],
+        json!({ "route": "name", "margin": 0.5, "decided_by": "query_shape" }),
+        "{automatic}"
+    );
 
     let rendered = handle_real_server_tool_call(
         &server,
@@ -187,6 +210,11 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
     assert_eq!(miss["results"], json!([]), "{miss}");
     assert_eq!(miss["freshness"], json!({ "state": "fresh" }), "{miss}");
     assert_eq!(miss["coverage"]["recall"], "full", "{miss}");
+    assert_eq!(
+        miss["query_route"],
+        json!({ "route": "prose", "margin": -0.5, "decided_by": "query_shape" }),
+        "{miss}"
+    );
 
     let anchored = handle_real_server_tool_call(
         &server,

@@ -159,3 +159,149 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
 
     fixture.harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn pr_context_budgeted_cursor_returns_every_changed_symbol_once() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub fn changed_alpha() -> u32 { 1 }\n\
+             pub fn changed_beta() -> u32 { 2 }\n\
+             pub fn changed_gamma() -> u32 { 3 }\n\
+             pub fn changed_delta() -> u32 { 4 }\n\
+             pub fn removed_alpha() {}\n\
+             pub fn removed_beta() {}\n\
+             pub fn removed_gamma() {}\n\
+             pub fn removed_delta() {}\n",
+        )
+        .unwrap();
+        crate::support::commit_worktree(project, "base symbols");
+        git_stdout(project, &["branch", "pr-base"]);
+        git_stdout(project, &["checkout", "-b", "pr-feature"]);
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub fn changed_alpha() -> u32 { 11 }\n\
+             pub fn changed_beta() -> u32 { 12 }\n\
+             pub fn changed_gamma() -> u32 { 13 }\n\
+             pub fn changed_delta() -> u32 { 14 }\n\
+             pub fn added_alpha() {}\n\
+             pub fn added_beta() {}\n\
+             pub fn added_gamma() {}\n\
+             pub fn added_delta() {}\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let server = fixture.harness.server(&fixture.project_root).unwrap();
+    wait_for_current_graph(&server).await;
+
+    for maximum_symbols in [200, 2] {
+        let mut cursor = None;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_cursors = std::collections::HashSet::new();
+        let mut pages = 0;
+        loop {
+            let output = call_json(
+                &fixture,
+                "tracedecay_pr_context",
+                json!({
+                    "base_ref": "pr-base", "head_ref": "pr-feature", "format": "json",
+                    "maximum_symbols": maximum_symbols, "budget_tokens": 1, "cursor": cursor,
+                }),
+            )
+            .await;
+            let page: Value = serde_json::from_str(&output).expect("PR page JSON");
+            assert_eq!(page["status"], "complete", "{page}");
+            let mut returned = 0;
+            for section in ["added", "removed", "modified"] {
+                let rows = page[section].as_array().unwrap();
+                assert_eq!(
+                    page[format!("symbols_{section}")],
+                    json!(rows.len()),
+                    "{page}"
+                );
+                for row in rows {
+                    assert!(
+                        seen_ids.insert(row["id"].as_str().unwrap().to_owned()),
+                        "repeated occurrence: {row}"
+                    );
+                    assert!(
+                        seen.insert((section.to_owned(), row["name"].as_str().unwrap().to_owned())),
+                        "repeated changed symbol: {row}"
+                    );
+                }
+                let budget_section = page["token_budget"]["sections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["section"] == section)
+                    .unwrap();
+                assert_eq!(budget_section["shown"], json!(rows.len()), "{page}");
+                assert!(budget_section["total"].as_u64().unwrap() >= rows.len() as u64);
+                returned += rows.len();
+            }
+            let co_change_budget = page["token_budget"]["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["section"] == "co_change_partners")
+                .expect("PR context budgets co-change partners");
+            assert_eq!(
+                co_change_budget["shown"],
+                json!(page["co_change_partners"].as_array().map_or(0, Vec::len)),
+                "{page}"
+            );
+            assert!(returned > 0 && returned <= maximum_symbols, "{page}");
+            assert_eq!(page["symbol_page"]["returned"], json!(returned), "{page}");
+            assert_eq!(
+                page["analysis_coverage"]["symbols_returned"],
+                json!(returned),
+                "{page}"
+            );
+            assert_eq!(page["token_budget"]["over_ceiling"], true, "{page}");
+            pages += 1;
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+            let has_more = cursor.is_some();
+            assert_eq!(page["symbol_page"]["has_more"], has_more, "{page}");
+            assert_eq!(page["symbol_page"]["complete"], !has_more, "{page}");
+            assert_eq!(
+                page["symbol_page"]["continuation_available"], has_more,
+                "{page}"
+            );
+            assert_eq!(
+                page["analysis_coverage"]["symbols_complete"], !has_more,
+                "{page}"
+            );
+            if let Some(cursor) = cursor.as_ref() {
+                assert!(seen_cursors.insert(cursor.clone()), "cursor must advance");
+                assert!(
+                    pages < 12,
+                    "cursor walk must finish after twelve changed symbols"
+                );
+            } else {
+                break;
+            }
+        }
+        assert!(pages > 1, "tiny budget must require continuation");
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("added".to_owned(), "added_alpha".to_owned()),
+                ("added".to_owned(), "added_beta".to_owned()),
+                ("added".to_owned(), "added_delta".to_owned()),
+                ("added".to_owned(), "added_gamma".to_owned()),
+                ("modified".to_owned(), "changed_alpha".to_owned()),
+                ("modified".to_owned(), "changed_beta".to_owned()),
+                ("modified".to_owned(), "changed_delta".to_owned()),
+                ("modified".to_owned(), "changed_gamma".to_owned()),
+                ("removed".to_owned(), "removed_alpha".to_owned()),
+                ("removed".to_owned(), "removed_beta".to_owned()),
+                ("removed".to_owned(), "removed_delta".to_owned()),
+                ("removed".to_owned(), "removed_gamma".to_owned()),
+            ]
+        );
+    }
+    fixture.harness.shutdown().await;
+}
