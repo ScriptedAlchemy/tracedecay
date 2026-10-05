@@ -1338,9 +1338,7 @@ impl TypeScriptExtractor {
         }
     }
 
-    // ----------------------------
     // Helper extraction methods
-    // ----------------------------
 
     /// Extract the leading decorators of a class or field declaration. Their
     /// call sites are left to the caller.
