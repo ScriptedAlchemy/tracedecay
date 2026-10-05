@@ -5729,10 +5729,6 @@ async fn diff_context_gate_reaches_cross_file_inline_tests_without_covering_thei
         )
         .await
         .expect("real diff context");
-        assert_eq!(
-            result.value.pointer("/structuredContent/test_gate"),
-            Some(&expected)
-        );
         let result = extract_json(&result.value);
         assert_eq!(result["impact_complete"], true, "{result}");
         assert_eq!(result["test_gate"], expected, "{result}");
