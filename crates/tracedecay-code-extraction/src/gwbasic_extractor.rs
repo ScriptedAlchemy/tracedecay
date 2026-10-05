@@ -10,7 +10,7 @@ use std::time::Instant;
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::basic_common::{
-    BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
+    BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line, parse_line,
 };
 use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
@@ -104,7 +104,7 @@ impl GwBasicExtractor {
                 let node = cursor.node();
                 if node.kind() == "line"
                     && selected_lines.contains(&(node.start_byte(), node.end_byte()))
-                    && let Some(basic_line) = Self::parse_line(state, node)
+                    && let Some(basic_line) = parse_line(state, node)
                 {
                     lines.push(basic_line);
                 }
@@ -114,46 +114,6 @@ impl GwBasicExtractor {
             }
         }
         lines
-    }
-
-    /// Parse a single `line` node into a `BasicLine` struct.
-    fn parse_line<'a>(state: &ExtractionState, node: TsNode<'a>) -> Option<BasicLine<'a>> {
-        let line_number_node = find_direct_child_by_kind(node, "line_number")?;
-        let line_number_text = state.node_text(line_number_node);
-        let line_number: u32 = line_number_text.trim().parse().unwrap_or(0);
-
-        // Navigate: line -> statement_list -> statement -> specific_kind
-        let statement_list = find_direct_child_by_kind(node, "statement_list")?;
-        let statement = find_direct_child_by_kind(statement_list, "statement")?;
-
-        // Get the first named child of statement (the actual statement type).
-        let mut stmt_cursor = statement.walk();
-        let mut statement_kind = String::new();
-        let mut comment_text = None;
-        if stmt_cursor.goto_first_child() {
-            let child = stmt_cursor.node();
-            statement_kind = child.kind().to_string();
-            if child.kind() == "comment" {
-                let text = state.node_text(child);
-                // Strip a leading "REM" keyword (case-insensitive) when present.
-                // Content-checked so non-ASCII text never lands the byte cut
-                // inside a multi-byte character.
-                let stripped = text
-                    .get(..3)
-                    .filter(|p| p.eq_ignore_ascii_case("REM"))
-                    .map_or(text, |_| &text[3..])
-                    .trim()
-                    .to_string();
-                comment_text = Some(stripped);
-            }
-        }
-
-        Some(BasicLine {
-            node,
-            line_number,
-            statement_kind,
-            comment_text,
-        })
     }
 
     /// Extract DEF FN definitions as Function nodes.

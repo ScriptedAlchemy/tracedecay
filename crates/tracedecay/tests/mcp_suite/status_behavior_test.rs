@@ -167,6 +167,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(compact["graph_statistics"]["state"], "observed");
     assert_eq!(compact["graph_statistics"]["symbol_count"], 6);
     assert_eq!(compact["graph_statistics"]["edge_count"], 4);
+    assert_eq!(compact["graph_statistics"]["ambiguous_name_drops"], 0);
     assert_eq!(compact["graph_statistics"]["source_total_bytes"], 365);
     assert_eq!(
         compact["graph_statistics"]["freshness"],
@@ -394,7 +395,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **active_branch:** status-proof\n\
              **code_index_freshness.status:** current\n\
              **github_source:** {{2 field(s)}}\n\
-             **graph_statistics:** {{6 field(s)}}\n\
+             **graph_statistics:** {{7 field(s)}}\n\
              **hook_replay.status:** drained\n\
              **memory.status:** nominal\n\
              {owner_bullets}\

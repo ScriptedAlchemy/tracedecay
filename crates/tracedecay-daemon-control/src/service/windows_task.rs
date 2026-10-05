@@ -148,6 +148,7 @@ impl TaskIdentity {
     }
 
     #[cfg(any(windows, test))]
+    #[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))] // path qualification can fail on Windows
     fn for_profile(mut self, profile: &ProfileRoot) -> Result<Self> {
         #[cfg(windows)]
         let root = fully_qualified_windows_path(profile.data_dir(), "daemon profile root")?;
@@ -159,8 +160,7 @@ impl TaskIdentity {
             #[cfg(not(windows))]
             let spelling = root.as_os_str().as_encoded_bytes();
             let digest = sha2::Sha256::digest(spelling);
-            self.task_name
-                .push_str(&format!(" [{}]", hex::encode(&digest[..8])));
+            self.task_name = format!("{} [{}]", self.task_name, hex::encode(&digest[..8]));
             self.task_path = format!(r"\{}", self.task_name);
         }
         self.profile_root = Some(root);

@@ -12,7 +12,8 @@ discovery, not a prerequisite for ordinary reads, local edits, or clarification.
 Choose by the missing evidence: exploration locates code; tracing follows call
 relationships; impact connects changes to dependents and tests; review evaluates
 a diff; editing handles structural mutation. Durable facts and raw session
-history have separate stores and retrieval workflows.
+history have separate stores and retrieval workflows. When the moment is clear
+and the tool is not, read `routing-tracedecay` and make the one call it names.
 
 MCP and the generic CLI adapt the same daemon operations. A failed MCP transport
 does not establish daemon failure; see `using-the-cli` when transport matters.
