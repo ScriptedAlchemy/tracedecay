@@ -659,9 +659,7 @@ fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Val
     }
 }
 
-// ---------------------------------------------------------------------------
 // Plugin bundle: embedding + deploy
-// ---------------------------------------------------------------------------
 
 /// The marketplace name (matches the plugin name `tracedecay`), yielding the
 /// `tracedecay@tracedecay` plugin identifier Claude Code enables by.
@@ -779,9 +777,7 @@ fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
     super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
 }
 
-// ---------------------------------------------------------------------------
 // Shared install helpers (permissions + CLAUDE.md)
-// ---------------------------------------------------------------------------
 
 fn ensure_claude_dir(claude_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(claude_dir).map_err(|e| TraceDecayError::Config {
@@ -1020,9 +1016,7 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 /// Check the deployed plugin bundle, marketplace registration, and enablement.
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {

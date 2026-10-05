@@ -254,9 +254,7 @@ impl ErrorCode {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Transport abstraction (zero-cost via monomorphization)
-// ---------------------------------------------------------------------------
 
 /// Implementations are monomorphized at each call site, no dyn dispatch.
 pub trait McpTransport {
