@@ -3,7 +3,9 @@
 
 Reads `cargo metadata` for target shapes and `cargo tree` for Cargo's own
 feature resolution, then emits one BUILD.bazel per member crate under
-crates/.
+crates/. The lane resolves the Linux dependency graph only: member deps
+behind foreign-platform target gates are dropped, and an unrecognized gate
+aborts the generator instead of silently drifting (see cfg_applies_linux).
 
 Feature model. Cargo compiles a member once per resolved feature set, and the
 set depends on the consuming context (normal build vs dev/test resolution vs
@@ -13,7 +15,8 @@ feature set it is ever built with. `<pkg>` covers its own build context and
 of the labels every producing context resolves for them. Dependents pick the
 variant matching the feature set Cargo resolves in their context.
 
-Outputs are deterministic. Rerun after any Cargo.toml change.
+Outputs are deterministic. Rerun after any Cargo.toml change. `--check`
+verifies the committed BUILD.bazel files match a fresh run without writing.
 """
 
 import hashlib
@@ -122,15 +125,39 @@ def feature_map(pkg_name, edges, features=()):
     return fmap
 
 
+# Platform tokens that never admit a Linux resolution.
+_FOREIGN_PLATFORM = (
+    "windows", "macos", "apple", "darwin", "ios", "android", "wasm",
+)
+
+
 def cfg_applies_linux(target):
+    """Whether a member dep's Cargo target gate admits it on Linux.
+
+    The generated graph is the Linux resolution only: exact Linux gates keep
+    the dep, foreign-platform gates drop it, and any other shape aborts so a
+    newly gated member dep fails loudly instead of drifting the graph."""
     if target is None:
         return True
     t = target.replace(" ", "")
-    if t in ('cfg(unix)', 'cfg(target_os="linux")', "cfg(not(windows))"):
+    if t in ('cfg(unix)', 'cfg(target_family="unix")', 'cfg(target_os="linux")'):
         return True
-    if "windows" in t or "macos" in t or "apple" in t or "wasm" in t:
+    if t.startswith("cfg(not(") and t.endswith("))"):
+        inner = t[len("cfg(not("):-2]
+        if any(k in inner for k in _FOREIGN_PLATFORM):
+            return True
+        if "linux" in inner or "unix" in inner:
+            return False
+    elif any(k in t for k in _FOREIGN_PLATFORM):
         return False
-    return True
+    elif "cfg(" not in t and "linux" in t:
+        # Target triple, e.g. x86_64-unknown-linux-gnu.
+        return True
+    sys.exit(
+        f"gen_builds.py: member dependency target gate {target!r} is not a "
+        "recognized Linux form; the Bazel lane resolves the Linux dependency "
+        "graph only, so decide the mapping explicitly"
+    )
 
 
 def variant_name(pkg, feats, base):
@@ -167,6 +194,9 @@ RE_INCLUDE_MANIFEST = re.compile(
 
 
 def main():
+    if sys.argv[1:] not in ([], ["--check"]):
+        sys.exit("usage: gen_builds.py [--check]")
+    check_only = sys.argv[1:] == ["--check"]
     meta = cargo_metadata()
     members = {p["name"]: p for p in meta["packages"]}
     dir_of = {
@@ -443,7 +473,7 @@ def main():
             for f in root.rglob("*.rs")
         )
 
-    def write_build(p):
+    def render_build(p):
         name = p["name"]
         used_names = set()
 
@@ -739,10 +769,11 @@ def main():
                 ")\n",
             ]
 
-        (Path(p["manifest_path"]).parent / "BUILD.bazel").write_text("\n".join(out))
+        return "\n".join(out)
 
+    outputs = {}
     for p in meta["packages"]:
-        write_build(p)
+        outputs[Path(p["manifest_path"]).parent / "BUILD.bazel"] = render_build(p)
 
     by_pkg = {}
     for (pkg_dir, gname), entry in out_of_pkg.items():
@@ -763,7 +794,8 @@ def main():
                     '    visibility = ["//visibility:public"],\n)\n'
                 )
             if extra:
-                path.write_text(existing + "\n" + "\n".join(extra))
+                existing += "\n" + "\n".join(extra)
+            outputs[path] = existing
             continue
         lines = [BANNER]
         for gname, entry in sorted(groups.items()):
@@ -786,7 +818,29 @@ def main():
                 '    srcs = glob(["fixtures/**"]),\n'
                 '    visibility = ["//visibility:public"],\n)\n'
             )
-        path.write_text("\n".join(lines))
+        outputs[path] = "\n".join(lines)
+
+    if check_only:
+        stale = [
+            path for path in sorted(outputs)
+            if not path.exists() or path.read_text() != outputs[path]
+        ]
+        # A removed member leaves its generated BUILD behind.
+        stale += [
+            path for path in sorted(REPO.glob("crates/*/BUILD.bazel"))
+            if path not in outputs and path.read_text().startswith(BANNER)
+        ]
+        if stale:
+            print("generated BUILD.bazel files are out of date:")
+            for path in stale:
+                print(f"  {path.relative_to(REPO)}")
+            print("rerun: python3 scripts/bazel/gen_builds.py")
+            sys.exit(1)
+        print(f"all {len(outputs)} generated BUILD.bazel files are current")
+        return
+
+    for path, content in outputs.items():
+        path.write_text(content)
 
     counts = {
         m: sorted(tname(m, kind, c) for kind, c in v)

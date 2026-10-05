@@ -15,3 +15,6 @@ seq	phase	decision	evidence	result
 14	scope	pnpm lane stays intact until Bazel proven	cargo check -p tracedecay-cli green and bazel build //... green	VERIFIED
 15	verify	bazel build //... covers the workspace	677 targets built end to end	VERIFIED
 16	verify	shipped binary serves the embedded Bazel dashboard	tracedecay --version + dashboard index 200 on demo project	VERIFIED
+17	verify	bazel test executes generated rust_test through the wrapper	bazel test //scripts:rust_test_environment_probe and //crates/tracedecay-framing:unit_test PASSED on Linux	VERIFIED
+18	verify	bazel cli build exercises digest-verified dashboard staging	bazel build //crates/tracedecay-cli:tracedecay 4035 actions on Linux; binary reports <head>.dirty	VERIFIED
+19	drift	generated BUILD files checked against Cargo metadata in Repository gates	gen_builds.py --check wired into the gates job	VERIFIED
