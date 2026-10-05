@@ -12,12 +12,13 @@ use grafeo_engine::GrafeoDB;
 use crate::adjacency_id_index::{AdjacencyIdIndexCache, AdjacencyIndexKey, page_ids};
 use crate::epoch_cache::LabelKeyCache;
 use crate::schema::{
-    ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
+    ENTITY_ID_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
     RELATION_FROM_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY, decode_entity,
     decode_graph_properties, decode_identity, decode_relation_identity, edge_locator,
-    edge_relation_identity, entity_key_value, entity_projection_label, label_keys,
-    locator_identity, relation_kind_from_type, relation_type_for_kind,
+    edge_relation_identity, entity_projection_label, label_keys, locator_identity,
+    relation_kind_from_type, relation_type_for_kind,
 };
+use crate::state::indexed_entity_node;
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
     GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot,
@@ -175,7 +176,7 @@ pub(crate) fn outgoing_relation_targets(
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
+        let Some(node) = indexed_entity_node(store.as_ref(), namespace, start)? else {
             results.push(Vec::new());
             continue;
         };
@@ -232,7 +233,7 @@ pub(crate) fn visit_outgoing_relation_targets(
     }
     let store = database.graph_store();
     let projected = relation_projection(Arc::clone(&store), relation_kinds);
-    let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
+    let Some(node) = indexed_entity_node(store.as_ref(), namespace, start)? else {
         return Ok(0);
     };
     let mut visited = 0_usize;
@@ -413,7 +414,7 @@ fn collect_relation_ids(
     let store = database.graph_store();
     let projected =
         relation_projection_cached(Arc::clone(&store), relation_kinds, label_keys_cache)?;
-    let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
+    let Some(node) = indexed_entity_node(store.as_ref(), namespace, start)? else {
         return Ok(Vec::new());
     };
     let direction = if incoming {
@@ -517,7 +518,7 @@ pub(crate) fn directed_relations(
             results.push(Vec::new());
             continue;
         }
-        let Some(node) = optional_node_for_entity(store.as_ref(), namespace, start)? else {
+        let Some(node) = indexed_entity_node(store.as_ref(), namespace, start)? else {
             results.push(Vec::new());
             continue;
         };
@@ -961,7 +962,7 @@ fn projected_reachable(
             queue.extend(neighbors.iter().cloned());
             continue;
         }
-        let Some(node) = optional_node_for_entity(store, namespace, &entity)? else {
+        let Some(node) = indexed_entity_node(store, namespace, &entity)? else {
             continue;
         };
         if projected.get_node(node).is_none() {
@@ -1044,39 +1045,8 @@ fn node_for_entity(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<NodeId, GraphDbError> {
-    optional_node_for_entity(store, namespace, identity)?
+    indexed_entity_node(store, namespace, identity)?
         .ok_or_else(|| GraphDbError::invalid("traversal start entity does not exist"))
-}
-
-fn optional_node_for_entity(
-    store: &dyn GraphStore,
-    namespace: &GraphNamespace,
-    identity: &GraphEntityId,
-) -> Result<Option<NodeId>, GraphDbError> {
-    let mut matches = crate::state::indexed_nodes(
-        store,
-        ENTITY_KEY_PROPERTY,
-        &entity_key_value(namespace, identity),
-        ENTITY_LABEL,
-    );
-    match matches.len() {
-        0 => Ok(None),
-        1 => {
-            let node = matches.pop().ok_or_else(|| GraphDbError::Corrupt {
-                message: "entity locator count changed while resolving traversal start".to_owned(),
-            })?;
-            let stored = entity_identity(store, node, namespace)?;
-            if stored != *identity {
-                return Err(GraphDbError::Corrupt {
-                    message: "entity locator does not match its native identity".to_owned(),
-                });
-            }
-            Ok(Some(node))
-        }
-        _ => Err(GraphDbError::Corrupt {
-            message: "entity locator returned duplicate native nodes".to_owned(),
-        }),
-    }
 }
 
 /// [`entity_identity`] memoized over one traversal: the first decode verifies

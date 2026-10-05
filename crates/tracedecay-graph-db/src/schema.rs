@@ -105,8 +105,7 @@ pub(crate) const COMPACT_IDENTITY_MARKER: char = '\u{1}';
 ///
 /// It is derived rather than allocated so a lookup needs no read and a sealed
 /// copy rebuilds identical keys. Every indexed read re-checks the row's
-/// namespace scalar, so two namespaces sharing an id surface as `Corrupt`
-/// instead of aliasing each other's rows.
+/// namespace scalar, so namespaces sharing an index bucket stay distinct.
 pub(crate) type NamespaceKeyId = [u8; NAMESPACE_KEY_ID_BYTES];
 
 pub(crate) fn namespace_key_id(namespace: &GraphNamespace) -> NamespaceKeyId {
@@ -127,8 +126,8 @@ pub(crate) fn stable_key(namespace_id: &NamespaceKeyId, identity: &str) -> Vec<u
 
 /// Digest bytes an indexed key keeps. Keys are only ever matched exactly
 /// through a property hash index and no scan orders by them; every keyed
-/// read and upsert re-checks the row's namespace and identity scalars, so a
-/// 128-bit prefix collision surfaces as `Corrupt` instead of aliasing a row.
+/// read and upsert selects the exact namespace and identity scalars from the
+/// bucket. Hex-encoded names can share a prefix without sharing an identity.
 const INDEXED_KEY_DIGEST_BYTES: usize = 16;
 
 fn key_bytes(namespace_id: &NamespaceKeyId, identity: &str, digest_bytes: usize) -> Vec<u8> {
@@ -281,8 +280,8 @@ pub(crate) fn relation_projection_label(
 
 /// The indexed unique-key value for one projection-state node.
 ///
-/// [`PROJECTION_KEY_PROPERTY`] is written on projection-state nodes only, so
-/// this resolves to at most one node without scanning the projection's rows.
+/// [`PROJECTION_KEY_PROPERTY`] indexes projection-state nodes, so matching
+/// the complete scalar identity never scans the projection's entity rows.
 pub(crate) fn projection_state_key_value(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,

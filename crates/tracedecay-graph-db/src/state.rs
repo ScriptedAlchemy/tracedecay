@@ -4,6 +4,7 @@ use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::lpg::Node;
 use grafeo_core::graph::{Direction, GraphStore};
 use grafeo_engine::GrafeoDB;
+use sha2::{Digest, Sha256};
 
 use crate::limits::{
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
@@ -19,9 +20,9 @@ use crate::schema::{
     RELATION_ID_PROPERTY, RELATION_KEY_PROPERTY, RELATION_LABEL, RELATION_TO_PROPERTY,
     SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
     decode_identity, decode_relation, entity_key_value, entity_projection_label, has_native_label,
-    namespace_key_id, nodes_with_label, nodes_with_label_count, projection_state_key_value,
-    publication_key_value, relation_edge_value, relation_key_value, relation_projection_label,
-    required_i64, required_string, stable_key,
+    key_value, namespace_key_id, nodes_with_label, nodes_with_label_count,
+    projection_state_key_value, publication_key_value, relation_edge_value, relation_key_value,
+    relation_projection_label, required_i64, required_string, stable_key,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -264,7 +265,8 @@ fn load_indexed_entity_node(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<(NodeId, Node, GraphNamespace, GraphProjectionId)>, GraphDbError> {
-    let Some(node_id) = indexed_entity_node(database, namespace, identity)? else {
+    let Some(node_id) = indexed_entity_node(database.graph_store().as_ref(), namespace, identity)?
+    else {
         return Ok(None);
     };
     let node = database
@@ -283,19 +285,22 @@ fn load_indexed_entity_node(
     Ok(Some((node_id, node, stored_namespace, projection)))
 }
 
-/// Resolves the node one entity identity is indexed under through the
-/// unique-key index alone, without materializing the node's properties.
+/// Resolves the exact entity identity within its compact property-index bucket.
 pub(crate) fn indexed_entity_node(
-    database: &GrafeoDB,
+    store: &dyn GraphStore,
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<NodeId>, GraphDbError> {
+    let key = entity_key_value(namespace, identity);
     unique_property_node(
-        database,
+        store,
         ENTITY_KEY_PROPERTY,
-        &entity_key_value(namespace, identity),
+        &key,
         ENTITY_LABEL,
         "entity identity",
+        |node| {
+            matches_indexed_identity(node, namespace, identity.as_str(), ENTITY_ID_PROPERTY, &key)
+        },
     )
 }
 
@@ -428,11 +433,12 @@ pub(crate) fn load_relation_by_edge_cached(
     cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
     let Some(locator) = unique_property_node(
-        database,
+        database.graph_store().as_ref(),
         RELATION_EDGE_PROPERTY,
         &relation_edge_value(edge_id)?,
         RELATION_LABEL,
         "relation edge identity",
+        |_| Ok(true),
     )?
     else {
         return Ok(None);
@@ -446,12 +452,22 @@ fn load_relation_by_key(
     identity: &GraphRelationId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
+    let indexed_key = relation_key_value(namespace, identity);
     let Some(locator) = unique_property_node(
-        database,
+        database.graph_store().as_ref(),
         RELATION_KEY_PROPERTY,
-        &relation_key_value(namespace, identity),
+        &indexed_key,
         RELATION_LABEL,
         "relation identity",
+        |node| {
+            matches_indexed_identity(
+                node,
+                namespace,
+                identity.as_str(),
+                RELATION_ID_PROPERTY,
+                &indexed_key,
+            )
+        },
     )?
     else {
         return Ok(None);
@@ -607,11 +623,12 @@ fn load_relation_reference_by_edge(
     edge_id: EdgeId,
 ) -> Result<Option<RelationReference>, GraphDbError> {
     let Some(locator_id) = unique_property_node(
-        database,
+        database.graph_store().as_ref(),
         RELATION_EDGE_PROPERTY,
         &relation_edge_value(edge_id)?,
         RELATION_LABEL,
         "relation edge identity",
+        |_| Ok(true),
     )?
     else {
         return Ok(None);
@@ -970,12 +987,22 @@ pub(crate) fn latest_projection(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
 ) -> Result<Option<ProjectionState>, GraphDbError> {
+    let indexed_key = projection_state_key_value(namespace, projection);
     let Some(node) = unique_property_node(
-        database,
+        database.graph_store().as_ref(),
         PROJECTION_KEY_PROPERTY,
-        &projection_state_key_value(namespace, projection),
+        &indexed_key,
         PROJECTION_LABEL,
         "projection identity",
+        |node| {
+            matches_indexed_identity(
+                node,
+                namespace,
+                projection.as_str(),
+                PROJECTION_PROPERTY,
+                &indexed_key,
+            )
+        },
     )?
     else {
         return Ok(None);
@@ -988,12 +1015,22 @@ pub(crate) fn publication(
     namespace: &GraphNamespace,
     key: &GraphIdempotencyKey,
 ) -> Result<Option<StoredPublication>, GraphDbError> {
+    let indexed_key = publication_key_value(namespace, key);
     let Some(node) = unique_property_node(
-        database,
+        database.graph_store().as_ref(),
         PUBLICATION_KEY_PROPERTY,
-        &publication_key_value(namespace, key),
+        &indexed_key,
         PUBLICATION_LABEL,
         "publication identity",
+        |node| {
+            matches_indexed_identity(
+                node,
+                namespace,
+                key.as_str(),
+                IDEMPOTENCY_KEY_PROPERTY,
+                &indexed_key,
+            )
+        },
     )?
     else {
         return Ok(None);
@@ -1218,60 +1255,70 @@ fn parse_namespace(
     .map_err(|error| persisted_validation_error(&format!("{description} namespace"), error))
 }
 
-/// Every node currently carrying `value` in the unique-key index `property`
-/// and bearing `label`.
-///
-/// The `label` filter is load-bearing and not a redundant sanity check.
-/// grafeo's `delete_node` clears the label index and drops the node's
-/// properties, but never calls `update_property_index_on_remove`, so a
-/// property index keeps returning the `NodeId` of a deleted node
-/// (`grafeo-core/src/graph/lpg/store/node_ops.rs:528`). Re-reading each
-/// candidate discards those tombstones: a deleted node reads back as `None`,
-/// and one that somehow survives no longer carries its record label. This is
-/// what preserves the absence and duplicate semantics the synthetic key-label
-/// lookup had, where the label index *was* maintained on delete.
-pub(crate) fn indexed_nodes(
-    store: &dyn grafeo_core::graph::GraphStore,
-    property: &str,
-    value: &Value,
-    label: &str,
-) -> Vec<NodeId> {
-    store
-        .find_nodes_by_property(property, value)
-        .into_iter()
-        .filter(|node| {
-            store
-                .get_node(*node)
-                .is_some_and(|record| has_native_label(&record, label))
-        })
-        .collect()
+/// Compact keys can collide for distinct identities, including hex-encoded
+/// names whose first 16 bytes agree. The complete persisted scalars own identity.
+fn matches_indexed_identity(
+    node: &Node,
+    namespace: &GraphNamespace,
+    identity: &str,
+    identity_property: &str,
+    indexed_key: &Value,
+) -> Result<bool, GraphDbError> {
+    let stored_namespace = parse_namespace(node, "indexed node")?;
+    let stored_identity =
+        decode_identity(node.get_property(identity_property), "indexed identity")?;
+    if stored_namespace == *namespace && stored_identity == identity {
+        return Ok(true);
+    }
+    if key_value(&stored_namespace, &stored_identity) != *indexed_key {
+        return Err(GraphDbError::Corrupt {
+            message: "native index does not match its scalar identity".to_owned(),
+        });
+    }
+    Ok(false)
 }
 
-/// Resolves the one node that carries `value` in the unique-key index
-/// `property` and bears `label`.
-///
-/// Absence is `Ok(None)` and a duplicate is `Corrupt`, exactly as the synthetic
-/// key-label lookup this replaced. The index is a *property* and not a label
-/// because grafeo files one columnar node table per distinct label: a key label
-/// per entity mints one table per entity and exhausts the `u16` table id at
-/// 32,767 rows, long before a real repository graph is loaded.
+/// Selects one exact identity from a property-index bucket. Deleted rows and
+/// other complete identities in the same bucket are not duplicate records.
 #[tracing::instrument(name = "graph_db.read.index_lookup", level = "trace", skip_all)]
 fn unique_property_node(
-    database: &GrafeoDB,
+    store: &dyn GraphStore,
     property: &str,
     value: &Value,
     label: &str,
     description: &str,
+    matches_identity: impl Fn(&Node) -> Result<bool, GraphDbError>,
 ) -> Result<Option<NodeId>, GraphDbError> {
-    let mut nodes =
-        indexed_nodes(database.graph_store().as_ref(), property, value, label).into_iter();
-    let first = nodes.next();
-    if nodes.next().is_some() {
-        return Err(GraphDbError::Corrupt {
-            message: format!("duplicate native {description}"),
-        });
+    let mut found: Option<NodeId> = None;
+    for node_id in store.find_nodes_by_property(property, value) {
+        let Some(node) = store.get_node(node_id) else {
+            continue;
+        };
+        if !has_native_label(&node, label) {
+            continue;
+        }
+        if node.get_property(property) != Some(value) {
+            return Err(GraphDbError::Corrupt {
+                message: "native property index does not match its stored key".to_owned(),
+            });
+        }
+        if !matches_identity(&node)? {
+            continue;
+        }
+        if let Some(first) = found {
+            let key_fingerprint = Sha256::digest(format!("{value:?}").as_bytes());
+            return Err(GraphDbError::Corrupt {
+                message: format!(
+                    "duplicate native {description} (property `{property}`, label `{label}`, key_sha256={}, native nodes {} and {})",
+                    hex::encode(key_fingerprint),
+                    first.as_u64(),
+                    node_id.as_u64(),
+                ),
+            });
+        }
+        found = Some(node_id);
     }
-    Ok(first)
+    Ok(found)
 }
 
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
@@ -1451,5 +1498,315 @@ mod tests {
             projection_relations_checked(&database, &namespace, &projection, &relation_check),
             Err(GraphDbError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn indexed_entity_lookup_distinguishes_hex_encoded_names_with_shared_prefixes() {
+        let database = GrafeoDB::new_in_memory();
+        database.create_property_index(ENTITY_KEY_PROPERTY);
+        let namespace = GraphNamespace::new("memory").unwrap();
+        let projection = GraphProjectionId::new("facts").unwrap();
+        let mut expected = Vec::new();
+        for name in [
+            "bench-sup-old-b-1791165733039390",
+            "bench-sup-old-b-1791165733039391",
+        ] {
+            let identity =
+                GraphEntityId::new(format!("memory-entity:{}", hex::encode(name))).unwrap();
+            let entity =
+                GraphEntity::new(identity.clone(), BTreeSet::new(), BTreeMap::new()).unwrap();
+            let labels = entity_labels(&namespace, &projection, &entity.labels);
+            let properties = entity_properties(&namespace, &projection, &entity);
+            let node = database
+                .session()
+                .create_node_with_props(
+                    &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    properties
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.clone())),
+                )
+                .unwrap();
+            expected.push((identity, node));
+        }
+        for (identity, node) in expected {
+            assert_eq!(
+                super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity)
+                    .unwrap(),
+                Some(node),
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_entity_lookup_rejects_duplicates_and_malformed_candidates() {
+        let database = GrafeoDB::new_in_memory();
+        database.create_property_index(ENTITY_KEY_PROPERTY);
+        let namespace = GraphNamespace::new("memory").unwrap();
+        let projection = GraphProjectionId::new("facts").unwrap();
+        let identity = GraphEntityId::new("entity").unwrap();
+        let entity = GraphEntity::new(identity.clone(), BTreeSet::new(), BTreeMap::new()).unwrap();
+        let labels = entity_labels(&namespace, &projection, &entity.labels);
+        let properties = entity_properties(&namespace, &projection, &entity);
+        let nodes = (0..2)
+            .map(|_| {
+                database
+                    .session()
+                    .create_node_with_props(
+                        &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                        properties
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.clone())),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity),
+            Err(GraphDbError::Corrupt { .. }),
+        ));
+        assert!(database.session().delete_node(nodes[0]));
+        assert_eq!(
+            super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity)
+                .unwrap(),
+            Some(nodes[1]),
+        );
+        database
+            .session()
+            .set_node_property(
+                nodes[1],
+                crate::schema::ENTITY_ID_PROPERTY,
+                Value::from("different-identity"),
+            )
+            .unwrap();
+        assert!(matches!(
+            super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity),
+            Err(GraphDbError::Corrupt { .. }),
+        ));
+        database
+            .session()
+            .set_node_property(
+                nodes[1],
+                crate::schema::ENTITY_ID_PROPERTY,
+                Value::from(7_i64),
+            )
+            .unwrap();
+        assert!(matches!(
+            super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity),
+            Err(GraphDbError::Corrupt { .. }),
+        ));
+    }
+
+    #[test]
+    fn indexed_entity_lookup_rejects_key_drift_despite_matching_identity() {
+        let database = GrafeoDB::new_in_memory();
+        database.create_property_index(ENTITY_KEY_PROPERTY);
+        let namespace = GraphNamespace::new("memory").unwrap();
+        let projection = GraphProjectionId::new("facts").unwrap();
+        let identity = GraphEntityId::new("entity").unwrap();
+        let entity = GraphEntity::new(identity.clone(), BTreeSet::new(), BTreeMap::new()).unwrap();
+        let labels = entity_labels(&namespace, &projection, &entity.labels);
+        let properties = entity_properties(&namespace, &projection, &entity);
+        let node = database
+            .session()
+            .create_node_with_props(
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                properties
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.clone())),
+            )
+            .unwrap();
+        let key = crate::schema::entity_key_value(&namespace, &identity);
+        let property = grafeo_common::types::PropertyKey::new(ENTITY_KEY_PROPERTY);
+        let store = database.store();
+        assert_eq!(
+            store.drain_node_property_column(&property),
+            vec![(node, key.clone())]
+        );
+        store.restore_node_property_column(
+            &property,
+            [(node, Value::from("different-key"))].into_iter(),
+        );
+        assert_eq!(
+            store.find_nodes_by_property(ENTITY_KEY_PROPERTY, &key),
+            vec![node]
+        );
+        assert_eq!(
+            super::indexed_entity_node(database.graph_store().as_ref(), &namespace, &identity),
+            Err(GraphDbError::Corrupt {
+                message: "native property index does not match its stored key".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn colliding_native_keys_keep_publication_reads_and_mutations_isolated_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = crate::GraphDbOpenOptions {
+            location: crate::GraphDbLocation::Persistent(directory.path().join("identity.grafeo")),
+            expected_format: crate::GraphFormatVersion::new(2).unwrap(),
+            durability: crate::GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        };
+        let namespace = GraphNamespace::new("memory").unwrap();
+        let owner = crate::GraphDbOwner::open(options.clone()).unwrap();
+        let database = owner.issue_lease().unwrap();
+        let mut publications = Vec::new();
+        for (name, watermark) in [
+            ("bench-sup-old-b-1791165733039390", "first"),
+            ("bench-sup-old-b-1791165733039391", "second"),
+        ] {
+            let encoded = hex::encode(name);
+            let projection = GraphProjectionId::new(format!("projection:{encoded}")).unwrap();
+            let entity = GraphEntity::new(
+                GraphEntityId::new(format!("memory-entity:{encoded}")).unwrap(),
+                BTreeSet::new(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            let relation = GraphRelation::new(
+                GraphRelationId::new(format!("relation:{encoded}")).unwrap(),
+                entity.identity.clone(),
+                entity.identity.clone(),
+                GraphRelationKind::new("self").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            let batch = GraphWriteBatch::new(
+                namespace.clone(),
+                projection,
+                SourceGeneration::new(watermark).unwrap(),
+                GraphWatermark::new(watermark).unwrap(),
+                vec![
+                    GraphMutation::UpsertEntity(entity.clone()),
+                    GraphMutation::UpsertRelation(relation.clone()),
+                ],
+                Arc::new(NeverCancelled),
+            )
+            .unwrap();
+            let publication = crate::GraphPublication {
+                namespace: namespace.clone(),
+                idempotency_key: crate::GraphIdempotencyKey::new(format!("publication:{encoded}"))
+                    .unwrap(),
+                input_digest: crate::GraphPublicationInputDigest::new(format!(
+                    "sha256:{}",
+                    "a".repeat(64)
+                ))
+                .unwrap(),
+                source_generation: batch.source_generation.clone(),
+                expected_watermark: None,
+                next_watermark: batch.next_watermark.clone(),
+                batch,
+                cancellation: Arc::new(NeverCancelled),
+            };
+            database.publish_unverified(publication.clone()).unwrap();
+            publications.push((publication, entity, relation));
+        }
+        drop(database);
+        owner.close().unwrap();
+        let owner = crate::GraphDbOwner::open(options).unwrap();
+        let database = owner.issue_lease().unwrap();
+        for ((publication, entity, relation), watermark) in
+            publications.iter().zip(["first", "second"])
+        {
+            assert_eq!(
+                database
+                    .entity(&namespace, &entity.identity, Arc::new(NeverCancelled))
+                    .unwrap(),
+                Some(entity.clone())
+            );
+            assert_eq!(
+                database
+                    .relation(&namespace, &relation.identity, Arc::new(NeverCancelled))
+                    .unwrap(),
+                Some(relation.clone())
+            );
+            let receipt = database
+                .publication_receipt(
+                    &namespace,
+                    &publication.idempotency_key,
+                    Arc::new(NeverCancelled),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.commit.watermark.as_str(), watermark);
+            assert_eq!(
+                database.publish_unverified(publication.clone()).unwrap(),
+                receipt.commit
+            );
+            let traversed = database
+                .traverse(crate::TraversalRequest {
+                    namespace: namespace.clone(),
+                    start: entity.identity.clone(),
+                    relation_kinds: BTreeSet::from([GraphRelationKind::new("self").unwrap()]),
+                    direction: crate::GraphTraversalDirection::Outgoing,
+                    max_depth: 1,
+                    max_visits: 2,
+                    max_results: 2,
+                    cancellation: Arc::new(NeverCancelled),
+                })
+                .unwrap();
+            assert_eq!(
+                traversed
+                    .visits
+                    .into_iter()
+                    .map(|visit| visit.entity)
+                    .collect::<Vec<_>>(),
+                vec![entity.identity.clone()]
+            );
+        }
+        let (first, entity, relation) = &publications[0];
+        database
+            .apply_unverified(
+                GraphWriteBatch::new(
+                    namespace.clone(),
+                    first.batch.projection.clone(),
+                    SourceGeneration::new("deleted").unwrap(),
+                    GraphWatermark::new("deleted").unwrap(),
+                    vec![
+                        GraphMutation::DeleteRelation(relation.identity.clone()),
+                        GraphMutation::DeleteEntity(entity.identity.clone()),
+                    ],
+                    Arc::new(NeverCancelled),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .entity(&namespace, &entity.identity, Arc::new(NeverCancelled))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .relation(&namespace, &relation.identity, Arc::new(NeverCancelled))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .entity(
+                    &namespace,
+                    &publications[1].1.identity,
+                    Arc::new(NeverCancelled)
+                )
+                .unwrap(),
+            Some(publications[1].1.clone())
+        );
+        database.apply_unverified(first.batch.clone()).unwrap();
+        assert_eq!(
+            database
+                .entity(&namespace, &entity.identity, Arc::new(NeverCancelled))
+                .unwrap(),
+            Some(entity.clone())
+        );
+        assert_eq!(
+            database
+                .relation(&namespace, &relation.identity, Arc::new(NeverCancelled))
+                .unwrap(),
+            Some(relation.clone())
+        );
+        drop(database);
+        owner.close().unwrap();
     }
 }
