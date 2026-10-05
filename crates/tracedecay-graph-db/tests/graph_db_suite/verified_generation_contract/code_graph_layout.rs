@@ -234,7 +234,7 @@ fn second_generation_supersedes_the_head_and_the_first_retires_without_head_reti
 }
 
 /// The mid-publish window: the code index deletes a superseded generation
-/// while its replay is still the projection's verified head — the durable
+/// while its replay is still the projection's verified head. The durable
 /// pointer already names a successor whose graph publication has not
 /// landed. The sweep must answer Retained and leave the shared head
 /// serving; CAS-deleting it here is what left restarts a headless
