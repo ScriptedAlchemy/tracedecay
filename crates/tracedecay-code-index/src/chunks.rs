@@ -2413,9 +2413,8 @@ fn resolve_file_references(
                 }
             }
             // No candidate: the reference is retained for cross-file
-            // resolution. Several the file cannot choose between: it is
-            // retained as a disclosed caller gap. Java overloads the call's
-            // arguments cannot tell apart resolve through Java's own rules.
+            // resolution. Several it cannot choose between: a disclosed
+            // caller gap. Java overloads resolve through Java's own rules.
             _ => {
                 if let Some(mut candidate) = cross_file_reference_candidate(
                     source,
