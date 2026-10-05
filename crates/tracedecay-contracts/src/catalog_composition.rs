@@ -1,15 +1,13 @@
 //! Assembly of the application capability catalog from its own descriptors.
 //!
 //! Composition validates metadata against the closed application handler
-//! descriptors and binds them to one caller-supplied canonical dispatcher. It
-//! lives beside `application_catalog_contributions` and
+//! descriptors. It lives beside `application_catalog_contributions` and
 //! `application_handler_descriptors` so the descriptor-derived catalog has one
 //! owner every transport can reach.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock};
 
-use crate::handlers::BoundApplicationHandler;
 use crate::retrieval::catalog::application_catalog_contributions_with;
 use crate::schema_bodies::SchemaBodyMaterialization;
 use crate::{
@@ -21,7 +19,7 @@ use thiserror::Error;
 use tracedecay_tool_catalog::{
     BindingSurface, CatalogContributionV1, CatalogSnapshotBuilderV1, CatalogSnapshotV1,
     CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
-    ProfileDefinitionInputV1, ProfileId, ProfileKind, UseCaseId,
+    ProfileDefinitionInputV1, ProfileId, ProfileKind,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -34,59 +32,11 @@ pub enum CatalogCompositionError {
     Identifier(#[from] IdentifierError),
 }
 
-/// Immutable catalog metadata and the application descriptors bound to one
-/// retained canonical dispatcher.
-pub struct ApplicationCatalogComposition<Dispatcher> {
-    snapshot: Arc<CatalogSnapshotV1>,
-    handlers: ApplicationHandlerDescriptors,
-    dispatcher: Dispatcher,
-}
-
-impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
-    pub fn snapshot(&self) -> &CatalogSnapshotV1 {
-        &self.snapshot
-    }
-
-    pub fn handler(
-        &self,
-        use_case_id: &UseCaseId,
-    ) -> Option<BoundApplicationHandler<'_, Dispatcher>> {
-        self.handlers
-            .get(use_case_id)
-            .map(|descriptor| descriptor.bind(&self.dispatcher))
-    }
-}
-
-/// Compose the immutable catalog and retain its one canonical application
-/// dispatcher. Request and result types remain compile-time checked by the
-/// dispatcher's per-request trait implementations.
-pub fn compose_application_catalog<Dispatcher>(
-    dispatcher: Dispatcher,
-) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
-    compose_application_catalog_with(|_snapshot| dispatcher)
-}
-
-/// Compose the catalog when the retained dispatcher also needs the validated
-/// immutable snapshot for its own binding checks.
-pub fn compose_application_catalog_with<Dispatcher>(
-    dispatcher: impl FnOnce(&Arc<CatalogSnapshotV1>) -> Dispatcher,
-) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
-    let snapshot = Arc::clone(application_catalog_snapshot()?);
-    let handlers = application_handler_descriptors()?;
-    let dispatcher = dispatcher(&snapshot);
-    Ok(ApplicationCatalogComposition {
-        snapshot,
-        handlers,
-        dispatcher,
-    })
-}
-
 /// The process's one catalog snapshot with schema bodies.
 ///
 /// Every descriptor behind it is `const`, so it cannot change while the
-/// process runs, and its snapshot was validated against the same handler
-/// descriptors a composition binds. Each composition that assembled its own
-/// kept another full copy of every schema body.
+/// process runs. The snapshot is validated against those handler descriptors
+/// once, then shared by every transport adapter without duplicating schema bodies.
 pub fn application_catalog_snapshot()
 -> Result<&'static Arc<CatalogSnapshotV1>, CatalogCompositionError> {
     static SNAPSHOT: LazyLock<Result<Arc<CatalogSnapshotV1>, CatalogCompositionError>> =
@@ -95,10 +45,8 @@ pub fn application_catalog_snapshot()
 }
 
 /// Build the immutable catalog snapshot used by transport binding resolution.
-/// Callers that execute operations must use [`compose_application_catalog`].
 pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
     assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)
-        .map(|(snapshot, _handlers)| snapshot)
 }
 
 /// Binding snapshot for dispatch. Schema references stay; JSON Schema bodies do not.
@@ -107,13 +55,12 @@ pub fn build_application_catalog_snapshot() -> Result<CatalogSnapshotV1, Catalog
 /// executable schema body is discovery and SDK work, not a dispatch prerequisite.
 pub fn build_application_binding_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
     assemble_application_catalog_with(SchemaBodyMaterialization::Omit)
-        .map(|(snapshot, _handlers)| snapshot)
 }
 
 #[tracing::instrument(name = "catalog_composition.assemble", level = "trace", skip_all)]
 fn assemble_application_catalog_with(
     materialize: SchemaBodyMaterialization,
-) -> Result<(CatalogSnapshotV1, ApplicationHandlerDescriptors), CatalogCompositionError> {
+) -> Result<CatalogSnapshotV1, CatalogCompositionError> {
     let (mut contributions, handlers) = {
         let _span = tracing::trace_span!("catalog_composition.contributions").entered();
         {
@@ -139,7 +86,7 @@ fn assemble_application_catalog_with(
             for contribution in contributions {
                 builder.add_contribution(contribution);
             }
-            for handler in handlers.catalog_descriptors()? {
+            for handler in handlers.catalog_descriptors() {
                 builder.add_handler(handler);
             }
             for profile in profiles {
@@ -148,7 +95,7 @@ fn assemble_application_catalog_with(
             builder.build()?
         }
     };
-    Ok((snapshot, handlers))
+    Ok(snapshot)
 }
 
 /// Validates the application-owned catalog before application-only handler
@@ -282,133 +229,14 @@ fn application_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::CanonicalApplicationDispatcher;
-    use crate::{
-        ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
-        application_catalog_contributions,
-    };
-    use tracedecay_tool_catalog::{CapabilityId, SurfaceBindingV1, SurfaceOperationName};
-
-    fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {
-        application_catalog_contributions()
-            .expect("application contributions")
-            .into_iter()
-            .flat_map(|contribution| contribution.bindings().to_vec())
-            .filter(|binding| binding.surface() == surface)
-            .collect()
-    }
-
-    /// Dashboard operations whose capability HTTP also serves. A dashboard-only
-    /// read such as `native_integration_status` has no HTTP handler to agree
-    /// with, so it cannot take part in the pre-render parity check.
-    fn dashboard_operations_shared_with_http() -> Vec<String> {
-        let http_capabilities = current_bindings_on(BindingSurface::Http)
-            .into_iter()
-            .map(|binding| binding.capability_id().clone())
-            .collect::<BTreeSet<_>>();
-        current_bindings_on(BindingSurface::Dashboard)
-            .iter()
-            .filter(|binding| http_capabilities.contains(binding.capability_id()))
-            .map(|binding| binding.operation().as_str().to_owned())
-            .collect()
-    }
-
-    #[derive(Clone, Copy)]
-    enum ParityOutcome {
-        Ready,
-        Unavailable,
-        Denied,
-    }
-
-    #[derive(Clone)]
-    struct ParityRequest {
-        outcome: ParityOutcome,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct ParityResult {
-        capability_id: CapabilityId,
-        use_case_id: UseCaseId,
-        outcome: Result<&'static str, ApplicationProblem>,
-    }
-
-    struct ParityDispatcher;
-
-    impl CanonicalApplicationDispatcher<ParityRequest> for ParityDispatcher {
-        type Output = ParityResult;
-
-        fn invoke(&self, operation: &ApplicationOperation, request: ParityRequest) -> Self::Output {
-            let outcome = match request.outcome {
-                ParityOutcome::Ready => Ok("canonical-result"),
-                ParityOutcome::Unavailable => {
-                    Err(ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "application.fixture.unavailable".to_owned(),
-                        message: "The canonical owner is unavailable".to_owned(),
-                    }))
-                }
-                ParityOutcome::Denied => Err(ApplicationProblem::not_found_or_not_authorized(
-                    RetryDirective::Never,
-                )),
-            };
-            ParityResult {
-                capability_id: operation.capability_id().clone(),
-                use_case_id: operation.use_case_id().clone(),
-                outcome,
-            }
-        }
-    }
-
-    fn invoke_pre_render(
-        composition: &ApplicationCatalogComposition<ParityDispatcher>,
-        surface: BindingSurface,
-        operation: &str,
-        outcome: ParityOutcome,
-    ) -> ParityResult {
-        let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
-        let operation = SurfaceOperationName::new(operation).expect("surface operation");
-        let capability = composition
-            .snapshot()
-            .resolve_binding(&profile, surface, &operation, 1, &BTreeSet::new())
-            .unwrap_or_else(|| panic!("{operation} must resolve on {surface:?}"));
-        composition
-            .handler(capability.use_case_id())
-            .expect("resolved capability has its canonical application handler")
-            .invoke(ParityRequest { outcome })
-    }
-
-    #[test]
-    fn dashboard_requests_invoke_the_same_pre_render_handlers_as_http() {
-        let composition =
-            compose_application_catalog(ParityDispatcher).expect("application composition");
-        let operations = dashboard_operations_shared_with_http();
-        assert!(
-            operations.contains(&"feedback_get".to_owned()),
-            "the shared dashboard/HTTP set must include the feedback read: {operations:?}"
-        );
-
-        for operation in operations {
-            for outcome in [
-                ParityOutcome::Ready,
-                ParityOutcome::Unavailable,
-                ParityOutcome::Denied,
-            ] {
-                let http =
-                    invoke_pre_render(&composition, BindingSurface::Http, &operation, outcome);
-                let dashboard =
-                    invoke_pre_render(&composition, BindingSurface::Dashboard, &operation, outcome);
-                assert_eq!(dashboard, http, "{operation} changed before rendering");
-            }
-        }
-    }
+    use tracedecay_tool_catalog::SurfaceOperationName;
 
     #[test]
     fn dashboard_does_not_advertise_an_uncallable_metadata_only_binding() {
-        let composition =
-            compose_application_catalog(ParityDispatcher).expect("application composition");
+        let snapshot = application_catalog_snapshot().expect("application catalog snapshot");
         let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
         let dashboard_use_case = |operation: &str| {
-            composition
-                .snapshot()
+            snapshot
                 .resolve_binding(
                     &profile,
                     BindingSurface::Dashboard,

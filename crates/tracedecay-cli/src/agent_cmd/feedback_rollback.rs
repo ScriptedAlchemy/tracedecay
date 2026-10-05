@@ -50,13 +50,13 @@ struct FeedbackRollbackCliState {
     restore_effect_started: bool,
     restore_receipt:
         Option<tracedecay_agent_hosts::agents::host_bundle::FeedbackPathRestoreReceiptV1>,
-    identity: FeedbackRollbackIdentityV2,
+    identity: FeedbackRollbackIdentity,
     registration_files: Vec<FeedbackRegistrationFileState>,
-    artifact_permissions: Vec<FeedbackArtifactPermissionStateV4>,
+    artifact_permissions: Vec<FeedbackArtifactPermissionState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct FeedbackRollbackIdentityV2 {
+struct FeedbackRollbackIdentity {
     canonical_home: PathBuf,
     canonical_lifecycle_root: PathBuf,
     canonical_project: PathBuf,
@@ -68,14 +68,14 @@ struct FeedbackRegistrationFileState {
     path_index: usize,
     path_digest: [u8; 32],
     contents: Option<Vec<u8>>,
-    permissions: Option<FeedbackFilePermissionsV2>,
+    permissions: Option<FeedbackFilePermissions>,
     #[serde(default)]
     metadata: Option<tracedecay_agent_hosts::agents::HostFileMetadataIdentityV1>,
-    applied_state: Option<FeedbackFileObservedStateV2>,
+    applied_state: Option<FeedbackFileObservedState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct FeedbackFileObservedStateV2 {
+struct FeedbackFileObservedState {
     present: bool,
     digest: [u8; 32],
     #[serde(default)]
@@ -83,25 +83,25 @@ struct FeedbackFileObservedStateV2 {
 }
 
 #[derive(Deserialize)]
-struct FeedbackHostConfigWriteIntentV2 {
+struct FeedbackHostConfigWriteIntent {
     schema_version: u16,
     digest: [u8; 32],
     metadata: Option<tracedecay_agent_hosts::agents::HostFileMetadataIdentityV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct FeedbackFilePermissionsV2 {
+struct FeedbackFilePermissions {
     readonly: bool,
     unix_mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct FeedbackArtifactPermissionStateV4 {
+struct FeedbackArtifactPermissionState {
     relative_path: String,
-    permissions: FeedbackFilePermissionsV2,
+    permissions: FeedbackFilePermissions,
 }
 
-impl FeedbackRollbackIdentityV2 {
+impl FeedbackRollbackIdentity {
     fn current(
         integration_id: &str,
         home: &Path,
@@ -676,26 +676,24 @@ fn validate_feedback_registration_restore(
                 Ok(intent) if intent.len() == 33 && intent[0] == 1 => {
                     let mut digest = [0_u8; 32];
                     digest.copy_from_slice(&intent[1..]);
-                    FeedbackFileObservedStateV2 {
+                    FeedbackFileObservedState {
                         present: true,
                         digest,
                         metadata: original.metadata.clone(),
                     }
                 }
                 Ok(intent) => {
-                    let intent: FeedbackHostConfigWriteIntentV2 = serde_json::from_slice(&intent)
-                        .map_err(|_| {
-                        tracedecay_domain::errors::TraceDecayError::Config {
+                    let intent: FeedbackHostConfigWriteIntent = serde_json::from_slice(&intent)
+                        .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
                             message: "invalid feedback registration write intent".to_string(),
-                        }
-                    })?;
+                        })?;
                     if intent.schema_version != 2 {
                         return Err(tracedecay_domain::errors::TraceDecayError::Config {
                             message: "unsupported feedback registration write-intent version"
                                 .to_string(),
                         });
                     }
-                    FeedbackFileObservedStateV2 {
+                    FeedbackFileObservedState {
                         present: true,
                         digest: intent.digest,
                         metadata: intent.metadata,
@@ -876,7 +874,7 @@ fn validate_feedback_active_receipts(
 fn snapshot_feedback_artifact_permissions(
     home: &Path,
     manifest: &tracedecay_agent_hosts::agents::host_bundle::HostBundleManifestV1,
-) -> tracedecay_domain::errors::Result<Vec<FeedbackArtifactPermissionStateV4>> {
+) -> tracedecay_domain::errors::Result<Vec<FeedbackArtifactPermissionState>> {
     manifest
         .artifacts
         .iter()
@@ -895,7 +893,7 @@ fn snapshot_feedback_artifact_permissions(
                     message: format!("unsafe feedback artifact {}", path.display()),
                 });
             }
-            Ok(FeedbackArtifactPermissionStateV4 {
+            Ok(FeedbackArtifactPermissionState {
                 relative_path: artifact.relative_path.clone(),
                 permissions: feedback_file_permissions(&metadata.permissions()),
             })
@@ -905,7 +903,7 @@ fn snapshot_feedback_artifact_permissions(
 
 fn restore_feedback_artifact_permissions(
     home: &Path,
-    permissions: &[FeedbackArtifactPermissionStateV4],
+    permissions: &[FeedbackArtifactPermissionState],
 ) -> tracedecay_domain::errors::Result<()> {
     for artifact in permissions {
         restore_feedback_file_permissions(
@@ -949,9 +947,9 @@ fn feedback_path_digest(path: &Path) -> tracedecay_domain::errors::Result<[u8; 3
 
 fn feedback_file_observed_state(
     path: &Path,
-) -> tracedecay_domain::errors::Result<FeedbackFileObservedStateV2> {
+) -> tracedecay_domain::errors::Result<FeedbackFileObservedState> {
     match fs::read(path) {
-        Ok(bytes) => Ok(FeedbackFileObservedStateV2 {
+        Ok(bytes) => Ok(FeedbackFileObservedState {
             present: true,
             digest: Sha256::digest(bytes).into(),
             metadata: Some(
@@ -966,7 +964,7 @@ fn feedback_file_observed_state(
             ),
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(FeedbackFileObservedStateV2 {
+            Ok(FeedbackFileObservedState {
                 present: false,
                 digest: [0; 32],
                 metadata: None,
@@ -984,14 +982,14 @@ fn feedback_file_observed_state(
 fn feedback_observed_state_for_contents(
     contents: Option<&[u8]>,
     metadata: Option<tracedecay_agent_hosts::agents::HostFileMetadataIdentityV1>,
-) -> FeedbackFileObservedStateV2 {
+) -> FeedbackFileObservedState {
     contents.map_or(
-        FeedbackFileObservedStateV2 {
+        FeedbackFileObservedState {
             present: false,
             digest: [0; 32],
             metadata: None,
         },
-        |bytes| FeedbackFileObservedStateV2 {
+        |bytes| FeedbackFileObservedState {
             present: true,
             digest: Sha256::digest(bytes).into(),
             metadata,
@@ -999,12 +997,12 @@ fn feedback_observed_state_for_contents(
     )
 }
 
-fn feedback_file_permissions(permissions: &fs::Permissions) -> FeedbackFilePermissionsV2 {
+fn feedback_file_permissions(permissions: &fs::Permissions) -> FeedbackFilePermissions {
     #[cfg(unix)]
     let unix_mode = Some(permissions.mode());
     #[cfg(not(unix))]
     let unix_mode = None;
-    FeedbackFilePermissionsV2 {
+    FeedbackFilePermissions {
         readonly: permissions.readonly(),
         unix_mode,
     }
@@ -1012,7 +1010,7 @@ fn feedback_file_permissions(permissions: &fs::Permissions) -> FeedbackFilePermi
 
 fn restore_feedback_file_permissions(
     path: &Path,
-    state: &FeedbackFilePermissionsV2,
+    state: &FeedbackFilePermissions,
 ) -> tracedecay_domain::errors::Result<()> {
     let mut permissions = fs::metadata(path)
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -1206,7 +1204,7 @@ fn feedback_rollback_apply(
         tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleOpV1::Repair,
         true,
     )?;
-    let identity = FeedbackRollbackIdentityV2::current(agent_id, &home, &lifecycle_root)?;
+    let identity = FeedbackRollbackIdentity::current(agent_id, &home, &lifecycle_root)?;
     let mut state = FeedbackRollbackCliState {
         schema_version: FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION,
         agent_id: agent_id.to_string(),

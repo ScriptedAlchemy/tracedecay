@@ -150,11 +150,35 @@ fn read_graph(
         return Err(PortError::Unavailable);
     }
 
+    let published: &[WorkProductPublishedVersionV1] =
+        if matches!(&request.mode, WorkGraphReadModeV1::Current) {
+            let mut latest = None;
+            for version in covered
+                .published
+                .iter()
+                .filter(|version| version.observed_at <= request.observed_at)
+            {
+                // Current still rejects invalid historical publication identities.
+                let index = covered
+                    .journal
+                    .binary_search_by_key(&version.event_sequence, |entry| entry.sequence)
+                    .map_err(|_| PortError::Unavailable)?;
+                verified_version(version, &covered.journal[index].event)
+                    .ok_or(PortError::Unavailable)?;
+                latest = Some(version);
+            }
+            match latest {
+                Some(version) => std::slice::from_ref(version),
+                None => &[],
+            }
+        } else {
+            &covered.published
+        };
     let entries = build_entries(
         storage,
         authority,
         &covered.journal,
-        &covered.published,
+        published,
         request.observed_at,
     )?;
     let absent = |selection_coverage| WorkGraphReadV1::Absent {
