@@ -672,7 +672,10 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             )
         }),
     });
-    if crate::repos::small_fixture_enabled() {
+    // `crate::repos` only exists inside the `large_repos` target; this file is
+    // also its own `[[bench]]` target, so the flag is read directly (same
+    // `TRACEDECAY_BENCH_SMALL_FIXTURE` authority).
+    if std::env::var_os("TRACEDECAY_BENCH_SMALL_FIXTURE").is_some() {
         groups.push(ToolGroup {
             tool: "tracedecay_callees",
             queries: vec![Query::prepared_read(
