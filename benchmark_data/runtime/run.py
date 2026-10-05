@@ -354,27 +354,6 @@ def _run_capture(
     abba_position: int = 0,
 ) -> None:
     scenario, workload = runtime_scenario()
-    try:
-        initialized = subprocess.run(
-            (
-                os.fspath(binary),
-                "init",
-                os.fspath(prepared.project),
-            ),
-            cwd=prepared.project,
-            env=prepared.environment,
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-    except subprocess.TimeoutExpired as exc:
-        fail(f"fixture enrollment timed out: {exc}")
-    if initialized.returncode != 0:
-        detail = initialized.stderr.decode("utf-8", errors="replace").strip()
-        fail(
-            f"fixture enrollment failed with exit {initialized.returncode}: "
-            f"{detail or 'no stderr'}"
-        )
     run_id = f"run-{uuid.uuid4().hex}"
     capture_id = f"capture-{uuid.uuid4().hex}"
     runtime_identity = prepared.runtime_identity
@@ -419,9 +398,73 @@ def _run_capture(
         termination_grace=1.0,
     )
     with daemon:
-        admission_ns = time.monotonic_ns() - daemon_started_ns
         if daemon.process is None:
             fail("owned daemon process is missing after readiness")
+        try:
+            initialized = subprocess.run(
+                (
+                    os.fspath(binary),
+                    "init",
+                    os.fspath(prepared.project),
+                ),
+                cwd=prepared.project,
+                env=prepared.environment,
+                capture_output=True,
+                check=False,
+                timeout=30.0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            fail(f"fixture enrollment timed out: {exc}")
+        if initialized.returncode != 0:
+            detail = initialized.stderr.decode("utf-8", errors="replace").strip()
+            fail(
+                f"fixture enrollment failed with exit {initialized.returncode}: "
+                f"{detail or 'no stderr'}"
+            )
+        readiness = subprocess.run(
+            (
+                os.fspath(binary),
+                "tool",
+                "tracedecay_status",
+                "--project",
+                os.fspath(prepared.project),
+                "--args",
+                json.dumps(
+                    {
+                        "format": "json",
+                        "wait_for": {"state": "ready", "timeout_ms": 110_000},
+                    },
+                    separators=(",", ":"),
+                ),
+                "--json",
+            ),
+            cwd=prepared.project,
+            env=prepared.environment,
+            capture_output=True,
+            check=False,
+            timeout=120.0,
+        )
+        if readiness.returncode != 0:
+            detail = readiness.stderr.decode("utf-8", errors="replace").strip()
+            fail(
+                "fixture code-index readiness failed with exit "
+                f"{readiness.returncode}: {detail or 'no stderr'}"
+            )
+        try:
+            readiness_document = json.loads(readiness.stdout.strip())
+        except json.JSONDecodeError as exc:
+            fail(f"fixture code-index readiness returned malformed JSON: {exc}")
+        wait_outcome = (
+            readiness_document.get("structuredContent", {})
+            .get("wait", {})
+            .get("outcome")
+        )
+        if wait_outcome != "reached":
+            fail(
+                "fixture code-index readiness returned unexpected wait outcome: "
+                f"{wait_outcome!r}"
+            )
+        admission_ns = time.monotonic_ns() - daemon_started_ns
         resources_before = _process_observations(daemon.process.pid)
         cli_started_ns = time.monotonic_ns()
         try:
