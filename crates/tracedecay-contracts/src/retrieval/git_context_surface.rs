@@ -33,6 +33,9 @@ pub struct DiffContextSurfaceRequestV1 {
     pub files: Vec<String>,
     /// Maximum impact traversal depth (default: 2, at most 10).
     pub depth: Option<u32>,
+    /// Cap the symbol, test, and co-change sections at about this many tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -63,6 +66,9 @@ pub struct PrContextSurfaceRequestV1 {
     /// remote-tracking refs such as origin/topic, full refs, and Git revision
     /// expressions.
     pub head_ref: Option<String>,
+    /// Cap the symbol, test, and module sections at about this many tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
     /// Maximum symbols returned on this page (default: 200, clamped to 1-500).
     pub maximum_symbols: Option<u32>,
     /// Authenticated continuation cursor returned by a previous page.
@@ -246,6 +252,83 @@ pub struct DiffContextResultV1 {
     /// when history has none, so a diff with no partners keeps its old shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_change_partners: Vec<CoChangePartnerV1>,
+    /// Budget accounting when the request supplies `budget_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<super::primitive_surface::TokenBudgetCutV1>,
+    /// Symbols in this diff that no test reaches, and the verdict a CLI exits on.
+    pub test_gate: TestGateV1,
+    /// Rust free functions whose parameter count changed since HEAD, with the
+    /// call sites that list cannot accept. Omitted when nothing changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature_edits: Vec<SignatureEditV1>,
+}
+
+/// A call site whose argument count cannot invoke the new parameter list.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncompatibleCallSiteV1 {
+    pub name: String,
+    pub file: String,
+    pub line: u32,
+    pub arguments: u32,
+}
+
+/// How a modified function's parameter list compares with HEAD.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureEditStatusV1 {
+    ContractChange,
+}
+
+/// A Rust free function whose parameter count differs from HEAD.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureEditV1 {
+    pub symbol: String,
+    pub file: String,
+    pub status: SignatureEditStatusV1,
+    pub old_parameters: Option<u32>,
+    pub new_parameters: Option<u32>,
+    pub incompatible: Vec<IncompatibleCallSiteV1>,
+}
+
+/// Whether tests reach the symbols in a diff's blast radius.
+///
+/// `pass` and exit 0 when every counted symbol is reached. `fail` and exit 4
+/// name the ones that are not. `incomplete` and exit 0 mean the caller walk
+/// stopped before that absence is known.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestGateV1 {
+    pub verdict: String,
+    pub exit_code: u8,
+    pub untested: Vec<String>,
+}
+
+impl TestGateV1 {
+    pub fn pass() -> Self {
+        Self {
+            verdict: "pass".to_owned(),
+            exit_code: 0,
+            untested: Vec::new(),
+        }
+    }
+
+    pub fn fail(untested: Vec<String>) -> Self {
+        Self {
+            verdict: "fail".to_owned(),
+            exit_code: 4,
+            untested,
+        }
+    }
+
+    pub fn incomplete() -> Self {
+        Self {
+            verdict: "incomplete".to_owned(),
+            exit_code: 0,
+            untested: Vec::new(),
+        }
+    }
 }
 
 impl DiffContextResultV1 {
@@ -533,6 +616,9 @@ pub struct PrContextCompleteV1 {
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    /// Budget accounting when the request supplies `budget_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<super::primitive_surface::TokenBudgetCutV1>,
 }
 
 /// The git comparison while exact base/head symbol comparison is unavailable
@@ -562,6 +648,9 @@ pub struct PrContextSymbolsUnavailableV1 {
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    /// Budget accounting when the request supplies `budget_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<super::primitive_surface::TokenBudgetCutV1>,
 }
 
 /// The git comparison while the verified graph generation is still warming.
@@ -596,6 +685,9 @@ pub struct PrContextGraphPendingV1 {
     /// The worktree verdict a served graph read opens with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<PrimitiveSearchFreshnessV1>,
+    /// Budget accounting when the request supplies `budget_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<super::primitive_surface::TokenBudgetCutV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
