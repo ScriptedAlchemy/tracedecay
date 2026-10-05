@@ -202,9 +202,7 @@ impl AgentIntegration for GeminiIntegration {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Lifecycle state
-// ---------------------------------------------------------------------------
 
 fn selects_extension(components: &[HostComponentV1]) -> bool {
     components.iter().any(|component| {
@@ -235,9 +233,7 @@ fn gemini_extension_registration_state(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_staged_extension(dc: &mut DoctorCounters, home: &Path) {
     let stage_dir = extension_stage_dir(home);

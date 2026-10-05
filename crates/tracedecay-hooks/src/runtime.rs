@@ -313,9 +313,7 @@ fn guidance_result(
 }
 
 /// Daemon configuration owns this delivery switch. Host lifecycle code may
-/// publish a new revision; hook code only dispatches Hook V2 through it. The
-/// retired Legacy route is gone, every production constructor already chose
-/// Hook V2, and every `deliver_legacy` impl was an Unavailable stub.
+/// publish a new revision; hook code only dispatches Hook V2 through it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookFeedbackRollbackSwitchV1 {
@@ -332,7 +330,7 @@ pub enum HookFeedbackDeliveryOutcomeV1 {
 /// Delivery-only seam over the existing feedback authority. The generic
 /// payload remains the owning application's typed feedback value.
 pub trait HookFeedbackDeliveryPortV1<T> {
-    fn deliver_hook_v2(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
+    fn deliver_hook(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
 }
 
 const fn admit_rollback_revision(
@@ -358,7 +356,7 @@ where
     P: HookFeedbackDeliveryPortV1<T> + ?Sized,
 {
     admit_rollback_revision(rollback)?;
-    let outcome = port.deliver_hook_v2(feedback);
+    let outcome = port.deliver_hook(feedback);
 
     Ok(outcome)
 }
@@ -373,7 +371,7 @@ pub type HookDeliveryFutureV1<'a> =
 /// inside `deadline`; they receive the validated content-free envelope and the
 /// owning application's typed payload, never a hook-authored command.
 pub trait AsyncHookFeedbackDeliveryPortV1<T> {
-    fn deliver_hook_v2<'a>(
+    fn deliver_hook<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
         feedback: &'a T,
@@ -392,7 +390,7 @@ where
     P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
 {
     admit_rollback_revision(rollback)?;
-    let outcome = port.deliver_hook_v2(envelope, feedback, deadline).await;
+    let outcome = port.deliver_hook(envelope, feedback, deadline).await;
 
     Ok(outcome)
 }
@@ -481,7 +479,7 @@ mod tests {
     }
 
     impl HookFeedbackDeliveryPortV1<()> for CountingHookV2Port {
-        fn deliver_hook_v2(&self, _feedback: &()) -> HookFeedbackDeliveryOutcomeV1 {
+        fn deliver_hook(&self, _feedback: &()) -> HookFeedbackDeliveryOutcomeV1 {
             self.hook_v2_calls.fetch_add(1, Ordering::SeqCst);
             HookFeedbackDeliveryOutcomeV1::Delivered
         }

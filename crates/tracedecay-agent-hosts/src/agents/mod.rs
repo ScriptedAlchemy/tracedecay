@@ -271,9 +271,7 @@ pub fn export_managed_skills_to_agent_hosts(
     reports
 }
 
-// ---------------------------------------------------------------------------
 // AgentIntegration trait
-// ---------------------------------------------------------------------------
 
 /// What [`AgentIntegration::require_host`] proved about the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -644,9 +642,7 @@ pub(crate) enum InstallScope {
     ProjectLocal,
 }
 
-// ---------------------------------------------------------------------------
 // Registry
-// ---------------------------------------------------------------------------
 
 /// Returns the agent matching `id`, or an error if unknown.
 pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
@@ -800,9 +796,7 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
-// ---------------------------------------------------------------------------
 // DoctorCounters
-// ---------------------------------------------------------------------------
 
 /// Diagnostic counters for doctor checks, plus every check line in order so
 /// `tracedecay doctor --json` carries exactly what the terminal showed.
@@ -902,9 +896,7 @@ impl DoctorCounters {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 #[macro_export]
 macro_rules! cli_fallback_args_invocation_lit {

@@ -396,9 +396,7 @@ fn config_has_tracedecay(config: &Value) -> bool {
             .is_some()
 }
 
-// ---------------------------------------------------------------------------
 // Config path resolution
-// ---------------------------------------------------------------------------
 
 /// Honors the profile's absolute `$XDG_CONFIG_HOME` only inside `home`.
 ///
@@ -636,9 +634,7 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Install helpers
-// ---------------------------------------------------------------------------
 
 /// Merge TraceDecay's MCP registration into `opencode.json`.
 ///
@@ -758,9 +754,7 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
     super::prompt_rules::reconcile_prompt_rules(prompt_path, PROMPT_RULE_MARKER, &block)
 }
 
-// ---------------------------------------------------------------------------
 // Uninstall helpers
-// ---------------------------------------------------------------------------
 
 /// Outcome of the uninstall transform, reported after publication.
 enum OpenCodeRegistrationRemoval {
@@ -876,9 +870,7 @@ fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
     super::prompt_rules::remove_standard_prompt_rules(prompt_path)
 }
 
-// ---------------------------------------------------------------------------
 // Healthcheck helpers
-// ---------------------------------------------------------------------------
 
 fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRoot) {
     let config_path = opencode_config_path(home, profile);

@@ -242,10 +242,7 @@ pub struct AdvisoryHookDeliveryPortV1 {
 }
 
 impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeliveryPortV1 {
-    fn deliver_hook_v2(
-        &self,
-        notice: &AdvisoryHookLookupNoticeV1,
-    ) -> HookFeedbackDeliveryOutcomeV1 {
+    fn deliver_hook(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
         if self.scope != notice.scope {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
