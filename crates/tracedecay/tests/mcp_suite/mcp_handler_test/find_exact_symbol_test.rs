@@ -176,18 +176,24 @@ async fn find_exact_symbol_returns_every_bare_name_hit() {
         json!([gmres_field(), gmres_function()])
     );
 
-    for name in [
-        "gmre",
-        "src/lib.rs::gmres",
-        "Solvers::gmres",
-        "shared_tok",
-        "not_a_symbol",
+    for (name, suggestions) in [
+        ("gmre", json!(["gmres"])),
+        ("src/lib.rs::gmres", json!([])),
+        ("Solvers::gmres", json!([])),
+        ("shared_tok", json!(["shared_token"])),
+        ("not_a_symbol", json!([])),
     ] {
+        let payload = exact_payload(&server, json!({"name": name, "format": "json"})).await;
         assert_eq!(
-            exact_payload(&server, json!({"name": name, "format": "json"})).await,
-            json!({"name": name, "count": 0, "matches": [], "freshness": {"state": "fresh"}}),
-            "a non-equal bare name must not match"
+            payload["count"], 0,
+            "{name} must not exact-match: {payload}"
         );
+        assert_eq!(payload["matches"], json!([]), "{payload}");
+        let got = payload
+            .get("suggestions")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        assert_eq!(got, suggestions, "{name}: {payload}");
     }
 
     fixture.harness.shutdown().await;

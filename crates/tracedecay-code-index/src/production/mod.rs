@@ -2151,11 +2151,11 @@ where
                         tracing::trace_span!("code_index.build.assemble.import_evidence").entered();
                     derive_import_evidence(&staged.files)
                 };
-                let (edges, edge_abstentions, unresolved_calls) = {
+                let (edges, edge_abstentions, unresolved_calls, ambiguous_name_drops) = {
                     let _span =
                         tracing::trace_span!("code_index.build.assemble.graph_outputs").entered();
                     {
-                        let (edges, abstentions, implementor_gaps) =
+                        let (edges, abstentions, implementor_gaps, ambiguous_name_drops) =
                             collect_edge_evidence(&staged.files)?;
                         let mut unresolved = resolution_outputs::unresolved_calls_for_edges(
                             &staged.files,
@@ -2165,13 +2165,19 @@ where
                         unresolved.extend(implementor_gaps);
                         unresolved.sort();
                         unresolved.dedup();
-                        Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))
+                        Ok::<_, CodeIndexProductionErrorV1>((
+                            edges,
+                            abstentions,
+                            unresolved,
+                            ambiguous_name_drops,
+                        ))
                     }
                 }?;
                 let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                     &staged.files,
                     staged.symbols.symbols.len(),
                     edges.len(),
+                    Some(ambiguous_name_drops),
                 )?;
                 let candidate = CodeIndexPublishedGenerationV1 {
                     manifest,

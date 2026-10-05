@@ -386,10 +386,23 @@ pub struct ContextPlanV1 {
     pub test_files: Option<Vec<String>>,
 }
 
+/// Which retrieval route `context` ran.
+///
+/// `name` is the preferred-symbol route. `prose` is the ordinary task
+/// route. A caller that omits `prefer_symbol` gets `name` only when the
+/// task is one identifier or one `Type.method` / `path::name` token.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRetrievalRouteV1 {
+    Name,
+    Prose,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextResultV1 {
     pub task: String,
+    pub route: ContextRetrievalRouteV1,
     pub mode: ContextModeV1,
     /// Freshness of the served code generation, derived from the typed lane
     /// coverage and the daemon scheduler's worktree state.
@@ -897,11 +910,11 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ContextModeV1, ContextResultV1, ContextRetrievalPlanV1, ContextStageV1,
-        ContextSurfaceRequestV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
-        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
-        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, RedundancySurfaceRequestV1,
-        SimilarSurfaceRequestV1,
+        ContextModeV1, ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1,
+        ContextStageV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
+        PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        RedundancySurfaceRequestV1, SimilarSurfaceRequestV1,
     };
     use crate::code_index_freshness::CodeIndexStalenessStateV1;
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
@@ -909,6 +922,7 @@ mod tests {
     fn context_result() -> ContextResultV1 {
         ContextResultV1 {
             task: "explain memory".to_owned(),
+            route: ContextRetrievalRouteV1::Prose,
             mode: ContextModeV1::Explore,
             freshness: PrimitiveSearchFreshnessV1 {
                 state: PrimitiveFreshnessStateV1::Fresh,
@@ -1033,6 +1047,7 @@ mod tests {
 
         let fresh = serde_json::to_value(context_result()).expect("context result serializes");
         assert_eq!(fresh["freshness"], json!({"state": "fresh"}));
+        assert_eq!(fresh["route"], "prose");
 
         let mut stale = context_result();
         stale.freshness = PrimitiveSearchFreshnessV1 {
@@ -1062,10 +1077,11 @@ mod tests {
         let schema = serde_json::to_value(schema_for!(ContextResultV1))
             .expect("context result schema serializes");
         assert!(
-            schema["required"]
-                .as_array()
-                .is_some_and(|required| required.contains(&Value::String("freshness".to_owned()))),
-            "freshness is part of every context result"
+            schema["required"].as_array().is_some_and(|required| {
+                required.contains(&Value::String("freshness".to_owned()))
+                    && required.contains(&Value::String("route".to_owned()))
+            }),
+            "freshness and route are part of every context result"
         );
     }
 

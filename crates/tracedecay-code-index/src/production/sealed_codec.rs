@@ -1081,6 +1081,7 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
     /// The edges sealing derived across files, restored as sealed.
     pub(super) cross_file_edges: Vec<CanonicalRelationEdgeV1>,
     pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(super) ambiguous_name_drops: Option<u64>,
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -1161,6 +1162,7 @@ pub(super) fn assemble_published_generation(
         projection_receipt,
         cross_file_edges,
         mut unresolved_calls,
+        ambiguous_name_drops,
     } = generation;
     let files = content.files.clone();
     if files
@@ -1254,6 +1256,7 @@ pub(super) fn assemble_published_generation(
                 &files,
                 symbols.symbols.len(),
                 edges.len(),
+                ambiguous_name_drops,
             )
         }?,
         manifest,

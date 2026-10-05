@@ -133,10 +133,16 @@ impl<'p> SealedSuccessorV1<'p> {
         &'v self,
         parent: &'v SealedParentGenerationV1,
         edited: &'v [EditedFileV1<'p>],
+        before: bool,
     ) -> Result<Vec<SparseFileV1<'v>>, CodeIndexProductionErrorV1> {
         let edited_by_path = edited
             .iter()
-            .map(|file| (file.file.logical_path.as_str(), &file.after))
+            .map(|file| {
+                (
+                    file.file.logical_path.as_str(),
+                    if before { &file.before } else { &file.after },
+                )
+            })
             .collect::<HashMap<_, _>>();
         let stand_in = edited
             .first()
@@ -184,8 +190,15 @@ impl<'p> SealedSuccessorV1<'p> {
         if edited.is_empty() {
             return Ok(SuccessorResolutionV1::default());
         }
-        let view = self.view(parent, edited)?;
+        let view = self.view(parent, edited, false)?;
+        let before_view = self.view(parent, edited, true)?;
         let index = parent.resolution_index()?;
+        let before_by_name = SparseSymbolsByNameV1::new(
+            &index,
+            &self.index_of_path,
+            std::iter::empty(),
+            &self.failure,
+        );
         let by_name = SparseSymbolsByNameV1::new(
             &index,
             &self.index_of_path,
@@ -213,6 +226,8 @@ impl<'p> SealedSuccessorV1<'p> {
             &index,
             &view,
             &by_name,
+            &before_view,
+            &before_by_name,
             &pairs,
             &self.index_of_path,
             &self.occurrence_of_path,
@@ -232,7 +247,11 @@ impl<'p> SealedSuccessorV1<'p> {
                 (Arc::clone(view[file_index].artifacts()), resolved),
             );
         }
-        Ok(SuccessorResolutionV1 { files })
+        Ok(SuccessorResolutionV1 {
+            files,
+            ambiguous_before: resolution.ambiguous_before,
+            ambiguous_after: resolution.ambiguous_after,
+        })
     }
 
     /// Every present file's segment descriptor: the edited files encoded
@@ -562,4 +581,6 @@ impl<'p> SealedSuccessorV1<'p> {
 #[derive(Default)]
 pub(super) struct SuccessorResolutionV1 {
     pub(super) files: BTreeMap<String, (Arc<FileGenerationArtifactsV1>, ResolvedFileV1)>,
+    pub(super) ambiguous_before: u64,
+    pub(super) ambiguous_after: u64,
 }
