@@ -244,7 +244,7 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         // on a removed inferred span goes, and so does any record the
         // inference itself produced (a branchless ReflogOverlap, or the
         // TimeOverlap the inferred branch admitted). Captured evidence linked
-        // to a surviving captured span stays — the span keeps its identity,
+        // to a surviving captured span stays. The span keeps its identity,
         // only its inferred branch is cleared.
         for record in commits.values().filter(|record| {
             record.provider == provider

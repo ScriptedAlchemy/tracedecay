@@ -320,8 +320,8 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
 /// share one span. Captured branches are never replaced. The overlapping
 /// spans absorb the segment's window and event count, so nothing the
 /// inference covered is dropped. Returns `false` when no captured span
-/// overlaps, or an overlapping span already names a different branch —
-/// captured or inferred — leaving the inference to stand on its own.
+/// overlaps, or an overlapping span already names a different branch,
+/// captured or inferred, leaving the inference to stand on its own.
 pub(super) fn infer_captured_branch(
     spans: &mut [SessionGitSpan],
     inferred: &SessionGitSpan,
