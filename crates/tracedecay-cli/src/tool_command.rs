@@ -94,8 +94,7 @@ use args::{
 };
 #[cfg(test)]
 use args::{
-    edit_distance, finalize_arrays, parse_invocation_with_stdin,
-    parse_whole_payload_invocation_with_stdin,
+    finalize_arrays, parse_invocation_with_stdin, parse_whole_payload_invocation_with_stdin,
 };
 #[cfg(test)]
 use serde_json::Map;

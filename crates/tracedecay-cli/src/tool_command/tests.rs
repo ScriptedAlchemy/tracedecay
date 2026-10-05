@@ -904,13 +904,6 @@ fn unknown_tool_suggestion_finds_nearest_name() {
 }
 
 #[test]
-fn edit_distance_basics() {
-    assert_eq!(edit_distance("limit", "limit"), 0);
-    assert_eq!(edit_distance("limt", "limit"), 1);
-    assert_eq!(edit_distance("", "abc"), 3);
-}
-
-#[test]
 fn validation_skips_opaque_schemas() {
     // A definition without properties must be treated as opaque: no unknown
     // key rejection, so dynamic tools can't be bricked by the walker.

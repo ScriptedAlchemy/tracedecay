@@ -34,8 +34,10 @@ pub async fn compute_impact(
     if graph.symbol_summary(&occurrence)?.is_none() {
         return Ok(graph_tool_completion(
             GraphToolResultV1::Impact(ImpactResultV1::NotFound(node_not_found_result(
+                graph,
                 &request.node_id,
-            ))),
+                &occurrence,
+            )?)),
             Vec::new(),
         ));
     }
@@ -163,8 +165,10 @@ pub async fn compute_node(
         }
         None => Ok(graph_tool_completion(
             GraphToolResultV1::Node(NodeResultV1::NotFound(Box::new(node_not_found_result(
+                graph,
                 &request.node_id,
-            )))),
+                &occurrence,
+            )?))),
             Vec::new(),
         )),
     }
