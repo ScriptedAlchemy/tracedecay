@@ -46,22 +46,17 @@ export async function fetchEnvelope<T>(
     }
     return { outcome: 'transport', state: 'error', detail: 'HTTP 405' };
   }
-  if (!response.ok) {
-    // Some routes answer an unready read with a non-2xx status AND a complete
-    // typed envelope body (the graph-structure routes return 503 while the
-    // verified graph is warming). The body is the daemon's typed truth,
-    // reason included, so it must not be flattened into a raw `HTTP 503`.
-    // Only a non-2xx without a decodable envelope stays a bare transport
-    // error.
-    const decoded = decodeEnvelopeBody<T>(payloadSchema, await decodeJsonBody(response, init?.signal));
-    return decoded ?? { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
-  }
-  return (
-    decodeEnvelopeBody<T>(payloadSchema, await decodeJsonBody(response, init?.signal)) ?? {
-      outcome: 'transport',
-      state: 'unsupported_schema',
-    }
+  // Some routes answer an unready read with a non-2xx status AND a complete
+  // typed envelope body (the graph-structure routes return 503 while the
+  // verified graph is warming). Prefer that typed truth to the HTTP status.
+  const decoded = decodeEnvelopeBody<T>(
+    payloadSchema,
+    await decodeJsonBody(response, init?.signal),
   );
+  if (decoded) return decoded;
+  return response.ok
+    ? { outcome: 'transport', state: 'unsupported_schema' }
+    : { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
 }
 
 /** Decodes one envelope body, or `null` when it is not an envelope, which
