@@ -4797,7 +4797,9 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
             "impacted_symbols": [],
             "impact_complete": true,
             "affected_tests": [],
-            "missing_co_change_partners": []
+            "missing_co_change_partners": [],
+            // No symbols changed, so nothing is untested.
+            "test_gate": {"verdict": "pass", "exit_code": 0, "untested": []}
         })
     );
 
@@ -5301,6 +5303,8 @@ fn assert_exact_hotspot(
             "incoming": incoming,
             "outgoing": outgoing,
             "total": total,
+            // Each fixture file lands in the mounted project's one commit.
+            "churn": 1,
         }),
         "{row}"
     );
