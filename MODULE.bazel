@@ -10,6 +10,14 @@ bazel_dep(name = "rules_nodejs", version = "6.7.6")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
+    # Cargo's dev profile compiles every crate at opt-level 1 and release at
+    # 3; generated targets and the .bazelrc block refine per crate from the
+    # perf profile.
+    opt_level = {
+        "dbg": "0",
+        "fastbuild": "1",
+        "opt": "3",
+    },
     versions = ["1.97.1"],
 )
 use_repo(rust, "rust_toolchains")

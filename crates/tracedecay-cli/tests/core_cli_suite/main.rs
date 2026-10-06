@@ -39,3 +39,13 @@ mod tool_first_touch_test;
 mod tool_surface_transport_test;
 mod tracedecay_test;
 mod user_config_test;
+
+/// The `tracedecay` binary this suite drives: the runfiles path Bazel and
+/// nextest pass at run time, else the artifact Cargo compiled in.
+pub(crate) fn tracedecay_exe() -> &'static std::path::Path {
+    static EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        std::env::var_os("CARGO_BIN_EXE_tracedecay")
+            .map_or_else(|| env!("CARGO_BIN_EXE_tracedecay").into(), Into::into)
+    })
+}

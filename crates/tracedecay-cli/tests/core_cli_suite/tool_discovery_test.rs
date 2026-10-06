@@ -21,7 +21,7 @@ use tracedecay_runtime_core::ast_grep::{AST_GREP_BIN_ENV, ast_grep_command};
 /// the operator's `PATH`. Handing the child the executable this process
 /// resolved keeps both catalogs probing the same host.
 fn isolated_tracedecay_command(home: &TempDir) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(crate::tracedecay_exe());
     apply_tracedecay_home_env(&mut command, home.path());
     command
         .current_dir(home.path())

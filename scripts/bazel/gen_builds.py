@@ -97,6 +97,33 @@ BUILD_SCRIPT_ENV = {
 }
 
 
+# Workspace binaries test suites resolve at run time, keyed by the override
+# variable their helper reads (crates/tracedecay/tests/common and the SDK
+# suite). Bazel hands each over as a runfiles path, so no suite depends on
+# Cargo's target/<profile>/ layout.
+RUNTIME_BINARIES = (
+    (
+        "TRACEDECAY_TEST_BIN",
+        "//crates/tracedecay-cli:tracedecay",
+        r'(?<!fn )\btracedecay_bin\(\)|var(?:_os)?\("TRACEDECAY_TEST_BIN"\)',
+    ),
+    (
+        "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval_bin",
+        r'search_eval_bin\("tracedecay-search-eval"\)',
+    ),
+    (
+        "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval-direct",
+        r"TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN|search_eval_bin\(\"tracedecay-search-eval-direct\"\)",
+    ),
+)
+
+
+# Marks a resolution context that Cargo builds with `--no-default-features`.
+NO_DEFAULT_FEATURES = "!no-default-features"
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -108,6 +135,27 @@ def run(cmd, cwd=REPO):
     # into parsed feature names; --color never covers Cargo, this covers the
     # rest.
     return _ANSI.sub("", out.stdout)
+
+
+def perf_opt_levels():
+    """Cargo `perf` opt-level per package name, the profile hosted CI tests
+    with. `perf` inherits `dev`, so a package resolves to its perf override,
+    then its dev override, then the perf and dev profile defaults."""
+    import tomllib
+
+    profiles = tomllib.loads((REPO / "Cargo.toml").read_text())["profile"]
+    perf = profiles.get("perf", {})
+    dev = profiles.get("dev", {})
+    default = perf.get("opt-level", dev.get("opt-level", 0))
+    names = set(perf.get("package", {})) | set(dev.get("package", {}))
+    levels = {}
+    for name in names - {"*"}:
+        for profile in (perf, dev):
+            level = profile.get("package", {}).get(name, {}).get("opt-level")
+            if level is not None:
+                levels[name] = level
+                break
+    return default, levels
 
 
 def cargo_metadata():
@@ -128,6 +176,10 @@ def feature_map(pkg_name, edges, features=()):
         "cargo", "tree", "-p", pkg_name, "-e", edges,
         "-f", "{p}|{f}", "--prefix", "none", "--color", "never",
     ]
+    features = set(features)
+    if NO_DEFAULT_FEATURES in features:
+        features.discard(NO_DEFAULT_FEATURES)
+        cmd.append("--no-default-features")
     if features:
         cmd += ["--features", ",".join(sorted(features))]
     fmap = {}
@@ -300,6 +352,7 @@ def main():
         sys.exit("usage: gen_builds.py [--check]")
     check_only = sys.argv[1:] == ["--check"]
     meta = cargo_metadata()
+    opt_default, opt_levels = perf_opt_levels()
     members = {p["name"]: p for p in meta["packages"]}
     dir_of = {
         p["name"]: str(Path(p["manifest_path"]).parent.relative_to(REPO))
@@ -334,6 +387,13 @@ def main():
             reqs.add((edges, frozenset(req)))
         for edges, req in reqs:
             contexts[(name, edges, req)] = None
+        # CI checks every test-transport surface compiles (`cargo check
+        # --workspace --all-targets --features test-transport`), so the
+        # gated variants exist even where no test target requires them.
+        if "test-transport" in p["features"]:
+            contexts[(name, "normal,build,dev", frozenset({"test-transport"}))] = None
+    # The lean root build (`cargo check -p tracedecay --no-default-features`).
+    contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
     for key in contexts:
         name, edges, feats = key
@@ -560,6 +620,22 @@ def main():
                 names.update(RE_BIN_EXE.findall(f.read_text(errors="replace")))
         return sorted(names)
 
+    def runtime_binaries(p, t, extra_dirs=()):
+        """{env var: label} for workspace binaries a target's sources locate
+        at run time through the shared test helpers, which read these
+        overrides before falling back to Cargo's profile directory."""
+        base = Path(t["src_path"]).resolve().parent
+        text = "".join(
+            f.read_text(errors="replace")
+            for root in (base, *extra_dirs)
+            for f in root.rglob("*.rs")
+        )
+        found = {}
+        for variable, label, pattern in RUNTIME_BINARIES:
+            if re.search(pattern, text):
+                found[variable] = label
+        return found
+
     def needs_env_tmpdir(p, t, extra_dirs=()):
         """True when a target's sources compile env!("CARGO_TARGET_TMPDIR"),
         which Cargo exports only for integration-test units."""
@@ -577,6 +653,14 @@ def main():
 
     def render_build(p):
         name = p["name"]
+        # Mirror the Cargo `perf` profile hosted CI tests with: the package's
+        # opt-level with debug assertions and overflow checks on. `-c opt`
+        # (release) keeps the toolchain's own opt-level 3 without assertions.
+        rustc_flags_attr = (
+            '    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ['
+            f'"-Copt-level={opt_levels.get(name, opt_default)}", '
+            '"-Cdebug-assertions=on", "-Coverflow-checks=on"]}),'
+        )
         used_names = set()
 
         def unique_name(want):
@@ -656,6 +740,7 @@ def main():
                     "    deps = all_crate_deps(normal = True) + [" + q(deps) + "],",
                     '    proc_macro_deps = all_crate_deps(proc_macro = True),',
                     '    aliases = aliases(normal = True),',
+                    rustc_flags_attr,
                     "    crate_features = ["
                 + q(sorted(next(fs for m, fs, _ in closure if m == name)))
                 + "],",
@@ -753,6 +838,7 @@ def main():
                 "    aliases = aliases(normal = True"
                 + (", normal_dev = True" if dev_args else "")
                 + "),",
+                rustc_flags_attr,
                 f"    crate_features = [{q(sorted(fmap[name]))}],",
                 ")\n",
             ]
@@ -802,24 +888,43 @@ def main():
             if needs_env_tmpdir(p, t, mod_pulled):
                 rustc_env["CARGO_TARGET_TMPDIR"] = "/tmp"
             bin_data = []
+            runfiles_env = {}
             for bin_name in needed_bin_exes(p, t, mod_pulled):
                 emitted = bin_target_names.get(bin_name)
                 if emitted is None:
                     continue
+                # env! needs a compile-time value; suites read the runtime
+                # runfiles path first, which survives a changed cwd.
                 rustc_env[f"CARGO_BIN_EXE_{bin_name}"] = (
-                    f"$(location :{emitted})"
+                    f"$(rootpath :{emitted})"
                 )
                 bin_data.append(f":{emitted}")
-            env_attr = (
-                "    rustc_env = {"
-                + ", ".join(
-                    f"{json.dumps(k)}: {json.dumps(v)}"
-                    for k, v in sorted(rustc_env.items())
+                runfiles_env[f"CARGO_BIN_EXE_{bin_name}"] = f":{emitted}"
+            for variable, target in runtime_binaries(p, t, mod_pulled).items():
+                if not target.startswith(f"//{dir_of[name]}:"):
+                    runfiles_env.setdefault(variable, target)
+                else:
+                    runfiles_env.setdefault(variable, ":" + target.split(":", 1)[1])
+            def env_dict(env):
+                return "{" + ", ".join(
+                    f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(env.items())
+                ) + "}"
+
+            if "CARGO_TARGET_TMPDIR" in rustc_env:
+                # Cargo's per-target scratch dir; any writable host directory
+                # serves the suites that root fixtures outside TMPDIR in it.
+                windows_env = dict(rustc_env, CARGO_TARGET_TMPDIR="C:/Windows/Temp")
+                env_attr = (
+                    '    rustc_env = select({"@platforms//os:windows": '
+                    + env_dict(windows_env)
+                    + ', "//conditions:default": '
+                    + env_dict(rustc_env)
+                    + "}),"
                 )
-                + "},"
-                if rustc_env
-                else None
-            )
+            elif rustc_env:
+                env_attr = "    rustc_env = " + env_dict(rustc_env) + ","
+            else:
+                env_attr = None
             if bin_data:
                 data += " + [" + q(bin_data) + "]"
             out += [
@@ -834,10 +939,21 @@ def main():
                 '    proc_macro_deps = all_crate_deps('
                 "proc_macro = True, proc_macro_dev = True),",
                 '    aliases = aliases(normal = True, normal_dev = True),',
+                rustc_flags_attr,
                 f"    crate_features = [{q(sorted(fmap[name]))}],",
                 f'    compile_data = {compile_data},',
                 f'    data = {data},',
                 env_attr,
+                (
+                    "    runfiles_env = {"
+                    + ", ".join(
+                        f"{json.dumps(k)}: {json.dumps(v)}"
+                        for k, v in sorted(runfiles_env.items())
+                    )
+                    + "},"
+                    if runfiles_env
+                    else None
+                ),
                 ")\n",
             ]
             out = [l for l in out if l is not None]
@@ -862,6 +978,7 @@ def main():
                 '    proc_macro_deps = all_crate_deps('
                 "proc_macro = True, proc_macro_dev = True),",
                 '    aliases = aliases(normal = True, normal_dev = True),',
+                rustc_flags_attr,
                 '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
                 '        + ["//tests:fixtures"]'
                 + (f"\n        + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
@@ -950,6 +1067,31 @@ def main():
             # nothing renders, so flag it for removal rather than writing.
             return None
         return BANNER + "\n" + block + "\n"
+
+    # External crates Cargo's perf profile optimizes past the dev default.
+    # crate_universe names their repositories `crates__<name>-<version>`, and
+    # rules_rust matches per-crate flags on the crate root's exec path.
+    import tomllib
+
+    locked = tomllib.loads((REPO / "Cargo.lock").read_text())["package"]
+    external_flags = []
+    for package in sorted(locked, key=lambda pkg: (pkg["name"], pkg["version"])):
+        level = opt_levels.get(package["name"])
+        if package["name"] in members or level is None:
+            continue
+        prefix = f"external/+crate+crates__{package['name']}-{package['version']}/"
+        external_flags.append(
+            f'build "--@rules_rust//rust/settings:per_crate_rustc_flag={prefix}@-Copt-level={level}"'
+        )
+    bazelrc = REPO / ".bazelrc"
+    rc_block = (
+        GEN_BEGIN
+        + "\n# Cargo perf opt-levels for external crates (see [profile.perf]).\n"
+        + "\n".join(external_flags)
+        + "\n"
+        + GEN_END
+    )
+    outputs[bazelrc] = splice_generated(bazelrc.read_text(), rc_block, bazelrc)
 
     by_pkg = {}
     for (pkg_dir, gname), entry in out_of_pkg.items():

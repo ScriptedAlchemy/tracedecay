@@ -415,7 +415,7 @@ fn daemon_authority_path(profile_root: &Path) -> PathBuf {
 }
 
 fn isolated(home: &Path, profile: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_exe());
     apply_isolated_profile_env(&mut command, home, profile);
     command
 }
@@ -1477,4 +1477,14 @@ fn task_item(graph: &Value) -> Value {
         })
         .cloned()
         .unwrap_or_else(|| panic!("the journey task must be in the product graph: {graph}"))
+}
+
+/// The `tracedecay` binary this suite drives: the runfiles path Bazel and
+/// nextest pass at run time, else the artifact Cargo compiled in.
+fn tracedecay_exe() -> &'static std::path::Path {
+    static EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        std::env::var_os("CARGO_BIN_EXE_tracedecay")
+            .map_or_else(|| env!("CARGO_BIN_EXE_tracedecay").into(), Into::into)
+    })
 }

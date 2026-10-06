@@ -89,7 +89,7 @@ pub(crate) fn remove_repo_local_marker_dir_if_present(project: &Path) {
 
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(crate::tracedecay_exe());
     apply_isolated_profile_env(&mut command, &home, &profile_root(&home));
     command
         .current_dir(project)
@@ -116,7 +116,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     } else {
         "tracedecay"
     });
-    link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
+    link_or_copy_executable(crate::tracedecay_exe(), &shim).unwrap();
     command.env("PATH", hermetic_path(&[bin_dir]));
     shim
 }
