@@ -41,9 +41,17 @@ def _isolated_rust_test_impl(ctx):
     executable = ctx.actions.declare_file(
         ctx.label.name + (".bat" if windows else ""),
     )
+    files_by_label = {}
+    runfiles_env_files = []
+    for target in ctx.attr.runfiles_env_targets:
+        files = target[DefaultInfo].files.to_list()
+        if len(files) != 1:
+            fail("runfiles_env target {} must produce exactly one file".format(target.label))
+        files_by_label[str(target.label)] = files[0]
+        runfiles_env_files.append(files[0])
     paths = {
-        variable: ctx.expand_location(location, ctx.attr.data)
-        for variable, location in sorted(ctx.attr.runfiles_env.items())
+        variable: files_by_label[label].short_path
+        for variable, label in ctx.attr.runfiles_env.items()
     }
     if windows:
         runfiles_env = "\n".join([
@@ -63,7 +71,7 @@ def _isolated_rust_test_impl(ctx):
         ),
         is_executable = True,
     )
-    runfiles = ctx.runfiles(files = [test_binary]).merge(
+    runfiles = ctx.runfiles(files = [test_binary] + runfiles_env_files).merge(
         ctx.attr.test_binary[DefaultInfo].default_runfiles,
     )
     test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
@@ -78,9 +86,8 @@ def _isolated_rust_test_impl(ctx):
 _isolated_rust_test = rule(
     implementation = _isolated_rust_test_impl,
     attrs = {
-        # Location expansion only: the test binary's runfiles carry the files.
-        "data": attr.label_list(allow_files = True),
         "runfiles_env": attr.string_dict(),
+        "runfiles_env_targets": attr.label_list(allow_files = True),
         "test_binary": attr.label(
             executable = True,
             cfg = "target",
@@ -118,14 +125,11 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
     }
     data = list(kwargs.pop("data", []))
     present = [native.package_relative_label(entry) for entry in data]
-    located = []
     for label in runfiles_env.values():
         resolved = native.package_relative_label(label)
         if resolved not in present:
             present.append(resolved)
             data.append(label)
-        if resolved not in located:
-            located.append(resolved)
     _rust_test(
         name = binary_name,
         env = env,
@@ -139,10 +143,13 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         "tags": tags,
         "test_binary": ":" + binary_name,
         "runfiles_env": {
-            variable: "$(rlocationpath {})".format(label)
+            variable: str(native.package_relative_label(label))
             for variable, label in runfiles_env.items()
         },
-        "data": located,
+        "runfiles_env_targets": sorted({
+            native.package_relative_label(label): None
+            for label in runfiles_env.values()
+        }.keys()),
     }
     if visibility != None:
         wrapper_args["visibility"] = visibility
