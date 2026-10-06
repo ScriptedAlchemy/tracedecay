@@ -245,11 +245,11 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assert_rejected_after(
             "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
             "        with:\n"
-            "          node-version: \"22.23.2\"\n\n"
+            "          node-version: \"22.23.3\"\n\n"
             "      # Prerelease SDK versions mirror the beta release convention",
             "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
             "        with:\n"
-            "          node-version: \"22.23.2\"\n"
+            "          node-version: \"22.23.3\"\n"
             "          registry-url: https://registry.npmjs.org\n\n"
             "      # Prerelease SDK versions mirror the beta release convention",
             "'publish-typescript' must not configure setup-node registry auth; "

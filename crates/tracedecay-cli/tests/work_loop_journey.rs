@@ -415,7 +415,7 @@ fn daemon_authority_path(profile_root: &Path) -> PathBuf {
 }
 
 fn isolated(home: &Path, profile: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    let mut command = Command::new(tracedecay_exe());
     apply_isolated_profile_env(&mut command, home, profile);
     command
 }
@@ -1478,3 +1478,7 @@ fn task_item(graph: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| panic!("the journey task must be in the product graph: {graph}"))
 }
+
+#[path = "support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+use tracedecay_exe::tracedecay_exe;

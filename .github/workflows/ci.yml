@@ -29,9 +29,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
@@ -50,8 +47,6 @@ jobs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
-      windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
-      macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
       - name: Decide what this run may spend
         id: decide
@@ -78,22 +73,6 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT)"
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: |
-            .github/platform-test-partitions.json
-            scripts
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Derive the Windows test matrix
-        id: windows-partitions
-        run: echo "matrix=$(python3 scripts/platform-test-partitions.py windows-matrix)" >> "$GITHUB_OUTPUT"
-
-      - name: Derive the macOS test matrix
-        id: macos-groups
-        run: echo "matrix=$(python3 scripts/platform-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
-
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
   # this build is absent unless `run_hosts=true`.
@@ -102,52 +81,16 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: ./.github/actions/setup-pnpm
-
-      # This is the workflow's only dev-profile build, so `ci-dev-*` has one
-      # writer. Every rust-cache step in this workflow stores dependency
-      # artifacts only: the workspace crates are exactly what a push changes,
-      # so caching their outputs per run re-saved ~1 GB per push for a
-      # restore that hit nothing.
-      #
-      # Before saving, rust-cache deletes the target/ artifacts of every
-      # package whose manifest lies under its workspace root. With the default
-      # root (`.`) that was every package: `.cargo/config.toml` points the
-      # crates-io and git sources at `.pnpm/crates` inside the checkout, so
-      # each save was an empty ~2 KB entry (run 36970303886 restored one and
-      # compiled 562 crates cold). The workspace members all live under
-      # `crates/`, so rooting rust-cache there keeps the vendored dependencies
-      # and still drops the members; `../target` is the repository target
-      # directory. rust-cache hashes `<root>/Cargo.lock` into the key, so the
-      # second root exists only to key on the real lockfile: its target
-      # directory is never created, so it owns no artifacts. `v1-rust` steps
-      # past the empty `v0-rust` entries, whose exact-key hits skip a save.
-      #
-      # Only pushes and dispatches save. A pull-request run restores the
-      # base branch's entry; its own save would be scoped to its merge ref,
-      # a multi-GB copy no other PR can restore that evicts master's
-      # entries from the repository's 10 GB cache budget.
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-dev-${{ runner.os }}-${{ runner.arch }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          save-if: ${{ github.event_name != 'pull_request' }}
-          cache-on-failure: true
-
       - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: ci-linux-arm64
 
       - name: Publish the binary for the host integration jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -277,193 +220,35 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: scripts/lint-ci-commits.sh
 
-  macos-test-partition:
-    name: Test macOS ${{ matrix.group }}
+  # The macOS and Windows lanes run the same Bazel workspace the Linux
+  # authority does, on demand: they exercise target-specific behavior the
+  # Linux lane cannot prove.
+  macos-test:
+    name: Test macOS
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: macos-14
-    # Each group's budget is set in the manifest beside the group, with the
-    # measurement it rests on.
-    timeout-minutes: ${{ matrix.timeout }}
-    # Re-signs the product after release strip (see .cargo/config.toml).
-    env:
-      CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: ${{ github.workspace }}/scripts/macos-rustc-wrapper.sh
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.scope-gate.outputs.macos-groups) }}
+    timeout-minutes: 330
     steps:
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
-      # object out of this checkout to prove the checked-in corpus really is the
-      # product source at that commit. A depth-1 checkout carries only the tip,
-      # so every candidate_output/report test fails with "resolve fixture source
-      # commit: An object with id ... could not be found".
+      # object out of this checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      # `rust-analyzer` is a test dependency of this lane, not a convenience.
-      # `runtime_surface_acceptance::production_lsp_negotiates_and_projects_\
-      # canonical_context` asserts that a routed analyzer negotiates the
-      # standard methods the client declared, and the upstream `initialize`
-      # response is the only authority for those. Without the component the
-      # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
-      # routes the language and only the spawn fails. The test would then
-      # measure a missing component instead of the negotiation contract. This
-      # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
-      # here rather than through `rust-toolchain.toml`, which it overrides.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-bazel
         with:
-          components: rust-analyzer
+          cache-key: ci-macos-test
+          test-tools: "true"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
+        shell: bash
+        run: bazel test --config=ci //...
 
-      - uses: ./.github/actions/setup-pnpm
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
-
-      # rust-cache carries the dependency graph, keyed by toolchain and
-      # lockfile; the workspace crates compile fresh every run. No per-run
-      # compiler store: the perf-profile test graph wrote 15.7 GB of outputs
-      # per build on macOS, which no store inside the repository's 10 GB
-      # cache budget can hold. One writer keeps the lane at one entry:
-      # `root-suites` resolves the widest root graph (the root crate with
-      # its dev-dependencies, the CLI and the evaluator), so its save covers
-      # `root-lib` and the `root-transport` group exactly (test-transport
-      # re-resolves 31 workspace crates but no dependency unit). The lower
-      # partitions unify the dependencies differently and recompile ~100-200
-      # units against it. A lineage for them was tried and removed when
-      # `runtime` compiled in 28.5-29.6 min cold and 29.5 with a full-match
-      # cache of its own (runs 36087768140 and 36095356282), but that entry
-      # was one of the empty ones explained at the debug-cli cache step, so
-      # the comparison measured two cold builds. Crate sources come from the
-      # pnpm store that setup-pnpm restores, not from this cache. The
-      # workspace roots, prefix and push-only save are explained there.
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-test-full-${{ runner.os }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          save-if: ${{ github.event_name != 'pull_request' && matrix.group == 'root-suites' }}
-          cache-on-failure: true
-
-      # Every group job re-proves the cover and the grouping before it
-      # compiles anything: a gap found here fails the lane rather than passing
-      # it with a target nobody ran.
-      - name: Check the partitions cover every test target
-        run: |
-          python3 scripts/test-platform-test-partitions.py
-          python3 scripts/platform-test-partitions.py check
-
-      # Each partition runs in turn. The executables its suites spawn are built
-      # into the same resolution first
-      # (`build-args`; nothing for a partition whose tests spawn nothing),
-      # then nextest under the `ci` policy and the perf cargo profile with
-      # `--no-tests=fail`. One target directory for the group, so a later
-      # partition's shared units are fingerprint hits; the manifest pairs
-      # partitions of one resolution where they exist (run 36051245663 had
-      # `root-transport` re-resolve 31 workspace crates behind
-      # `root-journeys`, 18 min on three cores, and `root-dashboard-api` as
-      # a lone `-p tracedecay` selection recompile 48 workspace crates and
-      # 108 dependency units, 24 min, because the CLI's clap graph changes
-      # `mio`'s features and so tokio's and every crate above it) and
-      # otherwise balances the sums of the measured partition costs, since
-      # a group's wall time is that sum. Every partition runs
-      # even after an earlier one fails, as nextest's `ci` policy runs every
-      # test, and the step fails if any did. Every nextest run rewrites the
-      # `ci` profile's junit.xml, so each partition's report is moved under
-      # its own name before the next runs. The per-partition wall times this
-      # prints are the measurements the manifest's macOS budgets wait for.
-      - name: Run the group's partitions
-        env:
-          PARTITIONS: ${{ matrix.partitions }}
-        run: |
-          set -uo pipefail
-          run_partition() {
-            local partition="$1" build selection
-            build="$(python3 scripts/platform-test-partitions.py build-args "$partition")" || return 1
-            selection="$(python3 scripts/platform-test-partitions.py cargo-args "$partition")" || return 1
-            if [ -n "$build" ]; then
-              eval cargo build --locked --profile perf "$build" || return 1
-            fi
-            eval cargo nextest run --profile ci --cargo-profile perf --locked "$selection" --no-tests=fail
-          }
-          read -ra partitions <<< "$PARTITIONS"
-          mkdir -p target/nextest/macos
-          failed=""
-          for partition in "${partitions[@]}"; do
-            echo "::group::Test partition ${partition}"
-            started=$SECONDS
-            if run_partition "$partition"; then
-              echo "${partition}: passed in $(( SECONDS - started )) s"
-            else
-              failed="${failed} ${partition}"
-              echo "${partition}: failed after $(( SECONDS - started )) s"
-            fi
-            [ ! -f target/nextest/ci/junit.xml ] || mv target/nextest/ci/junit.xml "target/nextest/macos/${partition}.xml"
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then
-            echo "::error::Failed partitions:${failed}"
-            exit 1
-          fi
-
-      # `macos-test` folds the group reports back into one report.
-      - name: Upload macOS group nextest report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-macOS-${{ matrix.group }}
-          path: target/nextest/macos/
-          if-no-files-found: ignore
-          retention-days: 1
-
-  # The one `Test macOS` verdict, as when a single job carried the suite:
-  # every group must pass. It also folds the group reports back into the
-  # `nextest-junit-macOS` artifact the single job published, one directory
-  # per group holding a junit.xml per partition.
-  macos-test:
-    name: Test macOS
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-os == 'true' }}
-    needs: [macos-test-partition, scope-gate]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Merge the group reports into the macOS nextest report
-        if: ${{ needs.macos-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-macOS
-          pattern: nextest-junit-macOS-*
-          separate-directories: true
-          retention-days: 7
-
-      - name: Check macOS groups
-        if: ${{ !cancelled() }}
-        run: |
-          if [ "${{ needs.macos-test-partition.result }}" != "success" ]; then
-            echo "macOS group result: ${{ needs.macos-test-partition.result }}"
-            exit 1
-          fi
-          echo "All macOS groups passed."
-
-  # Preserve the existing required check name while moving Linux compile and
-  # test authority to the generated Bazel workspace.
+  # Linux compile and test authority: the generated Bazel workspace.
   linux-test:
     name: Test Linux
     needs: [scope-gate, gates]
@@ -477,34 +262,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      # The workspace build plus its test outputs outgrow the runner's free
+      # space (run 37403143722 died with ENOSPC mid-test); drop preinstalled
+      # SDKs this job never uses.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-key: ci-linux-test
+          test-tools: "true"
 
-      - name: Build the workspace
-        run: bazel build //...
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
+        run: bazel test --config=ci //...
 
-      - name: Test the workspace
-        run: bazel test //... --test_output=errors
-
-  # Windows keeps the maintained Cargo partitions because it exercises target-
-  # specific behavior that the Linux Bazel lane cannot prove. Each partition
-  # builds the executables its suites spawn in the same resolution first.
-  windows-test-partition:
-    name: Test Windows ${{ matrix.partition }}
+  windows-test:
+    name: Test Windows
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: ${{ matrix.timeout }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.scope-gate.outputs.windows-partitions) }}
+    timeout-minutes: 330
     steps:
-      # Full history for the same reason as the Linux and macOS partition
-      # jobs: the pinned search-quality fixture commit must be resolvable here.
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -514,211 +299,52 @@ jobs:
         with:
           redirect-temp: "true"
 
-      # Install only the toolchain pinned by rust-toolchain.toml, with the
-      # components it lists (`rust-analyzer` is a test dependency of the LSP
-      # negotiation acceptance). Installing `stable` as well makes
-      # Swatinem/rust-cache include an unused compiler in its environment
-      # key, fragmenting the cache whenever stable moves. The architecture
-      # tests exec `cargo metadata` at runtime under nextest, so the install
-      # has to be serial and up front: concurrent rustup shims racing to
-      # self-install corrupt each other's partial downloads.
-      - name: Install pinned toolchain
-        shell: pwsh
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - name: Use lld-link linker
-        shell: pwsh
-        run: |
-          where.exe lld-link.exe
-          lld-link.exe --version
-          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # Node so build.rs can produce the embedded dashboard dist assets for
-      # the partitions that compile the CLI.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          node-version: 22
+          cache-key: ci-windows-test
+          test-tools: "true"
 
-      - uses: ./.github/actions/setup-pnpm
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
-
-      # One dependency cache for the lane, as on Linux: `root-journeys`
-      # resolves the widest graph, so its save covers the other root
-      # partitions; the lower partitions recompile the dependency units they
-      # unify differently, beside their shorter chains. Workspace roots,
-      # prefix and push-only save: see the debug-cli step.
-      - name: Cache Windows Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-test-full-windows-msvc-lld
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          save-if: ${{ github.event_name != 'pull_request' && matrix.partition == 'root-journeys' }}
-          cache-on-failure: true
-
-      # Every partition job re-proves the cover before it compiles anything,
-      # as on Linux.
-      - name: Check the partitions cover every test target
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
         shell: bash
-        run: |
-          python scripts/test-platform-test-partitions.py
-          python scripts/platform-test-partitions.py check
+        run: bazel test --config=ci //...
 
-      - name: Resolve this partition's cargo selection
-        id: selection
-        shell: bash
-        run: |
-          {
-            echo "test=$(python scripts/platform-test-partitions.py cargo-args '${{ matrix.partition }}')"
-            echo "build=$(python scripts/platform-test-partitions.py build-args '${{ matrix.partition }}')"
-          } >> "$GITHUB_OUTPUT"
-
-      # The CLI and evaluator executables the suites spawn use the same
-      # resolution as the test build below. The test resolvers find them under
-      # target/perf, so no override or preflight is needed.
-      - name: Build the executables the suites spawn
-        if: ${{ steps.selection.outputs.build != '' }}
-        shell: bash
-        run: cargo build --locked --profile perf ${{ steps.selection.outputs.build }}
-
-      # nextest `ci` policy and the perf cargo profile, as on Linux;
-      # `--test-threads num-cpus` as the Windows shards ran, since the
-      # Windows test groups in .config/nextest.toml are sized for it.
-      - name: Run tests
-        shell: bash
-        run: cargo nextest run --profile ci --cargo-profile perf --locked ${{ steps.selection.outputs.test }} --no-tests=fail --test-threads num-cpus --status-level slow
-
-      - name: Clean abandoned Windows test children
-        if: always()
-        shell: pwsh
-        run: |
-          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $all = Get-CimInstance Win32_Process
-          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
-          foreach ($process in $all) {
-            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
-          }
-          $stale = foreach ($process in $all) {
-            if ($process.Name -ne "tracedecay.exe") {
-              continue
-            }
-            if (-not $process.CommandLine) {
-              continue
-            }
-            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace) {
-              continue
-            }
-            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
-              $process
-            }
-          }
-          foreach ($process in $stale) {
-            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
-
-      # `windows-test` folds the partition reports back into one report.
-      - name: Upload Windows partition nextest report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-Windows-${{ matrix.partition }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-          retention-days: 1
-
-  # The one `Test Windows` verdict: every partition must pass. It also folds
-  # the partition reports into the `nextest-junit-Windows` artifact, one
-  # directory per partition, as `linux-test` does.
-  windows-test:
-    name: Test Windows
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-os == 'true' }}
-    needs: [windows-test-partition, scope-gate]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Merge the partition reports into the Windows nextest report
-        if: ${{ needs.windows-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-Windows
-          pattern: nextest-junit-Windows-*
-          separate-directories: true
-          retention-days: 7
-
-      - name: Check Windows partitions
-        if: ${{ !cancelled() }}
-        run: |
-          if [ "${{ needs.windows-test-partition.result }}" != "success" ]; then
-            echo "Windows partition result: ${{ needs.windows-test-partition.result }}"
-            exit 1
-          fi
-          echo "All Windows partitions passed."
-
+  # Blocking Clippy policy over every Bazel Rust target, the
+  # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    # The free 4-vCPU Arm runner (Cobalt 100), as a measured comparison
-    # against the x64 `ubuntu-latest` this lane took 19 minutes on: same
-    # workload, same cache shape, different core. Public repositories get it
-    # at no cost; the result decides whether the partitioned test jobs move.
     concurrency:
       group: ci-clippy
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-linux-arm64
+
+      - name: Run blocking Clippy policy
+        run: bazel build --config=ci --config=clippy //...
+
+      # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
+      # first compiles in the release build. Bazel has no MSVC toolchain on
+      # Linux, so this cross-target type check stays on Cargo: `cargo check`
+      # needs no linker, and mingw supplies the C compiler the native build
+      # scripts run. macOS has no equivalent: its build scripts need the Apple
+      # SDK headers.
       - name: Install pinned toolchain and Windows check target
         run: |
           rustup toolchain install
           rustup target add x86_64-pc-windows-gnu
 
-      - uses: ./.github/actions/setup-linux-mold
-
       - uses: ./.github/actions/setup-pnpm
 
-      # Workspace roots, prefix and push-only save: see the debug-cli step.
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-clippy-full-${{ runner.os }}-${{ runner.arch }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          save-if: ${{ github.event_name != 'pull_request' }}
-          cache-on-failure: true
-
-      - name: Run blocking Clippy policy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Check lean build
-        run: cargo check -p tracedecay --no-default-features --locked
-
-      # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
-      # first compiles in the release build. `cargo check` needs no linker;
-      # mingw supplies the C compiler the native build scripts run. macOS has
-      # no equivalent: its build scripts need the Apple SDK headers.
       - name: Install the Windows C cross-compiler
         run: |
           sudo apt-get update
@@ -730,25 +356,10 @@ jobs:
           --target x86_64-pc-windows-gnu
           --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
-  # Compile-only gate for feature graphs beyond the default test-lane
-  # selections. `test-transport` acceptance suites (`mcp_suite`,
-  # `transport_acceptance_suite`, `host_journeys_suite`, `work_loop_journey`)
-  # now run as the `root-transport` Linux partition; this job still
-  # `cargo check`s the full `--features test-transport` graph so
-  # non-selected targets cannot rot until release `--all-features`.
-  #
-  # Its own job, not a tail on the Linux build: these are dev-profile check
-  # builds, a graph the perf-profile test lanes share nothing with, so there
-  # is no compiled tree to reuse and nothing to gain from waiting for one.
-  # As the last step of the Linux test job it ran only after a green
-  # suite, never once on this branch, and would have held the Linux shards
-  # back by its own duration. Here the verdict lands independently at
-  # about clippy's cost (the cold `cargo clippy --workspace --all-targets`
-  # took 13.7 min in run 34231734416).
-  # Feature wiring does not vary by host, so one OS carries the gate. No
-  # cache: it is off every lane's critical path, and another lineage would
-  # compete for the 10 GB budget the test lanes' dependency caches are
-  # already evicted from.
+  # The production feature graph must exclude test-only surfaces. The
+  # feature-gated variants themselves (every `test-transport` library and the
+  # lean `--no-default-features` root, emitted by scripts/bazel/gen_builds.py)
+  # are ordinary `//...` targets that the Clippy job compiles.
   feature-gates:
     name: Feature gates
     needs: [scope-gate, gates]
@@ -758,39 +369,24 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: ./.github/actions/setup-linux-mold
-
       - uses: ./.github/actions/setup-pnpm
-
-      - name: Check feature-gated surfaces compile
-        run: |
-          cargo check --workspace --all-targets --features test-transport --locked
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
       - name: Check the production feature graph
         run: python3 scripts/check-production-feature-profile.py
 
-  # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
-  # resolves the release build to `--no-default-features --features production`
-  # on the release profile, and nothing on a push compiled it: `debug-cli` is a
-  # dev-profile binary built only for the stock host integrations, and every
-  # other lane runs the default feature graph. A break confined to the
-  # `production` graph (the mimalloc allocator, the embedded dashboard, the
-  # release profile itself) therefore first appeared while a release was being
-  # cut, which is the most expensive place to find it.
-  #
-  # Compile plus a smoke run, on one target. The packaging battery that sits on
-  # top of this binary (`cargo package`, the extracted-crate rebuild, MCPB, the
-  # MCP stdio checks) stays in distribution-acceptance.yml, which is
-  # dispatch-only and explicitly not a ship gate. This job does not repeat any
-  # of it, and that workflow keeps its own cache lineage.
+  # The configuration users actually receive: the release build of
+  # `tracedecay-cli`, whose default features are `production`. Nothing else on
+  # a push compiles it, so a break confined to the release graph (the
+  # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
+  # first appear while a release is being cut.
   shipped-cli:
     name: Shipped CLI build (x86_64-linux)
     needs: [scope-gate, gates]
@@ -800,77 +396,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      TARGET: x86_64-unknown-linux-gnu
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: "22"
-
-      - uses: ./.github/actions/setup-pnpm
-
-      # `production` embeds the dashboard, so the bundle has to exist before
-      # cargo runs. Handing build.rs the digest of this bundle keeps the build
-      # script from building the frontend a second time.
-      - name: Build the embedded dashboard bundle
-        working-directory: dashboard
-        run: pnpm run build
-
-      - name: Pin the embedded bundle for the skip-mode build
-        shell: bash
-        run: |
-          set -euo pipefail
-          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
-
-      # rust-toolchain.toml, not floating stable: the release workflows build
-      # this configuration with the pinned compiler, so a push gate on a
-      # different one is not evidence about the same artifact.
-      - name: Resolve pinned toolchain
-        id: pin
-        shell: bash
-        run: |
-          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
-        with:
-          toolchain: ${{ steps.pin.outputs.toolchain }}
-          targets: ${{ env.TARGET }}
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      # Dependencies only. The workspace crates are what a push changes, so
-      # caching their release artifacts would re-save the tree every run for a
-      # restore that hits nothing, against the repository's 10 GB budget that
-      # the test lanes' caches are already evicted from. Workspace roots,
-      # prefix and push-only save: see the debug-cli step.
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-shipped-cli-${{ env.TARGET }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          cache-workspace-crates: "false"
-          save-if: ${{ github.event_name != 'pull_request' }}
-          cache-on-failure: true
-
       - name: Build the shipped binary
-        shell: bash
-        run: |
-          cargo build --package tracedecay-cli --bin tracedecay --release \
-            --target "$TARGET" --no-default-features --features production --locked
+        uses: ./.github/actions/build-cli
+        with:
+          config: release
+          dest: target/x86_64-unknown-linux-gnu/release
+          cache-key: release-x86_64-unknown-linux-gnu
 
       - name: Smoke-run the shipped binary
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/${TARGET}/release/tracedecay"
+          binary="target/x86_64-unknown-linux-gnu/release/tracedecay"
           test -x "$binary"
           "$binary" --version
           "$binary" --help >/dev/null
@@ -971,7 +512,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock

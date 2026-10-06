@@ -902,11 +902,11 @@ async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mu
     )
     .await;
 
-    for i in 0..5 {
+    for (i, marker) in markers.iter().enumerate() {
         store_fact(
             server,
             json!({
-                "content": format!("bench added fact {}", markers[i]),
+                "content": format!("bench added fact {}", marker),
                 "category": "tool",
                 "entities": [format!("bench-alpha-{i}"), format!("bench-beta-{i}")],
                 "trust": 0.9,
@@ -917,12 +917,12 @@ async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mu
         assert_seeded_fact_graph_is_complete(server).await;
     }
 
-    for i in 0..5 {
+    for (i, marker) in markers.iter().enumerate() {
         let iteration = 1_791_165_733_039_380_u64 + i as u64;
         let id = store_fact(
             server,
             json!({
-                "content": format!("bench seeded fact update {}", markers[i]),
+                "content": format!("bench seeded fact update {}", marker),
                 "category": "tool",
                 "entities": ["bench-update-a", format!("bench-update-b-{iteration}")],
                 "trust": 0.9,
@@ -947,12 +947,12 @@ async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mu
         assert_seeded_fact_graph_is_complete(server).await;
     }
 
-    for i in 0..5 {
+    for (i, marker) in markers.iter().enumerate() {
         let iteration = 1_791_165_733_039_385_u64 + i as u64;
         let fact_id = store_fact(
             server,
             json!({
-                "content": format!("bench seeded fact remove {}", markers[i]),
+                "content": format!("bench seeded fact remove {}", marker),
                 "category": "tool",
                 "entities": ["bench-remove-a", format!("bench-remove-b-{iteration}")],
                 "trust": 0.9,
@@ -971,12 +971,12 @@ async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mu
         assert_seeded_fact_graph_is_complete(server).await;
     }
 
-    for i in 0..5 {
+    for (i, marker) in markers.iter().enumerate() {
         let iteration = 1_791_165_733_039_390_u64 + i as u64;
         let old_id = store_fact(
             server,
             json!({
-                "content": format!("bench seeded fact sup-old {}", markers[i]),
+                "content": format!("bench seeded fact sup-old {}", marker),
                 "category": "tool",
                 "entities": ["bench-sup-old-a", format!("bench-sup-old-b-{iteration}")],
                 "trust": 0.9,
@@ -987,7 +987,7 @@ async fn fact_store_search_keeps_seeded_graph_complete_through_bounded_memory_mu
         let new_id = store_fact(
             server,
             json!({
-                "content": format!("bench seeded fact sup-new {}", markers[i]),
+                "content": format!("bench seeded fact sup-new {}", marker),
                 "category": "tool",
                 "entities": ["bench-sup-new-a", format!("bench-sup-new-b-{iteration}")],
                 "trust": 0.9,

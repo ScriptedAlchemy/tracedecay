@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.3"
 
       - uses: ./.github/actions/setup-pnpm
 
@@ -80,8 +80,8 @@ jobs:
       # that shared key restored nothing this job reads, and an exact-key hit
       # would have skipped saving this job's artifacts. Dependency artifacts
       # only: extracted packages live under a fresh temporary path every run.
-      # The workspace roots keep the vendored dependencies (see the
-      # debug-cli cache step in ci.yml).
+      # The workspace roots keep the vendored dependencies (see
+      # scripts/check-rust-cache-lineage.py).
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

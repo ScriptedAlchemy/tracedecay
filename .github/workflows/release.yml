@@ -18,7 +18,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ inputs.release_tag }}
-  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
   group: release-${{ inputs.release_tag }}
@@ -161,96 +160,25 @@ jobs:
       - name: Validate downloaded dashboard bundle
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
-      # Skip-mode cargo builds require the expected digest of the validated
-      # prebuilt bundle; the CLI build script refuses to skip without it.
-      - name: Export dashboard bundle digest for skip-mode builds
-        shell: bash
-        run: |
-          set -euo pipefail
-          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
-
-      # rust-toolchain.toml is the only compiler this job may install.
-      # Installing floating stable as well fragments rust-cache's environment
-      # key whenever stable moves (measured on Release Beta 35271070760).
-      - name: Resolve pinned toolchain
-        id: pin
-        shell: bash
-        run: |
-          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
-        with:
-          toolchain: ${{ steps.pin.outputs.toolchain }}
-          targets: ${{ matrix.target }}
-
-      - uses: ./.github/actions/setup-pnpm
-
-      # Restore before the packaging compile. Tag runs can restore only
-      # same-ref or default-branch caches; keep this shared-key stable so a
-      # later master writer can seed them. cache-workspace-crates stays false
-      # so release blobs stay inside the 10 GB GitHub cache budget. The
-      # workspace roots keep the vendored dependencies (see the debug-cli
-      # cache step in ci.yml); 2.9.2 is the first release that cleans
-      # `target/<triple>/release` as a profile instead of deleting it.
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: release-${{ matrix.target }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          cache-workspace-crates: "false"
-          cache-on-failure: true
-
-      - name: Resolve release source feature profile
-        id: release-profile
-        shell: bash
-        run: |
-          python3 scripts/resolve-release-source-profile.py \
-            --source . \
-            --target "${{ matrix.target }}" \
-            --github-output "$GITHUB_OUTPUT"
-          if [[ -f crates/tracedecay-cli/Cargo.toml ]]; then
-            echo "binary_args=--package tracedecay-cli --bin tracedecay" >> "$GITHUB_OUTPUT"
-          else
-            echo "binary_args=--bin tracedecay" >> "$GITHUB_OUTPUT"
-          fi
-
-      # make-default symlinks ld to mold, which works on this
-      # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
-      - name: Install mold
-        if: runner.os == 'Linux'
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
-        with:
-          mold-version: 2.41.0
-          make-default: true
-
-      - name: Verify mold is the default linker
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mold --version
-          ld --version | head -n 1 | grep -i mold
-
-      - name: Use lld-link
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          where.exe lld-link
-          lld-link --version
-          "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
-
-      # Re-signs the product after release strip (see .cargo/config.toml).
-      # Cargo has no per-target wrapper, so only macOS runners set it.
-      - name: Use the macOS rustc wrapper
-        if: runner.os == 'macOS'
-        shell: bash
-        run: echo "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=${GITHUB_WORKSPACE}/scripts/macos-rustc-wrapper.sh" >> "$GITHUB_ENV"
-
+      # Bazel builds the dashboard bundle it embeds; the next step proves it is
+      # byte-identical to the validated artifact above.
       - name: Build release binary for packaging
-        run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
+        uses: ./.github/actions/build-cli
+        with:
+          config: release
+          dest: target/${{ matrix.target }}/release
+          cache-key: release-${{ matrix.target }}
+
+      - name: Prove the embedded dashboard is the validated artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          validated="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          embedded="$(python3 scripts/check-dashboard-bundle.py "$(bazel info --config=release bazel-bin)/dashboard/app-dist" --print-digest)"
+          if [[ "$validated" != "$embedded" ]]; then
+            echo "Bazel embedded dashboard ${embedded}, the validated artifact is ${validated}" >&2
+            exit 1
+          fi
 
       - name: Smoke release binary
         shell: bash
@@ -778,7 +706,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.3"
 
       - name: Install reviewed npm
         run: npm install -g npm@12.0.2
@@ -834,20 +762,19 @@ jobs:
           echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
             | sha256sum -c -
 
-      - name: Build embedded dashboard for the conformance daemon
-        working-directory: dashboard
-        run: pnpm run build
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
 
-      # The workflow-global skip flag applies here too, so the freshly built
-      # bundle's digest must accompany it for the CLI build script.
-      - name: Export dashboard bundle digest for skip-mode builds
+      # The conformance suite reads TRACEDECAY_TEST_BIN; Bazel builds the
+      # dashboard bundle the daemon embeds.
+      - name: Build the real production daemon for conformance
         run: |
           set -euo pipefail
-          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
-
-      - name: Build the real production daemon for conformance
-        run: cargo build -p tracedecay-cli --bin tracedecay
+          bazel build --config=ci //crates/tracedecay-cli:tracedecay
+          built="$(bazel cquery --config=ci --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
+          echo "TRACEDECAY_TEST_BIN=${GITHUB_WORKSPACE}/${built}" >> "$GITHUB_ENV"
 
       - name: Real-daemon conformance against the exact packed tarball
         working-directory: sdks/typescript
@@ -895,7 +822,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.2"
+          node-version: "22.23.3"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are

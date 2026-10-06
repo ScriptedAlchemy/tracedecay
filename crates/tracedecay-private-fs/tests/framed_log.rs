@@ -123,7 +123,10 @@ fn prepared_publish_is_private_and_readable_through_the_adapter() {
 #[cfg(target_os = "linux")]
 #[test]
 fn durable_batch_sync_is_sized_to_its_members_not_the_filesystem() {
-    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("batch fixture root");
+    // The Bazel test launcher passes its scratch dir at run time.
+    let target_tmp = std::env::var_os("CARGO_TARGET_TMPDIR")
+        .unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into());
+    let root = tempfile::tempdir_in(target_tmp).expect("batch fixture root");
     // Incompressible, so a compressing filesystem still has to write it.
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let chunk = (0..1 << 20)
