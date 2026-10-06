@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LINEAGE_PATH = ROOT / "scripts/rust_cache_lineage.py"
 CHECKER_PATH = ROOT / "scripts/check-rust-cache-lineage.py"
 WORKFLOWS = ROOT / ".github/workflows"
+# The packaging battery still builds with Cargo behind rust-cache.
+FIXTURE = "distribution-acceptance.yml"
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -62,19 +64,19 @@ class RustCacheKeyLineageTests(unittest.TestCase):
 
 
 class WorkspaceRootTests(unittest.TestCase):
-    """Drive the checker against a scratch copy of ci.yml."""
+    """Drive the checker against a scratch copy of a Cargo-building workflow."""
 
     def setUp(self) -> None:
         self.checker = load_module(CHECKER_PATH, "check_rust_cache_lineage")
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.workflows = Path(scratch.name)
-        shutil.copyfile(WORKFLOWS / "ci.yml", self.workflows / "ci.yml")
+        shutil.copyfile(WORKFLOWS / FIXTURE, self.workflows / FIXTURE)
         self.checker.WORKFLOWS = self.workflows
 
     def _assert_rejected_after(self, old: str, new: str, reason: str) -> None:
         self.assertEqual(self.checker.main(), 0)
-        path = self.workflows / "ci.yml"
+        path = self.workflows / FIXTURE
         text = path.read_text(encoding="utf-8")
         self.assertIn(old, text)
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
@@ -87,14 +89,14 @@ class WorkspaceRootTests(unittest.TestCase):
         self._assert_rejected_after(
             "crates -> ../target\n",
             ". -> target\n",
-            "ci.yml rust-cache step must list workspace root 'crates -> ../target'",
+            f"{FIXTURE} rust-cache step must list workspace root 'crates -> ../target'",
         )
 
     def test_rejects_dropping_the_lockfile_key_root(self) -> None:
         self._assert_rejected_after(
             "            . -> target/rust-cache-lockfile-key\n",
             "",
-            "ci.yml rust-cache step must list workspace root "
+            f"{FIXTURE} rust-cache step must list workspace root "
             "'. -> target/rust-cache-lockfile-key'",
         )
 
