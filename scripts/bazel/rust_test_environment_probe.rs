@@ -16,7 +16,7 @@ fn main() {
     let runfile = std::env::var("TRACEDECAY_RUNFILE_PROBE")
         .expect("the launcher must resolve runfiles_env");
     assert_eq!(
-        std::fs::read_to_string(runfile).as_deref(),
-        Ok("runfile probe\n"),
+        std::fs::read_to_string(runfile).expect("the resolved runfile must be readable"),
+        "runfile probe\n",
     );
 }
