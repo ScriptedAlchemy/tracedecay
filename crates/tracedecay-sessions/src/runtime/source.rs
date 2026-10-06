@@ -186,7 +186,9 @@ pub(super) async fn persist_host_provider_coverage(
 /// `byte_offset` and `file_id`. Its `mtime` is a revision that lets a changed
 /// record move `byte_offset` backwards past the monotonic cursor guard. An
 /// unchanged record stays as stored, so a sweep that finds nothing new
-/// commits nothing.
+/// commits nothing. Every write stores `mtime >= 1`, so `mtime == 0` is the
+/// absent record's default: the first sweep publishes it even when its
+/// values are the defaults, or an empty host would never be observed.
 pub(super) async fn revise_host_record(
     admission: &(impl HostAdmission + ?Sized),
     scope: &ObservationScopeV1,
@@ -195,7 +197,7 @@ pub(super) async fn revise_host_record(
     byte_offset: u64,
     file_id: u64,
 ) -> Result<(), HostAdmissionOutcome> {
-    if (current.byte_offset, current.file_id) == (byte_offset, file_id) {
+    if current.mtime != 0 && (current.byte_offset, current.file_id) == (byte_offset, file_id) {
         return Ok(());
     }
     admission
