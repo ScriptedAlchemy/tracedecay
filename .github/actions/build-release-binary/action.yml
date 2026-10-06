@@ -1,0 +1,48 @@
+name: Build release binary
+description: >-
+  Build the shipped tracedecay binary with Bazel's release configuration and
+  place it where the packaging steps read it, target/<triple>/release/.
+
+inputs:
+  target:
+    description: Rust target triple the runner builds natively.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+
+    # `tracedecay-cli`'s default features are `production`, the release
+    # source profile, so the default binary target is the shipped graph.
+    - name: Build the release binary
+      shell: bash
+      run: bazel build --config=release --config=ci //crates/tracedecay-cli:tracedecay
+
+    - name: Stage the binary for packaging
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        exe=""
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          exe=".exe"
+        fi
+        built="$(bazel cquery --config=release --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
+        mkdir -p "target/${TARGET}/release"
+        cp "$built" "target/${TARGET}/release/tracedecay${exe}"
+        chmod u+w "target/${TARGET}/release/tracedecay${exe}"
+
+    # Cargo's macOS link wrapper gave the product a stable ad-hoc identity;
+    # Bazel links directly, so sign the staged file the same way install.sh
+    # and `tracedecay update` do.
+    - name: Sign the macOS binary
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: scripts/macos-stable-codesign.sh "target/${TARGET}/release/tracedecay"
