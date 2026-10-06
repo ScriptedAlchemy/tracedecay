@@ -136,7 +136,7 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
 
     def test_rejects_mutable_action_reference(self) -> None:
         self.assert_rejected_after(
-            "      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable\n"
+            "      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable\n"
             "        with:\n"
             "          toolchain: stable",
             "      - uses: dtolnay/rust-toolchain@stable\n"

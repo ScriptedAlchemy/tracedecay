@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Refreshes the root Cargo.lock on a release-please release PR so the lockfile
-# matches the bumped crate version, committing and pushing only when the
-# update changed Cargo.lock and touched nothing else. Shared by the stable and
-# beta release-please workflows so the branch extraction, drift guard, and bot
+# Refreshes generated Cargo and Bazel metadata on a release-please release PR
+# so both match the bumped crate version. Shared by the stable and beta
+# release-please workflows so the branch extraction, drift guard, and bot
 # commit cannot diverge between channels. It also neutralizes closing keywords
 # in the PR body, because a manual `release-please release-pr` refresh
 # rewrites the body without the workflow's neutralize step.
@@ -31,16 +30,23 @@ repository_root=$PWD
 # directory, so resolve from outside the checkout with the pinned toolchain.
 (cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
   -p tracedecay --precise "$release_version")
+python3 scripts/bazel/gen_builds.py
 
-if git diff --quiet -- Cargo.lock; then
-  exit 0
-fi
-
-unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
+generated_paths=(
+  Cargo.lock
+  crates/tracedecay/BUILD.bazel
+  crates/tracedecay-cli/BUILD.bazel
+  crates/tracedecay-project/BUILD.bazel
+)
+unexpected_paths=$(git diff --name-only -- . "${generated_paths[@]/#/:(exclude)}")
 if [[ -n "$unexpected_paths" ]]; then
-  echo "Cargo metadata changed unexpected paths:" >&2
+  echo "Release metadata generation changed unexpected paths:" >&2
   echo "$unexpected_paths" >&2
   exit 1
+fi
+
+if git diff --quiet -- "${generated_paths[@]}"; then
+  exit 0
 fi
 
 # The bot identity applies to this one commit only. `git config` would write
@@ -48,8 +54,8 @@ fi
 # later commits when the script runs locally.
 bot_name="github-actions[bot]"
 bot_email="41898282+github-actions[bot]@users.noreply.github.com"
-git add Cargo.lock
+git add "${generated_paths[@]}"
 GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email \
   GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
-  git commit -m "chore(release): update root lockfile"
+  git commit -m "chore(release): update generated metadata"
 git push origin "HEAD:$RELEASE_PR_BRANCH"

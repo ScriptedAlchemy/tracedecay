@@ -135,7 +135,10 @@ jobs:
       # The release PR is opened as a draft and stays one until it carries a
       # lockfile matching the bumped Cargo.toml, the same invariant the later
       # locked release build enforces.
-      - name: Update release PR lockfile
+      - uses: ./.github/actions/setup-pnpm
+        if: steps.release.outputs.prs_created == 'true'
+
+      - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

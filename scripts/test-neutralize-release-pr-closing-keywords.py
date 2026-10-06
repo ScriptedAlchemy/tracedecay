@@ -152,7 +152,7 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
     linked worktree of the operator's repository."""
 
     def run_refresh(
-        self, scratch_path: Path, cargo_stub: str
+        self, scratch_path: Path, cargo_stub: str, bazel_stub: str = ""
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path, Path, bytes]:
         main = scratch_path / "main"
         checkout = scratch_path / "checkout"
@@ -179,6 +179,17 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
             "neutralize-release-pr-closing-keywords.py",
         ):
             shutil.copy2(ROOT / "scripts" / name, main / "scripts" / name)
+        (main / "scripts" / "bazel").mkdir()
+        generator = main / "scripts" / "bazel" / "gen_builds.py"
+        generator.write_text(bazel_stub)
+        for path in (
+            "crates/tracedecay/BUILD.bazel",
+            "crates/tracedecay-cli/BUILD.bazel",
+            "crates/tracedecay-project/BUILD.bazel",
+        ):
+            build = main / path
+            build.parent.mkdir(parents=True, exist_ok=True)
+            build.write_text('version = "1.0.0-beta.57"\n')
         (main / "version.txt").write_text("1.0.0-beta.58\n")
         (main / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
         (main / "Cargo.lock").write_text("version = 4\n")
@@ -230,12 +241,19 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
         )
         return result, git_env, edited_path, remote, shared_config_before
 
-    def test_lockfile_refresh_neutralizes_the_release_pr_body(self) -> None:
+    def test_build_refresh_neutralizes_the_release_pr_body(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
-            # The lockfile already matches, the manual-refresh case that
-            # exits before any commit.
             result, _, edited_path, _, _ = self.run_refresh(
-                Path(scratch), "#!/bin/sh\nexit 0\n"
+                Path(scratch),
+                "#!/bin/sh\nexit 0\n",
+                """from pathlib import Path
+for path in (
+    "crates/tracedecay/BUILD.bazel",
+    "crates/tracedecay-cli/BUILD.bazel",
+    "crates/tracedecay-project/BUILD.bazel",
+):
+    Path(path).write_text('version = "1.0.0-beta.58"\\n')
+""",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(edited_path.exists(), "the release PR body was never rewritten")
@@ -277,7 +295,9 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
                 text=True,
             ).stdout.strip()
             bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-            self.assertEqual(pushed, f"{bot}|{bot}|chore(release): update root lockfile")
+            self.assertEqual(
+                pushed, f"{bot}|{bot}|chore(release): update generated metadata"
+            )
 
 
 if __name__ == "__main__":
