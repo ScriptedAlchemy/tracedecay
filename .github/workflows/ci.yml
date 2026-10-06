@@ -323,9 +323,6 @@ jobs:
         with:
           version: ${{ env.AST_GREP_VERSION }}
 
-      - name: Build the workspace
-        run: bazel build --config=ci //...
-
       - name: Test the workspace
         run: bazel test --config=ci //...
 
