@@ -13,10 +13,7 @@ fn sanitization_receipt_schema_preserves_the_closed_nested_authority() {
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
     let mut actual: Vec<_> = properties.keys().map(String::as_str).collect();
     actual.sort_unstable();
-    assert_eq!(
-        actual,
-        ["disposition", "payload", "receipt", "sensitivity"]
-    );
+    assert_eq!(actual, ["disposition", "payload", "receipt", "sensitivity"]);
 
     let definitions = schema["$defs"]
         .as_object()

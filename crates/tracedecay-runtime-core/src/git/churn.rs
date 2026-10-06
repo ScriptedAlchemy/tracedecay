@@ -327,10 +327,7 @@ mod tests {
             // create the file, which is equivalent to the filesystem
             // rejecting the name.
             #[cfg(target_os = "macos")]
-            Err(error)
-                if error.raw_os_error() == Some(92)
-                    || error.raw_os_error() == Some(1) =>
-            {
+            Err(error) if error.raw_os_error() == Some(92) || error.raw_os_error() == Some(1) => {
                 Ok(false)
             }
             Err(error) => Err(error),
