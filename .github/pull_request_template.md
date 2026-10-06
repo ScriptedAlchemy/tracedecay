@@ -16,8 +16,8 @@
 
 ## Test plan
 
-- [ ] `cargo nextest run --workspace --no-fail-fast` passes
-- [ ] `cargo clippy` has no new warnings
+- [ ] The affected Bazel targets pass
+- [ ] `bazel build //...` passes when the change crosses package boundaries
 - [ ] Tested manually (describe below if applicable)
 
 <!-- For new language extractors: fixture file added, extraction test added. -->

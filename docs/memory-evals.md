@@ -35,9 +35,10 @@ drift apart.
 ### Deterministic layer (no LLM, runs in CI)
 
 `tests/memory_suite/memory_eval_test.rs` replays scripted tool-call sequences through the
-real `tracedecay` binary, the same code path MCP tool calls hit, and runs in
-the normal `cargo nextest run --workspace --all-features --no-fail-fast` suite (so it is part
-of the existing CI test job on Linux/macOS/Windows; CI never calls a model).
+real `tracedecay` binary, the same code path MCP tool calls hit. Linux CI runs
+`//crates/tracedecay:memory_suite` through Bazel. The optional macOS and Windows
+lanes run the same target through their platform-specific Cargo partitions. CI
+never calls a model.
 
 Each scenario runs up to two phases:
 

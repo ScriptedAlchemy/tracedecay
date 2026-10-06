@@ -246,11 +246,15 @@ async fn pr_context_budgeted_cursor_returns_every_changed_symbol_once() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|item| item["section"] == "co_change_partners")
+                .find(|item| item["section"] == "missing_co_change_partners")
                 .expect("PR context budgets co-change partners");
             assert_eq!(
                 co_change_budget["shown"],
-                json!(page["co_change_partners"].as_array().map_or(0, Vec::len)),
+                json!(
+                    page["missing_co_change_partners"]
+                        .as_array()
+                        .map_or(0, Vec::len)
+                ),
                 "{page}"
             );
             assert!(returned > 0 && returned <= maximum_symbols, "{page}");

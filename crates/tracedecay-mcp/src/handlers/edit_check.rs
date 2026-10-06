@@ -335,7 +335,7 @@ mod tests {
                 file: "caller.rs".to_owned(),
                 line: 0,
             };
-let symbols = [target, caller];
+            let symbols = [target, caller];
             let error = signature_edits(
                 root.path(),
                 std::slice::from_ref(&symbols[0]),

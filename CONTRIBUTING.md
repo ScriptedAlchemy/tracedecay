@@ -7,8 +7,9 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ```bash
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
-cargo build -p tracedecay-cli
-cargo test-ci
+pnpm install
+bazel build //...
+bazel test //... --test_output=errors
 ```
 
 Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
@@ -18,9 +19,10 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
 `pnpm-lock.yaml` or a `Cargo.lock` changes. Besides the npm packages, it
 installs every crate into `.pnpm/crates`, which the committed
 `.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
-`cargo` cannot resolve dependencies until it has run. Install `cargo-nextest` to run the `test-ci` and
-`test-all` aliases defined in `.cargo/config.toml`. Commands below run from the
-repository root unless noted.
+`cargo` cannot resolve dependencies until it has run. Bazel is the default
+workspace build and test runner. Install `cargo-nextest` only for the maintained
+macOS, Windows, package, or external-project workflows that use it. Commands
+below run from the repository root unless noted.
 
 Two Cargo errors mean "run `pnpm install` at the repository root". Before any
 install, Cargo reports `failed to read root of directory source
@@ -113,34 +115,32 @@ workspace, not a package. `crates/tracedecay-cli/Cargo.toml` and
 | `medium` | `lite` plus Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, and VB.NET |
 | `full` (default) | `medium` plus the remaining grammars selected by the extractor crate's `full` feature |
 
-Build with fewer languages for faster compile times during development:
+Build and test the generated Bazel targets during development:
 
 ```bash
-cargo build -p tracedecay-cli --no-default-features --features lite
-cargo nextest run -p tracedecay-code-extraction --no-default-features --features lite
+bazel build //crates/tracedecay-cli:tracedecay
+bazel test //crates/tracedecay-code-extraction:main --test_output=errors
 ```
+
+Use Cargo for a feature combination only when `scripts/bazel/gen_builds.py`
+does not generate an equivalent Bazel target.
 
 ## Making Changes
 
 1. **Use the task's branch**, or branch from `master` for a new contribution. Confirm the target before working on a release-channel branch.
 2. **Write tests in the owning crate.** Extraction changes belong with `crates/tracedecay-code-extraction/`; follow nearby inline tests or crate-local integration suites and assert on extracted nodes/edges.
-3. **Run focused tests** for the affected behavior, then broaden for unresolved risk. Documentation-only edits do not require application builds. For the hosted acceptance selection:
+3. **Run the owning Bazel test target**, then broaden for unresolved risk. Documentation-only edits do not require application builds.
    ```bash
-   cargo test-ci
+   bazel test //path/to/package:target --test_output=errors
    ```
-   Cargo-launched test processes are isolated from your real `~/.tracedecay`
-   profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
-   `target/test-profile/.tracedecay` (enforced by
-   `crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
-   should still override it per-test, e.g. via
+   The `rust_test` wrapper sets `TRACEDECAY_DATA_DIR` under Bazel's
+   `TEST_TMPDIR` and disables the global database. Tests that need a private
+   profile should still override it per test with
    `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
-   `cargo test-all` additionally enables every optional feature; it is broader
-   than the hosted selection. Check each suite's `required-features` before
-   selecting it and confirm that the run executed tests rather than matching zero.
-4. **Format your code** with the standard Rust toolchain:
+4. **Format Rust code**, then build the workspace:
    ```bash
    cargo fmt
-   cargo clippy --workspace --all-targets
+   bazel build //...
    ```
 
 ### Public wire compatibility changes
@@ -198,7 +198,7 @@ schema-validation workflow. `plugin/skills/` is the shared source of truth for
 bundled skills, do not fork host-specific copies. Before submitting, run:
 
 ```bash
-cargo nextest run -p tracedecay --features test-helpers --test agent_suite
+bazel test //crates/tracedecay:agent_suite --test_output=errors
 ```
 
 See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
@@ -236,15 +236,18 @@ contract change instead.
 
 ## Running Specific Tests
 
+Run the generated Bazel test target that owns the behavior:
+
 ```bash
-# All extractor tests for a specific language
-cargo nextest run -p tracedecay-code-extraction --test main -E 'test(/^rust::/)'
+bazel test //crates/tracedecay-code-extraction:main --test_output=errors
+bazel test //crates/tracedecay:agent_suite --test_output=errors
+```
 
-# A single test by name
-cargo nextest run -p tracedecay-code-extraction --test main test_rust_file_node_is_root
+To pass a libtest filter to one target, add it after `--test_arg`, for example:
 
-# Only sync-related tests
-cargo nextest run -p tracedecay --features test-helpers sync
+```bash
+bazel test //crates/tracedecay-code-extraction:main \
+  --test_arg=test_rust_file_node_is_root --test_output=errors
 ```
 
 ## Commit Messages
