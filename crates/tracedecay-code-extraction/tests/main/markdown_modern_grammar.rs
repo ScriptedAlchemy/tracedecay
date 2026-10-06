@@ -25,8 +25,11 @@ fn timed_extract(source: String, timeout: Duration) -> Option<(f64, Vec<(NodeKin
 /// and its YAML list items must not surface as document structure.
 #[test]
 fn yaml_frontmatter_hang_reproducer() {
-    let src =
-        include_str!("../../../../tests/fixtures/markdown_yaml_frontmatter_hang.md").to_string();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/markdown_yaml_frontmatter_hang.md"
+    );
+    let src = std::fs::read_to_string(path).expect("fixture missing");
     let Some((t, nodes)) = timed_extract(src, Duration::from_secs(5)) else {
         panic!("hang reproducer still hung > 5s");
     };

@@ -1,0 +1,11 @@
+--- a/aws-lc/crypto/fipsmodule/rand/entropy/tree_drbg_jitter_entropy.c
++++ b/aws-lc/crypto/fipsmodule/rand/entropy/tree_drbg_jitter_entropy.c
+@@ -14,7 +14,7 @@
+ #include "../../../rand_extra/internal.h"
+ #include "../../../ube/internal.h"
+ 
+-#include "../../../../third_party/jitterentropy/jitterentropy-library/jitterentropy.h"
++#include "jitterentropy.h"
+ 
+ // Randomness generation implements thread-local "frontend" DRBGs that serve
+ // requests for randomness from consumers through exported functions such as

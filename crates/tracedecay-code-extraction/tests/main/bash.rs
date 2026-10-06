@@ -22,7 +22,7 @@ fn bash_overlay(version: i64, content: &str) -> ParseDocumentIdentity {
 
 #[test]
 fn test_bash_call_sites() {
-    let source = include_str!("../../../../tests/fixtures/sample.sh").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -144,7 +144,7 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
 
 #[test]
 fn test_bash_docstrings() {
-    let source = include_str!("../../../../tests/fixtures/sample.sh").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

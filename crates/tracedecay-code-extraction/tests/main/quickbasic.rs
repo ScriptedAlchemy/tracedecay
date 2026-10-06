@@ -8,7 +8,7 @@ mod quickbasic_tests {
     include!("support/edges.rs");
 
     fn extract_fixture() -> ExtractionResult {
-        let source = include_str!("../../../../tests/fixtures/sample.bi").to_owned();
+        let source = std::fs::read_to_string("../../tests/fixtures/sample.bi").unwrap();
         let extractor = QuickBasicExtractor;
         let result = extractor.extract_artifact("sample.bi", &source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

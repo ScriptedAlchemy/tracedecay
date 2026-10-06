@@ -7,10 +7,18 @@ load("@rules_rust//rust:defs.bzl", _rust_test = "rust_test")
 _POSIX_LAUNCHER = """#!/bin/sh
 set -eu
 : "${{TEST_TMPDIR:?Bazel did not provide TEST_TMPDIR}}"
+export RUSTUP_HOME="${{RUSTUP_HOME:-$HOME/.rustup}}"
+export CARGO_HOME="${{CARGO_HOME:-$HOME/.cargo}}"
+export HOME="$TEST_TMPDIR/home"
+mkdir -p "$HOME"
 export TRACEDECAY_DATA_DIR="$TEST_TMPDIR/.tracedecay"
 export TRACEDECAY_DISABLE_GLOBAL_DB=1
 export CARGO_TARGET_TMPDIR="$TEST_TMPDIR/cargo-target-tmp"
 mkdir -p "$CARGO_TARGET_TMPDIR"
+# Cargo runs a test binary from its crate directory, and suites read
+# fixtures relative to it.
+export CARGO_MANIFEST_DIR="$TEST_SRCDIR/$TEST_WORKSPACE/{package}"
+cd "$CARGO_MANIFEST_DIR"
 # Names such as CARGO_BIN_EXE_<bin> may carry `-`, which no shell variable
 # can, so each assignment goes through env as its own argument: a runfiles
 # path with spaces stays one word.
@@ -23,12 +31,27 @@ if not defined TEST_TMPDIR (
   echo Bazel did not provide TEST_TMPDIR 1>&2
   exit /b 1
 )
+if not defined RUSTUP_HOME set "RUSTUP_HOME=%USERPROFILE%/.rustup"
+if not defined CARGO_HOME set "CARGO_HOME=%USERPROFILE%/.cargo"
+set "HOME=%TEST_TMPDIR%/home"
+set "USERPROFILE=%HOME%"
+if not exist "%HOME%" mkdir "%HOME%"
 set "TRACEDECAY_DATA_DIR=%TEST_TMPDIR%/.tracedecay"
 set "TRACEDECAY_DISABLE_GLOBAL_DB=1"
 set "CARGO_TARGET_TMPDIR=%TEST_TMPDIR%/cargo-target-tmp"
 if not exist "%CARGO_TARGET_TMPDIR%" mkdir "%CARGO_TARGET_TMPDIR%"
 {runfiles_env}
-"%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}" %*
+set "TEST_PACKAGE=%TEST_SRCDIR%/%TEST_WORKSPACE%/{package}"
+set "CARGO_MANIFEST_DIR=%TEST_PACKAGE%"
+cd /d "%TEST_PACKAGE:/=\\%"
+set "TEST_BINARY=%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}"
+set "TEST_BINARY=%TEST_BINARY:/=\\%"
+if not exist "%TEST_BINARY%" (
+  echo test binary missing from the runfiles tree: %TEST_BINARY% 1>&2
+  dir /s /b "%TEST_SRCDIR%" 1>&2
+  exit /b 1
+)
+"%TEST_BINARY%" %*
 exit /b %ERRORLEVEL%
 """
 
@@ -41,6 +64,7 @@ def _runfiles_path(file, workspace):
 
 def _isolated_rust_test_impl(ctx):
     test_binary = ctx.executable.test_binary
+    toolchain = ctx.toolchains["@rules_rust//rust:toolchain_type"]
     windows = ctx.target_platform_has_constraint(
         ctx.attr._windows[platform_common.ConstraintValueInfo],
     )
@@ -61,6 +85,8 @@ def _isolated_rust_test_impl(ctx):
         variable: _runfiles_path(files_by_label[label], workspace)
         for variable, label in ctx.attr.runfiles_env.items()
     }
+    for variable, file in {"CARGO": toolchain.cargo, "RUSTC": toolchain.rustc}.items():
+        paths[variable] = _runfiles_path(file, workspace)
     if windows:
         runfiles_env = "\n".join([
             'set "{}=%TEST_SRCDIR%/{}"'.format(variable, path)
@@ -75,18 +101,24 @@ def _isolated_rust_test_impl(ctx):
         output = executable,
         content = template.format(
             binary = test_binary.short_path,
+            package = ctx.label.package,
             runfiles_env = runfiles_env,
         ),
         is_executable = True,
     )
-    runfiles = ctx.runfiles(files = [test_binary] + runfiles_env_files).merge(
+    runfiles = ctx.runfiles(
+        files = [test_binary] + runfiles_env_files,
+        transitive_files = toolchain.all_files,
+    ).merge(
         ctx.attr.test_binary[DefaultInfo].default_runfiles,
     )
     test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
+    environment = dict(test_environment.environment)
+    environment["RUSTUP_TOOLCHAIN"] = toolchain.version
     return [
         DefaultInfo(executable = executable, runfiles = runfiles),
         RunEnvironmentInfo(
-            environment = test_environment.environment,
+            environment = environment,
             inherited_environment = test_environment.inherited_environment,
         ),
     ]
@@ -103,6 +135,7 @@ _isolated_rust_test = rule(
         ),
         "_windows": attr.label(default = "@platforms//os:windows"),
     },
+    toolchains = ["@rules_rust//rust:toolchain_type"],
     test = True,
 )
 
@@ -138,6 +171,8 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         if resolved not in present:
             present.append(resolved)
             data.append(label)
+    if "crate" not in kwargs:
+        kwargs.setdefault("crate_name", name.replace("-", "_"))
     _rust_test(
         name = binary_name,
         env = env,

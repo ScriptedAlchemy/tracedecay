@@ -1,17 +1,11 @@
 use tracedecay_code_extraction::{JsonExtractor, LanguageExtractor};
 use tracedecay_domain::NodeKind;
 
+const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typescript-monorepo");
+
 fn fixture(relative: &str) -> String {
-    match relative {
-        "packages/shared/package.json" => {
-            include_str!("../../fixtures/typescript-monorepo/packages/shared/package.json")
-                .to_owned()
-        }
-        "apps/web/tsconfig.json" => {
-            include_str!("../../fixtures/typescript-monorepo/apps/web/tsconfig.json").to_owned()
-        }
-        _ => panic!("unknown fixture: {relative}"),
-    }
+    std::fs::read_to_string(format!("{FIXTURE_ROOT}/{relative}"))
+        .unwrap_or_else(|error| panic!("fixture {relative}: {error}"))
 }
 
 /// The manifest pairs the TypeScript resolver reads must survive as `Const`

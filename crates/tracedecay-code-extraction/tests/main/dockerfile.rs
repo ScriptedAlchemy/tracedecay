@@ -8,7 +8,7 @@ include!("support/edges.rs");
 
 #[test]
 fn test_dockerfile_file_node_is_root() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -24,7 +24,7 @@ fn test_dockerfile_file_node_is_root() {
 
 #[test]
 fn test_dockerfile_extract_from_stages() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -46,7 +46,7 @@ fn test_dockerfile_extract_from_stages() {
 
 #[test]
 fn test_dockerfile_extract_env_vars() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -67,7 +67,7 @@ fn test_dockerfile_extract_env_vars() {
 
 #[test]
 fn test_dockerfile_extract_arg_vars() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -85,7 +85,7 @@ fn test_dockerfile_extract_arg_vars() {
 
 #[test]
 fn test_dockerfile_extract_expose_ports() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -104,7 +104,7 @@ fn test_dockerfile_extract_expose_ports() {
 
 #[test]
 fn test_dockerfile_extract_labels() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -123,7 +123,7 @@ fn test_dockerfile_extract_labels() {
 
 #[test]
 fn test_dockerfile_contains_edges() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;
@@ -146,7 +146,7 @@ fn test_dockerfile_contains_edges() {
 
 #[test]
 fn test_dockerfile_copy_from_creates_uses_edge() {
-    let source = include_str!("../../../../tests/fixtures/sample.dockerfile").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
     let result = DockerfileExtractor
         .extract_artifact("sample.dockerfile", &source)
         .result;

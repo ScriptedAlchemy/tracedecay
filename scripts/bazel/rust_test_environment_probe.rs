@@ -1,7 +1,9 @@
 fn main() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("rules_rust must provide CARGO_MANIFEST_DIR");
-    assert_eq!(manifest_dir, "scripts");
+    let manifest_dir = std::path::PathBuf::from(manifest_dir);
+    assert!(manifest_dir.is_absolute());
+    assert_eq!(manifest_dir, std::env::current_dir().unwrap());
 
     let test_tmpdir = std::env::var("TEST_TMPDIR").expect("Bazel must provide TEST_TMPDIR");
     assert_eq!(
@@ -21,6 +23,26 @@ fn main() {
         std::path::Path::new(&test_tmpdir).join("cargo-target-tmp"),
     );
     assert!(target_tmpdir.is_dir());
+
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("isolated home"));
+    assert_eq!(home, std::path::Path::new(&test_tmpdir).join("home"));
+    assert!(home.is_dir());
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").expect("pinned test toolchain");
+    for variable in ["CARGO", "RUSTC"] {
+        let tool = std::path::PathBuf::from(std::env::var_os(variable).expect("fixture compiler"));
+        assert!(tool.is_absolute(), "{variable}={}", tool.display());
+        let output = std::process::Command::new(&tool)
+            .arg("--version")
+            .current_dir(&home)
+            .output()
+            .expect("run fixture compiler outside the workspace");
+        assert!(output.status.success(), "{variable}: {:?}", output);
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains(&toolchain)
+        );
+    }
 
     for variable in ["TRACEDECAY_RUNFILE_PROBE", "CARGO_BIN_EXE_runfile-probe"] {
         let runfile = std::env::var(variable)

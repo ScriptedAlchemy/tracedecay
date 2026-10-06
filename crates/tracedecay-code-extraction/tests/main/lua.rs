@@ -4,7 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_lua_call_sites() {
-    let source = include_str!("../../../../tests/fixtures/sample.lua").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -54,7 +54,7 @@ fn test_lua_call_sites() {
 
 #[test]
 fn test_lua_docstrings() {
-    let source = include_str!("../../../../tests/fixtures/sample.lua").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let result = LuaExtractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let docs: Vec<(&str, &str)> = result
@@ -89,7 +89,7 @@ fn test_lua_docstrings() {
 
 #[test]
 fn test_lua_local_function_is_private() {
-    let source = include_str!("../../../../tests/fixtures/sample.lua").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -108,7 +108,7 @@ fn test_lua_local_function_is_private() {
 
 #[test]
 fn test_lua_dot_function_qualified_name() {
-    let source = include_str!("../../../../tests/fixtures/sample.lua").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -132,7 +132,7 @@ fn test_lua_dot_function_qualified_name() {
 
 #[test]
 fn test_lua_signatures() {
-    let source = include_str!("../../../../tests/fixtures/sample.lua").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

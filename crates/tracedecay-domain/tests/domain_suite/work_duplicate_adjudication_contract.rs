@@ -69,10 +69,13 @@ fn duplicate_adjudication_accepts_only_generations_with_mounted_authorities() {
         "the authority-bound attempt pair is the identity; callers must not invent an alias"
     );
     let evidence = command["evidence"].clone();
-    let mut actual: Vec<_> = evidence.as_object().unwrap().keys().cloned().collect();
-    actual.sort();
     assert_eq!(
-        actual,
+        evidence
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
         ["topology_generation", "work_generation"],
         "callers cannot fabricate file, symbol, or local-anchor authority"
     );

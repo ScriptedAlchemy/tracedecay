@@ -8,7 +8,7 @@ include!("support/edges.rs");
 
 #[test]
 fn test_glsl_file_node_is_root() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -24,7 +24,7 @@ fn test_glsl_file_node_is_root() {
 
 #[test]
 fn test_glsl_extract_functions() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -56,7 +56,7 @@ fn test_glsl_extract_functions() {
 
 #[test]
 fn test_glsl_extract_structs() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -79,7 +79,7 @@ fn test_glsl_extract_structs() {
 
 #[test]
 fn test_glsl_extract_struct_fields() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -107,7 +107,7 @@ fn test_glsl_extract_struct_fields() {
 
 #[test]
 fn test_glsl_extract_uniforms() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -136,7 +136,7 @@ fn test_glsl_extract_uniforms() {
 
 #[test]
 fn test_glsl_extract_in_out_declarations() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -170,7 +170,7 @@ fn test_glsl_extract_in_out_declarations() {
 
 #[test]
 fn test_glsl_extract_preproc_defines() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -189,7 +189,7 @@ fn test_glsl_extract_preproc_defines() {
 
 #[test]
 fn test_glsl_extract_const_globals() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -205,7 +205,7 @@ fn test_glsl_extract_const_globals() {
 
 #[test]
 fn test_glsl_function_docstrings() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -223,7 +223,7 @@ fn test_glsl_function_docstrings() {
 
 #[test]
 fn test_glsl_function_signatures() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -246,7 +246,7 @@ fn test_glsl_function_signatures() {
 
 #[test]
 fn test_glsl_contains_edges() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -305,7 +305,7 @@ fn test_glsl_contains_edges() {
 
 #[test]
 fn test_glsl_call_sites() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;
@@ -336,7 +336,7 @@ fn test_glsl_call_sites() {
 
 #[test]
 fn test_glsl_complexity_metrics() {
-    let source = include_str!("../../../../tests/fixtures/sample.glsl").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor
         .extract_artifact("sample.glsl", &source)
         .result;

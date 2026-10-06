@@ -4,7 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_powershell_call_sites() {
-    let source = include_str!("../../../../tests/fixtures/sample.ps1").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -36,7 +36,7 @@ fn test_powershell_call_sites() {
 
 #[test]
 fn test_powershell_docstrings() {
-    let source = include_str!("../../../../tests/fixtures/sample.ps1").to_owned();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
