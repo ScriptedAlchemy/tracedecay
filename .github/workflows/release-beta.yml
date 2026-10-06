@@ -184,7 +184,7 @@ jobs:
 
       - name: Install mold
         if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
         with:
           mold-version: 2.41.0
           make-default: true
@@ -428,13 +428,13 @@ jobs:
 
       - name: Attest newly built prerelease archives
         if: steps.built.outputs.archives != '0'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-binaries/tracedecay-beta-*
 
       - name: Attest newly built prerelease MCPBs
         if: steps.built.outputs.bundles != '0'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-mcpbs/*.mcpb
 

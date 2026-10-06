@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
