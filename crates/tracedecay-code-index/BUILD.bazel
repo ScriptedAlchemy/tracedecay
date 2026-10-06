@@ -156,7 +156,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/code_index_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/code_index_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -171,7 +171,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -186,7 +186,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -201,7 +201,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -216,7 +216,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -231,7 +231,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -246,7 +246,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -261,7 +261,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -276,7 +276,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -291,5 +291,5 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
-    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
