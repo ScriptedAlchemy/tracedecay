@@ -16,6 +16,11 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 pub fn compiled_host_cli_fixture() -> PathBuf {
+    // Bazel hands the example over directly rather than through Cargo's
+    // target/<profile>/examples layout.
+    if let Some(fixture) = std::env::var_os("TRACEDECAY_HOST_CLI_FIXTURE") {
+        return PathBuf::from(fixture);
+    }
     let test_executable = std::env::current_exe().expect("test binary has a current_exe path");
     let profile_dir = test_executable
         .parent()
