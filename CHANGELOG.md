@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.71](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.70...v1.0.0-beta.71) (2026-10-06)
+
+
+### Bug Fixes
+
+* **ci:** restore contracts and move Linux CI to Bazel ([6ba8a84](https://github.com/ScriptedAlchemy/tracedecay/commit/6ba8a84e3aff5c0a36cc1066a482e862a4d82ca3))
+* **ci:** restore contracts and move Linux CI to Bazel ([#3106](https://github.com/ScriptedAlchemy/tracedecay/issues/3106)) ([6ba8a84](https://github.com/ScriptedAlchemy/tracedecay/commit/6ba8a84e3aff5c0a36cc1066a482e862a4d82ca3))
+* **git:** complete missing co-change partner cutover ([62a4fc6](https://github.com/ScriptedAlchemy/tracedecay/commit/62a4fc6d0f414e7ffe65a24f20619302b779af3a))
+* **windows:** cmd fixture stdin, refusal classification, and remaining path-spelling fixes ([6e188d8](https://github.com/ScriptedAlchemy/tracedecay/commit/6e188d8d6afd5a78bb254274d0ad459eb0523ea8))
+* **windows:** preserve fixture stdin and path spelling ([#3034](https://github.com/ScriptedAlchemy/tracedecay/issues/3034)) ([6e188d8](https://github.com/ScriptedAlchemy/tracedecay/commit/6e188d8d6afd5a78bb254274d0ad459eb0523ea8))
+
 ## [1.0.0-beta.70](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.69...v1.0.0-beta.70) (2026-10-05)
 
 
