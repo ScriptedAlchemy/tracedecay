@@ -38,8 +38,10 @@ genrule(
         "//scripts:check-dashboard-bundle.py",
     ],
     outs = ["bundle_sha256.txt"],
-    # Windows runners ship `python`, not `python3`.
-    cmd = "$$(command -v python3 || command -v python) $(location //scripts:check-dashboard-bundle.py) $(location :app_dist) --print-digest > $@",
+    # Windows runners ship `python`, and `python3` there may be a Store stub
+    # that cannot run, so take the first interpreter that starts.
+    cmd = "for py in python3 python; do \"$$py\" -c '' 2>/dev/null && break; done; " +
+          "\"$$py\" $(location //scripts:check-dashboard-bundle.py) $(location :app_dist) --print-digest > $@",
 )
 
 filegroup(

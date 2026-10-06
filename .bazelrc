@@ -28,6 +28,9 @@ build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-fuse-ld=b
 # character names become invalid UTF-8 (see .cargo/config.toml).
 build:windows "--action_env=CFLAGS=-DNDEBUG /utf-8"
 build:windows "--action_env=CXXFLAGS=-DNDEBUG /utf-8"
+# Genrules run Git Bash under a stripped PATH that holds no Python; hand
+# actions the runner's PATH, as Linux and macOS find python3 in /usr/bin.
+build:windows --action_env=PATH
 # Windows runfiles default to a manifest; suites read fixtures and spawn
 # binaries through the runfiles tree.
 build:windows --enable_runfiles
@@ -48,6 +51,10 @@ build:release --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going
 build:ci --show_timestamps
+build:ci --verbose_failures
+# Build scripts that compile C (aws-lc-sys) print megabytes of compiler
+# output; keep a failing script's tail visible in the log.
+build:ci --experimental_ui_max_stdouterr_bytes=16777216
 test:ci --test_summary=terse
 # Suites spawn host tools (ast-grep, node, git, and rust-analyzer through
 # the rustup proxy, which needs its homes to find the pinned toolchain).
