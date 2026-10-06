@@ -31,6 +31,9 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -97,6 +100,35 @@ BUILD_SCRIPT_ENV = {
 }
 
 
+# Workspace binaries test suites resolve at run time, keyed by the override
+# variable their helper reads (crates/tracedecay/tests/common and the SDK
+# suite). Bazel hands each over as a runfiles path, so no suite depends on
+# Cargo's target/<profile>/ layout.
+RUNTIME_BINARIES = (
+    (
+        "TRACEDECAY_TEST_BIN",
+        "//crates/tracedecay-cli:tracedecay",
+        r'(?<!fn )\btracedecay_bin\(\)|var(?:_os)?\("TRACEDECAY_TEST_BIN"\)',
+    ),
+    (
+        "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval_bin",
+        r'search_eval_bin\("tracedecay-search-eval"\)',
+    ),
+    (
+        "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval-direct",
+        # Calls only: tests/common names the override inside search_eval_bin,
+        # which every suite that includes common compiles.
+        r'\bsearch_eval_direct_bin\(\)|search_eval_bin\("tracedecay-search-eval-direct"\)',
+    ),
+)
+
+
+# Marks a resolution context that Cargo builds with `--no-default-features`.
+NO_DEFAULT_FEATURES = "!no-default-features"
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -108,6 +140,25 @@ def run(cmd, cwd=REPO):
     # into parsed feature names; --color never covers Cargo, this covers the
     # rest.
     return _ANSI.sub("", out.stdout)
+
+
+def perf_opt_levels():
+    """Cargo `perf` opt-level per package name, the profile hosted CI tests
+    with. `perf` inherits `dev`, so a package resolves to its perf override,
+    then its dev override, then the perf and dev profile defaults."""
+    profiles = tomllib.loads((REPO / "Cargo.toml").read_text())["profile"]
+    perf = profiles.get("perf", {})
+    dev = profiles.get("dev", {})
+    default = perf.get("opt-level", dev.get("opt-level", 0))
+    names = set(perf.get("package", {})) | set(dev.get("package", {}))
+    levels = {}
+    for name in names - {"*"}:
+        for profile in (perf, dev):
+            level = profile.get("package", {}).get(name, {}).get("opt-level")
+            if level is not None:
+                levels[name] = level
+                break
+    return default, levels
 
 
 def cargo_metadata():
@@ -128,6 +179,10 @@ def feature_map(pkg_name, edges, features=()):
         "cargo", "tree", "-p", pkg_name, "-e", edges,
         "-f", "{p}|{f}", "--prefix", "none", "--color", "never",
     ]
+    features = set(features)
+    if NO_DEFAULT_FEATURES in features:
+        features.discard(NO_DEFAULT_FEATURES)
+        cmd.append("--no-default-features")
     if features:
         cmd += ["--features", ",".join(sorted(features))]
     fmap = {}
@@ -286,6 +341,28 @@ def q(items):
     return ", ".join(json.dumps(i) for i in items)
 
 
+def env_dict(env):
+    """A Starlark dict literal with sorted keys."""
+    return "{" + ", ".join(
+        f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(env.items())
+    ) + "}"
+
+
+@lru_cache(maxsize=None)
+def rust_sources(roots):
+    """(path, text) for every .rs file under `roots`, read once per run: the
+    per-target scans below all walk the same test and #[path] trees."""
+    seen = {}
+    for root in roots:
+        for f in root.rglob("*.rs"):
+            seen.setdefault(f, f.read_text(errors="replace"))
+    return tuple(seen.items())
+
+
+def target_sources(t, extra_dirs=()):
+    return rust_sources((Path(t["src_path"]).resolve().parent, *extra_dirs))
+
+
 RE_PATH_ATTR = re.compile(r'^[ \t]*#\[\s*path\s*=\s*"([^"]+)"\]', re.M)
 RE_BIN_EXE = re.compile(r'CARGO_BIN_EXE_([A-Za-z0-9_-]+)')
 RE_INCLUDE = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^"]+)"')
@@ -300,6 +377,7 @@ def main():
         sys.exit("usage: gen_builds.py [--check]")
     check_only = sys.argv[1:] == ["--check"]
     meta = cargo_metadata()
+    opt_default, opt_levels = perf_opt_levels()
     members = {p["name"]: p for p in meta["packages"]}
     dir_of = {
         p["name"]: str(Path(p["manifest_path"]).parent.relative_to(REPO))
@@ -334,10 +412,18 @@ def main():
             reqs.add((edges, frozenset(req)))
         for edges, req in reqs:
             contexts[(name, edges, req)] = None
+        # CI checks every test-transport surface compiles (`cargo check
+        # --workspace --all-targets --features test-transport`), so the
+        # gated variants exist even where no test target requires them.
+        if "test-transport" in p["features"]:
+            contexts[(name, "normal,build,dev", frozenset({"test-transport"}))] = None
+    # The lean root build (`cargo check -p tracedecay --no-default-features`).
+    contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
-    for key in contexts:
-        name, edges, feats = key
-        contexts[key] = feature_map(name, edges, feats)
+    # Each context is an independent `cargo tree` walk.
+    with ThreadPoolExecutor() as pool:
+        resolved = pool.map(lambda key: feature_map(*key), list(contexts))
+        contexts.update(zip(list(contexts), resolved))
 
     base = {n: frozenset(contexts[(n, "normal,build", frozenset())][n]) for n in members}
 
@@ -515,68 +601,68 @@ def main():
         the standard resource globs or //tests:fixtures are skipped."""
         crate_dir = Path(p["manifest_path"]).parent
         covered = tuple(crate_dir / d for d in RESOURCE_DIRS)
-        base = Path(t["src_path"]).resolve().parent
         local, labels = set(), set()
-        seen = set()
-        for root in (base, *extra_dirs):
-            for f in root.rglob("*.rs"):
-                if f in seen:
+        for f, text in target_sources(t, tuple(extra_dirs)):
+            include_hits = [
+                (f.parent / m.group(1)).resolve()
+                for m in RE_INCLUDE.finditer(text)
+            ]
+            include_hits += [
+                (crate_dir / m.group(1).lstrip("/")).resolve()
+                for m in RE_INCLUDE_MANIFEST.finditer(text)
+            ]
+            for resolved in include_hits:
+                try:
+                    repo_rel = resolved.relative_to(REPO)
+                except ValueError:
                     continue
-                seen.add(f)
-                text = f.read_text(errors="replace")
-                include_hits = [
-                    (f.parent / m.group(1)).resolve()
-                    for m in RE_INCLUDE.finditer(text)
-                ]
-                include_hits += [
-                    (crate_dir / m.group(1).lstrip("/")).resolve()
-                    for m in RE_INCLUDE_MANIFEST.finditer(text)
-                ]
-                for resolved in include_hits:
-                    try:
-                        repo_rel = resolved.relative_to(REPO)
-                    except ValueError:
-                        continue
-                    if repo_rel.parts[0] == "tests":
-                        continue  # covered by //tests:fixtures
-                    if crate_dir in resolved.parents or resolved.parent == crate_dir:
-                        if not any(d in resolved.parents for d in covered):
-                            local.add(
-                                str(resolved.parent.relative_to(crate_dir))
-                                + "/**"
-                            )
-                        continue
-                    glabel, _, _ = group_label(repo_rel)
-                    labels.add(glabel)
+                if repo_rel.parts[0] == "tests":
+                    continue  # covered by //tests:fixtures
+                if crate_dir in resolved.parents or resolved.parent == crate_dir:
+                    if not any(d in resolved.parents for d in covered):
+                        local.add(
+                            str(resolved.parent.relative_to(crate_dir))
+                            + "/**"
+                        )
+                    continue
+                glabel, _, _ = group_label(repo_rel)
+                labels.add(glabel)
         return sorted(local), sorted(labels)
 
     def needed_bin_exes(p, t, extra_dirs=()):
         """CARGO_BIN_EXE_<name> literals a target's sources compile, mapped to
         that package's emitted bin target names."""
-        base = Path(t["src_path"]).resolve().parent
-        names = set()
-        for root in (base, *extra_dirs):
-            for f in root.rglob("*.rs"):
-                names.update(RE_BIN_EXE.findall(f.read_text(errors="replace")))
-        return sorted(names)
+        return sorted(
+            {name for _, text in target_sources(t, tuple(extra_dirs)) for name in RE_BIN_EXE.findall(text)}
+        )
+
+    def runtime_binaries(p, t, extra_dirs=()):
+        """{env var: label} for workspace binaries a target's sources locate
+        at run time through the shared test helpers, which read these
+        overrides before falling back to Cargo's profile directory."""
+        text = "".join(text for _, text in target_sources(t, tuple(extra_dirs)))
+        return {
+            variable: label
+            for variable, label, pattern in RUNTIME_BINARIES
+            if re.search(pattern, text)
+        }
 
     def needs_env_tmpdir(p, t, extra_dirs=()):
         """True when a target's sources compile env!("CARGO_TARGET_TMPDIR"),
         which Cargo exports only for integration-test units."""
-        rel = rel_src(p, t)
-        if rel.startswith(".."):
-            base = Path(t["src_path"]).resolve().parent
-        else:
-            base = Path(p["manifest_path"]).parent / rel
-            base = base.parent
         return any(
-            "CARGO_TARGET_TMPDIR" in f.read_text(errors="replace")
-            for root in (base, *extra_dirs)
-            for f in root.rglob("*.rs")
+            "CARGO_TARGET_TMPDIR" in text
+            for _, text in target_sources(t, tuple(extra_dirs))
         )
 
     def render_build(p):
         name = p["name"]
+        # Mirror the Cargo `perf` profile hosted CI tests with: the package's
+        # opt-level with debug assertions and overflow checks on. `-c opt`
+        # (release) keeps the toolchain's own opt-level 3 without assertions.
+        rustc_flags_attr = (
+            f"    rustc_flags = perf_rustc_flags({opt_levels.get(name, opt_default)}),"
+        )
         used_names = set()
 
         def unique_name(want):
@@ -609,7 +695,7 @@ def main():
             'load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")\n'
             'load("@rules_rust//cargo:defs.bzl", "cargo_build_script")\n'
             'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
-            'load("//scripts:bazel/rust_test.bzl", "rust_test")\n'
+            'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
         )
 
         if lib_t:
@@ -656,6 +742,7 @@ def main():
                     "    deps = all_crate_deps(normal = True) + [" + q(deps) + "],",
                     '    proc_macro_deps = all_crate_deps(proc_macro = True),',
                     '    aliases = aliases(normal = True),',
+                    rustc_flags_attr,
                     "    crate_features = ["
                 + q(sorted(next(fs for m, fs, _ in closure if m == name)))
                 + "],",
@@ -685,11 +772,7 @@ def main():
             if data_labels or BUILD_SCRIPT_DATA_EXTRA.get(name):
                 out.append(f"    data = {data_expr},")
             if BUILD_SCRIPT_ENV.get(name):
-                pairs = ", ".join(
-                    f"{json.dumps(k)}: {json.dumps(v)}"
-                    for k, v in BUILD_SCRIPT_ENV[name].items()
-                )
-                out.append(f"    build_script_env = {{{pairs}}},")
+                out.append(f"    build_script_env = {env_dict(BUILD_SCRIPT_ENV[name])},")
             out.append(")\n")
 
         for t in p["targets"]:
@@ -753,6 +836,7 @@ def main():
                 "    aliases = aliases(normal = True"
                 + (", normal_dev = True" if dev_args else "")
                 + "),",
+                rustc_flags_attr,
                 f"    crate_features = [{q(sorted(fmap[name]))}],",
                 ")\n",
             ]
@@ -798,30 +882,22 @@ def main():
                 )
             if inc_labels_t:
                 compile_data += " + [" + q(inc_labels_t) + "]"
+            # env! needs compile-time values; the suites read the launcher's
+            # runtime values first (scripts/bazel/rust_test.bzl), which stay
+            # valid after a changed cwd and on every host.
             rustc_env = {}
             if needs_env_tmpdir(p, t, mod_pulled):
                 rustc_env["CARGO_TARGET_TMPDIR"] = "/tmp"
-            bin_data = []
+            runfiles_env = {}
             for bin_name in needed_bin_exes(p, t, mod_pulled):
                 emitted = bin_target_names.get(bin_name)
                 if emitted is None:
                     continue
-                rustc_env[f"CARGO_BIN_EXE_{bin_name}"] = (
-                    f"$(location :{emitted})"
-                )
-                bin_data.append(f":{emitted}")
-            env_attr = (
-                "    rustc_env = {"
-                + ", ".join(
-                    f"{json.dumps(k)}: {json.dumps(v)}"
-                    for k, v in sorted(rustc_env.items())
-                )
-                + "},"
-                if rustc_env
-                else None
-            )
-            if bin_data:
-                data += " + [" + q(bin_data) + "]"
+                rustc_env[f"CARGO_BIN_EXE_{bin_name}"] = f"$(rootpath :{emitted})"
+                runfiles_env[f"CARGO_BIN_EXE_{bin_name}"] = f"//{dir_of[name]}:{emitted}"
+            for variable, target in runtime_binaries(p, t, mod_pulled).items():
+                runfiles_env.setdefault(variable, target)
+            env_attr = "    rustc_env = " + env_dict(rustc_env) + "," if rustc_env else None
             out += [
                 "rust_test(",
                 f'    name = "{unique_name(t["name"])}",',
@@ -834,10 +910,12 @@ def main():
                 '    proc_macro_deps = all_crate_deps('
                 "proc_macro = True, proc_macro_dev = True),",
                 '    aliases = aliases(normal = True, normal_dev = True),',
+                rustc_flags_attr,
                 f"    crate_features = [{q(sorted(fmap[name]))}],",
                 f'    compile_data = {compile_data},',
                 f'    data = {data},',
                 env_attr,
+                "    runfiles_env = " + env_dict(runfiles_env) + "," if runfiles_env else None,
                 ")\n",
             ]
             out = [l for l in out if l is not None]
@@ -862,6 +940,7 @@ def main():
                 '    proc_macro_deps = all_crate_deps('
                 "proc_macro = True, proc_macro_dev = True),",
                 '    aliases = aliases(normal = True, normal_dev = True),',
+                rustc_flags_attr,
                 '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
                 '        + ["//tests:fixtures"]'
                 + (f"\n        + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
@@ -950,6 +1029,29 @@ def main():
             # nothing renders, so flag it for removal rather than writing.
             return None
         return BANNER + "\n" + block + "\n"
+
+    # External crates Cargo's perf profile optimizes past the dev default.
+    # crate_universe names their repositories `crates__<name>-<version>`, and
+    # rules_rust matches per-crate flags on the crate root's exec path.
+    locked = tomllib.loads((REPO / "Cargo.lock").read_text())["package"]
+    external_flags = []
+    for package in sorted(locked, key=lambda pkg: (pkg["name"], pkg["version"])):
+        level = opt_levels.get(package["name"])
+        if package["name"] in members or level is None:
+            continue
+        prefix = f"external/+crate+crates__{package['name']}-{package['version']}/"
+        external_flags.append(
+            f'build "--@rules_rust//rust/settings:per_crate_rustc_flag={prefix}@-Copt-level={level}"'
+        )
+    bazelrc = REPO / ".bazelrc"
+    rc_block = (
+        GEN_BEGIN
+        + "\n# Cargo perf opt-levels for external crates (see [profile.perf]).\n"
+        + "\n".join(external_flags)
+        + "\n"
+        + GEN_END
+    )
+    outputs[bazelrc] = splice_generated(bazelrc.read_text(), rc_block, bazelrc)
 
     by_pkg = {}
     for (pkg_dir, gname), entry in out_of_pkg.items():

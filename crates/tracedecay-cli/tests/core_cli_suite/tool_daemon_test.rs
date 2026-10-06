@@ -71,7 +71,7 @@ enum FakeDaemonResponse {
 fn cli_build_version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
-        let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        let output = Command::new(crate::tracedecay_exe())
             .arg("--version")
             .output()
             .expect("the built tracedecay binary should run");

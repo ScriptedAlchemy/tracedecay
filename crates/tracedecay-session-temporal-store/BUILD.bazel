@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
-load("//scripts:bazel/rust_test.bzl", "rust_test")
+load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-session-temporal-store",
@@ -21,7 +21,25 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-query:tracedecay-query", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers_+test-transport__d87ca9b1f50__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-query:tracedecay-query__d60082b01e7__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers", "test-transport"],
 )
 
 rust_library(
@@ -37,6 +55,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21__dev", "//crates/tracedecay-query:tracedecay-query__d6e4a0c4586__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -53,6 +72,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d7df71dbe6d__dev", "//crates/tracedecay-query:tracedecay-query__d7989a5b5e6__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -69,6 +89,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d7df71dbe6d__dev", "//crates/tracedecay-query:tracedecay-query__de21ecc9def__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -85,6 +106,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__d3598b0b07a__dev", "//crates/tracedecay-query:tracedecay-query__de21ecc9def__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d38ea41278b__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -101,6 +123,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__d3598b0b07a__dev", "//crates/tracedecay-query:tracedecay-query__d59d4007a71__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d38ea41278b__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -117,6 +140,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d7df71dbe6d__dev", "//crates/tracedecay-query:tracedecay-query__d0adc99dcad__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -133,6 +157,24 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d609c842489__dev", "//crates/tracedecay-query:tracedecay-query__d8b69fc4132__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d6e09195f42__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__dda353dbd67__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers__d6b6fef8b0d__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-query:tracedecay-query__daf9cd0b3d5__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -149,6 +191,41 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-query:tracedecay-query__d60082b01e7__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers__d97fdb41d04__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-query:tracedecay-query__d632129d751__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers__d9e556a4e95__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-query:tracedecay-query__deda062f225__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -165,6 +242,24 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21__dev", "//crates/tracedecay-query:tracedecay-query__+test-helpers__d73fa241f48__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers__dbfe7e0c471__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21__dev", "//crates/tracedecay-query:tracedecay-query__d84435883cf__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -181,6 +276,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d609c842489__dev", "//crates/tracedecay-query:tracedecay-query__d515920843a__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d6e09195f42__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__dda353dbd67__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -197,6 +293,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21__dev", "//crates/tracedecay-query:tracedecay-query__d6462988e63__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -213,6 +310,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21__dev", "//crates/tracedecay-query:tracedecay-query__d6374928ab3__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d9f9da69426__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -229,6 +327,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d609c842489__dev", "//crates/tracedecay-query:tracedecay-query__d002bae91ce__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d6e09195f42__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__dda353dbd67__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -245,6 +344,24 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d7df71dbe6d__dev", "//crates/tracedecay-query:tracedecay-query__d59d4007a71__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-session-temporal-store__+test-helpers__df01c1a29f0__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_session_temporal_store",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__d53080de818__dev", "//crates/tracedecay-query:tracedecay-query__d60082b01e7__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d53fda48b7c__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
 )
 
@@ -261,6 +378,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-query:tracedecay-query__d7f69c9e921", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -277,6 +395,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__dev", "//crates/tracedecay-lcm:tracedecay-lcm__dev", "//crates/tracedecay-query:tracedecay-query__d322fcd6388__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-sessions:tracedecay-sessions__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -293,6 +412,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__dev", "//crates/tracedecay-lcm:tracedecay-lcm__dev", "//crates/tracedecay-query:tracedecay-query__dbb04118824__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-sessions:tracedecay-sessions__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -309,6 +429,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-query:tracedecay-query__d9e0070c22b", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -325,6 +446,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-query:tracedecay-query__d070f9adee7", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store", "//crates/tracedecay-temporal-query:tracedecay-temporal-query"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -341,6 +463,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d56232f5837__dev", "//crates/tracedecay-lcm:tracedecay-lcm__dddb084b8da__dev", "//crates/tracedecay-query:tracedecay-query__d5034430ab4__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dev", "//crates/tracedecay-sessions:tracedecay-sessions__dbabf9410e0__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -352,6 +475,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d47fae96a64__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__d7df71dbe6d__dev", "//crates/tracedecay-query:tracedecay-query__d59d4007a71__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
+    rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     data = glob(["tests/**"], allow_empty = True),
