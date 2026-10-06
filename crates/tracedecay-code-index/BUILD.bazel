@@ -230,6 +230,23 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-code-index__+test-helpers_-default_-medium__d5a1c8c0de4__dev",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_code_index",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__-default__db02d42abe5__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d56232f5837__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["full", "lang-markdown", "lite", "test-helpers"],
+)
+
+rust_library(
     name = "tracedecay-code-index__+test-helpers_-default_-medium__d6b3bfd7fd2__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
@@ -240,6 +257,23 @@ rust_library(
         + ["//tests:fixtures"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d6e09195f42__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["full", "lang-markdown", "lite", "test-helpers"],
+)
+
+rust_library(
+    name = "tracedecay-code-index__+test-helpers_-default_-medium__df9e1f0d367",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_code_index",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__-default__db02d42abe5", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),
@@ -513,7 +547,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/code_index_suite/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/code_index_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -528,7 +562,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -543,7 +577,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -558,7 +592,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -573,7 +607,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -588,7 +622,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -603,7 +637,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -618,7 +652,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -633,7 +667,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(

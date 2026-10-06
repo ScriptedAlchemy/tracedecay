@@ -111,6 +111,23 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-source-edit__d340744629e",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_source_edit",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__-default__db02d42abe5", "//crates/tracedecay-code-index:tracedecay-code-index__+test-helpers_-default_-medium__df9e1f0d367", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c", "//crates/tracedecay-graph-query:tracedecay-graph-query__+test-helpers__dab4f9a8c1e", "//crates/tracedecay-privacy:tracedecay-privacy__d5069d59de6", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = [],
+)
+
+rust_library(
     name = "tracedecay-source-edit__d5e34b851f8__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",

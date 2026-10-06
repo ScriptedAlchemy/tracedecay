@@ -60,6 +60,23 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-agent-hosts__+test-transport_+token-counting__dfdb560b2e6",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_agent_hosts",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"] + ["//dashboard:hermes_wrapper", "//plugin:sources", "//plugin/chatgpt-extension:sources", "//plugin/cursor-native-extension:sources"] + ["//crates/tracedecay-hooks:fixtures_host_events_claude", "//dashboard:hermes-wrapper", "//dashboard:hermes-wrapper_src", "//plugin:opencode", "//plugin:pi", "//plugin:pi_skill"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-application:tracedecay-application__+test-helpers_+test-transport__ddd28a994a7", "//crates/tracedecay-automation-runtime:tracedecay-automation-runtime__+test-helpers_+test-transport__d58edc13fd8", "//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-code-index-runtime:tracedecay-code-index-runtime__+full_+lite_+test-helpers_+test-transport__d836e3fea7b", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d591ef487a2", "//crates/tracedecay-hooks:tracedecay-hooks__d12cdd5874c", "//crates/tracedecay-host-integration:tracedecay-host-integration", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21", "//crates/tracedecay-lsp:tracedecay-lsp__d10f91cb59c", "//crates/tracedecay-mcp-catalog:tracedecay-mcp-catalog__de9b886cae3", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10", "//crates/tracedecay-query:tracedecay-query__d54b5b9d29d", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__db5829de082", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__d55eb65c422", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e", "//crates/tracedecay-store:tracedecay-store__da358832c76", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog", ":build_script_build"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["default", "test-transport", "token-counting"],
+)
+
+rust_library(
     name = "tracedecay-agent-hosts__+test-transport__d39fa597b05__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
@@ -288,7 +305,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -303,7 +320,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(

@@ -512,6 +512,7 @@ def main():
         # gated variants exist even where no test target requires them.
         if "test-transport" in p["features"]:
             contexts[(name, "normal,build,dev", frozenset({"test-transport"}))] = None
+    contexts[("tracedecay-cli", "normal,build", frozenset({"test-transport"}))] = None
     # The lean root build (`cargo check -p tracedecay --no-default-features`).
     contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
@@ -779,7 +780,7 @@ def main():
             return cand
         build_tree = contexts[(name, "normal,build", frozenset())]
         dev_tree = contexts[(name, "normal,build,dev", frozenset())]
-        bin_target_names = {}  # cargo bin name -> emitted Bazel target name
+        bin_target_names = {}  # (Cargo bin name, extra features) -> Bazel target name
         md = member_deps_of[name]
         lib_t = next((t for t in p["targets"] if "lib" in t["kind"]), None)
         has_build = any("custom-build" in t["kind"] for t in p["targets"])
@@ -870,11 +871,17 @@ def main():
                 out.append(f"    build_script_env = {env_dict(BUILD_SCRIPT_ENV[name])},")
             out.append(")\n")
 
-        for t in p["targets"]:
+        binary_targets = [(t, frozenset()) for t in p["targets"]]
+        if name == "tracedecay-cli":
+            binary_targets += [
+                (t, frozenset({"test-transport"}))
+                for t in p["targets"] if "bin" in t["kind"]
+            ]
+        for t, extra_features in binary_targets:
             kinds = t["kind"]
             if not ({"bin", "example"} & set(kinds)):
                 continue
-            req = frozenset(t.get("required-features") or [])
+            req = frozenset(t.get("required-features") or []) | extra_features
             if "example" in kinds:
                 fmap = contexts[(name, "normal,build,dev", req)]
                 edges = md["normal"] + md["dev"]
@@ -909,11 +916,17 @@ def main():
                 srcs += " + [" + q(bin_labels) + "]"
             # Cargo builds examples against the dev resolution.
             dev_args = "example" in kinds
-            emitted = unique_name(t["name"])
-            bin_target_names[t["name"]] = emitted
+            suffix = "__test_transport" if extra_features else ""
+            emitted = unique_name(t["name"] + suffix)
+            bin_target_names[(t["name"], extra_features)] = emitted
             out += [
                 "rust_binary(",
                 f'    name = "{emitted}",',
+                *([
+                    "    testonly = True,",
+                    f'    binary_name = "test-transport/{t["name"]}",',
+                    f'    crate_name = "{t["name"].replace("-", "_")}",',
+                ] if extra_features else []),
                 "    srcs = " + srcs + ",",
                 f'    crate_root = {crate_root},',
                 '    edition = crate_edition(),',
@@ -962,9 +975,11 @@ def main():
                 srcs += " + glob([" + q(mod_local) + "])"
             if mod_labels:
                 srcs += " + [" + q(mod_labels) + "]"
-            data = srcs if srcs.startswith("[") else f'glob(["{str(Path(rel_src(p, t)).parent)}/**"])' +                 (" + [" + q(mod_labels) + "]" if mod_labels else "")
-            if not data.startswith("["):
-                data += ' + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+            data = srcs if srcs.startswith("[") else (
+                f'glob(["{str(Path(rel_src(p, t)).parent)}/**",'
+                '"tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+                + (" + [" + q(mod_labels) + "]" if mod_labels else "")
+            )
             # Suites read the shared fixtures as ../../tests/fixtures from the
             # crate directory, where the launcher starts them.
             data += ' + ["//tests:fixtures"]'
@@ -988,12 +1003,19 @@ def main():
                 rustc_env["CARGO_TARGET_TMPDIR"] = "/tmp"
             runfiles_env = {}
             for bin_name in needed_bin_exes(p, t, mod_pulled):
-                emitted = bin_target_names.get(bin_name)
+                binary_features = (
+                    frozenset({"test-transport"})
+                    if name == "tracedecay-cli" and "test-transport" in fmap[name]
+                    else frozenset()
+                )
+                emitted = bin_target_names.get((bin_name, binary_features))
                 if emitted is None:
                     continue
                 rustc_env[f"CARGO_BIN_EXE_{bin_name}"] = f"$(rootpath :{emitted})"
                 runfiles_env[f"CARGO_BIN_EXE_{bin_name}"] = f"//{dir_of[name]}:{emitted}"
             for variable, target in runtime_binaries(p, t, mod_pulled).items():
+                if variable == "TRACEDECAY_TEST_BIN" and "test-transport" in fmap[name]:
+                    target += "__test_transport"
                 runfiles_env.setdefault(variable, target)
             env_attr = "    rustc_env = " + env_dict(rustc_env) + "," if rustc_env else None
             out += [

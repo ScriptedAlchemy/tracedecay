@@ -163,6 +163,9 @@ pub fn apply_hermetic_child_env(command: &mut Command, home: &Path) {
         // inside the isolated home so it can never stop the real
         // `tracedecay.service`.
         .env("XDG_RUNTIME_DIR", home.join("run"))
+        // Host discovery may invoke gh; its telemetry must not write a device
+        // identity into the fixture home or send fixture activity upstream.
+        .env("GH_TELEMETRY", "0")
         .env("PATH", hermetic_path::<&Path>(&[]));
 }
 

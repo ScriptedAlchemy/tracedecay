@@ -60,6 +60,23 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay__+test-helpers_+test-transport_-default__d9886734483",
+    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support"],
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
+    version = "1.0.0-beta.72",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-agent-hosts:tracedecay-agent-hosts__+test-transport_+token-counting__dfdb560b2e6", "//crates/tracedecay-api:tracedecay-api", "//crates/tracedecay-application:tracedecay-application__+test-helpers_+test-transport__ddd28a994a7", "//crates/tracedecay-automation-runtime:tracedecay-automation-runtime__+test-helpers_+test-transport__d58edc13fd8", "//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-code-extraction:tracedecay-code-extraction__-default__db02d42abe5", "//crates/tracedecay-code-index-retention:tracedecay-code-index-retention__+test-helpers__dcf197e1e92", "//crates/tracedecay-code-index-runtime:tracedecay-code-index-runtime__+full_+lite_+test-helpers_+test-transport__d836e3fea7b", "//crates/tracedecay-code-index:tracedecay-code-index__+test-helpers_-default_-medium__df9e1f0d367", "//crates/tracedecay-configuration:tracedecay-configuration__d9a25e426a2", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-daemon-control:tracedecay-daemon-control__d146835ee3e", "//crates/tracedecay-daemon-identity:tracedecay-daemon-identity__d23eaca7027", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__df34e485125", "//crates/tracedecay-daemon-service:tracedecay-daemon-service__+test-helpers__d324a4b40f1", "//crates/tracedecay-dashboard-api:tracedecay-dashboard-api__+test-transport_+token-counting__d933828f8c2", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d591ef487a2", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d9385b4b04c", "//crates/tracedecay-graph-query:tracedecay-graph-query__+test-helpers__dab4f9a8c1e", "//crates/tracedecay-hooks:tracedecay-hooks__d12cdd5874c", "//crates/tracedecay-host-admission:tracedecay-host-admission__+test-helpers_+test-transport__d3025d38f13", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21", "//crates/tracedecay-lsp:tracedecay-lsp__d10f91cb59c", "//crates/tracedecay-maintenance:tracedecay-maintenance__+test-helpers__d70f1e54906", "//crates/tracedecay-mcp:tracedecay-mcp__+test-helpers_+test-transport__d8b5d9aa76e", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-privacy:tracedecay-privacy__d5069d59de6", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10", "//crates/tracedecay-project:tracedecay-project__+test-helpers_+test-transport__db74a9a219d", "//crates/tracedecay-query:tracedecay-query__d54b5b9d29d", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__db5829de082", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__d55eb65c422", "//crates/tracedecay-session-runtime:tracedecay-session-runtime__+test-helpers__d9e69636f62", "//crates/tracedecay-session-temporal-store:tracedecay-session-temporal-store__+test-helpers__dfc9f5aaaa1", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d8e2c100e2e", "//crates/tracedecay-source-edit:tracedecay-source-edit__d340744629e", "//crates/tracedecay-store-runtime:tracedecay-store-runtime__+test-helpers__d2d136757f2", "//crates/tracedecay-store:tracedecay-store__da358832c76", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = ["full", "lite", "production", "test-helpers", "test-transport", "token-counting"],
+)
+
+rust_library(
     name = "tracedecay__+test-helpers_+test-transport__db57d3e07b4__dev",
     srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support"],
     crate_root = "src/lib.rs",
@@ -187,7 +204,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/agent_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/agent_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -204,7 +221,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/automation_runner_test/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/automation_runner_test/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -221,7 +238,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:claude-observation"],
-    data = glob(["tests/claude_observation_benchmark/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/claude_observation_benchmark/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -236,7 +253,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:claude-observation", "//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-application:src_advisory_fixtures_provider_branch_review", "//crates/tracedecay-domain:tests_fixtures", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_cursor", "//crates/tracedecay-hooks:fixtures_host_events_droid", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi", "//crates/tracedecay-session-memory:src", "//plugin:skills_managing-session-context", "//plugin:skills_managing-session-context_references"],
-    data = glob(["tests/**"]) + ["//crates/tracedecay-domain:tests", "//crates/tracedecay-domain:tests_domain_suite_work_product_contract", "//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay-domain:tests", "//crates/tracedecay-domain:tests_domain_suite_work_product_contract", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN": "//crates/tracedecay-search-eval:tracedecay-search-eval-direct", "TRACEDECAY_SEARCH_EVAL_TEST_BIN": "//crates/tracedecay-search-eval:tracedecay-search-eval_bin", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -253,7 +270,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/daemon_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/daemon_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -270,9 +287,9 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/dashboard_api_test/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/dashboard_api_test/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
+    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test_transport"},
 )
 
 rust_test(
@@ -287,7 +304,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/graph_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/graph_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -304,7 +321,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//plugin:skills_managing-session-context", "//plugin:skills_managing-session-context_references"],
-    data = glob(["tests/hermes_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/hermes_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -321,7 +338,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_cursor", "//crates/tracedecay-hooks:fixtures_host_events_droid", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/hooks_lsp_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/hooks_lsp_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -338,9 +355,9 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-session-memory:src"],
-    data = glob(["tests/mcp_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/mcp_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
+    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test_transport"},
 )
 
 rust_test(
@@ -355,7 +372,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/memory_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/memory_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -372,7 +389,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_cursor", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode"],
-    data = glob(["tests/product_surface_suite/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/product_surface_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     runfiles_env = {"TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN": "//crates/tracedecay-search-eval:tracedecay-search-eval-direct"},
 )
 
@@ -388,7 +405,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-application:src_advisory_fixtures_provider_branch_review", "//crates/tracedecay-domain:tests_fixtures", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_cursor"],
-    data = glob(["tests/runtime_acceptance_suite/**"]) + ["//crates/tracedecay-domain:tests", "//crates/tracedecay-domain:tests_domain_suite_work_product_contract", "//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/runtime_acceptance_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay-domain:tests", "//crates/tracedecay-domain:tests_domain_suite_work_product_contract", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_SEARCH_EVAL_TEST_BIN": "//crates/tracedecay-search-eval:tracedecay-search-eval_bin", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -405,7 +422,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/session_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/session_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -437,7 +454,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events_cursor"],
-    data = glob(["tests/storage_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/storage_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -454,7 +471,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/transcript_ingest_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/transcript_ingest_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
 )
@@ -471,9 +488,9 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/transport_acceptance_suite/**"]) + ["//tests:support"] + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/transport_acceptance_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay"},
+    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test_transport"},
 )
 
 rust_test(
@@ -488,7 +505,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -503,7 +520,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -518,7 +535,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "test-helpers", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -533,7 +550,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -548,7 +565,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["benches/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(

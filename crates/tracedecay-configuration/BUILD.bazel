@@ -196,6 +196,23 @@ rust_library(
 )
 
 rust_library(
+    name = "tracedecay-configuration__d9a25e426a2",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_configuration",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d591ef487a2", "//crates/tracedecay-lcm:tracedecay-lcm__d8f45fd3c21", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__d55eb65c422"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(1),
+    crate_features = [],
+)
+
+rust_library(
     name = "tracedecay-configuration__dbe588740a1__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
