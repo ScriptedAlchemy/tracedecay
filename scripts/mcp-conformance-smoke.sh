@@ -35,7 +35,7 @@ INIT_STDERR=""
 run_smoke() {
   local work_dir="$1"
   local fixture="$2"
-  local tools_a tools_b call_out res_out
+  local tools_a tools_b call_out res_out unknown_out
   local diagnostics_out affected_out test_map_out test_map_err symbol_json impact_out impact_err node_id
   local failures=0
 
@@ -263,11 +263,14 @@ NODE
     fail "resources/list exposes tracedecay://status"
   fi
 
-  # 6. Error path: unknown tool must fail with a nonzero exit code.
-  if inspect --method tools/call --tool-name definitely_not_a_tool >/dev/null 2>&1; then
-    fail "tools/call unknown tool exits nonzero"
+  # 6. Error path: an unknown tool is a typed refusal, which MCP delivers as
+  # an isError tool result rather than a JSON-RPC error.
+  unknown_out="$work_dir/unknown.json"
+  if inspect --method tools/call --tool-name definitely_not_a_tool > "$unknown_out" 2>/dev/null &&
+    json_assert "$unknown_out" 'j.isError === true && j.structuredContent?.problem?.code === "unknown_tool"'; then
+    ok "tools/call unknown tool is a typed refusal"
   else
-    ok "tools/call unknown tool exits nonzero"
+    fail "tools/call unknown tool is a typed refusal"
   fi
 
   if ((failures > 0)); then
