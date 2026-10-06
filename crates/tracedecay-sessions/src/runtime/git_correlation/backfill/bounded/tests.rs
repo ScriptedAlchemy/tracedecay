@@ -1974,24 +1974,21 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
 fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
     use std::os::unix::ffi::OsStringExt as _;
 
+    let control = directory.join("filename-control");
+    std::fs::write(&control, b"")?;
+    std::fs::remove_file(control)?;
+
     let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             std::fs::remove_file(&probe)?;
             Ok(true)
         }
-        // Darwin exposes an invalid byte sequence as EILSEQ (92). Rust
-        // deliberately leaves that errno uncategorized, so keep this
-        // capability exception local to the one platform whose filesystem
-        // rejects the probe name.
-        // Bazel's darwin-sandbox may also return PermissionDenied (1)
-        // when the sandbox policy blocks the write — the probe cannot
-        // create the file, which is equivalent to the filesystem
-        // rejecting the name.
+        // APFS rejects invalid UTF-8 with EILSEQ; the Darwin sandbox
+        // rejects it earlier with EPERM. The control write above proves
+        // the directory itself is writable.
         #[cfg(target_os = "macos")]
-        Err(error) if error.raw_os_error() == Some(92) || error.raw_os_error() == Some(1) => {
-            Ok(false)
-        }
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 92)) => Ok(false),
         Err(error) => Err(error),
     }
 }
