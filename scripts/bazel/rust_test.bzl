@@ -32,6 +32,13 @@ if not exist "%CARGO_TARGET_TMPDIR%" mkdir "%CARGO_TARGET_TMPDIR%"
 exit /b %ERRORLEVEL%
 """
 
+def _runfiles_path(file, workspace):
+    """A file's path below TEST_SRCDIR: main-repository files sit under the
+    workspace directory, external ones (`../<repo>/...`) under their repo."""
+    if file.short_path.startswith("../"):
+        return file.short_path[len("../"):]
+    return "{}/{}".format(workspace, file.short_path)
+
 def _isolated_rust_test_impl(ctx):
     test_binary = ctx.executable.test_binary
     windows = ctx.target_platform_has_constraint(
@@ -49,8 +56,9 @@ def _isolated_rust_test_impl(ctx):
             fail("runfiles_env target {} must produce exactly one file".format(target.label))
         files_by_label[str(target.label)] = files[0]
         runfiles_env_files.append(files[0])
+    workspace = "%TEST_WORKSPACE%" if windows else "$TEST_WORKSPACE"
     paths = {
-        variable: files_by_label[label].short_path
+        variable: _runfiles_path(files_by_label[label], workspace)
         for variable, label in ctx.attr.runfiles_env.items()
     }
     if windows:
