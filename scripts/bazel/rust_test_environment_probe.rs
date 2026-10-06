@@ -24,14 +24,16 @@ fn main() {
 
     for variable in ["TRACEDECAY_RUNFILE_PROBE", "CARGO_BIN_EXE_runfile-probe"] {
         let runfile = std::env::var(variable)
-            .unwrap_or_else(|_| panic!("the launcher must resolve runfiles_env {variable}"));
+            .unwrap_or_else(|_| panic!("the launcher must resolve runfiles_env {}", variable));
         assert!(
             std::path::Path::new(&runfile).is_absolute(),
-            "{variable}={runfile}"
+            "{}={}",
+            variable,
+            runfile,
         );
         assert_eq!(
             std::fs::read_to_string(&runfile)
-                .unwrap_or_else(|error| panic!("{variable}={runfile}: {error}")),
+                .unwrap_or_else(|error| panic!("{}={}: {}", variable, runfile, error)),
             "runfile probe\n",
         );
     }
