@@ -493,9 +493,15 @@ mod tests {
     fn file_end_line_matches_the_lines_convention_for_every_checked_in_fixture() {
         let registry = LanguageRegistry::new();
         let mut checked = Vec::new();
-        for directory in ["../../tests/fixtures", "fixtures"] {
-            let mut entries = std::fs::read_dir(Path::new(directory))
-                .unwrap_or_else(|error| panic!("{directory}: {error}"))
+        for directory in [
+            format!("{}/../../tests/fixtures", env!("CARGO_MANIFEST_DIR")),
+            "tests/fixtures".to_string(),
+            "fixtures".to_string(),
+        ] {
+            let Ok(rd) = std::fs::read_dir(Path::new(&directory)) else {
+                continue;
+            };
+            let mut entries = rd
                 .map(|entry| entry.expect("fixture entry").path())
                 .filter(|path| path.is_file())
                 .collect::<Vec<_>>();

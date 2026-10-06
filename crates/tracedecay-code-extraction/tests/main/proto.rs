@@ -5,8 +5,7 @@ use tracedecay_code_extraction::{
 use tracedecay_domain::*;
 
 fn extract_sample() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.proto")
-        .expect("failed to read sample.proto");
+    let source = include_str!("../../../../tests/fixtures/sample.proto").to_owned();
     let extractor = ProtoExtractor;
     extractor.extract_artifact("sample.proto", &source).result
 }

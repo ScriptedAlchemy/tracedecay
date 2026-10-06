@@ -6,8 +6,37 @@ use tracedecay_domain::*;
 include!("support/edges.rs");
 
 fn read_fixture(name: &str) -> String {
-    let path = format!("../../tests/fixtures/{}", name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e))
+    match name {
+        "sample.ts" => include_str!("../../../../tests/fixtures/sample.ts").to_owned(),
+        "sample.js" => include_str!("../../../../tests/fixtures/sample.js").to_owned(),
+        "sample.py" => include_str!("../../../../tests/fixtures/sample.py").to_owned(),
+        "sample.c" => include_str!("../../../../tests/fixtures/sample.c").to_owned(),
+        "sample.h" => include_str!("../../../../tests/fixtures/sample.h").to_owned(),
+        "sample.cpp" => include_str!("../../../../tests/fixtures/sample.cpp").to_owned(),
+        "sample.kt" => include_str!("../../../../tests/fixtures/sample.kt").to_owned(),
+        "sample.dart" => include_str!("../../../../tests/fixtures/sample.dart").to_owned(),
+        "sample.cs" => include_str!("../../../../tests/fixtures/sample.cs").to_owned(),
+        "sample.php" => include_str!("../../../../tests/fixtures/sample.php").to_owned(),
+        "sample.pas" => include_str!("../../../../tests/fixtures/sample.pas").to_owned(),
+        "sample.rb" => include_str!("../../../../tests/fixtures/sample.rb").to_owned(),
+        "sample.swift" => include_str!("../../../../tests/fixtures/sample.swift").to_owned(),
+        "sample.sh" => include_str!("../../../../tests/fixtures/sample.sh").to_owned(),
+        "sample.lua" => include_str!("../../../../tests/fixtures/sample.lua").to_owned(),
+        "sample.zig" => include_str!("../../../../tests/fixtures/sample.zig").to_owned(),
+        "sample.proto" => include_str!("../../../../tests/fixtures/sample.proto").to_owned(),
+        "sample.nix" => include_str!("../../../../tests/fixtures/sample.nix").to_owned(),
+        "sample.vb" => include_str!("../../../../tests/fixtures/sample.vb").to_owned(),
+        "sample.ps1" => include_str!("../../../../tests/fixtures/sample.ps1").to_owned(),
+        "sample.bat" => include_str!("../../../../tests/fixtures/sample.bat").to_owned(),
+        "sample.pl" => include_str!("../../../../tests/fixtures/sample.pl").to_owned(),
+        "sample.m" => include_str!("../../../../tests/fixtures/sample.m").to_owned(),
+        "sample.f90" => include_str!("../../../../tests/fixtures/sample.f90").to_owned(),
+        "sample.cob" => include_str!("../../../../tests/fixtures/sample.cob").to_owned(),
+        "sample.bas" => include_str!("../../../../tests/fixtures/sample.bas").to_owned(),
+        "sample.gw" => include_str!("../../../../tests/fixtures/sample.gw").to_owned(),
+        "sample.qb" => include_str!("../../../../tests/fixtures/sample.qb").to_owned(),
+        _ => panic!("unknown fixture: {name}"),
+    }
 }
 
 fn names<'a>(nodes: &[&'a Node]) -> Vec<&'a str> {

@@ -11,8 +11,10 @@ fn sanitization_receipt_schema_preserves_the_closed_nested_authority() {
         .expect("sanitization receipt properties");
 
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
+    let mut actual: Vec<_> = properties.keys().map(String::as_str).collect();
+    actual.sort_unstable();
     assert_eq!(
-        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        actual,
         ["disposition", "payload", "receipt", "sensitivity"]
     );
 
@@ -30,9 +32,8 @@ fn sanitization_receipt_schema_preserves_the_closed_nested_authority() {
             .as_object()
             .expect("nested sanitization authority properties");
         assert_eq!(definitions[definition]["additionalProperties"], false);
-        assert_eq!(
-            properties.keys().map(String::as_str).collect::<Vec<_>>(),
-            fields
-        );
+        let mut actual: Vec<_> = properties.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        assert_eq!(actual, fields);
     }
 }

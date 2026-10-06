@@ -402,12 +402,19 @@ fn snapshot_without_complete_native_identity_is_read_only() {
 }
 
 fn legacy_fixture(name: &str) -> serde_json::Value {
-    let path = format!(
-        "{}/tests/fixtures/git_index_legacy/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    serde_json::from_str(&std::fs::read_to_string(path).expect("legacy fixture"))
-        .expect("legacy fixture is JSON")
+    let content = match name {
+        "stage_preview_input" => {
+            include_str!("../fixtures/git_index_legacy/stage_preview_input.json")
+        }
+        "stage_preview" => {
+            include_str!("../fixtures/git_index_legacy/stage_preview.json")
+        }
+        "stage_receipt" => {
+            include_str!("../fixtures/git_index_legacy/stage_receipt.json")
+        }
+        _ => panic!("unknown legacy fixture: {name}"),
+    };
+    serde_json::from_str(content).expect("legacy fixture is JSON")
 }
 
 #[test]

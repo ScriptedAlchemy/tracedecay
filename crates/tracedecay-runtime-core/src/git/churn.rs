@@ -318,12 +318,21 @@ mod tests {
                 std::fs::remove_file(&probe)?;
                 Ok(true)
             }
-            // Darwin exposes an invalid byte sequence as EILSEQ. Rust
+            // Darwin exposes an invalid byte sequence as EILSEQ (92). Rust
             // deliberately leaves that errno uncategorized, so keep this
             // capability exception local to the one platform whose filesystem
             // rejects the probe name.
+            // Bazel's darwin-sandbox may also return PermissionDenied (1)
+            // when the sandbox policy blocks the write — the probe cannot
+            // create the file, which is equivalent to the filesystem
+            // rejecting the name.
             #[cfg(target_os = "macos")]
-            Err(error) if error.raw_os_error() == Some(92) => Ok(false),
+            Err(error)
+                if error.raw_os_error() == Some(92)
+                    || error.raw_os_error() == Some(1) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
