@@ -76,12 +76,13 @@ unauthorized external action after completing independent, authorized work.
 
 ## Build & test
 
-- Bazel is the primary workspace build and test authority. Run `bazel build //...`
-  and `bazel test //... --test_output=errors`. Edition 2024, resolver 3, and the
-  toolchain pinned in `rust-toolchain.toml` remain canonical inputs. Use Cargo
-  for package and release semantics, code generators that invoke Cargo,
-  benchmarks that measure Cargo artifacts, and platform-specific workflows not
-  yet modeled by Bazel.
+- Bazel is the sole workspace build, test, check, run, benchmark, and
+  code-generation authority. Run `bazel build //...`,
+  `bazel test //... --test_output=errors`, `bazel run //crates/...`, and
+  `bazel test //... --test_arg=--bench` for benchmarks. Edition 2024,
+  resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
+  canonical inputs. Never invoke `cargo` directly; route every build, test,
+  check, run, bench, and codegen through Bazel.
 - pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
   sources. Run `pnpm install` at the repository root after cloning and after
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
@@ -95,23 +96,27 @@ unauthorized external action after completing independent, authorized work.
   packages; pnpm reads Cargo.lock as it is and never rewrites it or fails on
   a manifest mismatch.
 - To add, remove, or bump a crate (member or `[workspace.dependencies]`),
-  edit the manifests by hand, refresh the lock from outside the checkout with
-  the pinned toolchain, `cd / && cargo +<toolchain> update -w --manifest-path
+  edit the manifests by hand, then run `pnpm install` to re-vendor. For
+  lockfile refresh from outside the checkout (bumping a vendored source), use
+  the pinned toolchain: `cd / && cargo +<toolchain> update -w --manifest-path
   <repo>/Cargo.toml` (`-p <crate>` for a targeted bump), then run
-  `pnpm install`. Inside the checkout `cargo update` refuses the vendored git
-  sources and `cargo add` sees only vendored crates. A fork only workspace
-  members consume is a plain `git` + `rev` dependency (grafeo in
-  `[workspace.dependencies]`); `[patch.crates-io]` is only for forks that
-  crates.io dependents must also resolve to. To bump one, edit `rev` on every
-  crate from that repository, refresh the lock with `-p` for each, and run
-  `pnpm install`: pnpm vendors every source Cargo.lock names, git included,
-  and rewrites that source's replacement block in `.cargo/config.toml`. Do not use
-  `pnpm add crate:`; from a member directory it regenerates the whole
-  Cargo.lock, at the root it fails, and `pnpm remove crate:` is unsupported.
-  `pnpm install` leaves unused `.pnpm/crates` directories in place; they are
-  inert once the lock stops naming them. Cargo reads `.cargo/config.toml`
-  from its working directory, so run `sdks/codegen` cargo commands from
-  `sdks/codegen`.
+  `pnpm install` again. Inside the checkout `cargo update` refuses the
+  vendored git sources and `cargo add` sees only vendored crates. A fork
+  only workspace members consume is a plain `git` + `rev` dependency
+  (grafeo in `[workspace.dependencies]`); `[patch.crates-io]` is only for
+  forks that crates.io dependents must also resolve to. To bump one, edit
+  `rev` on every crate from that repository, refresh the lock with `-p` for
+  each, and run `pnpm install`: pnpm vendors every source Cargo.lock names,
+  git included, and rewrites that source's replacement block in
+  `.cargo/config.toml`. Do not use `pnpm add crate:`; from a member
+  directory it regenerates the whole Cargo.lock, at the root it fails, and
+  `pnpm remove crate:` is unsupported. `pnpm install` leaves unused
+  `.pnpm/crates` directories in place; they are inert once the lock stops
+  naming them.
+- Code generation: run `bazel run //sdks/codegen:...` targets from the
+  repository root. The Bazel rules invoke the generators inside the
+  `sdks/codegen` working directory with the correct `.cargo/config.toml`
+  already in scope.
 - Dashboard: `pnpm run build` (rsbuild), `pnpm run typecheck` (`tsc --noEmit`),
   `pnpm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
