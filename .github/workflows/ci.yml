@@ -484,9 +484,6 @@ jobs:
           disk-cache: ${{ github.event_name != 'pull_request' }}
           cache-save: ${{ github.event_name != 'pull_request' }}
 
-      - name: Build the workspace
-        run: bazel build //...
-
       - name: Test the workspace
         run: bazel test //... --test_output=errors
 
