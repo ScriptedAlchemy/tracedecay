@@ -332,7 +332,7 @@ jobs:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
+        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
 
       # rust-cache carries the dependency graph, keyed by toolchain and
       # lockfile; the workspace crates compile fresh every run. No per-run
@@ -553,7 +553,7 @@ jobs:
           version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
+        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
 
       # One dependency cache for the lane, as on Linux: `root-journeys`
       # resolves the widest graph, so its save covers the other root
