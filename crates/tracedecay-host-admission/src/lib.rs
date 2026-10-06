@@ -1473,6 +1473,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
 }
 
 #[cfg(test)]
+#[path = "broker_group_commit_test.rs"]
+mod broker_group_commit_test;
+#[cfg(test)]
 #[path = "host_admission_batch_test.rs"]
 mod host_admission_batch_test;
 #[cfg(test)]

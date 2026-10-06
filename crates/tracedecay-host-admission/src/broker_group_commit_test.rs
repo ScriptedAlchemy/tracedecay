@@ -12,6 +12,8 @@ fn open_broker(dir: &std::path::Path) -> Arc<HostAdmissionBroker> {
     Arc::new(HostAdmissionBroker::new(runtime))
 }
 
+// The held runtime guard is the in-flight batch the admissions queue behind.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
     let spool = tempfile::tempdir().unwrap();
@@ -46,9 +48,9 @@ async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
     }
     seqs.sort_unstable();
     assert_eq!(seqs, (2..=9).collect::<Vec<u64>>());
-    // One intent publish (file and directory) and one frame sync for all
-    // eight; one-at-a-time appends paid three metadata publishes each.
-    assert_eq!(barriers.syncs(), 3);
+    // One intent publish (file, plus directory on Unix) and one frame sync
+    // for all eight; one-at-a-time appends paid three metadata publishes each.
+    assert_eq!(barriers.syncs(), 2 + u64::from(cfg!(unix)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -103,15 +105,20 @@ async fn a_commit_waits_on_no_barrier_and_the_next_batch_publishes_its_watermark
     let barriers = sync_latency::inject(spool.path(), Duration::ZERO);
     assert_eq!(commit_leased(&broker).await, first.seq);
     assert_eq!(barriers.syncs(), 0);
+    drop(barriers);
     // The daemon dies before any later publish: the commit replays once more.
     drop(broker);
 
+    // Reopening publishes once to clear the first batch's reconciled append
+    // intent; count only the barriers after it.
     let broker = open_broker(spool.path());
     assert_eq!(broker.pending_replay_count().await.unwrap(), 1);
+    let barriers = sync_latency::inject(spool.path(), Duration::ZERO);
     assert_eq!(commit_leased(&broker).await, first.seq);
+    assert_eq!(barriers.syncs(), 0);
     let second = broker.admit("source", b"second").await.unwrap();
     // The second batch's intent publish and frame sync carry the watermark.
-    assert_eq!(barriers.syncs(), 3);
+    assert_eq!(barriers.syncs(), 2 + u64::from(cfg!(unix)));
     drop(broker);
 
     let (mut runtime, report) =
