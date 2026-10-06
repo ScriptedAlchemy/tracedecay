@@ -1,6 +1,6 @@
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("rules_rust must provide CARGO_MANIFEST_DIR");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("rules_rust must provide CARGO_MANIFEST_DIR");
     assert_eq!(manifest_dir, "scripts");
 
     let test_tmpdir = std::env::var("TEST_TMPDIR").expect("Bazel must provide TEST_TMPDIR");
@@ -12,4 +12,29 @@ fn main() {
         std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB").as_deref(),
         Ok("1"),
     );
+
+    let target_tmpdir = std::path::PathBuf::from(
+        std::env::var("CARGO_TARGET_TMPDIR").expect("the launcher must set CARGO_TARGET_TMPDIR"),
+    );
+    assert_eq!(
+        target_tmpdir,
+        std::path::Path::new(&test_tmpdir).join("cargo-target-tmp"),
+    );
+    assert!(target_tmpdir.is_dir());
+
+    for variable in ["TRACEDECAY_RUNFILE_PROBE", "CARGO_BIN_EXE_runfile-probe"] {
+        let runfile = std::env::var(variable)
+            .unwrap_or_else(|_| panic!("the launcher must resolve runfiles_env {}", variable));
+        assert!(
+            std::path::Path::new(&runfile).is_absolute(),
+            "{}={}",
+            variable,
+            runfile,
+        );
+        assert_eq!(
+            std::fs::read_to_string(&runfile)
+                .unwrap_or_else(|error| panic!("{}={}: {}", variable, runfile, error)),
+            "runfile probe\n",
+        );
+    }
 }

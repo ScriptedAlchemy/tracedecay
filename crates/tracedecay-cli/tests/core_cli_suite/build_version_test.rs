@@ -16,7 +16,7 @@ use tracedecay_project::version::PACKAGE_VERSION;
 /// The version `tracedecay --version` reports, with the `tracedecay ` prefix
 /// clap prints stripped off.
 fn reported_version() -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    let output = Command::new(crate::tracedecay_exe())
         .arg("--version")
         .output()
         .expect("the built tracedecay binary should run");

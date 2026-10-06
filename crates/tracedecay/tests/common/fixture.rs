@@ -715,8 +715,15 @@ fn git_template_root() -> Option<&'static Path> {
         .as_deref()
 }
 
+/// Cargo's per-target scratch directory: the Bazel test launcher passes a
+/// private one at run time, Cargo compiles it in.
+pub fn cargo_target_tmpdir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map_or_else(|| env!("CARGO_TARGET_TMPDIR").into(), PathBuf::from)
+}
+
 fn ensure_git_template() -> Option<PathBuf> {
-    let tmp_root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let tmp_root = &cargo_target_tmpdir();
     let shared = tmp_root.join(GIT_TEMPLATE_DIR_NAME);
     if shared.join("READY").is_file() {
         return Some(shared);

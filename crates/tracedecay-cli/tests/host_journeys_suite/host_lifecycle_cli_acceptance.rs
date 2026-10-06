@@ -239,7 +239,7 @@ impl IsolatedCli {
         } else {
             "tracedecay"
         });
-        link_or_copy_executable(Path::new(env!("CARGO_BIN_EXE_tracedecay")), &shim).unwrap();
+        link_or_copy_executable(crate::tracedecay_exe(), &shim).unwrap();
         Self {
             home,
             project,
@@ -258,7 +258,7 @@ impl IsolatedCli {
     /// The only host CLIs the child can resolve are the fakes a test put in
     /// `bin_dir`.
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        let mut command = Command::new(crate::tracedecay_exe());
         apply_isolated_profile_env(&mut command, self.home.path(), &self.profile);
         command
             .args(args)

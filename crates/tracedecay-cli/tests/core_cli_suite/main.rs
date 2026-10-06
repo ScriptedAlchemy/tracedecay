@@ -39,3 +39,7 @@ mod tool_first_touch_test;
 mod tool_surface_transport_test;
 mod tracedecay_test;
 mod user_config_test;
+
+#[path = "../support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+pub(crate) use tracedecay_exe::tracedecay_exe;

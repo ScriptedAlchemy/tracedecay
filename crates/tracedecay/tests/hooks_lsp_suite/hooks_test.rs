@@ -581,8 +581,8 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
     // The target directory usually sits inside this checkout, whose
     // repository may be an enrolled TraceDecay project; a fresh repository
     // bounds project discovery so the outcome never depends on the checkout.
-    let outside_dir =
-        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("fixture root outside temp");
+    let outside_dir = tempfile::tempdir_in(crate::common::fixture::cargo_target_tmpdir())
+        .expect("fixture root outside temp");
     let outside = outside_dir.path();
     gix::init(outside).expect("fixture repository boundary");
 

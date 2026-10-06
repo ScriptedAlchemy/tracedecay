@@ -20,3 +20,11 @@ genrule(
     stamp = True,
     visibility = ["//visibility:public"],
 )
+
+# `-c opt` is the release build: generated Rust targets drop their Cargo
+# `perf` opt-level and debug assertions under it (scripts/bazel/gen_builds.py).
+config_setting(
+    name = "opt_mode",
+    values = {"compilation_mode": "opt"},
+    visibility = ["//visibility:public"],
+)
