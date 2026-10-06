@@ -312,16 +312,19 @@ jobs:
         shell: bash
         run: bazel test --config=ci //...
 
-      # tracedecay-lsp and tracedecay-code-index fail here with E0463 for
-      # every dependency while the same rules compile on Linux; print the
-      # exact rustc arguments, param file included, until that is fixed.
-      - name: Show the tracedecay-lsp rustc arguments
+      - name: Diagnose failed Windows build and test launch
         if: failure()
-        shell: bash
-        run: >-
-          bazel aquery --config=ci --include_param_files
-          'mnemonic("Rustc", //crates/tracedecay-lsp:tracedecay-lsp)'
-          | head -c 400000
+        shell: pwsh
+        run: |
+          $execRoot = (bazel info execution_root).Trim()
+          Get-Content "$execRoot/bazel-out/stable-status.txt"
+          $bin = "$execRoot/bazel-out/x64_windows-fastbuild/bin"
+          Get-Content "$bin/scripts/rust_test_environment_probe.bat"
+          Get-Content "$bin/crates/tracedecay-lsp/*.params.expanded"
+          $testRoot = "$bin/scripts/rust_test_environment_probe.bat.runfiles"
+          $probe = "$testRoot/_main/scripts/rust_test_environment_probe__binary.exe"
+          Get-Item $probe | Format-List FullName,LinkType,Target,Length
+          & $probe
 
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
@@ -330,7 +333,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-clippy
+      group: ci-clippy-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
@@ -379,7 +382,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-feature-gates
+      group: ci-feature-gates-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
@@ -406,7 +409,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-shipped-cli
+      group: ci-shipped-cli-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest
@@ -435,7 +438,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-dashboard
+      group: ci-dashboard-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest

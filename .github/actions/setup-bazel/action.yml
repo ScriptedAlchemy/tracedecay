@@ -32,22 +32,10 @@ runs:
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, the ast-grep
     # bindings are graded against the host CLI, and SDK journeys run node.
-    # `cargo test` runs suites through the rustup proxy, which exports the
-    # pinned toolchain and its cargo; suites that spawn cargo, rustc, or
-    # rust-analyzer read them back (.bazelrc passes them to tests).
     - name: Install the pinned toolchain's components
       if: inputs.test-tools == 'true'
       shell: bash
-      run: |
-        rustup toolchain install
-        # Git Bash spells $HOME as /c/...; native Windows programs need C:\...
-        native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
-        {
-          echo "RUSTUP_TOOLCHAIN=$(rustup show active-toolchain | cut -d' ' -f1)"
-          echo "CARGO=$(rustup which cargo)"
-          echo "CARGO_HOME=$(native "${CARGO_HOME:-$HOME/.cargo}")"
-          echo "RUSTUP_HOME=$(native "${RUSTUP_HOME:-$HOME/.rustup}")"
-        } >> "$GITHUB_ENV"
+      run: rustup toolchain install
 
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       if: inputs.test-tools == 'true'

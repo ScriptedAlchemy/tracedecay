@@ -928,6 +928,7 @@ def main():
             # binaries a test run spawns with that run's features too (test
             # hooks, test-transport). `<bin>__test` is that build; the plain
             # target is the shipped one.
+            test_flavor = None
             if "example" in kinds:
                 emitted = unique_name(t["name"])
                 bin_target_names[t["name"]] = emitted
@@ -952,6 +953,13 @@ def main():
                 out += [
                     "rust_binary(",
                     f'    name = "{emitted}",',
+                    # Suites check the spawned binary's own name, so the test
+                    # build keeps the shipped file name in a directory of its own.
+                    *([
+                        "    testonly = True,",
+                        f'    binary_name = "test/{t["name"]}",',
+                        f'    crate_name = "{t["name"].replace("-", "_")}",',
+                    ] if emitted == test_flavor else []),
                     "    srcs = " + srcs + ",",
                     f'    crate_root = {crate_root},',
                     '    edition = crate_edition(),',
@@ -1038,9 +1046,11 @@ def main():
                 srcs += " + glob([" + q(mod_local) + "])"
             if mod_labels:
                 srcs += " + [" + q(mod_labels) + "]"
-            data = srcs if srcs.startswith("[") else f'glob(["{str(Path(rel_src(p, t)).parent)}/**"])' +                 (" + [" + q(mod_labels) + "]" if mod_labels else "")
-            if not data.startswith("["):
-                data += ' + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+            data = srcs if srcs.startswith("[") else (
+                f'glob(["{str(Path(rel_src(p, t)).parent)}/**",'
+                '"tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+                + (" + [" + q(mod_labels) + "]" if mod_labels else "")
+            )
             # Suites read the shared fixtures as ../../tests/fixtures from the
             # crate directory, where the launcher starts them.
             data += ' + ["//tests:fixtures"]'

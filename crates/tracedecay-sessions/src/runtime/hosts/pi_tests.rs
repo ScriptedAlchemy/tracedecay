@@ -228,6 +228,8 @@ async fn malformed_session_file_is_refused_with_a_typed_failure() {
     let temp_root = layout._temp.path().to_string_lossy().into_owned();
     let escaped_temp = serde_json::to_string(&temp_root).unwrap();
     let normalized = normalized.replace(&escaped_temp[1..escaped_temp.len() - 1], "/tmp-root");
+    // The contentless user message (b7..b8) is refused, so session_info is
+    // the next observation.
     assert_eq!(
         normalized,
         format!(

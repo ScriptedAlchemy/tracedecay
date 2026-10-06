@@ -132,7 +132,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -147,7 +147,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/main/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/main/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -162,7 +162,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
