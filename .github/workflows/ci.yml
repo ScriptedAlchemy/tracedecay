@@ -330,7 +330,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-clippy
+      group: ci-clippy-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
@@ -379,7 +379,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-feature-gates
+      group: ci-feature-gates-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
@@ -406,7 +406,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-shipped-cli
+      group: ci-shipped-cli-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest
@@ -435,7 +435,7 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     concurrency:
-      group: ci-dashboard
+      group: ci-dashboard-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest
