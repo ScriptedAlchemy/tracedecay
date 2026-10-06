@@ -87,10 +87,9 @@ jobs:
         working-directory: sdks/codegen
       - run: pnpm run contracts:check
         working-directory: dashboard
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
+          cache-key: sdk-conformance
       - run: bazel test --config=ci //crates/tracedecay-sdk/...
       - run: pnpm run typecheck
         working-directory: sdks/typescript
@@ -106,10 +105,14 @@ jobs:
         with:
           node-version: 22
       - uses: ./.github/actions/setup-pnpm
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      # test:installed spawns target/debug/tracedecay; staging it also sets up
+      # Bazel for the suite below.
+      - name: Build the production daemon
+        uses: ./.github/actions/build-cli
         with:
-          bazelisk-cache: true
-          repository-cache: true
+          config: ci
+          dest: target/debug
+          cache-key: sdk-conformance
       # This job owns every sdk_suite test that needs the production daemon,
       # which Bazel hands the suite as TRACEDECAY_TEST_BIN. Including the
       # ignored tests is what keeps a daemon-backed test from silently never
@@ -117,10 +120,5 @@ jobs:
       - run: >-
           bazel test --config=ci //crates/tracedecay-sdk:sdk_suite
           --test_arg=--include-ignored
-      - name: Point the installed-package journey at the same daemon
-        run: |
-          set -euo pipefail
-          built="$(bazel cquery --config=ci --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
-          echo "TRACEDECAY_TEST_BIN=${GITHUB_WORKSPACE}/${built}" >> "$GITHUB_ENV"
       - run: pnpm run test:installed
         working-directory: sdks/typescript

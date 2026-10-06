@@ -226,7 +226,7 @@ async fn template_root() -> Option<&'static Path> {
     TEMPLATE_ROOT
         .get_or_init(|| async {
             ensure_template(
-                Path::new(env!("CARGO_TARGET_TMPDIR")),
+                &crate::common::fixture::cargo_target_tmpdir(),
                 StoreSchemaVersions::CURRENT,
             )
             .await

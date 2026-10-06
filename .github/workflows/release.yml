@@ -163,9 +163,11 @@ jobs:
       # Bazel builds the dashboard bundle it embeds; the next step proves it is
       # byte-identical to the validated artifact above.
       - name: Build release binary for packaging
-        uses: ./.github/actions/build-release-binary
+        uses: ./.github/actions/build-cli
         with:
-          target: ${{ matrix.target }}
+          config: release
+          dest: target/${{ matrix.target }}/release
+          cache-key: release-${{ matrix.target }}
 
       - name: Prove the embedded dashboard is the validated artifact
         shell: bash
@@ -770,8 +772,8 @@ jobs:
       - name: Build the real production daemon for conformance
         run: |
           set -euo pipefail
-          bazel build //crates/tracedecay-cli:tracedecay
-          built="$(bazel cquery --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
+          bazel build --config=ci //crates/tracedecay-cli:tracedecay
+          built="$(bazel cquery --config=ci --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
           echo "TRACEDECAY_TEST_BIN=${GITHUB_WORKSPACE}/${built}" >> "$GITHUB_ENV"
 
       - name: Real-daemon conformance against the exact packed tarball

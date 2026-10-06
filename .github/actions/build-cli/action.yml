@@ -1,0 +1,56 @@
+name: Build the tracedecay CLI
+description: >-
+  Build //crates/tracedecay-cli:tracedecay with Bazel and stage it at a fixed
+  path for the steps that package, upload, or spawn it.
+
+inputs:
+  config:
+    description: >-
+      Bazel config: `release` for the shipped binary (tracedecay-cli's default
+      features are `production`, the release source profile), `ci` for a
+      dev-profile build.
+    required: true
+  dest:
+    description: Directory the binary is copied into, as tracedecay[.exe].
+    required: true
+  cache-key:
+    description: Disk-cache name (see the setup-bazel action).
+    required: true
+
+outputs:
+  path:
+    description: The staged binary.
+    value: ${{ steps.stage.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-bazel
+      with:
+        cache-key: ${{ inputs.cache-key }}
+
+    - name: Build and stage the binary
+      id: stage
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        DEST: ${{ inputs.dest }}
+      run: |
+        set -euo pipefail
+        exe=""
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          exe=".exe"
+        fi
+        bazel build --config="$CONFIG" --config=ci //crates/tracedecay-cli:tracedecay
+        mkdir -p "$DEST"
+        cp "$(bazel info --config="$CONFIG" --config=ci bazel-bin)/crates/tracedecay-cli/tracedecay${exe}" "$DEST/tracedecay${exe}"
+        chmod u+w "$DEST/tracedecay${exe}"
+        echo "path=${GITHUB_WORKSPACE}/${DEST}/tracedecay${exe}" >> "$GITHUB_OUTPUT"
+
+    # Cargo's macOS link wrapper gave the product a stable ad-hoc identity;
+    # Bazel links directly, so sign the staged file the way install.sh and
+    # `tracedecay update` do.
+    - name: Sign the macOS binary
+      if: runner.os == 'macOS'
+      shell: bash
+      run: scripts/macos-stable-codesign.sh "${{ steps.stage.outputs.path }}"

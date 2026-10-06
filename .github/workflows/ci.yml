@@ -29,9 +29,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
@@ -88,19 +85,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-debug-cli' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
-
       - name: Build tracedecay binary
-        run: |
-          set -euo pipefail
-          bazel build --config=ci //crates/tracedecay-cli:tracedecay
-          mkdir -p target/debug
-          cp "$(bazel cquery --config=ci --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)" target/debug/tracedecay
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: ci-linux-arm64
 
       - name: Publish the binary for the host integration jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -247,34 +237,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-macos-test' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-key: ci-macos-test
+          test-tools: "true"
 
-      # Test dependencies, not conveniences: the LSP negotiation acceptance
-      # spawns rust-analyzer, the ast-grep bindings are graded against the
-      # host CLI, and SDK journeys run under node.
-      - name: Install the pinned toolchain's components
-        shell: bash
-        run: rustup toolchain install
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Build the workspace
-        shell: bash
-        run: bazel build --config=ci //...
-
-      - name: Test the workspace
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
         shell: bash
         run: bazel test --config=ci //...
 
@@ -300,30 +270,14 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-linux-test' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-key: ci-linux-test
+          test-tools: "true"
 
-      # Test dependencies, not conveniences: the LSP negotiation acceptance
-      # spawns rust-analyzer, the ast-grep bindings are graded against the
-      # host CLI, and SDK journeys run under node.
-      - name: Install the pinned toolchain's components
-        shell: bash
-        run: rustup toolchain install
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Test the workspace
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
         run: bazel test --config=ci //...
 
   windows-test:
@@ -345,34 +299,14 @@ jobs:
         with:
           redirect-temp: "true"
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-windows-test' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-key: ci-windows-test
+          test-tools: "true"
 
-      # Test dependencies, not conveniences: the LSP negotiation acceptance
-      # spawns rust-analyzer, the ast-grep bindings are graded against the
-      # host CLI, and SDK journeys run under node.
-      - name: Install the pinned toolchain's components
-        shell: bash
-        run: rustup toolchain install
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Build the workspace
-        shell: bash
-        run: bazel build --config=ci //...
-
-      - name: Test the workspace
+      # `bazel test` builds every target in the pattern, so tests start
+      # while the rest of the workspace still links.
+      - name: Build and test the workspace
         shell: bash
         run: bazel test --config=ci //...
 
@@ -391,12 +325,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-clippy' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-key: ci-linux-arm64
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
@@ -425,9 +356,10 @@ jobs:
           --target x86_64-pc-windows-gnu
           --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
-  # Compile-only gate for feature graphs beyond the test-lane selections:
-  # every `test-transport` library variant and the lean root build
-  # (`--no-default-features`), which scripts/bazel/gen_builds.py emits.
+  # The production feature graph must exclude test-only surfaces. The
+  # feature-gated variants themselves (every `test-transport` library and the
+  # lean `--no-default-features` root, emitted by scripts/bazel/gen_builds.py)
+  # are ordinary `//...` targets that the Clippy job compiles.
   feature-gates:
     name: Feature gates
     needs: [scope-gate, gates]
@@ -437,23 +369,9 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-          disk-cache: ${{ github.event_name != 'pull_request' && 'ci-feature-gates' || false }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
-
-      - name: Check feature-gated surfaces compile
-        run: |
-          set -euo pipefail
-          bazel query 'attr(crate_features, "test-transport", kind(rust_library, //crates/...)) + //crates/tracedecay:all' \
-            | grep -E 'test-transport|:tracedecay__bare' > gated-targets.txt
-          bazel build --config=ci --target_pattern_file=gated-targets.txt
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -483,9 +401,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the shipped binary
-        uses: ./.github/actions/build-release-binary
+        uses: ./.github/actions/build-cli
         with:
-          target: x86_64-unknown-linux-gnu
+          config: release
+          dest: target/x86_64-unknown-linux-gnu/release
+          cache-key: release-x86_64-unknown-linux-gnu
 
       - name: Smoke-run the shipped binary
         shell: bash
