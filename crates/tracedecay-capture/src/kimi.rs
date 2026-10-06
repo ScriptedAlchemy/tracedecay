@@ -28,10 +28,11 @@ pub fn native_record_id(
 pub fn normalize_observation(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_kimi_record(native, session_id, stable_record_id, range)
+    normalize_kimi_record(native, session_id, transcript_path, stable_record_id, range)
 }
 
 /// One source-record canonicalization, not a per-item walk.
@@ -39,6 +40,7 @@ pub fn normalize_observation(
 fn normalize_kimi_record(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -109,6 +111,26 @@ fn normalize_kimi_record(
             native_kind: native_kind.to_owned(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
+    }
+
+    // A session's transcript is its main agent's wire: only main-agent wires
+    // pass a path, and it rides every durable record of that wire.
+    if let Some(transcript_path) = transcript_path {
+        facts.insert(
+            0,
+            CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: None,
+                transcript_path: Some(transcript_path.to_owned()),
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: Some("kimi_wire".to_owned()),
+                native_source: Some(PROVIDER.to_owned()),
+                profile: None,
+                location_provenance: None,
+            },
+        );
     }
 
     let timestamp = record.timestamp.and_then(timestamp_secs);
@@ -389,6 +411,7 @@ mod tests {
         normalize_observation(
             &native,
             "session-current",
+            None,
             native_record_id("session-current", range).unwrap(),
             range,
         )

@@ -1,0 +1,15 @@
+load("//scripts:bazel/rust_test.bzl", "rust_test")
+
+exports_files(
+    [
+        "bazel/rust_test.bzl",
+        "check-dashboard-bundle.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "rust_test_environment_probe",
+    srcs = ["bazel/rust_test_environment_probe.rs"],
+    use_libtest_harness = False,
+)

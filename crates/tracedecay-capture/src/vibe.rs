@@ -27,10 +27,19 @@ pub fn normalize_observation(
     session_id: &str,
     model: Option<&str>,
     location: Option<&str>,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_vibe_record(native, session_id, model, location, stable_record_id, range)
+    normalize_vibe_record(
+        native,
+        session_id,
+        model,
+        location,
+        transcript_path,
+        stable_record_id,
+        range,
+    )
 }
 
 /// One source-record canonicalization, not a per-call walk.
@@ -40,6 +49,7 @@ fn normalize_vibe_record(
     session_id: &str,
     model: Option<&str>,
     location: Option<&str>,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -65,13 +75,14 @@ fn normalize_vibe_record(
     let relations =
         CanonicalObservationRelationsV1::new(session_id).with_message_id(stable_record_id.clone());
     let mut facts = Vec::new();
-    if let Some(location) = location.filter(|path| !path.is_empty()) {
+    let location = location.filter(|path| !path.is_empty());
+    if location.is_some() || transcript_path.is_some() {
         // `project_path` stays unset on purpose: session routing keeps its
         // scope-derived fallback, only the location metadata is projected.
         facts.push(CanonicalObservationFactV1::Session {
             project_path: None,
-            location_path: Some(location.to_owned()),
-            transcript_path: None,
+            location_path: location.map(str::to_owned),
+            transcript_path: transcript_path.map(str::to_owned),
             title: None,
             started_at: None,
             ended_at: None,

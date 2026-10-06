@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.70](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.69...v1.0.0-beta.70) (2026-10-05)
+
+
+### Features
+
+* **search:** route name-shaped queries to the symbol lane ([0ed2023](https://github.com/ScriptedAlchemy/tracedecay/commit/0ed2023a2780163c9a98163177d97b30e057167d))
+
+
+### Bug Fixes
+
+* **ci:** repair release-shared checks and test drift ([a86ac80](https://github.com/ScriptedAlchemy/tracedecay/commit/a86ac80476a5698c52ee35cfcdc80c57f3de5e63))
+* **ci:** repair release-shared checks and test drift ([#3095](https://github.com/ScriptedAlchemy/tracedecay/issues/3095)) ([a86ac80](https://github.com/ScriptedAlchemy/tracedecay/commit/a86ac80476a5698c52ee35cfcdc80c57f3de5e63))
+* **code-index:** disclose ambiguous calls as caller gaps ([0bafb9b](https://github.com/ScriptedAlchemy/tracedecay/commit/0bafb9b0f63e053cf59c520f7feb2668fdfddd23))
+* **code-index:** stop reading a held projection slot as work ([9c8bcfe](https://github.com/ScriptedAlchemy/tracedecay/commit/9c8bcfee369a9e5a0402f315efe5f4e8101b1ec7))
+* **git:** attribute inferred branches to the captured span ([c601265](https://github.com/ScriptedAlchemy/tracedecay/commit/c6012655aa9c8c32add7a6e973c1d9c062d46652))
+* **graph-db:** keep a serving code-shard head through the replay sweep ([51f9c77](https://github.com/ScriptedAlchemy/tracedecay/commit/51f9c772dc3206adb7c58fbd38e37f42b39e8619))
+* **graph-db:** layer a linked worktree over its sibling's graph ([b0bd802](https://github.com/ScriptedAlchemy/tracedecay/commit/b0bd8029b574e9f9c6139f5d568c70730faa7a74))
+* **index:** seal an edit's successor during text projection ([f5d3e83](https://github.com/ScriptedAlchemy/tracedecay/commit/f5d3e83f865985c0434c61be7d5553e405789acf))
+* **lexical:** carry text artifact across added and removed files ([02d9804](https://github.com/ScriptedAlchemy/tracedecay/commit/02d9804f9ecb744cb81de53db8a2ed88fe881c6f))
+* **plugin:** repair validation gates on master ([ef8f6e2](https://github.com/ScriptedAlchemy/tracedecay/commit/ef8f6e2ff4e6d2141f6bd2ce499ae6d5b6d2fa53))
+* **plugin:** repair validation gates on master ([ef8f6e2](https://github.com/ScriptedAlchemy/tracedecay/commit/ef8f6e2ff4e6d2141f6bd2ce499ae6d5b6d2fa53))
+* **private-fs:** admit a free lock after its admission deadline ([150e7db](https://github.com/ScriptedAlchemy/tracedecay/commit/150e7db3b6b8b24017a83f24dd2643ddb21300dc))
+* **sessions:** fold the refresh begin into the first batch commit ([fe6b51a](https://github.com/ScriptedAlchemy/tracedecay/commit/fe6b51afdbb02aad7fa774ea3da1d832c2977445))
+* **work:** seal cancellations that land before running ([6f5cd24](https://github.com/ScriptedAlchemy/tracedecay/commit/6f5cd24582a5ac5a7411cec978d41506a8cbd97d))
+
+
+### Performance Improvements
+
+* **sessions:** skip unchanged host bookkeeping writes on idle passes ([b9d82b3](https://github.com/ScriptedAlchemy/tracedecay/commit/b9d82b386a31349d1bb5ac23caca577959eeb83a))
+* **work:** fold the Work graph journal once per read ([68d5b93](https://github.com/ScriptedAlchemy/tracedecay/commit/68d5b9377821db4661262a7847c85babbc02a99d))
+
 ## [1.0.0-beta.69](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.68...v1.0.0-beta.69) (2026-10-05)
 
 

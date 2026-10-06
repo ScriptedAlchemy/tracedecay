@@ -180,6 +180,54 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     fixture.harness.shutdown().await;
 }
 
+/// An unknown id answers with the nearest served symbols, whether the caller
+/// typo'd the occurrence id or passed a misspelled name in its place.
+#[tokio::test]
+async fn tracedecay_node_suggests_the_nearest_symbols_for_an_unknown_id() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), SOURCE).unwrap();
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production node server");
+    wait_for_current_graph(&server).await;
+    let fetch_id = occurrence_id(&server, "fetch_value", "function").await;
+    let fetch_location = json!({
+        "node_id": fetch_id,
+        "name": "fetch_value",
+        "qualified_name": "src/lib.rs::fetch_value",
+        "kind": "function",
+        "file": "src/lib.rs",
+        "start_line": 2,
+        "end_line": 11,
+        "unavailable_fields": ["attrs_start_line"]
+    });
+
+    let mut typo_id = fetch_id.clone();
+    let last = typo_id.pop().expect("occurrence id");
+    typo_id.push(if last == '0' { '1' } else { '0' });
+    for unknown in [typo_id.as_str(), "fetch_valu"] {
+        let missing = node_call(&server, json!({"node_id": unknown})).await;
+        assert_eq!(missing["result"]["isError"], true, "{missing}");
+        assert_eq!(
+            parse_json(&tool_text(&missing)),
+            json!({
+                "freshness": {"state": "fresh"},
+                "status": "not_found",
+                "reason_code": "node_not_found",
+                "node_id": unknown,
+                "message": format!("Node not found: {unknown}"),
+                "suggestions": [fetch_location]
+            })
+        );
+    }
+
+    fixture.harness.shutdown().await;
+}
+
 fn fetch_details(id: &str) -> Value {
     details(
         id,

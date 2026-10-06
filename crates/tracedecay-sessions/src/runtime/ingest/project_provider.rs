@@ -392,16 +392,15 @@ impl<'a> ProjectProviderRun<'a> {
         } else {
             HostProviderCoverage::Complete
         };
-        if stored_coverage != Some(coverage)
-            && let Err(error) = persist_host_provider_coverage(
-                self.facade,
-                self.scope,
-                "codex",
-                coverage,
-                u64::from(coverage != HostProviderCoverage::Complete),
-                None,
-            )
-            .await
+        if let Err(error) = persist_host_provider_coverage(
+            self.facade,
+            self.scope,
+            "codex",
+            coverage,
+            u64::from(coverage != HostProviderCoverage::Complete),
+            None,
+        )
+        .await
         {
             outcome.add_failure(warn_transcript_catch_up_failure(
                 "codex",

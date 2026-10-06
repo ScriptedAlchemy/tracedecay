@@ -354,6 +354,7 @@ fn vibe_checked_in_message_preserves_projection_without_workflow_inference() {
             "vibe-lookalike",
             Some("vibe-model"),
             None,
+            None,
             record_id.clone(),
             range,
         )

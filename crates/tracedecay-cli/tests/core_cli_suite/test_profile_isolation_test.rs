@@ -1,10 +1,8 @@
-//! Guards the suite-wide profile isolation configured in `.cargo/config.toml`.
+//! Guards the suite-wide profile isolation configured by Cargo and Bazel.
 //!
-//! Every cargo-launched test process must resolve TraceDecay storage away
-//! from the developer's real `~/.tracedecay`; otherwise tests that index
-//! temp fixture repos enroll them into the real profile and contend with a
-//! live daemon. This binary intentionally never mutates `TRACEDECAY_DATA_DIR`,
-//! so it observes exactly what cargo's `[env]` section provided.
+//! Every test process must resolve TraceDecay storage away from the
+//! developer's real `~/.tracedecay`. This binary does not change
+//! `TRACEDECAY_DATA_DIR`, so it observes the test runner's value.
 
 use std::path::{Path, PathBuf};
 
@@ -135,18 +133,47 @@ fn resolved_data_dir_is_not_the_real_user_profile() {
         .expect("the test process profile should resolve")
         .data_dir()
         .to_path_buf();
-    let Some(real_profile) = dirs::home_dir().map(|home| home.join(".tracedecay")) else {
-        return;
-    };
+    if let Some(test_tmpdir) = std::env::var_os("TEST_TMPDIR").map(PathBuf::from) {
+        assert_eq!(
+            canonical(&resolved),
+            canonical(&test_tmpdir.join(".tracedecay")),
+            "Bazel tests must use their private TEST_TMPDIR profile"
+        );
+    }
+    assert_eq!(
+        std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB").as_deref(),
+        Ok("1"),
+        "test processes must disable global accounting"
+    );
 
-    let resolved = canonical(&resolved);
-    let real_profile = canonical(&real_profile);
+    let real_profile = dirs::home_dir().map(|home| home.join(".tracedecay"));
+    if let Some(real_profile) = real_profile {
+        assert!(
+            !canonical(&resolved).starts_with(canonical(&real_profile)),
+            "tests resolved TraceDecay storage to the real user profile '{}'; \
+             the suite must stay isolated through {USER_DATA_DIR_ENV}",
+            real_profile.display()
+        );
+    }
+
+    let output = std::process::Command::new(crate::common::tracedecay_bin())
+        .args(["storage", "report", "--json"])
+        .output()
+        .expect("the spawned tracedecay binary should run");
     assert!(
-        !resolved.starts_with(&real_profile),
-        "tests resolved TraceDecay storage to the real user profile '{}'; \
-         the suite must stay isolated (see the {USER_DATA_DIR_ENV} entry in \
-         .cargo/config.toml). If {USER_DATA_DIR_ENV} is set in your shell, \
-         unset it or point it away from ~/.tracedecay before running tests.",
-        real_profile.display()
+        output.status.success(),
+        "spawned tracedecay storage report failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("storage report JSON");
+    assert_eq!(
+        report["profile_root"]
+            .as_str()
+            .map(Path::new)
+            .map(canonical),
+        Some(canonical(&resolved)),
+        "a CLI spawned by the test must inherit the isolated profile"
     );
 }

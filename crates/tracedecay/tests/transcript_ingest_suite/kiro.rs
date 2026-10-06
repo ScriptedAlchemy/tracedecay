@@ -13,7 +13,8 @@ use crate::restart_atomicity::{
     observation_source_cursor, open_project_session_db, set_projection_failure,
 };
 use crate::support::{
-    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+    assert_metadata_path_eq, assert_sanitized_path_text_eq, create_git_repo_with_linked_worktree,
+    init_git_repo, setup,
 };
 
 fn encode_workspace_path(path: &std::path::Path) -> String {
@@ -284,12 +285,19 @@ async fn kiro_secret_is_sanitized_before_observation_and_projection() {
 async fn kiro_workspace_location_projects_session_metadata() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    write_workspace_session_json(&home, &project, "sess-location");
+    let transcript = write_workspace_session_json(&home, &project, "sess-location");
 
     let db = open_project_session_db(&project).await.unwrap();
     ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
 
     let session = db.get_session("kiro", "sess-location").await.unwrap();
+    assert_sanitized_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &transcript,
+    );
     let metadata: serde_json::Value =
         serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&metadata["kiro_session_cwd"], &project);

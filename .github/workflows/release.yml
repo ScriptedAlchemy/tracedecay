@@ -221,7 +221,7 @@ jobs:
       # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
       - name: Install mold
         if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
         with:
           mold-version: 2.41.0
           make-default: true
@@ -389,7 +389,7 @@ jobs:
         if: needs.validate-release.outputs.build_required == 'true'
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Revalidate release tag target
         env:
@@ -772,7 +772,7 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
 

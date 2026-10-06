@@ -185,6 +185,8 @@ pub fn stable_backfill_span(
         last_ts,
         event_count: 2,
         source: super::SpanSource::Backfill,
+        branch_provenance: super::BranchProvenance::Inferred,
+        capture_window: None,
     }
 }
 
@@ -200,7 +202,7 @@ pub(super) fn transcript_spans_from_observations(
             providers_compatible(&span.provider, &observation.provider)
                 && span.session_id == observation.session_id
                 && span.thread_id == observation.thread_id
-                && span.branch == observation.branch
+                && span.captured_branch() == observation.branch.as_deref()
                 && span.worktree == worktree
                 && span.source == observation.source
                 && observation_extends_span(
@@ -209,6 +211,12 @@ pub(super) fn transcript_spans_from_observations(
                     observation.ts,
                     merge_gap_secs,
                 )
+                // An inference-tagged span is bounded by its evidence: a
+                // later branchless observation merges only inside its
+                // window, never stretches the inferred branch over time
+                // the reflog segment did not cover.
+                && (span.branch_provenance != super::BranchProvenance::Inferred
+                    || (observation.ts >= span.first_ts && observation.ts <= span.last_ts))
         });
         let span = match existing {
             Some(existing) => {
@@ -221,6 +229,15 @@ pub(super) fn transcript_spans_from_observations(
                 span.last_ts = span.last_ts.max(observation.ts);
                 if extends {
                     span.event_count = span.event_count.saturating_add(1);
+                }
+                if let Some(capture) = span.capture_window.as_mut() {
+                    let capture_extends =
+                        observation.ts < capture.first_ts || observation.ts > capture.last_ts;
+                    capture.first_ts = capture.first_ts.min(observation.ts);
+                    capture.last_ts = capture.last_ts.max(observation.ts);
+                    if capture_extends {
+                        capture.event_count = capture.event_count.saturating_add(1);
+                    }
                 }
                 span
             }
@@ -235,6 +252,8 @@ pub(super) fn transcript_spans_from_observations(
                 last_ts: observation.ts,
                 event_count: 1,
                 source: observation.source,
+                branch_provenance: super::BranchProvenance::Captured,
+                capture_window: None,
             },
         };
         if let Some(candidate) = candidates
@@ -268,6 +287,7 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
             && span.session_id == incoming.session_id
             && span.thread_id == incoming.thread_id
             && span.branch == incoming.branch
+            && span.branch_provenance == incoming.branch_provenance
             && span.worktree == incoming.worktree
             && span.source == incoming.source
             && incoming.first_ts <= span.last_ts
@@ -280,9 +300,65 @@ pub(super) fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitS
         existing.first_ts = existing.first_ts.min(incoming.first_ts);
         existing.last_ts = existing.last_ts.max(incoming.last_ts);
         existing.event_count = existing.event_count.max(incoming.event_count);
+        existing.capture_window = match (existing.capture_window, incoming.capture_window) {
+            (Some(a), Some(b)) => Some(super::CaptureWindow {
+                first_ts: a.first_ts.min(b.first_ts),
+                last_ts: a.last_ts.max(b.last_ts),
+                event_count: a.event_count.max(b.event_count),
+            }),
+            (a, b) => a.or(b),
+        };
         return *existing != previous;
     } else {
         spans.push(incoming.clone());
+    }
+    true
+}
+
+/// Attributes a reflog-inferred branch to the captured spans of the same
+/// session and worktree that `inferred` overlaps, so capture and inference
+/// share one span. Captured branches are never replaced. The overlapping
+/// spans absorb the segment's window and event count, so nothing the
+/// inference covered is dropped. Returns `false` when no captured span
+/// overlaps, or an overlapping span already names a different branch,
+/// captured or inferred, leaving the inference to stand on its own.
+pub(super) fn infer_captured_branch(
+    spans: &mut [SessionGitSpan],
+    inferred: &SessionGitSpan,
+) -> bool {
+    let mut overlapping = spans
+        .iter_mut()
+        .filter(|span| {
+            span.source != super::SpanSource::Backfill
+                && providers_compatible(&span.provider, &inferred.provider)
+                && span.session_id == inferred.session_id
+                && span.worktree == inferred.worktree
+                && inferred.first_ts <= span.last_ts
+                && inferred.last_ts >= span.first_ts
+        })
+        .collect::<Vec<_>>();
+    if overlapping.is_empty()
+        || overlapping
+            .iter()
+            .any(|span| span.branch.is_some() && span.branch != inferred.branch)
+    {
+        return false;
+    }
+    for span in &mut overlapping {
+        if span.capture_window.is_none() {
+            span.capture_window = Some(super::CaptureWindow {
+                first_ts: span.first_ts,
+                last_ts: span.last_ts,
+                event_count: span.event_count,
+            });
+        }
+        if span.branch.is_none() {
+            span.branch.clone_from(&inferred.branch);
+            span.branch_provenance = super::BranchProvenance::Inferred;
+        }
+        span.first_ts = span.first_ts.min(inferred.first_ts);
+        span.last_ts = span.last_ts.max(inferred.last_ts);
+        span.event_count = span.event_count.max(inferred.event_count);
     }
     true
 }

@@ -37,7 +37,7 @@ pub struct SearchSurfaceRequestV1 {
     /// Exact identifiers or technical terms (e.g. 'reserve_stock', 'Foo::bar', 'E0308') that the answer must be about. Each is ranked through the lexical lane as its own route: a hit carrying an anchor outranks every hit that carries none, exact hits included, every anchor with matches keeps at least its best sites through the lane cap, and `lexical_anchors` in the response reports each anchor's outcome (`matched` rows, `admitted` sites this response returns, `dropped` admitted sites it could not carry with the reason, `unmatched`, or `not_served`). Ranked retrieval, not exhaustive grep (use tracedecay_grep for that). Each result names the routes that ranked it. At most 8 anchors, each one whitespace-free term of at most 128 bytes, no repeats.
     #[schemars(length(max = SEARCH_MAX_LEXICAL_ANCHORS))]
     pub lexical_anchors: Option<Vec<String>>,
-    /// Add a lexical route restricted to symbol-name matches for the identifier-shaped words of the query (default: false). Query words such as class/struct/function/find/explain are ignored; 'Foo::bar' and 'Foo.bar' contribute 'bar'.
+    /// Add a lexical route restricted to symbol-name matches for the identifier-shaped words of the query. Omitted, it runs when the query is name-shaped (at least half its content words are identifiers such as 'getUserById' or 'Foo::bar'); true forces it, false suppresses it. `query_route` in the response reports the decision and its margin. Query words such as class/struct/function/find/explain are ignored; 'Foo::bar' and 'Foo.bar' contribute 'bar'.
     pub prefer_symbol: Option<bool>,
     /// Named query-time vocabulary aliases. The strict query always ranks first. Alias-only hits follow it with the strict query, alternative, and configured-vocabulary reason disclosed.
     #[schemars(length(max = SEARCH_MAX_LEXICAL_ALIASES))]
@@ -98,6 +98,38 @@ pub struct SearchLexicalFieldFilterV1 {
     pub include: bool,
 }
 
+/// Which lexical lane the query's shape selected.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchQueryRouteKindV1 {
+    /// The symbol-name route ran beside the strict query.
+    Name,
+    /// The strict query ran without the symbol-name route.
+    Prose,
+}
+
+/// Who chose the query route: the query-shape gate or the caller's
+/// `prefer_symbol`.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchQueryRouteDeciderV1 {
+    QueryShape,
+    Caller,
+}
+
+/// The query-shape routing decision behind a page.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchQueryRouteV1 {
+    pub route: SearchQueryRouteKindV1,
+    /// Distance from the name gate in [-0.5, 0.5]: the share of the query's
+    /// content words that are identifier-shaped, minus one half. The gate
+    /// selects `name` at or above 0. Reported when the caller decided too.
+    /// It describes query shape only and is not an answerability signal.
+    pub margin: f64,
+    pub decided_by: SearchQueryRouteDeciderV1,
+}
+
 /// What a search served: a ranked page, or the typed reason no generation
 /// could answer.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -119,6 +151,9 @@ pub struct SearchCompleteV1 {
     pub next_cursor: Option<String>,
     pub coverage: SearchCoverageV1,
     pub results: Vec<SearchResultRowV1>,
+    /// Which lane the query's shape selected, and its margin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_route: Option<SearchQueryRouteV1>,
     /// Every lexical route fused into this page; present only when a route
     /// beyond the strict query ran or ranked a result.
     #[serde(default, skip_serializing_if = "Option::is_none")]

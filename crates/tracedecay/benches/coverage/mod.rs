@@ -3290,27 +3290,6 @@ async fn settle_attempt(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    // A cancellation observed while the provider is still spawning can leave
-    // the row parked in `cancellation_requested`: the orphaned mark_running
-    // transition already lost its fence, so only the recovery sweep seals the
-    // lost cancellation to `cancelled`.
-    if !terminal(&state) {
-        let _ = call(
-            "tracedecay_work_resume_attempts",
-            json!({"occurred_at": now_micros()}),
-        )
-        .await;
-        for _ in 0..60 {
-            if let Ok(s) = call("tracedecay_work_attempt_status", status(attempt_id)).await
-                && let Some(st) = dig_str(&s, "state")
-                && terminal(st)
-            {
-                state = st.to_owned();
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
     (started, identity, state)
 }
 

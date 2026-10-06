@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Resolve Cargo test selections and prove complete, disjoint coverage.
 
-    linux-test-partitions.py [--metadata FILE] check
-    linux-test-partitions.py [--metadata FILE] cargo-args <partition>
-    linux-test-partitions.py [--metadata FILE] build-args <partition>
-    linux-test-partitions.py linux-matrix
-    linux-test-partitions.py windows-matrix
-    linux-test-partitions.py macos-matrix
-    linux-test-partitions.py [--metadata FILE] run-linux-group <group>
+    platform-test-partitions.py [--metadata FILE] check
+    platform-test-partitions.py [--metadata FILE] cargo-args <partition>
+    platform-test-partitions.py [--metadata FILE] build-args <partition>
+    platform-test-partitions.py windows-matrix
+    platform-test-partitions.py macos-matrix
 
-`cargo-args` and `build-args` emit shell-quoted selections. The Linux runner
-passes those same argument arrays through Hauler, preserves every partition's
-JUnit report, and writes build/test durations and exit codes to timings.json.
+`cargo-args` and `build-args` emit shell-quoted selections for the maintained
+macOS and Windows lanes.
 """
 
 from __future__ import annotations
@@ -20,16 +17,14 @@ import argparse
 import json
 import re
 import shlex
-import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = ROOT / ".github/linux-test-partitions.json"
+MANIFEST_PATH = ROOT / ".github/platform-test-partitions.json"
 
 # cargo metadata reports every kind a target can have; a test run only ever
 # builds the ones with a test harness, and the lane's `cargo test-ci` alias
@@ -154,12 +149,13 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
     ):
         raise PartitionError(f"{path}: not_run must map `package::target` to a reason")
     groups(document, "macos")
-    groups(document, "linux")
     return document
 
 
 def groups(document: dict[str, Any], platform: str) -> dict[str, list[str]]:
-    label = {"linux": "Linux", "macos": "macOS"}[platform]
+    if platform != "macos":
+        raise PartitionError(f"unsupported grouped platform {platform!r}")
+    label = "macOS"
     declarations = document.get(f"{platform}_groups")
     if not isinstance(declarations, list) or not declarations:
         raise PartitionError(f"manifest has no {platform}_groups")
@@ -331,13 +327,12 @@ def check(document: dict[str, Any], metadata: dict[str, Any]) -> list[str]:
         f"{len(universe)} test targets: {sum(1 for names in owners.values() if names)} in exactly "
         f"one partition, {len(not_run)} listed under not_run"
     )
-    for platform, label in (("macos", "macOS"), ("linux", "Linux")):
-        members = groups(document, platform)
-        for group, partitions in members.items():
-            lines.append(f"{label} {group}: {', '.join(partitions)}")
-        lines.append(
-            f"{len(document['partitions'])} partitions: each in exactly one of {len(members)} {label} groups"
-        )
+    members = groups(document, "macos")
+    for group, partitions in members.items():
+        lines.append(f"macOS {group}: {', '.join(partitions)}")
+    lines.append(
+        f"{len(document['partitions'])} partitions: each in exactly one of {len(members)} macOS groups"
+    )
     return lines
 
 
@@ -405,57 +400,6 @@ def group_matrix(document: dict[str, Any], platform: str) -> dict[str, Any]:
     }
 
 
-def run_linux_group(document: dict[str, Any], metadata: dict[str, Any], name: str) -> int:
-    members = groups(document, "linux")
-    if name not in members:
-        raise PartitionError(f"no Linux group named {name!r}")
-    check(document, metadata)
-    output = ROOT / "target/nextest/linux"
-    output.mkdir(parents=True, exist_ok=True)
-    source = ROOT / "target/nextest/ci/junit.xml"
-    results: dict[str, Any] = {"group": name, "partitions": []}
-    failed = False
-    for partition in members[name]:
-        result: dict[str, Any] = {"partition": partition, "build": None, "test": None, "report": None, "error": None}
-        print(f"::group::Test partition {partition}", flush=True)
-        try:
-            source.unlink(missing_ok=True)
-            destination = output / f"{partition}.xml"
-            destination.unlink(missing_ok=True)
-            build = build_args(document, metadata, partition)
-            commands = []
-            if build:
-                commands.append(("build", ["build", "--locked", "--profile", "perf", *build]))
-            commands.append(("test", [
-                "nextest", "run", "--profile", "ci", "--cargo-profile", "perf", "--locked",
-                *cargo_args(document, metadata, partition), "--no-tests=fail",
-            ]))
-            for stage, args in commands:
-                started = time.monotonic()
-                hauler = shutil.which("hauler")
-                if hauler is None:
-                    raise FileNotFoundError("hauler executable not found on PATH")
-                completed = subprocess.run([hauler, "exec", "--", "cargo", *args], cwd=ROOT)
-                result[stage] = {"seconds": round(time.monotonic() - started, 3), "exit_code": completed.returncode}
-                if completed.returncode:
-                    failed = True
-                    break
-            if source.exists():
-                source.replace(destination)
-                result["report"] = destination.relative_to(ROOT).as_posix()
-            elif result["test"] is not None and result["test"]["exit_code"] == 0:
-                raise PartitionError(f"{partition}: nextest succeeded without its JUnit report")
-        except (OSError, PartitionError) as error:
-            result["error"] = str(error)
-            failed = True
-            print(f"::error::{error}", flush=True)
-        results["partitions"].append(result)
-        (output / "timings.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(result), flush=True)
-        print("::endgroup::", flush=True)
-    return int(failed)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
@@ -464,8 +408,6 @@ def main() -> None:
     commands.add_parser("check")
     for command in ("cargo-args", "build-args"):
         commands.add_parser(command).add_argument("partition")
-    commands.add_parser("linux-matrix")
-    commands.add_parser("run-linux-group").add_argument("group")
     commands.add_parser("windows-matrix")
     commands.add_parser("macos-matrix")
     args = parser.parse_args()
@@ -475,12 +417,10 @@ def main() -> None:
         if args.command == "windows-matrix":
             print(json.dumps(matrix(document, "windows_timeout_minutes")))
             return
-        if args.command in ("linux-matrix", "macos-matrix"):
-            print(json.dumps(group_matrix(document, args.command.removesuffix("-matrix"))))
+        if args.command == "macos-matrix":
+            print(json.dumps(group_matrix(document, "macos")))
             return
         metadata = load_metadata(args.metadata)
-        if args.command == "run-linux-group":
-            raise SystemExit(run_linux_group(document, metadata, args.group))
         if args.command == "check":
             print("\n".join(check(document, metadata)))
         elif args.command == "cargo-args":
@@ -488,7 +428,7 @@ def main() -> None:
         else:
             print(shlex.join(build_args(document, metadata, args.partition)))
     except (OSError, json.JSONDecodeError, KeyError, subprocess.CalledProcessError, PartitionError) as error:
-        print(f"linux test partitions: {error}", file=sys.stderr)
+        print(f"platform test partitions: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
 

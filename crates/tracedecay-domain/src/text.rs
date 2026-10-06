@@ -121,12 +121,51 @@ pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
     &text[..text.floor_char_boundary(max_bytes)]
 }
 
+/// Levenshtein distance between `left` and `right` when it is at most
+/// `limit`, counted in characters. `None` means more than `limit` edits.
+#[must_use]
+pub fn edit_distance_within(left: &str, right: &str, limit: usize) -> Option<usize> {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > limit {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_character) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            current[right_index + 1] = (previous[right_index]
+                + usize::from(left_character != right_character))
+            .min(previous[right_index + 1] + 1)
+            .min(current[right_index] + 1);
+        }
+        // A row's minimum never decreases in later rows.
+        if current.iter().min().is_some_and(|minimum| *minimum > limit) {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    Some(previous[right.len()]).filter(|distance| *distance <= limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        blank_json_comments, collapse_whitespace, fold_control_characters, forward_slash_text,
-        utf8_prefix_at_or_before,
+        blank_json_comments, collapse_whitespace, edit_distance_within, fold_control_characters,
+        forward_slash_text, utf8_prefix_at_or_before,
     };
+
+    #[test]
+    fn edit_distance_within_counts_character_edits_up_to_the_limit() {
+        assert_eq!(edit_distance_within("limit", "limit", 0), Some(0));
+        assert_eq!(edit_distance_within("limt", "limit", 1), Some(1));
+        assert_eq!(edit_distance_within("", "abc", 3), Some(3));
+        assert_eq!(edit_distance_within("", "abc", 2), None);
+        assert_eq!(edit_distance_within("kitten", "sitting", 3), Some(3));
+        assert_eq!(edit_distance_within("kitten", "sitting", 2), None);
+        assert_eq!(edit_distance_within("caf\u{e9}", "cafe", 1), Some(1));
+    }
 
     #[test]
     fn json_comments_become_spaces_and_keep_offsets_and_strings() {

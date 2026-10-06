@@ -1,4 +1,4 @@
-//! Carry the parent's clone rows: replace the changed files' occurrences in
+//! Carry the parent's clone rows: replace the replaced files' occurrences in
 //! place and renumber payloads by first use, as a cold build's insert order
 //! numbers them.
 
@@ -17,7 +17,7 @@ use super::super::prepared::PreparedCloneBodyV1;
 use super::super::row_codec::stored_symbol_key;
 use super::super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
 use super::postings::{scan_window, transform_window};
-use super::{ChangedFileV1, ShiftV1, shift_rowid_keys, shifted};
+use super::{ReplacedFilesV1, ShiftV1, shift_rowid_keys, shifted};
 
 /// One successor clone body with the occurrence ordinal it takes.
 struct CarriedCloneV1<'a> {
@@ -25,13 +25,13 @@ struct CarriedCloneV1<'a> {
     body: &'a PreparedCloneBodyV1,
 }
 
-/// Replace the changed files' clone occurrences in place, then renumber the
+/// Replace the replaced files' clone occurrences in place, then renumber the
 /// payloads by first use over the whole occurrence sequence, which is how a
 /// cold build's insert order numbers them.
 pub(super) fn carry_clone_rows(
     transaction: &Transaction<'_>,
     clones: &ShiftV1,
-    changed: &[ChangedFileV1],
+    changed: &[ReplacedFilesV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let mut bodies = Vec::new();
@@ -145,14 +145,14 @@ pub(super) fn carry_clone_rows(
     renumber_clone_payloads(transaction, &parent_payloads, &successor_payloads, control)
 }
 
-/// Where a changed file's first successor occurrence lands: its parent
-/// start moved by the growth of the changed files before it. `index` pairs
-/// the file with its replaced range, since two files without clone bodies
-/// can replace the same empty range.
+/// Where a run's first successor occurrence lands: its parent start moved
+/// by the growth of the runs before it. `index` pairs the run with its
+/// replaced range, since two runs without clone bodies can replace the same
+/// empty range.
 fn clone_range_image(
     clones: &ShiftV1,
     index: usize,
-    file: &ChangedFileV1,
+    file: &ReplacedFilesV1,
 ) -> Result<u64, CodeLexicalArtifactErrorV1> {
     let start = file.old_clones.0 + 1;
     if clones.replaced.get(index) != Some(&(start, file.old_clones.1 + 1)) {

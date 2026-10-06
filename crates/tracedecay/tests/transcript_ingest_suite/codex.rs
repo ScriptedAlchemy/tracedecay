@@ -169,6 +169,78 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
     );
 }
 
+/// The `session_meta` model is the rollout's starting model; `turn_context`
+/// records replace it for the turns that follow, and the session row records
+/// which rollout file the projection was read from.
+#[tokio::test]
+async fn codex_rollout_projects_turn_context_model_and_transcript_path() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = crate::support::setup(&tmp);
+    let path = write_codex_rollout(&home, &project, "codex-model-session");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "type": "turn_context",
+            "payload": {"turn_id": "turn-2", "cwd": project.to_string_lossy(), "model": "gpt-5.6"}
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:04.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "billing pipeline follow-up verified"}
+        })
+    )
+    .unwrap();
+    drop(file);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+
+    let session = db
+        .get_session("codex", "codex-model-session")
+        .await
+        .expect("codex session should be stored");
+    crate::support::assert_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &path,
+    );
+
+    let hits = db
+        .search_session_messages("codex", None, "billing pipeline", 10)
+        .await;
+    let model_for = |needle: &str| {
+        hits.iter()
+            .find(|hit| hit.message.text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: message should be searchable"))
+            .message
+            .model
+            .clone()
+    };
+    assert_eq!(
+        model_for("The billing pipeline regression is fixed."),
+        Some("gpt-5.5".to_owned()),
+        "session_meta model is the starting model"
+    );
+    assert_eq!(
+        model_for("billing pipeline follow-up verified"),
+        Some("gpt-5.6".to_owned()),
+        "turn_context replaces the model for the turns that follow"
+    );
+}
+
 #[tokio::test]
 async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
     let tmp = TempDir::new().unwrap();

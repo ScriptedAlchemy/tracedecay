@@ -16,7 +16,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
-use tracedecay_query::retrieval::lexical::task_is_name_shaped;
+use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -306,7 +306,7 @@ where
         .unwrap_or_else(|| task_is_name_shaped(task));
     let lexical_routing = lexical_routing::routing_from_parts(
         request.lexical_anchors.clone().unwrap_or_default(),
-        prefer_symbol,
+        Some(prefer_symbol),
     )?
     .with_task_identifiers(task);
     let requested_anchors: Vec<String> = lexical_routing
@@ -530,14 +530,18 @@ where
     let cost = graph
         .as_ref()
         .map(tracedecay_graph_query::VerifiedGraphQuery::read_cost);
+    // Mirror the lexical planner's admission rule: a name preference only
+    // becomes a served name route when at least one eligible symbol token
+    // survives normalization and the stoplist.
+    let route = if prefer_symbol && !preferred_symbol_tokens(task).is_empty() {
+        ContextRetrievalRouteV1::Name
+    } else {
+        ContextRetrievalRouteV1::Prose
+    };
     let budget_tokens = request.budget_tokens;
     let mut result = ContextResultV1 {
         task: request.task,
-        route: if prefer_symbol {
-            ContextRetrievalRouteV1::Name
-        } else {
-            ContextRetrievalRouteV1::Prose
-        },
+        route,
         mode,
         freshness,
         code_generation,

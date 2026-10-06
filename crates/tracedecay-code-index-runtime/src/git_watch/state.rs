@@ -151,6 +151,8 @@ pub struct WatchState {
     #[cfg(test)]
     pub plan_drained: Notify,
     #[cfg(test)]
+    pub operation_held: Notify,
+    #[cfg(test)]
     pub operation_scan_probe: OperationScanProbe,
     #[cfg(test)]
     pub retirement_probe: RetirementRaceProbe,
@@ -205,6 +207,8 @@ impl WatchState {
             drained_plans: AtomicU64::new(0),
             #[cfg(test)]
             plan_drained: Notify::new(),
+            #[cfg(test)]
+            operation_held: Notify::new(),
             #[cfg(test)]
             operation_scan_probe: OperationScanProbe::default(),
             #[cfg(test)]

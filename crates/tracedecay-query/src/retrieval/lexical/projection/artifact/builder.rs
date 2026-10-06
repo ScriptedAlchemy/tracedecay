@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use tracedecay_code_index::production::{
-    CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
-    VerifiedSealedLexicalSymbolDisplayV1, advance_import_dictionary_digest,
-    initial_import_dictionary_digest,
+    CodeIndexExecutionControlV1, SealedLexicalFileReplacementV1, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    advance_import_dictionary_digest, initial_import_dictionary_digest,
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -1037,7 +1037,7 @@ impl CodeLexicalArtifactBuilderV1 {
 
     /// Stage a successor over a byte copy of the sealed `parent`, whose bytes
     /// must hash to `parent_digest` and number `parent_size_bytes`, re-encoding
-    /// only `changed_files` (ascending file ordinals) through
+    /// only the successor files of `replacements` (ascending runs) through
     /// `stage_file_pages`. The result stands where a cold build of the same
     /// generation stands on entering digest verification, so
     /// `advance_started_finalization` seals the bytes a cold build seals.
@@ -1058,7 +1058,7 @@ impl CodeLexicalArtifactBuilderV1 {
         memory_budget_bytes: usize,
         source_state_digest: ManifestDigest,
         source_format_revision: u32,
-        changed_files: &[u64],
+        replacements: &[SealedLexicalFileReplacementV1],
         stage_file_pages: &mut CarriedFilePagesV1<'_>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -1100,7 +1100,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let carried = carry_parent_rows(
             &transaction,
             &metadata,
-            changed_files,
+            replacements,
             stage_file_pages,
             control,
         )?;

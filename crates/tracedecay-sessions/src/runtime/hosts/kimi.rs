@@ -29,7 +29,7 @@ use crate::runtime::snapshot_observation::{
 use crate::runtime::source::{
     FileDiscoveryLimit, HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, bound_path_list, canonical_framed_sha256, jsonl_file_identity,
-    persist_host_provider_coverage, run_blocking_transcript_section,
+    persist_host_provider_coverage, revise_host_record, run_blocking_transcript_section,
 };
 
 mod discovery;
@@ -683,7 +683,7 @@ pub async fn capture_kimi_observations(
                     }
                     Err(error) => return Err(error),
                 };
-                let (session_id, agent_id) = match kimi_session_identity(&path) {
+                let (session_id, agent_id, is_main_agent) = match kimi_session_identity(&path) {
                     Ok(identity) => identity,
                     Err(_) => {
                         warn_isolated_source(&path, "invalid_source_identity");
@@ -728,6 +728,7 @@ pub async fn capture_kimi_observations(
                 let retention =
                     RetentionClass::new("transcript.kimi.v1").map_err(|_| invalid_frame())?;
                 let native_record_prefix = format!("{session_id}:{agent_id}");
+                let transcript_path = is_main_agent.then(|| path.to_string_lossy().into_owned());
                 let request = JsonlObservationAdmissionRequest::new(
                     PROVIDER,
                     &path,
@@ -753,6 +754,7 @@ pub async fn capture_kimi_observations(
                                 kimi_capture::normalize_observation(
                                     &native,
                                     &canonical_session_id,
+                                    transcript_path.as_deref(),
                                     native_id.clone(),
                                     range,
                                 )
@@ -837,29 +839,27 @@ pub async fn capture_kimi_observations(
                 && !cancellation.is_cancelled()
             {
                 let next_frontier = if discovery.reached_end {
-                    Some(ParseOffset {
-                        byte_offset: 0,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: 0,
-                    })
+                    Some((0, 0))
                 } else {
-                    last_discovered_entry.map(|entry| ParseOffset {
-                        byte_offset: entry.sequence,
-                        mtime: discovery_frontier.mtime.saturating_add(1),
-                        file_id: entry.sequence,
-                    })
+                    last_discovered_entry.map(|entry| (entry.sequence, entry.sequence))
                 };
-                if let Some(next_frontier) = next_frontier
+                if let Some((byte_offset, file_id)) = next_frontier
                     && !cancellation.is_cancelled()
                 {
-                    facade
-                        .advance_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY, next_frontier)
-                        .await
-                        .map_err(|outcome| {
-                            crate::runtime::snapshot_observation::host_admission_error(
-                                PROVIDER, outcome,
-                            )
-                        })?;
+                    revise_host_record(
+                        facade,
+                        &scope,
+                        KIMI_DISCOVERY_FRONTIER_KEY,
+                        discovery_frontier,
+                        byte_offset,
+                        file_id,
+                    )
+                    .await
+                    .map_err(|outcome| {
+                        crate::runtime::snapshot_observation::host_admission_error(
+                            PROVIDER, outcome,
+                        )
+                    })?;
                 }
             }
             let deferred_units = outcome
@@ -907,7 +907,9 @@ fn warn_isolated_source(path: &Path, failure_kind: &'static str) {
     );
 }
 
-fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)> {
+/// A wire's session identity: its session, its agent, and whether that agent
+/// is the session's main wire — the one file that is the session transcript.
+fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String, bool)> {
     let session_dir = path
         .parent()
         .and_then(Path::parent)
@@ -960,13 +962,16 @@ fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)
             path: path.to_path_buf(),
         }
     })?;
-    if !state.agents.contains_key(agent_id) {
-        return Err(TranscriptIngestError::InvalidSourceIdentity {
-            provider: PROVIDER,
-            path: path.to_path_buf(),
-        });
-    }
-    Ok((session_id, agent_id.to_owned()))
+    let is_main = match state.agents.get(agent_id) {
+        Some(agent) => agent.kind == "main",
+        None => {
+            return Err(TranscriptIngestError::InvalidSourceIdentity {
+                provider: PROVIDER,
+                path: path.to_path_buf(),
+            });
+        }
+    };
+    Ok((session_id, agent_id.to_owned(), is_main))
 }
 
 const fn invalid_frame() -> TranscriptIngestError {

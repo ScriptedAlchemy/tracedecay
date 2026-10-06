@@ -19,7 +19,8 @@ use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill,
     GraphGenerationRows, GraphLayeredRowSpill, GraphNamespace, GraphProjectionId,
     GraphProjectionIdentity, GraphProjectorRevision, GraphSealedBaseAbsenceV1,
-    SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
+    GraphSiblingSealedBaseV1, SealedCodeGenerationReplay, SealedGraphStateDigest,
+    SpilledGraphGeneration,
 };
 use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
@@ -606,9 +607,19 @@ fn open_seal_from_roots(
 pub(super) type LayeredRowSpillV1 =
     Result<Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>, GraphDbError>;
 
+/// The sealed graph a layered refresh builds its delta over.
+pub(super) enum LayeredBaseV1<'a> {
+    /// The graph the scope sealed for the seal's parent code generation.
+    Parent(&'a tracedecay_domain::CodeGenerationId),
+    /// A cold graph another scope of the same store sealed, the base of a
+    /// scope's first generation: a linked worktree at its sibling's tree.
+    Sibling(GraphSiblingSealedBaseV1),
+}
+
 /// A seal's graph rows as its publication seals them: a delta over the
-/// sealed graph of the seal's parent code generation when `layered_spill`
-/// resolves one and the base's inputs admit it, the cold rows otherwise.
+/// sealed graph of the seal's parent code generation, or for a seal with no
+/// parent over a sibling scope's sealed graph, when `layered_spill` resolves
+/// one and the base's inputs admit it, the cold rows otherwise.
 ///
 /// A layered attempt that fails for any reason but an interruption is
 /// reported and replaced by the cold build, which is the authority a
@@ -626,7 +637,8 @@ pub(super) fn graph_rows_from_roots(
     generation: &tracedecay_domain::CodeGenerationId,
     projection: GraphProjectionIdentity,
     projector_revision: &GraphProjectorRevision,
-    layered_spill: &dyn Fn(&tracedecay_domain::CodeGenerationId) -> LayeredRowSpillV1,
+    layered_spill: &dyn Fn(LayeredBaseV1<'_>) -> LayeredRowSpillV1,
+    sibling_bases: &dyn Fn() -> Result<Vec<GraphSiblingSealedBaseV1>, GraphDbError>,
     cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
     admit: &mut dyn FnMut(
         tracedecay_code_index::production::CodeGraphBuildBoundV1,
@@ -641,50 +653,44 @@ pub(super) fn graph_rows_from_roots(
         check,
         "code_graph_manifest.graph_rows",
     )?;
+    let mut layered = |base: &str, spill: LayeredRowSpillV1| {
+        layered_graph_rows(
+            &seal,
+            generation,
+            &projection,
+            projector_revision,
+            base,
+            spill,
+            admit,
+            check,
+        )
+    };
     if let Some(parent) = seal.source.manifest().parent_generation.clone() {
-        let layered = layered_spill(&parent).and_then(|spill| match spill {
-            Ok(spill) => with_verified_segments(
-                &seal.sealed_state_digest,
-                &seal.routes,
-                check,
-                |read_segment| {
-                    build_layered_code_graph_rows(
-                        projection.clone(),
-                        &seal.source,
-                        read_segment,
-                        projector_revision,
-                        spill,
-                        admit,
-                        check,
-                    )
-                },
-            )
-            .map(|built| built.map_err(|decline| format!("{decline:?}"))),
-            Err(absence) => Ok(Err(format!("{absence:?}"))),
-        });
-        match layered {
-            Ok(Ok(built)) => return Ok((built.generation.into(), Some(built.report))),
-            Ok(Err(reason)) => tracing::info!(
-                event = "code_graph_layered_refresh_declined",
-                generation = %generation,
-                parent = %parent,
-                reason = %reason,
-                "the refresh seals cold rather than as a delta over its parent's graph"
-            ),
-            Err(
-                error @ (GraphDbError::Cancelled
-                | GraphDbError::DeadlineExceeded
-                | GraphDbError::SealSuperseded),
-            ) => {
-                return Err(error);
+        if let Some(built) = layered(
+            parent.as_str(),
+            layered_spill(LayeredBaseV1::Parent(&parent)),
+        )? {
+            return Ok(built);
+        }
+    } else {
+        let siblings = match sibling_bases() {
+            Ok(siblings) => siblings,
+            Err(error) if is_interruption(&error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_graph_layered_refresh_unavailable",
+                    generation = %generation,
+                    error = %error,
+                    "sibling sealed graphs could not be listed; sealing the generation cold"
+                );
+                Vec::new()
             }
-            Err(error) => tracing::warn!(
-                event = "code_graph_layered_refresh_unavailable",
-                generation = %generation,
-                parent = %parent,
-                error = %error,
-                "a layered graph refresh could not be built; sealing the generation cold"
-            ),
+        };
+        for sibling in siblings {
+            let base = sibling.base().generation().as_str().to_owned();
+            if let Some(built) = layered(&base, layered_spill(LayeredBaseV1::Sibling(sibling)))? {
+                return Ok(built);
+            }
         }
     }
     let spilled = spill_verified_seal_graph(
@@ -696,6 +702,69 @@ pub(super) fn graph_rows_from_roots(
         check,
     )?;
     Ok((spilled.into(), None))
+}
+
+fn is_interruption(error: &GraphDbError) -> bool {
+    matches!(
+        error,
+        GraphDbError::Cancelled | GraphDbError::DeadlineExceeded | GraphDbError::SealSuperseded
+    )
+}
+
+/// The seal's rows as a delta over `base`, or `None` when the base declines
+/// or the attempt fails for any reason but an interruption.
+#[allow(clippy::too_many_arguments)]
+fn layered_graph_rows(
+    seal: &VerifiedSealGraphSourceV1,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: &GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    base: &str,
+    spill: LayeredRowSpillV1,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Option<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>)>, GraphDbError> {
+    let layered = spill.and_then(|spill| match spill {
+        Ok(spill) => with_verified_segments(
+            &seal.sealed_state_digest,
+            &seal.routes,
+            check,
+            |read_segment| {
+                build_layered_code_graph_rows(
+                    projection.clone(),
+                    &seal.source,
+                    read_segment,
+                    projector_revision,
+                    spill,
+                    admit,
+                    check,
+                )
+            },
+        )
+        .map(|built| built.map_err(|decline| format!("{decline:?}"))),
+        Err(absence) => Ok(Err(format!("{absence:?}"))),
+    });
+    match layered {
+        Ok(Ok(built)) => return Ok(Some((built.generation.into(), Some(built.report)))),
+        Ok(Err(reason)) => tracing::info!(
+            event = "code_graph_layered_refresh_declined",
+            generation = %generation,
+            base = %base,
+            reason = %reason,
+            "the refresh seals cold rather than as a delta over this base's graph"
+        ),
+        Err(error) if is_interruption(&error) => return Err(error),
+        Err(error) => tracing::warn!(
+            event = "code_graph_layered_refresh_unavailable",
+            generation = %generation,
+            base = %base,
+            error = %error,
+            "a layered graph refresh could not be built; sealing the generation cold"
+        ),
+    }
+    Ok(None)
 }
 
 struct PinnedPartitionedSegmentV1 {

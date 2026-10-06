@@ -53,6 +53,10 @@ impl SessionTemporalWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::commit(self)
     }
+
+    fn rollback(self) -> impl Future<Output = Result<(), EngineError>> + Send {
+        RegisteredGlobalDbWriteTransaction::rollback(self)
+    }
 }
 
 impl SessionTemporalRegisteredDb for RegisteredGlobalDb {

@@ -42,10 +42,18 @@ pub struct ClaudeSpawnParent<'a> {
 pub fn normalize(
     native: &Value,
     session_id: &str,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_spawned(native, session_id, None, stable_record_id, range)
+    normalize_spawned(
+        native,
+        session_id,
+        None,
+        transcript_path,
+        stable_record_id,
+        range,
+    )
 }
 
 /// [`normalize`] for a record of a subagent transcript spawned by `parent`.
@@ -53,10 +61,18 @@ pub fn normalize_spawned(
     native: &Value,
     session_id: &str,
     parent: Option<ClaudeSpawnParent<'_>>,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_record(native, session_id, parent, stable_record_id, range)
+    normalize_record(
+        native,
+        session_id,
+        parent,
+        transcript_path,
+        stable_record_id,
+        range,
+    )
 }
 
 /// One source-record canonicalization, not a per-block walk.
@@ -65,6 +81,7 @@ fn normalize_record(
     native: &Value,
     session_id: &str,
     parent: Option<ClaudeSpawnParent<'_>>,
+    transcript_path: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -80,7 +97,7 @@ fn normalize_record(
         .and_then(parse_rfc3339_timestamp);
     let mut facts = Vec::new();
 
-    append_session_location_fact(&mut facts, native);
+    append_session_location_fact(&mut facts, native, transcript_path);
     if matches!(record_kind, "user" | "assistant") {
         let message = native.get("message").unwrap_or(native);
         // Message facts carry only provider-authored visible text. Thinking,
@@ -261,19 +278,23 @@ fn tool_result_only_message_content(message: &Value) -> Option<Value> {
     (!parts.is_empty()).then(|| Value::String(parts.join("\n\n")))
 }
 
-fn append_session_location_fact(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
-    let Some(cwd) = native
+fn append_session_location_fact(
+    facts: &mut Vec<CanonicalObservationFactV1>,
+    native: &Value,
+    transcript_path: Option<&str>,
+) {
+    let cwd = native
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
-        .map(str::to_owned)
-    else {
+        .map(str::to_owned);
+    if cwd.is_none() && transcript_path.is_none() {
         return;
-    };
+    }
     facts.push(CanonicalObservationFactV1::Session {
-        project_path: Some(cwd.clone()),
-        location_path: Some(cwd),
-        transcript_path: None,
+        project_path: cwd.clone(),
+        location_path: cwd,
+        transcript_path: transcript_path.map(str::to_owned),
         title: None,
         started_at: None,
         ended_at: None,
@@ -721,7 +742,7 @@ mod provider_usage_tests {
                 ObservationSourceRangeV1::new(20, 30).unwrap(),
             ),
         ] {
-            let envelope = normalize(native, "session.fixture", stable_id, range).unwrap();
+            let envelope = normalize(native, "session.fixture", None, stable_id, range).unwrap();
             assert_eq!(
                 envelope.relations().message_id().map(ObservationId::as_str),
                 Some("message.shared")
@@ -747,6 +768,7 @@ mod provider_usage_tests {
         let envelope = normalize(
             &native,
             "session.fixture",
+            None,
             ObservationId::new("message.fixture").unwrap(),
             ObservationSourceRangeV1::new(10, 20).unwrap(),
         )
@@ -781,6 +803,7 @@ mod provider_usage_tests {
         let envelope = normalize(
             &native,
             "session.fixture",
+            None,
             ObservationId::new("message.user-fixture").unwrap(),
             ObservationSourceRangeV1::new(20, 30).unwrap(),
         )

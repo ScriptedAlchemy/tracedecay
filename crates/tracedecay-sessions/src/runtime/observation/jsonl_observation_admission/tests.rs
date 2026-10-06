@@ -1544,7 +1544,7 @@ fn catch_up_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
         _ if index % CATCH_UP_TURN_RECORDS == 1 => json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "turn_context",
-            "payload": {"turn_id": format!("turn-{index:05}"), "cwd": cwd, "pad": pad}
+            "payload": {"turn_id": format!("turn-{index:05}"), "cwd": cwd, "model": "gpt-5.5", "pad": pad}
         }),
         _ => json!({
             "timestamp": "2026-01-01T00:00:01.000Z",

@@ -78,6 +78,7 @@ fn completed_sparse_search_for_generation(
                 anchors: Vec::new(),
                 dropped_sites: std::collections::BTreeMap::new(),
                 declaring_sites: std::collections::BTreeSet::new(),
+                decision: tracedecay_query::retrieval::lexical::LexicalRouteDecisionV1::default(),
             },
         },
     )
@@ -323,6 +324,7 @@ fn completed_sparse_search_with_anchor_route(
         anchors: Vec::new(),
         dropped_sites: std::collections::BTreeMap::new(),
         declaring_sites: std::collections::BTreeSet::new(),
+        decision: tracedecay_query::retrieval::lexical::LexicalRouteDecisionV1::default(),
     };
     tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
 }
@@ -730,7 +732,10 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
         .clone()
         .expect("the executor received the request");
     assert_eq!(routing.anchors[0].as_str(), "SparseLexicalWidget");
-    assert!(routing.prefer_symbol);
+    assert_eq!(
+        routing.prefer_symbol,
+        tracedecay_query::retrieval::lexical::SymbolRoutePreferenceV1::Always
+    );
     let text = response_text(&result);
     assert!(
         text.contains("**SparseLexicalWidget** (function, approximate), rank 1 · utility 1 · via anchor:SparseLexicalWidget"),
