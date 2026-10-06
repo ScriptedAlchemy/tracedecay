@@ -11,11 +11,7 @@ export TRACEDECAY_DATA_DIR="$TEST_TMPDIR/.tracedecay"
 export TRACEDECAY_DISABLE_GLOBAL_DB=1
 # Names such as CARGO_BIN_EXE_<bin> may carry `-`, which no shell variable
 # can, so read with printenv and pass the absolute values through env.
-resolved=""
-for name in {runfiles_env}; do
-  resolved="$resolved $name=$TEST_SRCDIR/$(printenv "$name")"
-done
-exec env $resolved "$TEST_SRCDIR/$TEST_WORKSPACE/{binary}" "$@"
+exec env {runfiles_assignments} "$TEST_SRCDIR/$TEST_WORKSPACE/{binary}" "$@"
 """
 
 _WINDOWS_LAUNCHER = """@echo off
@@ -45,6 +41,10 @@ def _isolated_rust_test_impl(ctx):
         content = template.format(
             binary = test_binary.short_path,
             runfiles_env = " ".join(ctx.attr.runfiles_env),
+            runfiles_assignments = " ".join([
+                "\"{name}=$TEST_SRCDIR/$(printenv '{name}')\"".format(name = name)
+                for name in ctx.attr.runfiles_env
+            ]),
         ),
         is_executable = True,
     )

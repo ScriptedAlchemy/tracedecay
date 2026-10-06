@@ -12,4 +12,11 @@ fn main() {
         std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB").as_deref(),
         Ok("1"),
     );
+
+    let runfile = std::env::var("TRACEDECAY_RUNFILE_PROBE")
+        .expect("the launcher must resolve runfiles_env");
+    assert_eq!(
+        std::fs::read_to_string(runfile).as_deref(),
+        Ok("runfile probe\n"),
+    );
 }
