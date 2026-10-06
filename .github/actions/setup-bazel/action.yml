@@ -24,6 +24,10 @@ runs:
         repository-cache: true
         disk-cache: ${{ inputs.cache-key }}
         cache-save: ${{ github.event_name != 'pull_request' }}
+        # Windows build-script runfiles nest each vendored crate's sources
+        # under its repository name twice; a short output base (default
+        # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
+        output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, the ast-grep

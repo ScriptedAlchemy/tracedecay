@@ -25,11 +25,13 @@ register_toolchains("@rust_toolchains//:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
-    name = "crates",
+    # One letter: Windows build-script paths repeat the hub's repository
+    # name, and MSVC cannot open headers past MAX_PATH (gen_builds.py).
+    name = "c",
     cargo_lockfile = "//:Cargo.lock",
     manifests = ["//:Cargo.toml"],
 )
-use_repo(crate, "crates")
+use_repo(crate, "c")
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "22.14.0")
