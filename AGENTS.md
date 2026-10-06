@@ -76,8 +76,12 @@ unauthorized external action after completing independent, authorized work.
 
 ## Build & test
 
-- Edition 2024, resolver 3. Use the toolchain pinned in `rust-toolchain.toml`.
-  Run `cargo <subcommand>` normally.
+- Bazel is the primary workspace build and test authority. Run `bazel build //...`
+  and `bazel test //... --test_output=errors`. Edition 2024, resolver 3, and the
+  toolchain pinned in `rust-toolchain.toml` remain canonical inputs. Use Cargo
+  for package and release semantics, code generators that invoke Cargo,
+  benchmarks that measure Cargo artifacts, and platform-specific workflows not
+  yet modeled by Bazel.
 - pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
   sources. Run `pnpm install` at the repository root after cloning and after
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed

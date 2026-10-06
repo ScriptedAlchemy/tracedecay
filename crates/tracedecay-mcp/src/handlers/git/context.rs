@@ -16,11 +16,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
-    ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CoChangePartnerV1,
-    CoChangeUnavailableV1, CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1,
-    CommitFileRoleV1, CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1,
-    DiffContextResultV1, DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1,
-    GitReadCompleteV1, GitReadPartialV1, GitReadUnavailableV1, PrAnalysisCoverageV1,
+    ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CoChangeUnavailableV1,
+    CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1,
+    CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1, DiffContextResultV1,
+    DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1, GitReadCompleteV1,
+    GitReadPartialV1, GitReadUnavailableV1, MissingCoChangePartnerV1, PrAnalysisCoverageV1,
     PrContextCompleteV1, PrContextGraphPendingV1, PrContextSurfaceRequestV1,
     PrContextSymbolsUnavailableV1, PrCoverageSelectionV1, PrSelectionCoverageV1,
     PrSymbolChangesCompleteV1, PrSymbolEntryV1, PrSymbolPageV1, PrSymbolSelectionV1,
@@ -29,8 +29,8 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
 use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
-use tracedecay_runtime_core::git::cochange::{CoChangeError, co_change_partners};
-use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError};
+use tracedecay_runtime_core::git::GitCommandBounds;
+use tracedecay_runtime_core::git::co_change::missing_co_change_partners;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
@@ -309,7 +309,7 @@ fn context_symbol(symbol: &CodeGraphSymbolSummaryV1) -> Result<GitContextSymbolV
 }
 
 struct CoChangeEvidence {
-    missing: Vec<CoChangePartnerV1>,
+    missing: Vec<MissingCoChangePartnerV1>,
     unavailable: Option<CoChangeUnavailableV1>,
 }
 
@@ -319,18 +319,6 @@ impl Drop for CancelGitReadOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
     }
-}
-
-fn co_change_retryable(error: &CoChangeError) -> bool {
-    matches!(
-        error,
-        CoChangeError::Command(
-            GitCommandError::Cancelled
-                | GitCommandError::DeadlineExceeded
-                | GitCommandError::ReadOutput { .. }
-                | GitCommandError::Wait(_)
-        )
-    )
 }
 
 async fn co_change_evidence(
@@ -357,7 +345,7 @@ async fn co_change_evidence(
     }
     let root = ctx.project_root().to_path_buf();
     let mut worker = tokio::task::spawn_blocking(move || {
-        co_change_partners(&root, &history, &tree, &changed_files, &bounds)
+        missing_co_change_partners(&root, &history, &tree, &changed_files, &bounds)
     });
     let joined = match ctx.cancellation() {
         Some(signal) => tokio::select! {
@@ -374,15 +362,22 @@ async fn co_change_evidence(
         Ok(Ok(partners)) => CoChangeEvidence {
             missing: partners
                 .into_iter()
-                .map(|partner| CoChangePartnerV1 {
+                .map(|partner| MissingCoChangePartnerV1 {
                     file: partner.file,
-                    partner: partner.partner,
-                    together: partner.together,
+                    partner_of: partner.partner_of,
+                    co_changes: partner.co_changes as u64,
+                    partner_of_changes: partner.partner_of_changes as u64,
                 })
                 .collect(),
             unavailable: None,
         },
-        Ok(Err(error)) => unavailable(error.to_string(), co_change_retryable(&error)),
+        Ok(Err(error)) => {
+            let retryable = error.project_route_context().map_or(
+                !matches!(&error, TraceDecayError::HostCliUnavailable { .. }),
+                |context| context.1,
+            );
+            unavailable(error.to_string(), retryable)
+        }
         Err(join_error) => unavailable(format!("co-change task failed: {join_error}"), true),
     }
 }
@@ -823,7 +818,7 @@ where
         impacted_symbols,
         impact_complete: impacted.complete,
         affected_tests: tests_sorted,
-        co_change_partners: co_change.missing,
+        missing_co_change_partners: co_change.missing,
         co_change_unavailable: co_change.unavailable,
         freshness: None,
         token_budget: None,
@@ -849,8 +844,8 @@ where
                 shares[2],
             )?,
             crate::handlers::token_budget::trim_section(
-                "co_change_partners",
-                &mut result.co_change_partners,
+                "missing_co_change_partners",
+                &mut result.missing_co_change_partners,
                 shares[3],
             )?,
         ];
@@ -1327,7 +1322,7 @@ impl PrContextGitEvidence {
             commits: self.commits,
             files_changed: self.changes.len(),
             changes: self.changes,
-            co_change_partners: self.co_change.missing,
+            missing_co_change_partners: self.co_change.missing,
             co_change_unavailable: self.co_change.unavailable,
             symbols_added: 0,
             symbols_removed: 0,
@@ -1490,7 +1485,7 @@ where
                 commits: evidence.commits,
                 files_changed: evidence.changes.len(),
                 changes: evidence.changes,
-                co_change_partners: evidence.co_change.missing,
+                missing_co_change_partners: evidence.co_change.missing,
                 co_change_unavailable: evidence.co_change.unavailable,
                 symbols_added: 0,
                 symbols_modified: 0,
@@ -1957,7 +1952,7 @@ where
         commits: evidence.commits,
         files_changed: evidence.changes.len(),
         changes: evidence.changes,
-        co_change_partners: evidence.co_change.missing,
+        missing_co_change_partners: evidence.co_change.missing,
         co_change_unavailable: evidence.co_change.unavailable,
         symbols_added: added.len(),
         symbols_removed: removed.len(),
@@ -2016,8 +2011,8 @@ where
             shares[4],
         )?);
         sections.push(crate::handlers::token_budget::trim_section(
-            "co_change_partners",
-            &mut result.co_change_partners,
+            "missing_co_change_partners",
+            &mut result.missing_co_change_partners,
             shares[5],
         )?);
         if sections[3].shown < sections[3].total {
@@ -2063,29 +2058,6 @@ fn pr_context_completion(
         ..InvocationAnalyticsV1::default()
     });
     completion
-}
-
-#[cfg(test)]
-mod co_change_error_tests {
-    use super::co_change_retryable;
-    use tracedecay_runtime_core::git::GitCommandError;
-    use tracedecay_runtime_core::git::cochange::CoChangeError;
-
-    #[test]
-    fn only_transient_command_failures_are_retryable() {
-        assert!(co_change_retryable(&CoChangeError::Command(
-            GitCommandError::DeadlineExceeded
-        )));
-        assert!(!co_change_retryable(&CoChangeError::Command(
-            GitCommandError::OutputLimitExceeded {
-                stream: "stdout",
-                bound: 1,
-            }
-        )));
-        assert!(!co_change_retryable(&CoChangeError::NonZeroExit(
-            "bad revision".to_owned()
-        )));
-    }
 }
 
 #[cfg(test)]

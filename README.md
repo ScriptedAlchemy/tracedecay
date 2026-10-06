@@ -245,14 +245,13 @@ workspace Cargo packages are private.
 
 ```bash
 pnpm install
-cargo build --release
-cargo build --release --features medium
-cargo build --release --no-default-features
-
-cargo nextest run --workspace --all-features --no-fail-fast
-cargo check --no-default-features
-cargo clippy --workspace --all-targets
+bazel build //...
+bazel test //... --test_output=errors
 ```
+
+Use Cargo when you need to validate Cargo packaging, a feature combination that
+has no Bazel target, or a platform-specific workflow. The release workflows
+continue to build the published Cargo artifact.
 
 On macOS `tracedecay` is ad-hoc signed as `dev.tracedecay.cli` with
 designated requirement `identifier "dev.tracedecay.cli"`. macOS TCC keys
