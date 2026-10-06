@@ -657,6 +657,7 @@ describe("TraceDecayClient generated operation bindings", () => {
           impact_complete: false,
           affected_tests: [],
           missing_co_change_partners: [],
+          test_gate: { verdict: "pass", exit_code: 0, untested: [] },
         },
       ],
       [
