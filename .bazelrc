@@ -6,7 +6,9 @@ common --enable_platform_specific_config
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh
-build:windows --workspace_status_command=scripts/bazel/workspace_status.bat
+# Bazel runs the status command through cmd.exe, which reads a forward slash
+# as a switch (`scripts /bazel/...`), so the Windows path uses backslashes.
+build:windows --workspace_status_command=scripts\\bazel\\workspace_status.bat
 # .cargo/config.toml compiles vendored C deps with NDEBUG. Keep parity for
 # cc crates built inside cargo_build_script actions (tree-sitter grammars).
 build --action_env=CFLAGS=-DNDEBUG

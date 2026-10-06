@@ -312,6 +312,17 @@ jobs:
         shell: bash
         run: bazel test --config=ci //...
 
+      # tracedecay-lsp and tracedecay-code-index fail here with E0463 for
+      # every dependency while the same rules compile on Linux; print the
+      # exact rustc arguments, param file included, until that is fixed.
+      - name: Show the tracedecay-lsp rustc arguments
+        if: failure()
+        shell: bash
+        run: >-
+          bazel aquery --config=ci --include_param_files
+          'mnemonic("Rustc", //crates/tracedecay-lsp:tracedecay-lsp)'
+          | head -c 400000
+
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:

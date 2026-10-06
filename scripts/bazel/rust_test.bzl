@@ -11,6 +11,9 @@ export TRACEDECAY_DATA_DIR="$TEST_TMPDIR/.tracedecay"
 export TRACEDECAY_DISABLE_GLOBAL_DB=1
 export CARGO_TARGET_TMPDIR="$TEST_TMPDIR/cargo-target-tmp"
 mkdir -p "$CARGO_TARGET_TMPDIR"
+# Cargo runs a test binary from its crate directory, and suites read
+# fixtures relative to it.
+cd "$TEST_SRCDIR/$TEST_WORKSPACE/{package}"
 # Names such as CARGO_BIN_EXE_<bin> may carry `-`, which no shell variable
 # can, so each assignment goes through env as its own argument: a runfiles
 # path with spaces stays one word.
@@ -28,7 +31,16 @@ set "TRACEDECAY_DISABLE_GLOBAL_DB=1"
 set "CARGO_TARGET_TMPDIR=%TEST_TMPDIR%/cargo-target-tmp"
 if not exist "%CARGO_TARGET_TMPDIR%" mkdir "%CARGO_TARGET_TMPDIR%"
 {runfiles_env}
-"%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}" %*
+set "TEST_PACKAGE=%TEST_SRCDIR%/%TEST_WORKSPACE%/{package}"
+cd /d "%TEST_PACKAGE:/=\\%"
+set "TEST_BINARY=%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}"
+set "TEST_BINARY=%TEST_BINARY:/=\\%"
+if not exist "%TEST_BINARY%" (
+  echo test binary missing from the runfiles tree: %TEST_BINARY% 1>&2
+  dir /s /b "%TEST_SRCDIR%" 1>&2
+  exit /b 1
+)
+"%TEST_BINARY%" %*
 exit /b %ERRORLEVEL%
 """
 
@@ -75,6 +87,7 @@ def _isolated_rust_test_impl(ctx):
         output = executable,
         content = template.format(
             binary = test_binary.short_path,
+            package = ctx.label.package,
             runfiles_env = runfiles_env,
         ),
         is_executable = True,

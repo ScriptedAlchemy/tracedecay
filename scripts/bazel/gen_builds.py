@@ -965,6 +965,9 @@ def main():
             data = srcs if srcs.startswith("[") else f'glob(["{str(Path(rel_src(p, t)).parent)}/**"])' +                 (" + [" + q(mod_labels) + "]" if mod_labels else "")
             if not data.startswith("["):
                 data += ' + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+            # Suites read the shared fixtures as ../../tests/fixtures from the
+            # crate directory, where the launcher starts them.
+            data += ' + ["//tests:fixtures"]'
             # include_str!/include_bytes! are compile-time inputs. They cover crate-root
             # resource dirs beside tests/ and repo-root fixtures under //tests.
             compile_data = (
@@ -1044,7 +1047,7 @@ def main():
                 + (f"\n        + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
                 + (f"\n        + [{q(inc_labels)}]" if inc_labels else "")
                 + ",",
-                '    data = glob(["tests/**"], allow_empty = True),',
+                '    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],',
                 ")\n",
             ]
 

@@ -490,7 +490,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "$(rootpath :tracedecay-index-bench)"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "//crates/tracedecay-query:tracedecay-index-bench"},
 )
@@ -507,7 +507,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "$(rootpath :tracedecay-index-bench)"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "//crates/tracedecay-query:tracedecay-index-bench"},
 )
@@ -524,7 +524,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "$(rootpath :tracedecay-index-bench)"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "//crates/tracedecay-query:tracedecay-index-bench"},
 )
@@ -541,7 +541,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["tests/search_quality_suite/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/search_quality_suite/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -556,7 +556,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["benches/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -571,5 +571,5 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
-    data = glob(["tests/**"], allow_empty = True),
+    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
