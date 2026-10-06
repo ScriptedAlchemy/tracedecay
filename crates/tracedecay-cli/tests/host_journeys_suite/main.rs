@@ -10,12 +10,6 @@ mod host_lifecycle_cli_acceptance;
 #[path = "../../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
 
-/// The `tracedecay` binary this suite drives: the runfiles path Bazel and
-/// nextest pass at run time, else the artifact Cargo compiled in.
-pub(crate) fn tracedecay_exe() -> &'static std::path::Path {
-    static EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    EXE.get_or_init(|| {
-        std::env::var_os("CARGO_BIN_EXE_tracedecay")
-            .map_or_else(|| env!("CARGO_BIN_EXE_tracedecay").into(), Into::into)
-    })
-}
+#[path = "../support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+pub(crate) use tracedecay_exe::tracedecay_exe;

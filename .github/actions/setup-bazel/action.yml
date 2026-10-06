@@ -1,0 +1,45 @@
+name: Set up Bazel
+description: >
+  Installs Bazel through the pinned bazelisk with its repository cache, and a
+  disk cache named by `cache-key` that only pushes save: a pull-request run
+  restores the base branch's entry, and its own save would be a multi-GB copy
+  no other ref can restore. Jobs that run the same configuration on the same
+  runner image share one key. With `test-tools`, also installs the host tools
+  the test suites spawn.
+
+inputs:
+  cache-key:
+    description: Disk-cache name; jobs with the same runner image and flags share it.
+    required: true
+  test-tools:
+    description: Also install rust-analyzer, node, and ast-grep for `bazel test`.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+        disk-cache: ${{ inputs.cache-key }}
+        cache-save: ${{ github.event_name != 'pull_request' }}
+
+    # Test dependencies, not conveniences: the LSP negotiation acceptance
+    # spawns rust-analyzer through the pinned toolchain, the ast-grep
+    # bindings are graded against the host CLI, and SDK journeys run node.
+    - name: Install the pinned toolchain's components
+      if: inputs.test-tools == 'true'
+      shell: bash
+      run: rustup toolchain install
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      if: inputs.test-tools == 'true'
+      with:
+        node-version: 22
+
+    - name: Install ast-grep
+      if: inputs.test-tools == 'true'
+      uses: ./.github/actions/install-ast-grep
+      with:
+        version: ${{ env.AST_GREP_VERSION }}

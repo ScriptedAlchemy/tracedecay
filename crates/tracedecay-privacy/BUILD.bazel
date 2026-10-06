@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
-load("//scripts:bazel/rust_test.bzl", "rust_test")
+load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-privacy",
@@ -21,7 +21,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-store:tracedecay-store"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ["-Copt-level=1", "-Cdebug-assertions=on", "-Coverflow-checks=on"]}),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
 )
 
@@ -38,7 +38,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__da00215497f__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ["-Copt-level=1", "-Cdebug-assertions=on", "-Coverflow-checks=on"]}),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
 )
 
@@ -55,7 +55,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ["-Copt-level=1", "-Cdebug-assertions=on", "-Coverflow-checks=on"]}),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
 )
 
@@ -68,7 +68,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-daemon-identity:tracedecay-daemon-identity__dbeb72c35a2__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__d55e2c95eba__dev", "//crates/tracedecay-store-runtime:tracedecay-store-runtime__+test-helpers__d8637fcbd47__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ["-Copt-level=1", "-Cdebug-assertions=on", "-Coverflow-checks=on"]}),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = ["default"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["tests/**"]) + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
@@ -82,7 +82,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-daemon-identity:tracedecay-daemon-identity__dbeb72c35a2__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__d55e2c95eba__dev", "//crates/tracedecay-store-runtime:tracedecay-store-runtime__+test-helpers__d8637fcbd47__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = select({"//:opt_mode": [], "//conditions:default": ["-Copt-level=1", "-Cdebug-assertions=on", "-Coverflow-checks=on"]}),
+    rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     data = glob(["tests/**"], allow_empty = True),

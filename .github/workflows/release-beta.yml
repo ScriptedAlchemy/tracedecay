@@ -109,12 +109,6 @@ jobs:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.23.3"
-
-      - uses: ./.github/actions/setup-pnpm
-
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           # 3.12.10 is the newest 3.12 patch published for every release
@@ -123,9 +117,11 @@ jobs:
 
       # Bazel builds the dashboard bundle the binary embeds (//dashboard:app_dist).
       - name: Build release binary for packaging
-        uses: ./.github/actions/build-release-binary
+        uses: ./.github/actions/build-cli
         with:
-          target: ${{ matrix.target }}
+          config: release
+          dest: target/${{ matrix.target }}/release
+          cache-key: release-${{ matrix.target }}
 
       - name: Smoke release binary
         shell: bash
