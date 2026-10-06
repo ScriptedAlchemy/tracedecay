@@ -73,6 +73,7 @@ rust_binary(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-search-eval__+evaluator-corpus-languages_+lang-dockerfile_+lite__dev",
+    crate_features = ["evaluator-corpus-languages", "lang-dockerfile", "lite"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-code-index:tracedecay-code-index__+eval-helpers_+lang-dockerfile_-default_-full_-medium__d95bb3d304b__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-query:tracedecay-query__d29c827fb35__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d3cb43ae4d4__dev", "//crates/tracedecay-search-eval:tracedecay-search-eval__+evaluator-corpus-languages_+lang-dockerfile_+lite__dev", "//crates/tracedecay-sessions:tracedecay-sessions__dada8145128__dev"],

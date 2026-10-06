@@ -262,6 +262,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-sessions__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-framing:tracedecay-framing__dev", "//crates/tracedecay-lcm:tracedecay-lcm__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__dev", "//crates/tracedecay-store:tracedecay-store__dev"],

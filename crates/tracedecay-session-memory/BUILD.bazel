@@ -453,6 +453,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-session-memory__dev",
+    crate_features = ["default"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d8bc8ffe96b__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__d3598b0b07a__dev", "//crates/tracedecay-privacy:tracedecay-privacy__d5069d59de6__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-query:tracedecay-query__d59d4007a71__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-session-temporal-store:tracedecay-session-temporal-store__+test-helpers__d41b9f2baa1__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d38ea41278b__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],

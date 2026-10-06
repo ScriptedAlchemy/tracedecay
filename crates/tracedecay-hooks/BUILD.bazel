@@ -94,6 +94,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-hooks__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-framing:tracedecay-framing__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10__dev"],

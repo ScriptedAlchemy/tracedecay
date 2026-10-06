@@ -111,6 +111,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-rusqlite-runtime__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],

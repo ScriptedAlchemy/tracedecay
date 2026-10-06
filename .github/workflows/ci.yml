@@ -254,7 +254,9 @@ jobs:
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # A cold Bazel disk cache (any MODULE.bazel or toolchain change) builds
+    # and tests every target from scratch.
+    timeout-minutes: 330
     env:
       CARGO_BAZEL_TIMEOUT: "3600"
     steps:
@@ -321,7 +323,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    # Clippy compiles every target; a cold disk cache needs over two hours.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

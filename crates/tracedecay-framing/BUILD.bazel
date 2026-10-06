@@ -62,6 +62,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-framing__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + [],

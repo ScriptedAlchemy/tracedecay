@@ -215,6 +215,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-source-edit__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__cfg_2583ec52__d66eddaf54a__dev", "//crates/tracedecay-code-index:tracedecay-code-index__+test-helpers_-default_-full_-lang-markdown_-lite_-medium__d85914a6b90__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d56232f5837__dev", "//crates/tracedecay-graph-query:tracedecay-graph-query__d89f8656010__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],

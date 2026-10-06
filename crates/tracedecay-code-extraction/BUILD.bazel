@@ -253,6 +253,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-code-extraction__dev",
+    crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],

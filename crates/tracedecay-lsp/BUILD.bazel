@@ -213,6 +213,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-lsp__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__cfg_2583ec52__d66eddaf54a__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],

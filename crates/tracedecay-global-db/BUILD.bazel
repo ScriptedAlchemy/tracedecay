@@ -562,6 +562,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-global-db__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-lcm:tracedecay-lcm__de3299f186e__dev", "//crates/tracedecay-privacy:tracedecay-privacy__d5069d59de6__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d27de479496__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__db5829de082__dev", "//crates/tracedecay-session-temporal-store:tracedecay-session-temporal-store__+test-helpers__d7a10cce707__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__da6f3052de6__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__d7bf792a035__dev"],

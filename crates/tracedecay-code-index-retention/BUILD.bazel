@@ -317,6 +317,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-code-index-retention__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-index:tracedecay-code-index__bare__db7d4a3d311__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d2c51e40783__dev"],

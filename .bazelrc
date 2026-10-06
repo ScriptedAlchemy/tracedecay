@@ -19,6 +19,11 @@ build --action_env=CXXFLAGS=-DNDEBUG
 # stay sandboxed.
 build "--strategy_regexp=Compiling Rust bin _bs_.*=local"
 build "--strategy_regexp=Compiling Rust bin build_script_build_.*=local"
+# Tests read fixtures through env!("CARGO_MANIFEST_DIR") the same way, and a
+# sandboxed rustc bakes a sandbox path that is gone by the time the test
+# runs. Compile Rust in the real execroot so that path stays readable.
+build --strategy=Rustc=local
+build --strategy=RustcMetadata=local
 # ld.bfd peaks near 4 GB per link. Cap parallelism so links do not
 # OOM-kill each other on 8-core/32 GB workers.
 build --jobs=4
@@ -36,6 +41,9 @@ build:windows --action_env=PATH
 build:windows --enable_runfiles
 
 test --test_output=errors
+# Each rust_test is a whole Cargo test binary, where nextest caps single
+# tests at six minutes; give medium (moderate) binaries 30 minutes.
+test --test_timeout=-1,1800,-1,-1
 
 # Blocking Clippy policy over every Rust target, matching
 # `cargo clippy --workspace --all-targets -- -D warnings`.

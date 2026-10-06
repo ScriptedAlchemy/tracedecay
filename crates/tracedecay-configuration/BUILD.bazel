@@ -385,6 +385,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-configuration__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__dcbab521b1d__dev", "//crates/tracedecay-lcm:tracedecay-lcm__dev", "//crates/tracedecay-policy:tracedecay-policy__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__d7633601611__dev"],

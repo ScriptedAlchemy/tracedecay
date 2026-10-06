@@ -639,6 +639,7 @@ rust_test(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-code-index__+test-helpers__dev",
+    crate_features = ["default", "full", "lang-markdown", "lite", "medium", "test-helpers"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers_-default__dd0ee22f7e6__dev", "//crates/tracedecay-code-index:tracedecay-code-index__+test-helpers__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d56232f5837__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__dev", "//crates/tracedecay-store:tracedecay-store__dev"],

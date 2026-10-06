@@ -232,6 +232,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-dashboard-api__dev",
+    crate_features = ["default"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-application:tracedecay-application__dd5e8d4a9eb__dev", "//crates/tracedecay-automation-runtime:tracedecay-automation-runtime__dev", "//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-code-index:tracedecay-code-index__bare__d3bbd7581b2__dev", "//crates/tracedecay-configuration:tracedecay-configuration__dbf73cdf9f1__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__d8b1b15e2c4__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+test-helpers__d1d8e7f9ebf__dev", "//crates/tracedecay-graph-query:tracedecay-graph-query__d2bb7cf83e6__dev", "//crates/tracedecay-lsp:tracedecay-lsp__d931c99798a__dev", "//crates/tracedecay-privacy:tracedecay-privacy__d5069d59de6__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__deab06bd6c5__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__d7651659b02__dev", "//crates/tracedecay-store:tracedecay-store__da358832c76__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
