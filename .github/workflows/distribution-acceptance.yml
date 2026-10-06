@@ -95,7 +95,7 @@ jobs:
       # The acceptance script runs the packaged Rust-grammar proof and the
       # focused packaged-CLI integration journeys through nextest.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
+        uses: taiki-e/install-action@bb0282cdd6e41599bc8dfa5fc712ebe9e27cfd8c # nextest
 
       - name: Run distribution acceptance
         run: |
