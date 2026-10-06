@@ -25,7 +25,7 @@ failure and neighboring cases that should remain silent. Read
 evals versus adapter tests. A review-only pass does not require running builds.
 
 Run relevant existing evals in the owning package:
-`cargo test -p tracedecay-agent-hosts --lib hooks::tool_hints::evals -- --nocapture`.
+`bazel test //crates/tracedecay-agent-hosts:unit_test --test_arg=hooks::tool_hints::evals --test_output=errors`.
 For an adapter change, run its focused tests separately; Cargo accepts one name
 filter per invocation. Confirm non-zero test counts. Audit all supported hosts
 when shared hook behavior changes; test affected behavior without repeating

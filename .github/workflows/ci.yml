@@ -17,10 +17,6 @@ on:
         description: "Also run stock host integrations"
         type: boolean
         default: false
-      run_full_nextest:
-        description: "Also run the full Linux search and transport selections"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -39,8 +35,8 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Drafts run cheap gates. Enabled, trusted PRs use the Hauler pool; other
-  # PRs and pushes retain native jobs. Dispatch can request additional lanes.
+  # Drafts run cheap gates. Ready PRs and pushes run the Bazel Linux authority;
+  # dispatch can request additional OS and stock-host journeys.
   scope-gate:
     name: Scope gate
     permissions:
@@ -54,30 +50,9 @@ jobs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
-      linux-groups: ${{ steps.linux-groups.outputs.matrix }}
       windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
-      - name: Route eligible PR checks through Hauler
-        id: route
-        if: >-
-          github.event_name == 'pull_request' &&
-          !github.event.pull_request.draft &&
-          github.event.pull_request.head.repo.full_name == github.repository &&
-          vars.HAULER_CI_ENABLED == 'true'
-        continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@783ddee7d8b81fd93899a97eec90cb25a4125d2d
-        with:
-          mode: route
-          token: ${{ github.token }}
-          recipe: .github/hauler-ci.json
-          admission-workflow: ci.yml
-          # A saturated runner pool starts the enqueue run minutes late; waiting for it keeps the PR off the native matrix.
-          route-wait-minutes: '10'
-
-      - name: Hauler route / ${{ steps.route.outputs.decision || 'native' }} / ${{ steps.route.outputs.policy || 'unavailable' }}
-        run: ':'
-
       - name: Decide what this run may spend
         id: decide
         env:
@@ -85,16 +60,9 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft || false }}
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
-          HAULER_DECISION: ${{ steps.route.outputs.decision }}
-          HAULER_ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
           heavy=true
           if [[ $EVENT == pull_request && $DRAFT == true ]]; then
-            heavy=false
-          fi
-          # Only the validated Action receipt transfers ownership. Missing or
-          # failed routing keeps the native jobs, even if enqueue arrives later.
-          if [[ $EVENT == pull_request && $HAULER_ROUTE_OUTCOME == success && $HAULER_DECISION == delegated ]]; then
             heavy=false
           fi
           os=false
@@ -110,28 +78,21 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT)"
 
-      # The Linux, Windows and macOS test matrices come from the same manifest
-      # the partition jobs select their targets from, so a partition cannot
-      # exist without a job or a job without a partition.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
-            .github/linux-test-partitions.json
+            .github/platform-test-partitions.json
             scripts
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - name: Derive the Linux test matrix
-        id: linux-groups
-        run: echo "matrix=$(python3 scripts/linux-test-partitions.py linux-matrix)" >> "$GITHUB_OUTPUT"
-
       - name: Derive the Windows test matrix
         id: windows-partitions
-        run: echo "matrix=$(python3 scripts/linux-test-partitions.py windows-matrix)" >> "$GITHUB_OUTPUT"
+        run: echo "matrix=$(python3 scripts/platform-test-partitions.py windows-matrix)" >> "$GITHUB_OUTPUT"
 
       - name: Derive the macOS test matrix
         id: macos-groups
-        run: echo "matrix=$(python3 scripts/linux-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
+        run: echo "matrix=$(python3 scripts/platform-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
 
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
@@ -406,11 +367,11 @@ jobs:
       # it with a target nobody ran.
       - name: Check the partitions cover every test target
         run: |
-          python3 scripts/test-linux-test-partitions.py
-          python3 scripts/linux-test-partitions.py check
+          python3 scripts/test-platform-test-partitions.py
+          python3 scripts/platform-test-partitions.py check
 
-      # Each partition in turn, as `linux-test-partition` runs it: the
-      # executables its suites spawn are built into the same resolution first
+      # Each partition runs in turn. The executables its suites spawn are built
+      # into the same resolution first
       # (`build-args`; nothing for a partition whose tests spawn nothing),
       # then nextest under the `ci` policy and the perf cargo profile with
       # `--no-tests=fail`. One target directory for the group, so a later
@@ -435,8 +396,8 @@ jobs:
           set -uo pipefail
           run_partition() {
             local partition="$1" build selection
-            build="$(python3 scripts/linux-test-partitions.py build-args "$partition")" || return 1
-            selection="$(python3 scripts/linux-test-partitions.py cargo-args "$partition")" || return 1
+            build="$(python3 scripts/platform-test-partitions.py build-args "$partition")" || return 1
+            selection="$(python3 scripts/platform-test-partitions.py cargo-args "$partition")" || return 1
             if [ -n "$build" ]; then
               eval cargo build --locked --profile perf "$build" || return 1
             fi
@@ -501,245 +462,37 @@ jobs:
           fi
           echo "All macOS groups passed."
 
-  linux-test-partition:
-    name: Test Linux ${{ matrix.group }}
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    concurrency:
-      group: ci-linux-${{ matrix.group }}
-      cancel-in-progress: false
-      queue: max
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: ${{ matrix.timeout }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.scope-gate.outputs.linux-groups) }}
-    steps:
-      # Full history: the search-quality workload fixture pins a
-      # `source_repository_commit`, and `validate_source_bindings` resolves that
-      # object out of this checkout to prove the checked-in corpus really is the
-      # product source at that commit. A depth-1 checkout carries only the tip,
-      # so every candidate_output/report test fails with "resolve fixture source
-      # commit: An object with id ... could not be found".
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      # `rust-analyzer` is a test dependency of this lane, not a convenience.
-      # `runtime_surface_acceptance::production_lsp_negotiates_and_projects_\
-      # canonical_context` asserts that a routed analyzer negotiates the
-      # standard methods the client declared, and the upstream `initialize`
-      # response is the only authority for those. Without the component the
-      # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
-      # routes the language and only the spawn fails. The test would then
-      # measure a missing component instead of the negotiation contract.
-      - name: Select the repository toolchain
-        run: |
-          rustup show active-toolchain
-          rustup which rust-analyzer
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install Cargo Hauler
-        run: |
-          echo "CARGO_HAULER_STATE_DIR=$RUNNER_TEMP/hauler" >> "$GITHUB_ENV"
-          npm install --global cargo-hauler@0.14.1
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
-
-      # Workspace roots, prefix and push-only save: see the debug-cli step.
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: v1-rust
-          shared-key: ci-test-full-Linux-${{ runner.arch }}
-          workspaces: |
-            crates -> ../target
-            . -> target/rust-cache-lockfile-key
-          save-if: ${{ github.event_name != 'pull_request' && matrix.group == 'root-journeys' }}
-          cache-on-failure: true
-
-      # Every partition job re-proves the cover before it compiles anything:
-      # the manifest is consumed here, and a gap found here fails the lane
-      # rather than passing it with a target nobody ran.
-      - name: Check the partitions cover every test target
-        run: |
-          python3 scripts/test-linux-test-partitions.py
-          python3 scripts/linux-test-partitions.py check
-
-      - name: Run the group's partitions through Hauler
-        env:
-          GROUP: ${{ matrix.group }}
-        run: python3 scripts/linux-test-partitions.py run-linux-group "$GROUP"
-
-      - name: Stop the worker's Hauler daemon
-        if: always()
-        run: hauler daemon stop
-
-      # `linux-test` folds the partition reports back into one report.
-      - name: Upload Linux partition reports and timings
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-Linux-${{ matrix.group }}
-          path: target/nextest/linux/
-          if-no-files-found: ignore
-          retention-days: 1
-
-  # The one `Test Linux` verdict, as when a single job carried the suite:
-  # every partition must pass. It also folds the partition reports back into
-  # the `nextest-junit-Linux` artifact the single job published.
+  # Preserve the existing required check name while moving Linux compile and
+  # test authority to the generated Bazel workspace.
   linux-test:
     name: Test Linux
-    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
-    needs: [linux-test-partition, scope-gate]
+    needs: [scope-gate, gates]
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      # Each partition's junit.xml keeps its name under its partition's
-      # directory; the partition artifacts themselves expire after a day.
-      - name: Merge the partition reports into the Linux nextest report
-        if: ${{ needs.linux-test-partition.result != 'skipped' }}
-        uses: actions/upload-artifact/merge@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-Linux
-          pattern: nextest-junit-Linux-*
-          separate-directories: true
-          retention-days: 7
-
-      - name: Check Linux partitions
-        if: ${{ !cancelled() }}
-        run: |
-          if [ "${{ needs.linux-test-partition.result }}" != "success" ]; then
-            echo "Linux partition result: ${{ needs.linux-test-partition.result }}"
-            exit 1
-          fi
-          echo "All Linux partitions passed."
-
-  # Optional cross-test isolation proof. The partition lane cannot expose
-  # authorities leaked between targets that it runs in separate jobs. Keep
-  # the evaluator and transport resolutions separate: the transport surface
-  # includes a generation-scale cancellation journey whose bounded receipts
-  # assume it is not competing with the entire workspace. Each compatible
-  # selection still shares one nextest process across all of its targets.
-  # Keep this off ordinary pushes and run it after the normal Linux verdict so
-  # its extra compilation and eight concurrent tests do not crowd that lane.
-  linux-full-nextest:
-    name: Test Linux full selection isolation
-    needs: linux-test
-    if: ${{ !cancelled() && needs.linux-test.result != 'skipped' && github.event_name == 'workflow_dispatch' && inputs.run_full_nextest }}
-    runs-on: ubuntu-24.04-arm
-    # No recent measured run. 240 is 1.5x the largest Linux partition budget (160).
     timeout-minutes: 240
+    env:
+      CARGO_BAZEL_TIMEOUT: "3600"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Verify pinned Rust toolchain and analyzer
-        run: |
-          rustup show active-toolchain
-          rustup which rust-analyzer
-          rust-analyzer --version
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
         with:
-          node-version: 22
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: ${{ github.event_name != 'pull_request' }}
+          cache-save: ${{ github.event_name != 'pull_request' }}
 
-      - uses: ./.github/actions/setup-pnpm
+      - name: Build the workspace
+        run: bazel build //...
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
+      - name: Test the workspace
+        run: bazel test //... --test_output=errors
 
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@badb8c3638e0b773c6c17a6025c2306a8f1c4303 # nextest
-
-      # Build the evaluator selection and the executables its journeys spawn
-      # with the same feature set and perf resolution nextest uses below.
-      - name: Build full evaluator selection and support executables
-        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
-
-      - name: Run full evaluator selection
-        run: |
-          set +e
-          cargo test-ci --locked --no-tests=fail
-          status=$?
-          set -e
-          if [ -f target/nextest/ci/junit.xml ]; then
-            mv target/nextest/ci/junit.xml target/nextest/ci/full-evaluator.xml
-          fi
-          exit "$status"
-
-      # Transport-only modules live inside otherwise ordinary root targets, so
-      # run every root library, binary, and integration target in one process.
-      # The evaluator selection above already covers the remaining workspace
-      # crates without implicitly linking evaluator code into this resolution.
-      - name: Build full transport selection and support executables
-        id: transport_build
-        if: ${{ always() && !cancelled() }}
-        run: cargo build -p tracedecay -p tracedecay-cli --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport
-
-      - name: Run full transport selection
-        if: ${{ always() && !cancelled() && steps.transport_build.outcome == 'success' }}
-        run: |
-          set +e
-          cargo nextest run -p tracedecay -p tracedecay-cli --bins --tests --profile ci --cargo-profile perf --locked --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
-          status=$?
-          set -e
-          if [ -f target/nextest/ci/junit.xml ]; then
-            mv target/nextest/ci/junit.xml target/nextest/ci/full-transport.xml
-          fi
-          exit "$status"
-
-      - name: Upload full-selection nextest reports
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: nextest-junit-Linux-full-selections
-          path: target/nextest/ci/full-*.xml
-          if-no-files-found: ignore
-          retention-days: 7
-
-  # Windows compiles and runs the suite as the same partitions as Linux, one
-  # hosted 4-vCPU `windows-latest` job each. The lane that preceded it built
-  # every test of the workspace in one job and sharded only the execution
-  # from a nextest archive: in run 36051245663 (warm dependency cache, full
-  # match) that build spent 27 min compiling the library chain beneath the
-  # root crate and then 67 min on the root crate's library and its ~40 test
-  # targets alone, 94 min of `cargo build` plus 5 of archive in a job that
-  # nothing could shorten, then the five shards ran 10-14 min each: 116 min
-  # for the lane's verdict, against 27 for Linux. As partitions each job pays
-  # the chain and its own selection's test targets, as `linux-test-partition`
-  # does, so the lane's wall time is the slowest partition: 66.5 min in run
-  # 36077289779 (`runtime`: 25 min of library chain with its dependency
-  # units beside it, 23 min of 31 test targets, 15 min of tests; the root
-  # partitions compile 35-38 min each). The manifest's
-  # `windows_timeout_minutes` are the budgets; the executables the suites
-  # spawn are built into the same resolution first, as on Linux.
+  # Windows keeps the maintained Cargo partitions because it exercises target-
+  # specific behavior that the Linux Bazel lane cannot prove. Each partition
+  # builds the executables its suites spawn in the same resolution first.
   windows-test-partition:
     name: Test Windows ${{ matrix.partition }}
     needs: scope-gate
@@ -823,21 +576,20 @@ jobs:
       - name: Check the partitions cover every test target
         shell: bash
         run: |
-          python scripts/test-linux-test-partitions.py
-          python scripts/linux-test-partitions.py check
+          python scripts/test-platform-test-partitions.py
+          python scripts/platform-test-partitions.py check
 
       - name: Resolve this partition's cargo selection
         id: selection
         shell: bash
         run: |
           {
-            echo "test=$(python scripts/linux-test-partitions.py cargo-args '${{ matrix.partition }}')"
-            echo "build=$(python scripts/linux-test-partitions.py build-args '${{ matrix.partition }}')"
+            echo "test=$(python scripts/platform-test-partitions.py cargo-args '${{ matrix.partition }}')"
+            echo "build=$(python scripts/platform-test-partitions.py build-args '${{ matrix.partition }}')"
           } >> "$GITHUB_OUTPUT"
 
-      # The CLI and evaluator executables the suites spawn, in the same
-      # resolution as the test build below (see `linux-test-partition`); the
-      # test resolvers find them beside the test executables under
+      # The CLI and evaluator executables the suites spawn use the same
+      # resolution as the test build below. The test resolvers find them under
       # target/perf, so no override or preflight is needed.
       - name: Build the executables the suites spawn
         if: ${{ steps.selection.outputs.build != '' }}

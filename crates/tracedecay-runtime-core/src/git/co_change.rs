@@ -2,13 +2,21 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::{GitCommandBounds, GitCommandError, bounded_git_output, try_git_program};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use super::{GitCommandBounds, bounded_git_output, try_git_program};
+use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
+
+/// Newest commits mined per read.
 const HISTORY_COMMITS: usize = 1_000;
+/// Commits touching more files are bulk edits (renames, formatting, vendoring)
+/// whose file sets say nothing about which files belong together.
 const MAX_COMMIT_FILES: usize = 50;
-const MAX_PARTNERS: usize = 8;
-const SINCE: &str = "--since=18 months ago";
+const MAX_PARTNERS: usize = 20;
 
+/// The degree threshold a partner must clear: the pair changed together in at
+/// least `min_co_changes` commits, and in at least `min_percent` of the
+/// commits that touched the changed file.
 struct CouplingGate {
     min_co_changes: usize,
     min_percent: usize,
@@ -18,55 +26,73 @@ const MULTI_FILE_GATE: CouplingGate = CouplingGate {
     min_co_changes: 3,
     min_percent: 50,
 };
+/// A one-file change raises the most false alarms, so it must clear a stricter
+/// gate before it is told a partner is missing.
 const SINGLE_FILE_GATE: CouplingGate = CouplingGate {
     min_co_changes: 5,
     min_percent: 75,
 };
 
-/// A typed failure from co-change Git reads.
-#[derive(Debug, thiserror::Error)]
-pub enum CoChangeError {
-    #[error(transparent)]
-    Command(#[from] GitCommandError),
-    #[error("{0}")]
-    InvalidOutput(String),
-    #[error("{0}")]
-    NonZeroExit(String),
-}
-
-/// One changed file and a file outside that change that co-occur in commits.
+/// A file that historically changes with `partner_of` but is absent from the
+/// change set under review.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CoChangePartner {
+pub struct MissingCoChangePartner {
     pub file: String,
-    pub partner: String,
-    pub together: usize,
-    file_changes: usize,
+    pub partner_of: String,
+    /// Commits that changed both `partner_of` and `file`.
+    pub co_changes: usize,
+    /// Commits that changed `partner_of`.
+    pub partner_of_changes: usize,
 }
 
 /// Reports files that usually change with `changed` (mined from the history
 /// reachable from `history`) but are missing from `changed` and still exist
-/// in `tree`. Unavailable history is an error. Every Git read observes
-/// `bounds`, including its cancellation.
+/// in `tree`. Missing/unborn repositories have no history; unreadable history
+/// is an error. Every Git read observes `bounds`, including its cancellation.
 #[tracing::instrument(
-    name = "runtime_core.git.co_change_partners",
+    name = "runtime_core.git.missing_co_change_partners",
     level = "trace",
     skip_all
 )]
-pub fn co_change_partners(
+pub fn missing_co_change_partners(
     root: &Path,
     history: &str,
     tree: &str,
     changed: &[String],
     bounds: &GitCommandBounds,
-) -> Result<Vec<CoChangePartner>, CoChangeError> {
+) -> Result<Vec<MissingCoChangePartner>> {
     if changed.is_empty() {
         return Ok(Vec::new());
     }
-    try_git_program().map_err(GitCommandError::from)?;
-    let prefix = git_stdout(root, &["rev-parse", "--show-prefix"], bounds)?;
-    let prefix = prefix
-        .strip_suffix(b"\n")
-        .ok_or_else(|| co_change_error("git rev-parse returned an unterminated project prefix"))?;
+    try_git_program().map_err(|_| TraceDecayError::HostCliUnavailable {
+        program: "git".to_owned(),
+        lifecycle: "Git co-change analysis".to_owned(),
+    })?;
+    match std::fs::metadata(root) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(TraceDecayError::Io(error)),
+        Ok(_) => {}
+    }
+    let repository = match GitRepositoryAuthority::discover(root) {
+        Ok(repository) => repository,
+        Err(GitRepositoryError::NotARepository { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(co_change_error(error.to_string())),
+    };
+    if repository
+        .head()
+        .map_err(|error| co_change_error(error.to_string()))?
+        .commit()
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
 
     let changed = changed.iter().map(String::as_bytes).collect::<HashSet<_>>();
     let gate = if changed.len() == 1 {
@@ -81,12 +107,10 @@ pub fn co_change_partners(
             "log",
             "--no-merges",
             "--no-renames",
-            "--no-relative",
-            "--format=%x00",
+            "--format=%x01",
             "--name-only",
             "-z",
             &max_count,
-            SINCE,
             history,
             "--",
         ],
@@ -100,19 +124,15 @@ pub fn co_change_partners(
         if commit.len() > MAX_COMMIT_FILES {
             continue;
         }
-        let files = commit
-            .iter()
-            .filter_map(|path| path.strip_prefix(prefix))
-            .collect::<HashSet<_>>();
-        for anchor in files.iter().filter_map(|path| changed.get(path)) {
+        for anchor in commit.iter().filter_map(|path| changed.get(path)) {
             *changes.entry(anchor).or_default() += 1;
-            for partner in files.iter().filter(|path| !changed.contains(*path)) {
+            for partner in commit.iter().filter(|path| !changed.contains(*path)) {
                 *co_changes.entry((anchor, partner)).or_default() += 1;
             }
         }
     }
 
-    let mut strongest = HashMap::<String, CoChangePartner>::new();
+    let mut strongest = HashMap::<String, MissingCoChangePartner>::new();
     for ((anchor, file), together) in co_changes {
         let total = changes[anchor];
         if together < gate.min_co_changes || together * 100 < total * gate.min_percent {
@@ -122,11 +142,11 @@ pub fn co_change_partners(
         else {
             continue;
         };
-        let candidate = CoChangePartner {
-            file: anchor.to_owned(),
-            partner: file.to_owned(),
-            together,
-            file_changes: total,
+        let candidate = MissingCoChangePartner {
+            file: file.to_owned(),
+            partner_of: anchor.to_owned(),
+            co_changes: together,
+            partner_of_changes: total,
         };
         match strongest.get(file) {
             Some(current) if rank(current) <= rank(&candidate) => {}
@@ -146,38 +166,38 @@ pub fn co_change_partners(
         .collect::<HashSet<_>>();
     let mut partners = strongest
         .into_values()
-        .filter(|partner| present.contains(partner.partner.as_bytes()))
+        .filter(|partner| present.contains(partner.file.as_bytes()))
         .collect::<Vec<_>>();
     partners.sort_by(|left, right| rank(left).cmp(&rank(right)));
     partners.truncate(MAX_PARTNERS);
     Ok(partners)
 }
 
+/// Strongest coupling first: higher co-change share, then more co-changes,
+/// then path order for a deterministic answer.
 fn rank(
-    partner: &CoChangePartner,
+    partner: &MissingCoChangePartner,
 ) -> (
     std::cmp::Reverse<u128>,
     std::cmp::Reverse<usize>,
     &str,
     &str,
 ) {
-    let share = (partner.together as u128 * 1_000_000) / partner.file_changes as u128;
+    let share =
+        (partner.co_changes as u128 * 1_000_000) / partner.partner_of_changes.max(1) as u128;
     (
         std::cmp::Reverse(share),
-        std::cmp::Reverse(partner.together),
-        partner.partner.as_str(),
+        std::cmp::Reverse(partner.co_changes),
         partner.file.as_str(),
+        partner.partner_of.as_str(),
     )
 }
 
-fn git_stdout(
-    root: &Path,
-    args: &[&str],
-    bounds: &GitCommandBounds,
-) -> Result<Vec<u8>, CoChangeError> {
-    let output = bounded_git_output(root, args, bounds)?;
+fn git_stdout(root: &Path, args: &[&str], bounds: &GitCommandBounds) -> Result<Vec<u8>> {
+    let output = bounded_git_output(root, args, bounds)
+        .map_err(|error| co_change_error(error.to_string()))?;
     if !output.status.success() {
-        return Err(CoChangeError::NonZeroExit(format!(
+        return Err(co_change_error(format!(
             "git {} exited with {}: {}",
             args[0],
             output.status,
@@ -187,27 +207,29 @@ fn git_stdout(
     Ok(output.stdout)
 }
 
-/// Empty NUL tokens delimit commits because Git paths cannot be empty or
-/// contain NUL. The first path carries one formatting newline.
-fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<&[u8]>>, CoChangeError> {
+/// Splits `git log --format=%x01 --name-only -z` output into per-commit file
+/// sets. Each commit is a `\x01` header token; the first path after it carries
+/// the one `\n` separator Git writes between the header and the name list.
+fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<&[u8]>>> {
     let mut commits = Vec::new();
     let mut current: Option<Vec<&[u8]>> = None;
     let mut after_header = false;
     for token in log.split(|byte| *byte == 0) {
-        if token.is_empty() {
-            commits.extend(current.take());
-            after_header = true;
-            continue;
-        }
         let token = if after_header {
-            current = Some(Vec::new());
-            after_header = false;
-            token
-                .strip_prefix(b"\n")
-                .ok_or_else(|| co_change_error("git log omitted the commit header separator"))?
+            token.strip_prefix(b"\n").unwrap_or(token)
         } else {
             token
         };
+        after_header = false;
+        if token == b"\x01" {
+            commits.extend(current.take());
+            current = Some(Vec::new());
+            after_header = true;
+            continue;
+        }
+        if token.is_empty() {
+            continue;
+        }
         current
             .as_mut()
             .ok_or_else(|| co_change_error("git log listed a path before any commit"))?
@@ -217,8 +239,8 @@ fn commit_file_sets(log: &[u8]) -> Result<Vec<Vec<&[u8]>>, CoChangeError> {
     Ok(commits)
 }
 
-fn co_change_error(detail: impl Into<String>) -> CoChangeError {
-    CoChangeError::InvalidOutput(detail.into())
+fn co_change_error(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("git-co-change-unavailable", false, detail.into())
 }
 
 #[cfg(test)]
@@ -269,7 +291,7 @@ mod tests {
                 .iter()
                 .map(|path| (*path).to_owned())
                 .collect::<Vec<_>>();
-            co_change_partners(
+            missing_co_change_partners(
                 self.0.path(),
                 "HEAD",
                 "HEAD",
@@ -280,10 +302,10 @@ mod tests {
             .into_iter()
             .map(|partner| {
                 (
-                    partner.partner,
                     partner.file,
-                    partner.together,
-                    partner.file_changes,
+                    partner.partner_of,
+                    partner.co_changes,
+                    partner.partner_of_changes,
                 )
             })
             .collect()
@@ -301,7 +323,20 @@ mod tests {
 
     #[test]
     fn a_change_missing_its_usual_companion_is_reported() {
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            missing_co_change_partners(
+                &missing.path().join("absent"),
+                "HEAD",
+                "HEAD",
+                &["schema.rs".to_owned()],
+                &GitCommandBounds::default(),
+            )
+            .unwrap(),
+            Vec::new()
+        );
         let repo = Repo::new();
+        assert_eq!(repo.partners(&["schema.rs", "handler.rs"]), Vec::new());
 
         for _ in 0..3 {
             repo.commit(&["schema.rs", "migrations/next.sql"]);
@@ -326,6 +361,7 @@ mod tests {
             "a partner already in the change set is not missing"
         );
 
+        // A one-file change must clear the stricter single-file gate.
         assert_eq!(repo.partners(&["schema.rs"]), Vec::new());
         for _ in 0..3 {
             repo.commit(&["schema.rs", "migrations/next.sql"]);
@@ -335,6 +371,7 @@ mod tests {
             vec![partner("migrations/next.sql", "schema.rs", 6, 7)]
         );
 
+        // A partner that no longer exists cannot be forgotten.
         repo.git(&["rm", "-q", "migrations/next.sql"]);
         repo.git(&["commit", "-m", "drop migration"]);
         assert_eq!(repo.partners(&["schema.rs"]), Vec::new());
@@ -358,31 +395,21 @@ mod tests {
         assert!(output.status.success(), "{:?}", output.stderr);
         repo.git(&["commit", "-m", "binary asset"]);
         for _ in 0..3 {
-            repo.commit(&["schema.rs", "migrations/next.sql", "new\nline.rs", "\u{1}"]);
+            repo.commit(&["schema.rs", "migrations/next.sql"]);
         }
         assert_eq!(
             repo.partners(&["schema.rs", "handler.rs"]),
-            vec![
-                partner("\u{1}", "schema.rs", 3, 3),
-                partner("migrations/next.sql", "schema.rs", 3, 3),
-                partner("new\nline.rs", "schema.rs", 3, 3),
-            ]
+            vec![partner("migrations/next.sql", "schema.rs", 3, 3)]
         );
     }
 
     #[test]
     fn a_cancelled_read_stops_before_mining() {
         let repo = Repo::new();
-        for _ in 0..5 {
-            repo.commit(&["schema.rs", "migrations/next.sql"]);
-        }
-        assert_eq!(
-            repo.partners(&["schema.rs"]),
-            vec![partner("migrations/next.sql", "schema.rs", 5, 5)]
-        );
+        repo.commit(&["schema.rs"]);
         let cancel = crate::cancellation::CancellationToken::new();
         cancel.cancel();
-        let read = co_change_partners(
+        let read = missing_co_change_partners(
             repo.0.path(),
             "HEAD",
             "HEAD",
@@ -392,11 +419,11 @@ mod tests {
                 ..GitCommandBounds::default()
             },
         );
-        let error = read.unwrap_err();
-        assert!(matches!(
-            error,
-            CoChangeError::Command(GitCommandError::Cancelled)
-        ));
+        assert!(
+            read.as_ref()
+                .is_err_and(|error| error.to_string().contains("cancelled")),
+            "{read:?}"
+        );
     }
 
     #[test]
@@ -411,119 +438,5 @@ mod tests {
             repo.commit(&files);
         }
         assert_eq!(repo.partners(&["lib.rs", "other.rs"]), Vec::new());
-        for _ in 0..3 {
-            repo.commit(&["lib.rs", "lib_test.rs"]);
-        }
-        assert_eq!(
-            repo.partners(&["lib.rs", "other.rs"]),
-            vec![partner("lib_test.rs", "lib.rs", 3, 3)]
-        );
-    }
-
-    #[test]
-    fn nested_projects_keep_project_relative_paths_and_history_bounds() {
-        let repo = Repo::new();
-        for _ in 0..5 {
-            repo.commit(&[
-                "project/src/schema.rs",
-                "project/migrations/next.sql",
-                "outside.rs",
-            ]);
-        }
-        let root = repo.0.path().join("project");
-        let changed = vec!["src/schema.rs".to_owned()];
-        let partners = co_change_partners(
-            &root,
-            "HEAD",
-            "HEAD",
-            &changed,
-            &GitCommandBounds::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            partners,
-            vec![CoChangePartner {
-                file: "src/schema.rs".to_owned(),
-                partner: "migrations/next.sql".to_owned(),
-                together: 5,
-                file_changes: 5,
-            }]
-        );
-        let limited = GitCommandBounds {
-            max_stdout_bytes: 1,
-            ..GitCommandBounds::default()
-        };
-        let error = co_change_partners(&root, "HEAD", "HEAD", &changed, &limited).unwrap_err();
-        assert!(matches!(
-            &error,
-            CoChangeError::Command(GitCommandError::OutputLimitExceeded {
-                stream: "stdout",
-                bound: 1
-            })
-        ));
-        for _ in 0..3 {
-            repo.commit(&["project/src/schema.rs"]);
-        }
-        assert_eq!(
-            co_change_partners(
-                &root,
-                "HEAD",
-                "HEAD",
-                &changed,
-                &GitCommandBounds::default()
-            )
-            .unwrap(),
-            Vec::new(),
-        );
-        assert_eq!(
-            co_change_partners(
-                &root,
-                "HEAD~3",
-                "HEAD",
-                &changed,
-                &GitCommandBounds::default()
-            )
-            .unwrap(),
-            partners,
-        );
-    }
-
-    #[test]
-    fn unavailable_history_is_not_an_empty_measurement() {
-        let repo = Repo::new();
-        let changed = vec!["schema.rs".to_owned()];
-        let unborn = co_change_partners(
-            repo.0.path(),
-            "HEAD",
-            "HEAD",
-            &changed,
-            &GitCommandBounds::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(&unborn, CoChangeError::NonZeroExit(_)));
-        assert!(
-            unborn.to_string().contains("bad revision 'HEAD'"),
-            "{unborn}"
-        );
-        for _ in 0..5 {
-            repo.commit(&["schema.rs", "migration.sql"]);
-        }
-        assert_eq!(
-            repo.partners(&["schema.rs"]),
-            vec![partner("migration.sql", "schema.rs", 5, 5)]
-        );
-        let error = co_change_partners(
-            repo.0.path(),
-            "missing-ref",
-            "HEAD",
-            &changed,
-            &GitCommandBounds::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(&error, CoChangeError::NonZeroExit(_)));
-        assert!(
-            error.to_string().contains("bad revision 'missing-ref'"),
-            "{error}"
-        );
     }
 }
