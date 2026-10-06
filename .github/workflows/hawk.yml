@@ -1,12 +1,9 @@
 # Hawk visibility lint. Explicit optional channel, not PR tip evidence.
 #
-# Retrigger note: keep this workflow off pull_request CI until Hawk is clean.
-#
 # Kept off pull_request CI on purpose: tip green must not depend on
-# continue-on-error or a forged dashboard app-dist seed. Dispatch or wait for
-# the weekly schedule until the Hawk backlog is clean enough to promote into
-# required CI without softening -D warnings.
-# Unarchive retrigger: keep Hawk optional until -D warnings is clean.
+# continue-on-error or a forged dashboard app-dist seed. Dispatch it on demand
+# until the Hawk backlog is clean enough to promote into required CI without
+# softening -D warnings.
 name: Hawk
 
 # On demand only; see distribution-acceptance.yml for why nothing runs on a
