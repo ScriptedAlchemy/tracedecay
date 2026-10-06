@@ -38,7 +38,8 @@ genrule(
         "//scripts:check-dashboard-bundle.py",
     ],
     outs = ["bundle_sha256.txt"],
-    cmd = "python3 $(location //scripts:check-dashboard-bundle.py) $(location :app_dist) --print-digest > $@",
+    # Windows runners ship `python`, not `python3`.
+    cmd = "$$(command -v python3 || command -v python) $(location //scripts:check-dashboard-bundle.py) $(location :app_dist) --print-digest > $@",
 )
 
 filegroup(

@@ -1031,15 +1031,16 @@ def main():
         return BANNER + "\n" + block + "\n"
 
     # External crates Cargo's perf profile optimizes past the dev default.
-    # crate_universe names their repositories `crates__<name>-<version>`, and
-    # rules_rust matches per-crate flags on the crate root's exec path.
+    # rules_rust matches per-crate flags on a prefix of the crate root's exec
+    # path, which carries the canonical name of the crate_universe repository
+    # (`rules_rust++crate+crates__<name>-<version>`).
     locked = tomllib.loads((REPO / "Cargo.lock").read_text())["package"]
     external_flags = []
     for package in sorted(locked, key=lambda pkg: (pkg["name"], pkg["version"])):
         level = opt_levels.get(package["name"])
         if package["name"] in members or level is None:
             continue
-        prefix = f"external/+crate+crates__{package['name']}-{package['version']}/"
+        prefix = f"external/rules_rust++crate+crates__{package['name']}-{package['version']}/"
         external_flags.append(
             f'build "--@rules_rust//rust/settings:per_crate_rustc_flag={prefix}@-Copt-level={level}"'
         )
