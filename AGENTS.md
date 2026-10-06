@@ -76,15 +76,20 @@ unauthorized external action after completing independent, authorized work.
 
 ## Build & test
 
-- Bazel is the workspace build, lint, test, and release authority on every CI
-  host. Run `bazel build //...`, `bazel test //... --test_output=errors`,
-  `bazel build --config=clippy //...`, and `bazel build --config=release
-  //crates/tracedecay-cli:tracedecay`. Generated targets mirror the Cargo
+- Bazel is the repository Rust build, lint, test, and release authority on every
+  host. Use Bazel for broad and focused verification, including one crate or one
+  test. Run `bazel build //...`, `bazel test //... --test_output=errors`,
+  `bazel test //path/to/package:target --test_filter='module::test_name'
+  --test_output=errors`, `bazel build --config=clippy //...`, and `bazel build
+  --config=release //crates/tracedecay-cli:tracedecay`. Treat a direct `cargo
+  test`, `cargo check`, `cargo build`, or `cargo clippy` result as diagnostic
+  evidence only, not repository verification. Generated targets mirror the Cargo
   `perf` profile, so Cargo profile edits need a `gen_builds.py` rerun. Edition
   2024, resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
-  canonical inputs. Use Cargo for package semantics (`cargo package`), code
+  canonical inputs. Use Cargo only for package and lockfile semantics, code
   generators that invoke Cargo, benchmarks that measure Cargo artifacts, Hawk,
-  and the Windows cross-target type check.
+  the Windows cross-target type check, and external Rust projects outside this
+  workspace.
 - pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
   sources. Run `pnpm install` at the repository root after cloning and after
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
