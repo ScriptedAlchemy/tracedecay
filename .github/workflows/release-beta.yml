@@ -113,7 +113,7 @@ jobs:
         with:
           # 3.12.10 is the newest 3.12 patch published for every release
           # matrix architecture, including macOS 14 ARM.
-          python-version: "3.12.10"
+          python-version: "3.14.8"
 
       # Bazel builds the dashboard bundle the binary embeds (//dashboard:app_dist).
       - name: Build release binary for packaging
