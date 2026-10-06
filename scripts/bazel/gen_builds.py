@@ -16,8 +16,10 @@ stale or obsolete groups are detectable drift rather than inherited bytes.
 
 Feature model. Cargo compiles a member once per resolved feature set, and the
 set depends on the consuming context (normal build vs dev/test resolution vs
-required-features). Each member therefore gets one rust_library per distinct
-feature set it is ever built with. `<pkg>` covers its own build context and
+required-features). Test contexts resolve across the whole workspace, as one
+`cargo test --workspace` does, so every member's tests share one dependency
+build. Each member gets one rust_library per distinct feature set it is ever
+built with. `<pkg>` covers its own build context and
 `<pkg>__<extra-features>` names the variants. A variant's own member deps are the union
 of the labels every producing context resolves for them. Dependents pick the
 variant matching the feature set Cargo resolves in their context.
@@ -186,9 +188,12 @@ _TREE_LINE = re.compile(
 
 
 def feature_map(pkg_name, edges, features=()):
-    """cargo tree resolution for one root context. Maps member -> feature set."""
+    """cargo tree resolution for one root context, or for the whole workspace
+    when `pkg_name` is None (features then carry their `pkg/` prefix). Maps
+    member -> feature set."""
+    root = ["--workspace"] if pkg_name is None else ["-p", pkg_name]
     cmd = [
-        "cargo", "tree", "-p", pkg_name, "-e", edges,
+        "cargo", "tree", *root, "-e", edges,
         "-f", "{p}|{f}", "--prefix", "none", "--color", "never",
     ]
     features = set(features)
@@ -507,18 +512,42 @@ def main():
             reqs.add((edges, frozenset(req)))
         for edges, req in reqs:
             contexts[(name, edges, req)] = None
-        # CI checks every test-transport surface compiles (`cargo check
-        # --workspace --all-targets --features test-transport`), so the
-        # gated variants exist even where no test target requires them.
-        if "test-transport" in p["features"]:
-            contexts[(name, "normal,build,dev", frozenset({"test-transport"}))] = None
     # The lean root build (`cargo check -p tracedecay --no-default-features`).
     contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
-    # Each context is an independent `cargo tree` walk.
+    # Test contexts share workspace-wide resolutions, as one `cargo test
+    # --workspace` does: the plain one, and one enabling every feature a
+    # test, bench or example requires plus each test-transport surface CI
+    # checks compiles (`cargo check --workspace --all-targets --features
+    # test-transport`). Resolving each member's tests on their own, as `cargo
+    # test -p <member>` does, gave every member its own featured copy of its
+    # dependency closure: 534 libraries for 50 crates.
+    gated = frozenset(
+        f"{p['name']}/{f}"
+        for p in meta["packages"]
+        for t in p["targets"]
+        if {"test", "bench", "example"} & set(t["kind"])
+        for f in t.get("required-features") or []
+    ) | frozenset(
+        f"{p['name']}/test-transport"
+        for p in meta["packages"]
+        if "test-transport" in p["features"]
+    )
+
+    # The gated surfaces build even where no target requires them.
+    contexts[(None, "normal,build,dev", gated)] = None
+
+    def resolution(key):
+        name, edges, req = key
+        if "dev" not in edges:
+            return key
+        return (None, edges, gated if req else frozenset())
+
+    # Each distinct resolution is an independent `cargo tree` walk.
+    walks = list(dict.fromkeys(resolution(key) for key in contexts))
     with ThreadPoolExecutor() as pool:
-        resolved = pool.map(lambda key: feature_map(*key), list(contexts))
-        contexts.update(zip(list(contexts), resolved))
+        walked = dict(zip(walks, pool.map(lambda key: feature_map(*key), walks)))
+    contexts = {key: walked[resolution(key)] for key in contexts}
 
     base = {n: frozenset(contexts[(n, "normal,build", frozenset())][n]) for n in members}
 
