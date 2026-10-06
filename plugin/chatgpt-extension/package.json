@@ -23,7 +23,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1",
+    "@playwright/test": "1.63.0",
     "@rsbuild/core": "^1.7.6",
     "@rslib/core": "^0.23.2",
     "@types/node": "^22.20.1",
