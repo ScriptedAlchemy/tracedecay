@@ -42,23 +42,6 @@ rust_library(
     crate_features = ["test-helpers"],
 )
 
-rust_library(
-    name = "tracedecay-daemon-protocol__df34e485125",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_protocol",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(0),
-    crate_features = [],
-)
-
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-daemon-protocol__+test-helpers__dev",

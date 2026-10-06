@@ -16,9 +16,9 @@ stale or obsolete groups are detectable drift rather than inherited bytes.
 
 Feature model. Cargo compiles a member once per resolved feature set, and the
 set depends on the consuming context (normal build vs dev/test resolution vs
-required-features). Test contexts resolve across the whole workspace, as one
-`cargo test --workspace` does, so every member's tests share one dependency
-build. Each member gets one rust_library per distinct feature set it is ever
+required-features). Test contexts resolve once across the whole workspace,
+as one `cargo test --workspace` does, so every member's tests share one
+dependency build. Each member gets one rust_library per distinct feature set it is ever
 built with. `<pkg>` covers its own build context and
 `<pkg>__<extra-features>` names the variants. A variant's own member deps are the union
 of the labels every producing context resolves for them. Dependents pick the
@@ -115,26 +115,32 @@ BUILD_SCRIPT_ENV = {
 
 
 # Workspace binaries test suites resolve at run time, keyed by the override
-# variable their helper reads (crates/tracedecay/tests/common and the SDK
-# suite). Bazel hands each over as a runfiles path, so no suite depends on
-# Cargo's target/<profile>/ layout.
+# variable their helper reads (crates/tracedecay/tests/common, the SDK suite
+# and the host-CLI fixture installer). Bazel hands each over as a runfiles
+# path, so no suite depends on Cargo's target/<profile>/ layout. Binaries name
+# their `__test` build, which carries the test run's features as Cargo's would.
 RUNTIME_BINARIES = (
     (
         "TRACEDECAY_TEST_BIN",
-        "//crates/tracedecay-cli:tracedecay",
+        "//crates/tracedecay-cli:tracedecay__test",
         r'(?<!fn )\btracedecay_bin\(\)|var(?:_os)?\("TRACEDECAY_TEST_BIN"\)',
     ),
     (
         "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
-        "//crates/tracedecay-search-eval:tracedecay-search-eval_bin",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval_bin__test",
         r'search_eval_bin\("tracedecay-search-eval"\)',
     ),
     (
         "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
-        "//crates/tracedecay-search-eval:tracedecay-search-eval-direct",
+        "//crates/tracedecay-search-eval:tracedecay-search-eval-direct__test",
         # Calls only: tests/common names the override inside search_eval_bin,
         # which every suite that includes common compiles.
         r'\bsearch_eval_direct_bin\(\)|search_eval_bin\("tracedecay-search-eval-direct"\)',
+    ),
+    (
+        "TRACEDECAY_HOST_CLI_FIXTURE",
+        "//crates/tracedecay-cli:tracedecay-host-cli-fixture",
+        r'\bcompiled_host_cli_fixture\(\)',
     ),
 )
 
@@ -512,17 +518,17 @@ def main():
             reqs.add((edges, frozenset(req)))
         for edges, req in reqs:
             contexts[(name, edges, req)] = None
-    contexts[("tracedecay-cli", "normal,build", frozenset({"test-transport"}))] = None
     # The lean root build (`cargo check -p tracedecay --no-default-features`).
     contexts[("tracedecay", "normal,build", frozenset({NO_DEFAULT_FEATURES}))] = None
 
-    # Test contexts share workspace-wide resolutions, as one `cargo test
-    # --workspace` does: the plain one, and one enabling every feature a
-    # test, bench or example requires plus each test-transport surface CI
-    # checks compiles (`cargo check --workspace --all-targets --features
-    # test-transport`). Resolving each member's tests on their own, as `cargo
-    # test -p <member>` does, gave every member its own featured copy of its
-    # dependency closure: 534 libraries for 50 crates.
+    # Every test context shares one workspace-wide resolution, as one `cargo
+    # test --workspace` does, with every feature a test, bench or example
+    # requires and each test-transport surface CI checks compiles (`cargo
+    # check --workspace --all-targets --features test-transport`) enabled,
+    # as the hosted CI test partitions enabled them. Resolving each member's
+    # tests on their own, as `cargo test -p <member>` does, gave every member
+    # its own featured copy of its dependency closure: 534 libraries for 50
+    # crates. Feature-absence tests carry their own cfg gates.
     gated = frozenset(
         f"{p['name']}/{f}"
         for p in meta["packages"]
@@ -535,14 +541,9 @@ def main():
         if "test-transport" in p["features"]
     )
 
-    # The gated surfaces build even where no target requires them.
-    contexts[(None, "normal,build,dev", gated)] = None
-
     def resolution(key):
         name, edges, req = key
-        if "dev" not in edges:
-            return key
-        return (None, edges, gated if req else frozenset())
+        return (None, edges, gated) if "dev" in edges else key
 
     # Each distinct resolution is an independent `cargo tree` walk.
     walks = list(dict.fromkeys(resolution(key) for key in contexts))
@@ -809,7 +810,7 @@ def main():
             return cand
         build_tree = contexts[(name, "normal,build", frozenset())]
         dev_tree = contexts[(name, "normal,build,dev", frozenset())]
-        bin_target_names = {}  # (Cargo bin name, extra features) -> Bazel target name
+        bin_target_names = {}  # cargo bin name -> target its tests spawn
         md = member_deps_of[name]
         lib_t = next((t for t in p["targets"] if "lib" in t["kind"]), None)
         has_build = any("custom-build" in t["kind"] for t in p["targets"])
@@ -900,31 +901,10 @@ def main():
                 out.append(f"    build_script_env = {env_dict(BUILD_SCRIPT_ENV[name])},")
             out.append(")\n")
 
-        binary_targets = [(t, frozenset()) for t in p["targets"]]
-        if name == "tracedecay-cli":
-            binary_targets += [
-                (t, frozenset({"test-transport"}))
-                for t in p["targets"] if "bin" in t["kind"]
-            ]
-        for t, extra_features in binary_targets:
+        for t in p["targets"]:
             kinds = t["kind"]
             if not ({"bin", "example"} & set(kinds)):
                 continue
-            req = frozenset(t.get("required-features") or []) | extra_features
-            if "example" in kinds:
-                fmap = contexts[(name, "normal,build,dev", req)]
-                edges = md["normal"] + md["dev"]
-            else:
-                fmap = contexts[(name, "normal,build", req)]
-                edges = md["normal"]
-            vkind = "dev" if "example" in kinds else "norm"
-            deps = dedup(
-                sorted({label(d, fmap, vkind) for d in edges if d in fmap})
-            )
-            if lib_t and name in fmap:
-                deps = dedup([label(name, fmap, vkind)] + deps)
-            if has_build:
-                deps.append(":build_script_build")
             srcs, crate_root = srcs_for(p, t)
             if not srcs.startswith("[") and rel_src(p, t).startswith("src/"):
                 # In-package bins/tests resolve `mod` paths anywhere under
@@ -943,40 +923,102 @@ def main():
                 srcs += " + glob([" + q(bin_local) + "])"
             if bin_labels:
                 srcs += " + [" + q(bin_labels) + "]"
-            # Cargo builds examples against the dev resolution.
-            dev_args = "example" in kinds
-            suffix = "__test_transport" if extra_features else ""
-            emitted = unique_name(t["name"] + suffix)
-            bin_target_names[(t["name"], extra_features)] = emitted
-            out += [
-                "rust_binary(",
-                f'    name = "{emitted}",',
-                *([
-                    "    testonly = True,",
-                    f'    binary_name = "test-transport/{t["name"]}",',
-                    f'    crate_name = "{t["name"].replace("-", "_")}",',
-                ] if extra_features else []),
-                "    srcs = " + srcs + ",",
-                f'    crate_root = {crate_root},',
-                '    edition = crate_edition(),',
-                '    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)'
-                + ("\n        + glob([" + q(inc_local_b) + "], allow_empty = True)" if inc_local_b else "")
-                + ("\n        + [" + q(inc_labels_b) + "]" if inc_labels_b else "")
-                + ",",
-                f'    version = "{p["version"]}",',
-                "    deps = all_crate_deps(normal = True"
-                + (", normal_dev = True" if dev_args else "")
-                + ") + [" + q(deps) + "],",
-                "    proc_macro_deps = all_crate_deps(proc_macro = True"
-                + (", proc_macro_dev = True" if dev_args else "")
-                + "),",
-                "    aliases = aliases(normal = True"
-                + (", normal_dev = True" if dev_args else "")
-                + "),",
-                rustc_flags_attr,
-                f"    crate_features = [{q(sorted(fmap[name]))}],",
-                ")\n",
-            ]
+            req = frozenset(t.get("required-features") or [])
+            # Cargo builds examples against the dev resolution, and builds the
+            # binaries a test run spawns with that run's features too (test
+            # hooks, test-transport). `<bin>__test` is that build; the plain
+            # target is the shipped one.
+            test_flavor = None
+            if "example" in kinds:
+                emitted = unique_name(t["name"])
+                bin_target_names[t["name"]] = emitted
+                flavors = [(emitted, contexts[(name, "normal,build,dev", req)], "dev", True)]
+            else:
+                emitted = unique_name(t["name"])
+                test_flavor = unique_name(emitted + "__test")
+                bin_target_names[t["name"]] = test_flavor
+                flavors = [
+                    (emitted, contexts[(name, "normal,build", req)], "norm", False),
+                    (test_flavor, contexts[(name, "normal,build,dev", req)], "dev", False),
+                ]
+            for emitted, fmap, vkind, dev_args in flavors:
+                edges = md["normal"] + (md["dev"] if dev_args else [])
+                deps = dedup(
+                    sorted({label(d, fmap, vkind) for d in edges if d in fmap})
+                )
+                if lib_t and name in fmap:
+                    deps = dedup([label(name, fmap, vkind)] + deps)
+                if has_build:
+                    deps.append(":build_script_build")
+                out += [
+                    "rust_binary(",
+                    f'    name = "{emitted}",',
+                    # Suites check the spawned binary's own name, so the test
+                    # build keeps the shipped file name in a directory of its own.
+                    *([
+                        "    testonly = True,",
+                        f'    binary_name = "test/{t["name"]}",',
+                        f'    crate_name = "{t["name"].replace("-", "_")}",',
+                    ] if emitted == test_flavor else []),
+                    "    srcs = " + srcs + ",",
+                    f'    crate_root = {crate_root},',
+                    '    edition = crate_edition(),',
+                    '    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)'
+                    + ("\n        + glob([" + q(inc_local_b) + "], allow_empty = True)" if inc_local_b else "")
+                    + ("\n        + [" + q(inc_labels_b) + "]" if inc_labels_b else "")
+                    + ",",
+                    f'    version = "{p["version"]}",',
+                    "    deps = all_crate_deps(normal = True"
+                    + (", normal_dev = True" if dev_args else "")
+                    + ") + [" + q(deps) + "],",
+                    "    proc_macro_deps = all_crate_deps(proc_macro = True"
+                    + (", proc_macro_dev = True" if dev_args else "")
+                    + "),",
+                    "    aliases = aliases(normal = True"
+                    + (", normal_dev = True" if dev_args else "")
+                    + "),",
+                    rustc_flags_attr,
+                    f"    crate_features = [{q(sorted(fmap[name]))}],",
+                    ")\n",
+                ]
+            # A binary's own #[cfg(test)] modules, as `cargo test --bins`
+            # runs them, unless the manifest opts it out with `test = false`.
+            if "bin" in kinds and t.get("test", True):
+                fmap = contexts[(name, "normal,build,dev", req)]
+                deps = dedup(
+                    sorted(
+                        {
+                            label(d, fmap, "dev")
+                            for d in md["normal"] + md["dev"]
+                            if d in fmap
+                        }
+                    )
+                )
+                if lib_t and name in fmap:
+                    deps = dedup([label(name, fmap, "dev")] + deps)
+                if has_build:
+                    deps.append(":build_script_build")
+                runfiles_env = runtime_binaries(p, t, bin_pulled)
+                out += [
+                    "rust_test(",
+                    f'    name = "{unique_name(t["name"] + "_unit_test")}",',
+                    f'    crate = ":{test_flavor}",',
+                    f"    crate_features = [{q(sorted(fmap[name]))}],",
+                    '    edition = crate_edition(),',
+                    f'    version = "{p["version"]}",',
+                    "    deps = all_crate_deps(normal = True, normal_dev = True) + ["
+                    + q(deps) + "],",
+                    '    proc_macro_deps = all_crate_deps('
+                    "proc_macro = True, proc_macro_dev = True),",
+                    '    aliases = aliases(normal = True, normal_dev = True),',
+                    rustc_flags_attr,
+                    '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
+                    '        + ["//tests:fixtures"],',
+                    '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],',
+                    "    runfiles_env = " + env_dict(runfiles_env) + "," if runfiles_env else None,
+                    ")\n",
+                ]
+                out = [l for l in out if l is not None]
 
         for t in p["targets"]:
             kinds = t["kind"]
@@ -1035,19 +1077,12 @@ def main():
                 rustc_env["CARGO_TARGET_TMPDIR"] = "/tmp"
             runfiles_env = {}
             for bin_name in needed_bin_exes(p, t, mod_pulled):
-                binary_features = (
-                    frozenset({"test-transport"})
-                    if name == "tracedecay-cli" and "test-transport" in fmap[name]
-                    else frozenset()
-                )
-                emitted = bin_target_names.get((bin_name, binary_features))
+                emitted = bin_target_names.get(bin_name)
                 if emitted is None:
                     continue
                 rustc_env[f"CARGO_BIN_EXE_{bin_name}"] = f"$(rootpath :{emitted})"
                 runfiles_env[f"CARGO_BIN_EXE_{bin_name}"] = f"//{dir_of[name]}:{emitted}"
             for variable, target in runtime_binaries(p, t, mod_pulled).items():
-                if variable == "TRACEDECAY_TEST_BIN" and "test-transport" in fmap[name]:
-                    target += "__test_transport"
                 runfiles_env.setdefault(variable, target)
             env_attr = "    rustc_env = " + env_dict(rustc_env) + "," if rustc_env else None
             out += [
@@ -1073,6 +1108,7 @@ def main():
             out = [l for l in out if l is not None]
 
         if lib_t:
+            lib_runfiles_env = runtime_binaries(p, lib_t, lib_pulled)
             dev_edges = md["normal"] + md["dev"]
             deps = dedup(
                 sorted(
@@ -1102,8 +1138,12 @@ def main():
                 + (f"\n        + [{q(inc_labels)}]" if inc_labels else "")
                 + ",",
                 '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],',
+                "    runfiles_env = " + env_dict(lib_runfiles_env) + ","
+                if lib_runfiles_env
+                else None,
                 ")\n",
             ]
+            out = [l for l in out if l is not None]
 
         return "\n".join(out)
 
