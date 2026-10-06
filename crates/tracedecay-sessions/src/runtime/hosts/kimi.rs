@@ -518,13 +518,13 @@ pub async fn capture_kimi_observations(
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
     tracing::Instrument::instrument(
         async {
-            let discovery_frontier = facade
+            let stored_frontier = facade
                 .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
                 .await
                 .map_err(|outcome| {
                     crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
-                })?
-                .unwrap_or_default();
+                })?;
+            let discovery_frontier = stored_frontier.unwrap_or_default();
             let frontier_path = if discovery_frontier.file_id == 0 {
                 None
             } else {
@@ -850,7 +850,7 @@ pub async fn capture_kimi_observations(
                         facade,
                         &scope,
                         KIMI_DISCOVERY_FRONTIER_KEY,
-                        discovery_frontier,
+                        stored_frontier,
                         byte_offset,
                         file_id,
                     )
