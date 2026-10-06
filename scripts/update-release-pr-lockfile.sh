@@ -31,12 +31,16 @@ repository_root=$PWD
 (cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
   -p tracedecay --precise "$release_version")
 python3 scripts/bazel/gen_builds.py
+pnpm --dir sdks/typescript run build
+pnpm --dir plugin/chatgpt-extension run build
 
 generated_paths=(
   Cargo.lock
   crates/tracedecay/BUILD.bazel
   crates/tracedecay-cli/BUILD.bazel
   crates/tracedecay-project/BUILD.bazel
+  plugin/chatgpt-extension/embedded/app.html
+  plugin/chatgpt-extension/embedded/server.mjs
 )
 unexpected_paths=$(git diff --name-only -- . "${generated_paths[@]/#/:(exclude)}")
 if [[ -n "$unexpected_paths" ]]; then

@@ -182,6 +182,18 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
         (main / "scripts" / "bazel").mkdir()
         generator = main / "scripts" / "bazel" / "gen_builds.py"
         generator.write_text(bazel_stub)
+        for package in ("sdks/typescript", "plugin/chatgpt-extension"):
+            path = main / package / "package.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"scripts":{"build":"node build.mjs"}}\n')
+            (path.parent / "build.mjs").write_text(
+                "import {mkdirSync, writeFileSync} from 'node:fs';\n"
+                "if (process.cwd().endsWith('chatgpt-extension')) {\n"
+                "  mkdirSync('embedded', {recursive: true});\n"
+                "  writeFileSync('embedded/app.html', 'app beta.58\\n');\n"
+                "  writeFileSync('embedded/server.mjs', 'server beta.58\\n');\n"
+                "}\n"
+            )
         for path in (
             "crates/tracedecay/BUILD.bazel",
             "crates/tracedecay-cli/BUILD.bazel",
