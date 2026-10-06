@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.72](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.71...v1.0.0-beta.72) (2026-10-06)
+
+
+### Bug Fixes
+
+* **deps:** disable pnpm minimum release age ([4e94c24](https://github.com/ScriptedAlchemy/tracedecay/commit/4e94c2429b82404cf92e7af5d363d88d4f08c0cf))
+* **deps:** disable pnpm minimum release age ([d5d9bfc](https://github.com/ScriptedAlchemy/tracedecay/commit/d5d9bfc4630209056b44eabb4b2739b871144e44))
+* **deps:** disable pnpm minimum release age ([#3110](https://github.com/ScriptedAlchemy/tracedecay/issues/3110)) ([4e94c24](https://github.com/ScriptedAlchemy/tracedecay/commit/4e94c2429b82404cf92e7af5d363d88d4f08c0cf))
+* **plugin:** refresh embedded ChatGPT bundle ([ac52861](https://github.com/ScriptedAlchemy/tracedecay/commit/ac52861653839b8be38394a59d2908dabc8fb601))
+* **plugin:** refresh embedded ChatGPT bundle ([decfb39](https://github.com/ScriptedAlchemy/tracedecay/commit/decfb39dae82333b57117a124fdc02ce309ef3c6))
+* **plugin:** refresh embedded ChatGPT bundle ([#3115](https://github.com/ScriptedAlchemy/tracedecay/issues/3115)) ([ac52861](https://github.com/ScriptedAlchemy/tracedecay/commit/ac52861653839b8be38394a59d2908dabc8fb601))
+* **release:** regenerate Bazel metadata on version bumps ([2fe9865](https://github.com/ScriptedAlchemy/tracedecay/commit/2fe9865f05ddcde25a26fba768e33c3e23c8303e))
+* **release:** regenerate Bazel metadata on version bumps ([00cd61b](https://github.com/ScriptedAlchemy/tracedecay/commit/00cd61bd746192cd482f428b947a2c2652462a27))
+* **release:** regenerate Bazel metadata on version bumps ([#3112](https://github.com/ScriptedAlchemy/tracedecay/issues/3112)) ([2fe9865](https://github.com/ScriptedAlchemy/tracedecay/commit/2fe9865f05ddcde25a26fba768e33c3e23c8303e))
+* **release:** regenerate versioned plugin bundle ([a705e5d](https://github.com/ScriptedAlchemy/tracedecay/commit/a705e5d226cbc706192ee13266fdd4be6fa42273))
+* **release:** regenerate versioned plugin bundle ([d0e4685](https://github.com/ScriptedAlchemy/tracedecay/commit/d0e4685e7845ec100a1bb67485352532405fc514))
+* **release:** regenerate versioned plugin bundle ([#3116](https://github.com/ScriptedAlchemy/tracedecay/issues/3116)) ([a705e5d](https://github.com/ScriptedAlchemy/tracedecay/commit/a705e5d226cbc706192ee13266fdd4be6fa42273))
+
 ## [1.0.0-beta.71](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.70...v1.0.0-beta.71) (2026-10-06)
 
 
