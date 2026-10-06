@@ -76,12 +76,15 @@ unauthorized external action after completing independent, authorized work.
 
 ## Build & test
 
-- Bazel is the primary workspace build and test authority. Run `bazel build //...`
-  and `bazel test //... --test_output=errors`. Edition 2024, resolver 3, and the
-  toolchain pinned in `rust-toolchain.toml` remain canonical inputs. Use Cargo
-  for package and release semantics, code generators that invoke Cargo,
-  benchmarks that measure Cargo artifacts, and platform-specific workflows not
-  yet modeled by Bazel.
+- Bazel is the workspace build, lint, test, and release authority on every CI
+  host. Run `bazel build //...`, `bazel test //... --test_output=errors`,
+  `bazel build --config=clippy //...`, and `bazel build --config=release
+  //crates/tracedecay-cli:tracedecay`. Generated targets mirror the Cargo
+  `perf` profile, so Cargo profile edits need a `gen_builds.py` rerun. Edition
+  2024, resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
+  canonical inputs. Use Cargo for package semantics (`cargo package`), code
+  generators that invoke Cargo, benchmarks that measure Cargo artifacts, Hawk,
+  and the Windows cross-target type check.
 - pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
   sources. Run `pnpm install` at the repository root after cloning and after
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed

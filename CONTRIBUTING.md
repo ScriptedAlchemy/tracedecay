@@ -19,10 +19,12 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
 `pnpm-lock.yaml` or a `Cargo.lock` changes. Besides the npm packages, it
 installs every crate into `.pnpm/crates`, which the committed
 `.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
-`cargo` cannot resolve dependencies until it has run. Bazel is the default
-workspace build and test runner. Install `cargo-nextest` only for the maintained
-macOS, Windows, package, or external-project workflows that use it. Commands
-below run from the repository root unless noted.
+`cargo` cannot resolve dependencies until it has run. Bazel is the workspace
+build, lint, test, and release runner on every CI host. Cargo remains for the
+local edit loop, packaging, Hawk, the Windows cross-target type check, and the
+`sdks/codegen` workspace; install `cargo-nextest` only for the local
+`cargo test-ci` / `cargo test-all` aliases. Commands below run from the
+repository root unless noted.
 
 Two Cargo errors mean "run `pnpm install` at the repository root". Before any
 install, Cargo reports `failed to read root of directory source
@@ -152,15 +154,16 @@ external boundary alongside its behavior.
 
 ### Clippy policy
 
-The CI `Clippy` job runs the same command contributors should run locally before
-pushing:
+The CI `Clippy` job runs the rules_rust Clippy aspect over every Bazel target
+with `-D warnings`:
 
 ```bash
-cargo clippy --workspace --all-targets
+bazel build --config=clippy //...
 ```
 
-This check is blocking in CI: the workflow fails if `cargo clippy --workspace
---all-targets` exits non-zero. The composition-root lint policy in
+`cargo clippy --workspace --all-targets -- -D warnings` checks the same targets
+in the Cargo edit loop. Either way the check is blocking: the workflow fails on
+any Clippy warning. The composition-root lint policy in
 `crates/tracedecay/src/lib.rs` currently denies `clippy::all`, `clippy::unwrap_used`, and
 `clippy::expect_used`; new violations of those lints must be fixed or justified
 with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
@@ -297,8 +300,8 @@ integration branch waits behind, so a run spends only what its state earns:
 | State | Runs |
 |---|---|
 | Pull request | Nothing automatically. Dispatch CI on its branch ref when the head is ready. |
-| `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, and Linux test partitions. |
-| `CI` with `run_os=true` | Adds the macOS and Windows matrices. |
+| `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: Bazel build and test, clippy, feature gates, the shipped CLI, and the dashboard. |
+| `CI` with `run_os=true` | Adds the macOS and Windows Bazel build and test lanes. |
 | `CI` with `run_hosts=true` | Adds stock host integrations. |
 | Push to `master` | Everything. |
 
