@@ -65,7 +65,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
-    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     runfiles_env = {"TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture"},
 )
 
@@ -95,7 +95,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -112,7 +112,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/core_cli_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/core_cli_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -129,7 +129,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/host_journeys_suite/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/host_journeys_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -146,7 +146,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -163,7 +163,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -180,7 +180,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -197,7 +197,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
@@ -214,7 +214,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["alloc-mimalloc", "default", "production", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//crates/tracedecay-hooks:fixtures_host_events", "//crates/tracedecay-hooks:fixtures_host_events_claude", "//crates/tracedecay-hooks:fixtures_host_events_codex", "//crates/tracedecay-hooks:fixtures_host_events_hermes", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//crates/tracedecay-hooks:fixtures_host_events_opencode", "//crates/tracedecay-hooks:fixtures_host_events_pi"],
-    data = glob(["tests/**","tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay:tests_common", "//tests:support"] + ["//tests:fixtures"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay": "$(rootpath :tracedecay__test)", "CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_HOST_CLI_FIXTURE": "//crates/tracedecay-cli:tracedecay-host-cli-fixture", "TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )

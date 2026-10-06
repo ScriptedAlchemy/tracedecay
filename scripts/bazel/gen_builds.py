@@ -1014,7 +1014,7 @@ def main():
                     rustc_flags_attr,
                     '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
                     '        + ["//tests:fixtures"],',
-                    '    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],',
+                    '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],',
                     "    runfiles_env = " + env_dict(runfiles_env) + "," if runfiles_env else None,
                     ")\n",
                 ]
@@ -1046,9 +1046,12 @@ def main():
                 srcs += " + glob([" + q(mod_local) + "])"
             if mod_labels:
                 srcs += " + [" + q(mod_labels) + "]"
+            runtime_globs = dedup([
+                f"{Path(rel_src(p, t)).parent}/**",
+                *[f"{directory}/**" for directory in RESOURCE_DIRS if directory != "src"],
+            ])
             data = srcs if srcs.startswith("[") else (
-                f'glob(["{str(Path(rel_src(p, t)).parent)}/**",'
-                '"tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+                f"glob([{q(runtime_globs)}], allow_empty = True)"
                 + (" + [" + q(mod_labels) + "]" if mod_labels else "")
             )
             # Suites read the shared fixtures as ../../tests/fixtures from the
@@ -1134,7 +1137,7 @@ def main():
                 + (f"\n        + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
                 + (f"\n        + [{q(inc_labels)}]" if inc_labels else "")
                 + ",",
-                '    data = glob(["tests/**"], allow_empty = True) + ["//tests:fixtures"],',
+                '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],',
                 "    runfiles_env = " + env_dict(lib_runfiles_env) + ","
                 if lib_runfiles_env
                 else None,
