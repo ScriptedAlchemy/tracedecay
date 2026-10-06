@@ -3,6 +3,7 @@ load("//scripts:bazel/rust_test.bzl", "rust_test")
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
     ],
     visibility = ["//visibility:public"],
@@ -11,5 +12,9 @@ exports_files(
 rust_test(
     name = "rust_test_environment_probe",
     srcs = ["bazel/rust_test_environment_probe.rs"],
+    runfiles_env = {
+        "CARGO_BIN_EXE_runfile-probe": ":bazel/rust_test_environment_probe.txt",
+        "TRACEDECAY_RUNFILE_PROBE": ":bazel/rust_test_environment_probe.txt",
+    },
     use_libtest_harness = False,
 )

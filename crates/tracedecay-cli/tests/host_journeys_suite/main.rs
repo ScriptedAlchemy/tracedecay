@@ -9,3 +9,7 @@
 mod host_lifecycle_cli_acceptance;
 #[path = "../../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
+
+#[path = "../support/tracedecay_exe.rs"]
+mod tracedecay_exe;
+pub(crate) use tracedecay_exe::tracedecay_exe;

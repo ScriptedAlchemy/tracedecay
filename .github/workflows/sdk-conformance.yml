@@ -73,7 +73,7 @@ jobs:
           .github/workflows/release-pr-integrity.yml
   packages:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -87,7 +87,10 @@ jobs:
         working-directory: sdks/codegen
       - run: pnpm run contracts:check
         working-directory: dashboard
-      - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: sdk-conformance
+      - run: bazel test --config=ci //crates/tracedecay-sdk/...
       - run: pnpm run typecheck
         working-directory: sdks/typescript
       - run: pnpm test
@@ -95,27 +98,27 @@ jobs:
 
   production-router:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@db63522f73ba296577a3b5f633e260964b497067 # nextest
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - uses: ./.github/actions/setup-pnpm
-      - run: pnpm run build
-        working-directory: dashboard
-      - run: cargo build -p tracedecay-cli --bin tracedecay
-      # This job owns every sdk_suite test that needs the production daemon.
-      # It is the only job that builds one, so an unfiltered run is what keeps
-      # a daemon-backed test from silently never executing anywhere.
+      # test:installed spawns target/debug/tracedecay; staging it also sets up
+      # Bazel for the suite below.
+      - name: Build the production daemon
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: sdk-conformance
+      # This job owns every sdk_suite test that needs the production daemon,
+      # which Bazel hands the suite as TRACEDECAY_TEST_BIN. Including the
+      # ignored tests is what keeps a daemon-backed test from silently never
+      # executing anywhere.
       - run: >-
-          cargo nextest run
-          --manifest-path crates/tracedecay-sdk/Cargo.toml
-          --test sdk_suite
-          --run-ignored all
-          --no-tests=fail
+          bazel test --config=ci //crates/tracedecay-sdk:sdk_suite
+          --test_arg=--include-ignored
       - run: pnpm run test:installed
         working-directory: sdks/typescript

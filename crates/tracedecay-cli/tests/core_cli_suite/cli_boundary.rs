@@ -17,7 +17,7 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
     let home = tempfile::tempdir().expect("isolated home");
     let output = sandboxed_command("/bin/sh", home.path())
         .args(["-c", r#""$TRACEDECAY_BIN" tool | head -n 4"#])
-        .env("TRACEDECAY_BIN", env!("CARGO_BIN_EXE_tracedecay"))
+        .env("TRACEDECAY_BIN", crate::tracedecay_exe())
         .output()
         .expect("tracedecay tool pipeline should run");
 
@@ -35,7 +35,7 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
 #[test]
 fn context_help_describes_the_tool_without_a_project_size() {
     let home = tempfile::tempdir().expect("isolated home");
-    let output = sandboxed_command(env!("CARGO_BIN_EXE_tracedecay"), home.path())
+    let output = sandboxed_command(crate::tracedecay_exe(), home.path())
         .args(["tool", "context", "--help"])
         .output()
         .expect("run tool help");

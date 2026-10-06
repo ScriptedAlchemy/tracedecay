@@ -20,7 +20,10 @@ fn index_bench_drains_a_clone_body_the_daemon_page_admits() {
     std::fs::create_dir_all(corpus.join("src")).unwrap();
     std::fs::write(corpus.join("src/lib.rs"), generated_bindings_source()).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay-index-bench"))
+    // Bazel and nextest pass the bench's path at run time.
+    let bench = std::env::var_os("CARGO_BIN_EXE_tracedecay-index-bench")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay-index-bench").into());
+    let output = Command::new(bench)
         .arg("--corpus")
         .arg(&corpus)
         .env("TMPDIR", scratch.path())
