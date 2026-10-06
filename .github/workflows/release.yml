@@ -221,7 +221,7 @@ jobs:
       # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
       - name: Install mold
         if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
         with:
           mold-version: 2.41.0
           make-default: true
