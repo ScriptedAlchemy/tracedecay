@@ -686,9 +686,7 @@ where
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
                     Ok(scope) => scope,
-                    Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
-                        return code_index_scope_unavailable();
-                    }
+                    Err(error) => return code_index_scope_unavailable(error),
                 };
                 let exact_source_bound = code_index_task_support::exact_source_is_complete(
                     request.source_reference.as_ref(),
@@ -1545,11 +1543,7 @@ where
                 .resolved_scope_for_project(&request.project_root, &project_id)
             {
                 Ok(scope) => scope,
-                Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
+                Err(error) => return unavailable(error.search_reason()),
             };
             if schedulers.automatic_admission_for_scope(&scope)
                 == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
@@ -1712,11 +1706,7 @@ where
                 .resolved_scope_for_project(&request.project_root, &project_id)
             {
                 Ok(scope) => scope,
-                Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                    );
-                }
+                Err(error) => return unavailable(error.search_reason()),
             };
             if request.project_id != scope.project_id
                 || request.repository_id != scope.repository_id
@@ -1855,6 +1845,61 @@ mod tests {
         CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
         CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
     };
+
+    #[tokio::test]
+    async fn non_git_search_is_not_applicable_without_waiting_for_a_scheduler() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("simple.py"),
+            "def unique_nongit_symbol(): return 4\n",
+        )
+        .unwrap();
+        let executor = code_index_search_executor(
+            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+            ProjectId::new("project.non-git").unwrap(),
+            UnreachableAdmission,
+            crate::mcp_admission::RegisteredProjectScopeResolverV1,
+        );
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            executor(CodeIndexSearchRequestV1 {
+                project_root: root.path().to_owned(),
+                query: "unique_nongit_symbol".to_owned(),
+                source_revision: None,
+                source_tree: None,
+                source_reference: None,
+                limit: 10,
+                cursor: None,
+                lexical_routing: tracedecay_query::retrieval::lexical::LexicalRoutingV1::default(),
+                authority: None,
+                deadline: None,
+                cancellation: None,
+            }),
+        )
+        .await
+        .expect("unsupported indexing must not wait for graph warming");
+        let CodeIndexSearchOutcomeV1::Unavailable(unavailable) = outcome else {
+            panic!("non-Git search must remain explicitly unavailable");
+        };
+        assert_eq!(
+            unavailable.reason,
+            CodeIndexSearchUnavailableReasonV1::NotApplicable
+        );
+        assert!(!unavailable.reason.is_retryable());
+        assert_eq!(unavailable.code_generation, None);
+        assert_eq!(
+            unavailable.coverage,
+            code_search::CodeIndexSearchCoverageV1::unavailable("code_index_not_applicable")
+        );
+        assert_eq!(
+            crate::mcp_admission::RegisteredProjectScopeResolverV1.resolved_scope_for_project(
+                &root.path().join("missing"),
+                &ProjectId::new("project.missing").unwrap(),
+            ),
+            Err(CodeIndexScopeUnavailableV1::AuthorityUnavailable),
+            "an inaccessible root must not be described as a confirmed non-Git project",
+        );
+    }
 
     #[derive(Clone)]
     struct FixedScopeResolver(ResolvedScope);

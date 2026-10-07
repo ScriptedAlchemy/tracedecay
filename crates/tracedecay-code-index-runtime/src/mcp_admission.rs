@@ -9,11 +9,23 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_query::code_search;
 
-/// Typed refusal for scope resolution. The composition root deliberately
-/// narrows its internal contract errors to this: the executors map every
-/// resolution failure onto the search-unavailable vocabulary uniformly.
+/// Scope resolution distinguishes an unsupported root from unavailable authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CodeIndexScopeUnavailableV1;
+pub enum CodeIndexScopeUnavailableV1 {
+    AuthorityUnavailable,
+    NotApplicable,
+}
+
+impl CodeIndexScopeUnavailableV1 {
+    pub fn search_reason(self) -> code_search::CodeIndexSearchUnavailableReasonV1 {
+        match self {
+            Self::AuthorityUnavailable => {
+                code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
+            }
+            Self::NotApplicable => code_search::CodeIndexSearchUnavailableReasonV1::NotApplicable,
+        }
+    }
+}
 
 /// Scope resolver the search/diff executors call for each request root.
 pub trait CodeIndexScopeResolverV1: Clone + Send + Sync + 'static {
@@ -33,8 +45,20 @@ impl CodeIndexScopeResolverV1 for RegisteredProjectScopeResolverV1 {
         project_root: &Path,
         project_id: &ProjectId,
     ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        // Indexing mounts only the root's own Git control path. Do not discover
+        // a parent repository or mistake a failed filesystem probe for non-Git.
+        match std::fs::metadata(project_root.join(".git")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return match std::fs::metadata(project_root) {
+                    Ok(root) if root.is_dir() => Err(CodeIndexScopeUnavailableV1::NotApplicable),
+                    _ => Err(CodeIndexScopeUnavailableV1::AuthorityUnavailable),
+                };
+            }
+            Err(_) => return Err(CodeIndexScopeUnavailableV1::AuthorityUnavailable),
+        }
         crate::resolved_scope_for_project(project_root, project_id)
-            .map_err(|_| CodeIndexScopeUnavailableV1)
+            .map_err(|_| CodeIndexScopeUnavailableV1::AuthorityUnavailable)
     }
 }
 

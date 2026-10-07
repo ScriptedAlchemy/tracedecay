@@ -471,7 +471,9 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
 #[test]
 fn an_unservable_search_reports_every_lane_down() {
     let code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) =
-        super::code_index_scope_unavailable()
+        super::code_index_scope_unavailable(
+            tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1::AuthorityUnavailable,
+        )
     else {
         panic!("an unresolvable scope has no servable lane");
     };
