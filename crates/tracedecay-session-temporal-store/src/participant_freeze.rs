@@ -121,7 +121,9 @@ pub(super) async fn freeze_participants(
             ],
         )
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        .map_err(|error| {
+            SessionTemporalExecutionError::storage("read session participant", error)
+        })?;
 
     collect_participant_rows(read, vec![rows], request, None).await
 }
@@ -239,7 +241,9 @@ pub(super) async fn freeze_prepared_candidate_participants(
                 ],
             )
             .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+            .map_err(|error| {
+                SessionTemporalExecutionError::storage("read prepared participants", error)
+            })?,
         );
     }
     collect_participant_rows(read, row_batches, request, Some(expected_count)).await
@@ -272,11 +276,9 @@ async fn collect_participant_rows(
     };
     let mut shared_cursor_key = None::<Option<SignedCursorKeyRefV1>>;
     for mut rows in row_batches {
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?
-        {
+        while let Some(row) = rows.next().await.map_err(|error| {
+            SessionTemporalExecutionError::storage("read participant row", error)
+        })? {
             snapshot_request
                 .execution_control()
                 .checkpoint()
@@ -417,11 +419,11 @@ pub(super) async fn root_readiness(
             params![root.project_key(), snapshot_request.provider_scope()],
         )
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        .map_err(|error| SessionTemporalExecutionError::storage("read root readiness", error))?;
     let row = rows
         .next()
         .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+        .map_err(|error| SessionTemporalExecutionError::storage("read root readiness", error))?
         .ok_or(SessionTemporalExecutionError::Unavailable)?;
     let total = row
         .get::<i64>(0)
@@ -490,11 +492,11 @@ async fn authorized_scope_has_sources(
             .await
         }
     }
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    .map_err(|error| SessionTemporalExecutionError::storage("read authorized sources", error))?;
     rows.next()
         .await
         .map(|row| row.is_some())
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)
+        .map_err(|error| SessionTemporalExecutionError::storage("read authorized sources", error))
 }
 
 #[derive(Deserialize)]
@@ -1438,6 +1440,25 @@ mod tests {
             }
             Err(error) => panic!("unexpected root freeze refusal: {error:?}"),
             Ok(_) => panic!("no-hit root freeze must return a truthful zero outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn root_readiness_preserves_storage_failure() {
+        let directory = tempdir().expect("temporary directory");
+        let connection = TestConnection::open(&directory.path().join("missing-schema.db"));
+        let result = root_readiness(
+            &TemporalSqlRead::engine_connection(&connection),
+            &root_execution_request("needle cohort"),
+        )
+        .await;
+
+        match result {
+            Err(SessionTemporalExecutionError::Storage { operation, detail }) => {
+                assert_eq!(operation, "read root readiness");
+                assert!(detail.contains("sessions"), "missing table cause: {detail}");
+            }
+            other => panic!("a broken read must retain its storage cause: {other:?}"),
         }
     }
 

@@ -48,9 +48,7 @@ use tracedecay_sdk::client::{Client, ClientError, ConnectionMode, OperationReque
 use tracedecay_sdk::operations::{ApplicationFactStoreAdd, ApplicationStorageStatus};
 use tracedecay_session_memory::memory::hygiene::detect_secret_like;
 
-use crate::common::{
-    TestChildProcess, http_agent_with_timeout, output_with_timeout, tracedecay_command_with_home,
-};
+use crate::common::{TestChildProcess, http_agent_with_timeout, tracedecay_command_with_home};
 
 /// Route of the fact-add effect on the application mount, as the generated SDK
 /// operation descriptor names it.
@@ -501,50 +499,17 @@ fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
     }
 }
 
-fn build_typescript_sdk() -> tempfile::TempDir {
-    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/typescript");
-    let output_dir = tempfile::TempDir::new().expect("isolated TypeScript SDK output");
-    // Nextest runs each journey in a separate process. Both generated output
-    // and Rspack's persistent cache must belong to that journey, and building
-    // must finish before any request deadline starts.
-    let config_url = url::Url::from_file_path(sdk_root.join("rslib.config.ts"))
-        .expect("canonical SDK config URL");
-    let config_path = output_dir.path().join("rslib.config.mjs");
-    std::fs::write(
-        &config_path,
-        format!(
-            "import config from {};\nexport default {{ ...config, performance: {{ ...config.performance, buildCache: {{ cacheDirectory: {} }} }} }};\n",
-            serde_json::to_string(config_url.as_str()).expect("SDK config module specifier"),
-            serde_json::to_string(&output_dir.path().join("cache")).expect("SDK cache directory"),
-        ),
-    )
-    .expect("configure isolated SDK build cache");
-    std::fs::write(
-        output_dir.path().join("package.json"),
-        r#"{"type":"module"}"#,
-    )
-    .expect("declare the generated SDK module format");
-    #[cfg(windows)]
-    let mut build = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "pnpm"]);
-        command
-    };
-    #[cfg(not(windows))]
-    let mut build = std::process::Command::new("pnpm");
-    build
-        .args(["run", "build", "--config"])
-        .arg(config_path)
-        .arg("--dist-path")
-        .arg(output_dir.path().join("dist"))
-        .current_dir(&sdk_root);
-    let output = output_with_timeout(build, TRANSPORT_TIMEOUT);
-    assert!(
-        output.status.success(),
-        "TypeScript SDK build failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+fn typescript_sdk() -> std::path::PathBuf {
+    let dist = std::path::PathBuf::from(
+        std::env::var_os("TRACEDECAY_TYPESCRIPT_SDK_DIST")
+            .expect("Bazel must provide the built TypeScript SDK"),
     );
-    output_dir
+    assert!(
+        dist.join("index.js").is_file(),
+        "SDK bundle missing: {}",
+        dist.display()
+    );
+    dist
 }
 
 fn typescript_problem(
@@ -575,12 +540,11 @@ fn typescript_call(
     deadline_micros: Option<i64>,
     allow_success: bool,
 ) -> Value {
-    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/typescript");
-    let mut command = std::process::Command::new("node");
+    let runner = std::env::var_os("TRACEDECAY_TYPESCRIPT_SDK_RUNNER")
+        .expect("Bazel must provide the TypeScript SDK journey runner");
+    let mut command = std::process::Command::new(runner);
     command
-        .arg("test/typed-terminal-live.mjs")
-        .arg(sdk_output.join("dist/index.js"))
-        .current_dir(&sdk_root)
+        .arg(sdk_output.join("index.js"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -604,7 +568,7 @@ fn typescript_call(
 
 #[test]
 fn partial_effect_survives_http_mcp_and_both_sdks_across_restart() {
-    let sdk_output = build_typescript_sdk();
+    let sdk_output = typescript_sdk();
     // Each marker stays short enough that production memory hygiene stores
     // the fact instead of refusing it as a high-entropy secret-like token.
     const HTTP_MARKER: &str = "boundaries-partial-http-4a71c8";
@@ -730,7 +694,7 @@ fn partial_effect_survives_http_mcp_and_both_sdks_across_restart() {
     let ts_identity = identity.clone();
     let ts_envelope = park_at_commit_barrier(&barrier_path, TS_MARKER, move || {
         typescript_problem(
-            sdk_output.path(),
+            &sdk_output,
             &ts_mount,
             &ts_identity,
             "fact_store_add",
@@ -810,7 +774,7 @@ fn partial_effect_survives_http_mcp_and_both_sdks_across_restart() {
 
 #[test]
 fn reset_required_survives_http_mcp_and_both_sdks_across_restart() {
-    let sdk_output = build_typescript_sdk();
+    let sdk_output = typescript_sdk();
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = crate::common::canonical_existing_path(home.path());
     let project = tempfile::TempDir::new().expect("reset required project");
@@ -888,7 +852,7 @@ fn reset_required_survives_http_mcp_and_both_sdks_across_restart() {
     let ts_problem = await_settled_problem("TypeScript SDK, first observation", || {
         problem_envelope(
             &typescript_problem(
-                sdk_output.path(),
+                &sdk_output,
                 &mount,
                 &identity,
                 "storage_status",
@@ -959,7 +923,7 @@ fn reset_required_survives_http_mcp_and_both_sdks_across_restart() {
         await_settled_problem("TypeScript SDK, after a physical restart", || {
             problem_envelope(
                 &typescript_problem(
-                    sdk_output.path(),
+                    &sdk_output,
                     &mount,
                     &identity,
                     "storage_status",
@@ -981,7 +945,7 @@ fn reset_required_survives_http_mcp_and_both_sdks_across_restart() {
 /// refresh handles, and exact native session retrieval across a new daemon.
 #[test]
 fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
-    let sdk_output = build_typescript_sdk();
+    let sdk_output = typescript_sdk();
     const SESSION: &str = "82261fe4-4fb3-4936-8fd7-ed59c1e20aa7";
     const MESSAGE: &str = "Native Codex session keeps the bronze restart proof";
     const FACT: &str = "typescript retained bronze restart fact";
@@ -1012,7 +976,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     let identity = admitted_project_id(&home_path, &project_path);
     let mount = http_mount(&home_path);
     let added = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "fact_store_add",
@@ -1040,7 +1004,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     let deadline = Instant::now() + TRANSPORT_TIMEOUT;
     loop {
         let result = typescript_call(
-            sdk_output.path(),
+            &sdk_output,
             &mount,
             &identity,
             "lcm_load_session",
@@ -1065,7 +1029,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
             "frontier": { "observed_through": 0, "committed_through": 0 } }
     });
     let stale = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "session_refresh_begin",
@@ -1087,7 +1051,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
         "observed_through": frontier, "committed_through": frontier
     });
     let begun = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "session_refresh_begin",
@@ -1108,7 +1072,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     let completion_deadline = Instant::now() + TRANSPORT_TIMEOUT;
     let status = loop {
         let status = typescript_call(
-            sdk_output.path(),
+            &sdk_output,
             &mount,
             &identity,
             "session_refresh_status",
@@ -1134,7 +1098,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
         "{status}"
     );
     let cancelled = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "session_refresh_cancel",
@@ -1163,7 +1127,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     let mount = http_mount(&home_path);
     assert_eq!(admitted_project_id(&home_path, &project_path), identity);
     let search = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "fact_store_search",
@@ -1179,7 +1143,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
         "{search}"
     );
     let loaded = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "lcm_load_session",
@@ -1190,7 +1154,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
     assert_eq!(loaded["kind"], "success", "{loaded}");
     assert!(loaded.to_string().contains(MESSAGE), "{loaded}");
     let old_handle = typescript_call(
-        sdk_output.path(),
+        &sdk_output,
         &mount,
         &identity,
         "session_refresh_status",

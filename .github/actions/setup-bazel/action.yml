@@ -24,14 +24,27 @@ runs:
         repository-cache: true
         disk-cache: ${{ inputs.cache-key }}
         cache-save: ${{ github.event_name != 'pull_request' }}
+        # Windows build-script runfiles nest each vendored crate's sources
+        # under its repository name twice; a short output base (default
+        # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
+        output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, the ast-grep
-    # bindings are graded against the host CLI, and SDK journeys run node.
+    # bindings are graded against the host CLI, and host journeys run node.
+    # Bazel isolates HOME; retain the installed analyzer proxy and rustup
+    # toolchain locations explicitly for the test launcher.
     - name: Install the pinned toolchain's components
       if: inputs.test-tools == 'true'
       shell: bash
-      run: rustup toolchain install
+      run: |
+        rustup toolchain install
+        # Git Bash spells $HOME as /c/...; native Windows programs need C:\...
+        native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
+        {
+          echo "CARGO_HOME=$(native "${CARGO_HOME:-$HOME/.cargo}")"
+          echo "RUSTUP_HOME=$(native "${RUSTUP_HOME:-$HOME/.rustup}")"
+        } >> "$GITHUB_ENV"
 
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       if: inputs.test-tools == 'true'

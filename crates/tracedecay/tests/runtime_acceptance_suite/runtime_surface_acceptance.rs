@@ -1846,6 +1846,9 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
 
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
+    // write-tree refreshes Git's index cache-tree extension, so capture it
+    // before preview binds the exact index bytes.
+    let staged_tree_before_apply = git_stdout(&fixture.project, &["write-tree"]);
     let hunks_input = staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks").await;
     let preview_request = GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::UnstageHunks,
@@ -1879,12 +1882,25 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         cli_preview_payload.disposition,
         GitIndexPreviewDispositionV1::Applicable
     );
+    // Each preview commits an immutable identity and observation time. A new
+    // transport observation needs its own hunk input, even for unchanged Git state.
+    let mcp_hunks = staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks.mcp").await;
+    let mcp_preview_arguments = serde_json::to_value(GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(mcp_hunks.preview_input_id),
+        selected_hunk_digests: mcp_hunks
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
+    })
+    .expect("MCP preview arguments");
     let mcp_preview = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
         RequestId::new("request.git-parity.preview.mcp").expect("MCP preview request id"),
         parse_application_surface_request(
             ApplicationSurfaceOperation::GitPreview,
-            preview_arguments,
+            mcp_preview_arguments,
         )
         .expect("MCP preview request"),
         RequestedOutputFormat::Json,
@@ -1932,7 +1948,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
             .expect("idempotency key"),
     })
     .expect("apply arguments");
-    let staged_tree_before_apply = git_stdout(&fixture.project, &["write-tree"]);
     let cli_apply = run_application_tool(
         fixture.home(),
         &fixture.project,
@@ -1952,7 +1967,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     };
     assert_eq!(
         cli_apply.execution.termination,
-        OperationTermination::Completed
+        OperationTermination::Completed,
+        "CLI apply must commit the unchanged preview: {cli_apply:?}"
     );
     let cli_receipt: GitIndexTransactionReceiptV1 =
         serde_json::from_value(cli_apply.payload.clone().expect("CLI durable Git receipt"))
@@ -1987,7 +2003,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     };
     assert_eq!(
         mcp_apply.execution.termination,
-        OperationTermination::Failed
+        OperationTermination::Completed,
+        "replaying a committed apply must preserve its successful terminal outcome"
     );
     let normalize_replay = |effect: &tracedecay_contracts::EffectResult<Value>| {
         let mut value = serde_json::to_value(effect).expect("effect wire value");
@@ -2023,9 +2040,9 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     )
     .expect("write conflicting replay change");
     git(&fixture.project, &["add", "src/main.rs"]);
+    let before_conflicting_replay_tree = git_stdout(&fixture.project, &["write-tree"]);
     let conflicting_preview =
         preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.conflicting-preview").await;
-    let before_conflicting_replay_tree = git_stdout(&fixture.project, &["write-tree"]);
     let conflicting_replay = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitApply,
         RequestId::new("request.git-parity.conflicting-replay")
@@ -2113,10 +2130,10 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         "CAS drift rejection must preserve the caller's newer index"
     );
 
-    let cancellation_preview =
-        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.cancellation-preview").await;
     let cancellation_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let cancellation_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let cancellation_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.cancellation-preview").await;
     let cancellation_deadline =
         Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(60_000_000)))
             .expect("cancellation deadline");

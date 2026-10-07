@@ -21,11 +21,11 @@ on:
 permissions:
   contents: read
 
-# PR updates supersede their own run. Master finishes its current snapshot
-# and retains only the newest pending run.
+# PR updates and branch dispatches supersede their own run. Master finishes
+# its current snapshot and retains only the newest pending run.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -316,10 +316,6 @@ jobs:
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    concurrency:
-      group: ci-clippy
-      cancel-in-progress: false
-      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
@@ -364,10 +360,6 @@ jobs:
     name: Feature gates
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    concurrency:
-      group: ci-feature-gates
-      cancel-in-progress: false
-      queue: max
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
@@ -391,10 +383,6 @@ jobs:
     name: Shipped CLI build (x86_64-linux)
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    concurrency:
-      group: ci-shipped-cli
-      cancel-in-progress: false
-      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -420,10 +408,6 @@ jobs:
     name: Dashboard
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    concurrency:
-      group: ci-dashboard
-      cancel-in-progress: false
-      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

@@ -68,6 +68,11 @@ harness = false
 name = "tracedecay-index-bench"
 path = "src/bin/tracedecay_index_bench.rs"
 test = false
+required-features = ["production"]
+
+[[test]]
+name = "index_bench_workload"
+required-features = ["production"]
 
 # Daemon-free search-lane query latency workload over a published artifact.
 [[bin]]

@@ -855,15 +855,8 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
 #[tokio::test(flavor = "multi_thread")]
 async fn operation_family_executes_through_cli_mcp_and_http() {
     let fixture = production_fixture().await;
-    let mut compiler = std::process::Command::new("rustup");
-    fixture._environment.apply_toolchain_env(&mut compiler);
-    let compiler = compiler
-        .args(["which", "rustc"])
-        .output()
-        .expect("resolve the installed fixture compiler");
-    assert_command_success("resolve fixture compiler", &compiler);
-    let compiler = String::from_utf8(compiler.stdout).expect("compiler path");
-    publish_compiler_diagnostics(&fixture, Path::new(compiler.trim()));
+    let compiler = std::env::var_os("RUSTC").expect("Bazel must provide the fixture compiler");
+    publish_compiler_diagnostics(&fixture, Path::new(&compiler));
     let cases = [
         (
             ApplicationSurfaceOperation::FeedbackImpact,

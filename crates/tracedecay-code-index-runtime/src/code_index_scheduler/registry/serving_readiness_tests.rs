@@ -224,7 +224,9 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .is_none(),
         "seal alone must not claim serving readiness"
     );
-    assert!(!changes.has_changed().expect("live serving subscription"));
+    // Text authority may wake readers before graph activation. Only the
+    // serving-seat authority certifies that activation installed a graph.
+    assert_eq!(*serving_seats.borrow(), initial_seat);
     gate.release();
     serving_seats
         .wait_for(|seat| *seat != initial_seat)

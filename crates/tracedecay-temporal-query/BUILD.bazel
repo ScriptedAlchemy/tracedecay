@@ -3,7 +3,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@c//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
@@ -26,7 +26,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-temporal-query__+test-helpers__d7bf792a035__dev",
+    name = "tracedecay-temporal-query__+test-helpers__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_temporal_query",
@@ -42,26 +42,10 @@ rust_library(
     crate_features = ["test-helpers"],
 )
 
-rust_library(
-    name = "tracedecay-temporal-query__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_temporal_query",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
 rust_test(
     name = "unit_test",
-    crate = ":tracedecay-temporal-query__dev",
+    crate = ":tracedecay-temporal-query__+test-helpers__dev",
+    crate_features = ["test-helpers"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev"],
@@ -70,5 +54,5 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
-    data = glob(["tests/**"], allow_empty = True),
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )

@@ -166,8 +166,7 @@ pub(super) async fn persist_host_provider_coverage(
         .await
         .map_err(|outcome| {
             crate::runtime::snapshot_observation::host_admission_error(provider, outcome)
-        })?
-        .unwrap_or_default();
+        })?;
     revise_host_record(
         admission,
         scope,
@@ -186,18 +185,20 @@ pub(super) async fn persist_host_provider_coverage(
 /// `byte_offset` and `file_id`. Its `mtime` is a revision that lets a changed
 /// record move `byte_offset` backwards past the monotonic cursor guard. An
 /// unchanged record stays as stored, so a sweep that finds nothing new
-/// commits nothing.
+/// commits nothing. An absent record is always written, even with default
+/// values, or an empty host would never be observed.
 pub(super) async fn revise_host_record(
     admission: &(impl HostAdmission + ?Sized),
     scope: &ObservationScopeV1,
     key: &str,
-    current: ParseOffset,
+    stored: Option<ParseOffset>,
     byte_offset: u64,
     file_id: u64,
 ) -> Result<(), HostAdmissionOutcome> {
-    if (current.byte_offset, current.file_id) == (byte_offset, file_id) {
+    if stored.is_some_and(|stored| (stored.byte_offset, stored.file_id) == (byte_offset, file_id)) {
         return Ok(());
     }
+    let current = stored.unwrap_or_default();
     admission
         .advance_parse_offset(
             scope,

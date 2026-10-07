@@ -1,7 +1,8 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_library")
 load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//sdks/typescript:@rslib/core/package_json.bzl", rslib_bin = "bin")
 
 npm_link_all_packages(name = "node_modules")
-load("@aspect_rules_js//js:defs.bzl", "js_library")
 
 js_library(
     name = "pkg",
@@ -9,5 +10,22 @@ js_library(
         "src/**",
         "package.json",
     ]),
+    visibility = ["//visibility:public"],
+)
+
+# The physical transport journey consumes the same bundled SDK as publishing.
+rslib_bin.rslib(
+    name = "dist",
+    srcs = [":pkg", ":node_modules"] + glob(["*.json", "*.ts"]),
+    args = ["build"],
+    chdir = package_name(),
+    out_dirs = ["dist"],
+    visibility = ["//visibility:public"],
+)
+
+js_binary(
+    name = "typed_terminal_live",
+    entry_point = "test/typed-terminal-live.mjs",
+    data = [":dist", "package.json"],
     visibility = ["//visibility:public"],
 )

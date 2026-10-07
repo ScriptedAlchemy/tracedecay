@@ -3,7 +3,7 @@
 
 package(default_visibility = ["//visibility:public"])
 
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@c//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
@@ -26,91 +26,6 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-daemon-identity__d12395ba0d0__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_identity",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__df34e485125__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d6e09195f42__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-daemon-identity__d23eaca7027__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_identity",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__df34e485125__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-daemon-identity__d3cec66d908__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_identity",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__+test-helpers__d0876451c2a__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dbc4dcaab10__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__d9c4387985b__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-daemon-identity__dbeb72c35a2__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_identity",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__dea5b92169e__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-daemon-identity__dee3b521f3b__dev",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_daemon_identity",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers__d9e6b0d6e5d__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = [],
-)
-
-rust_library(
     name = "tracedecay-daemon-identity__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
@@ -120,7 +35,7 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d2c51e40783__dev"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(1),
@@ -130,13 +45,14 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":tracedecay-daemon-identity__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d2c51e40783__dev"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
-    data = glob(["tests/**"], allow_empty = True),
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )

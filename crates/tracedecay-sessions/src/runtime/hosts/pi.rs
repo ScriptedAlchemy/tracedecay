@@ -510,11 +510,11 @@ pub async fn capture_pi_observations(
 ) -> TranscriptIngestResult<PiCaptureOutcome> {
     tracing::Instrument::instrument(
         async {
-            let discovery_frontier = facade
+            let stored_frontier = facade
                 .get_parse_offset(&scope, PI_DISCOVERY_FRONTIER_KEY)
                 .await
-                .map_err(admission_error)?
-                .unwrap_or_default();
+                .map_err(admission_error)?;
+            let discovery_frontier = stored_frontier.unwrap_or_default();
             let frontier_path = if discovery_frontier.file_id == 0 {
                 None
             } else {
@@ -667,7 +667,7 @@ pub async fn capture_pi_observations(
                         facade,
                         &scope,
                         PI_DISCOVERY_FRONTIER_KEY,
-                        discovery_frontier,
+                        stored_frontier,
                         byte_offset,
                         file_id,
                     )
