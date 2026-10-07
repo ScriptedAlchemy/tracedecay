@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -2363,10 +2365,14 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
+    // The file owner is mapped in the current user namespace; an arbitrary
+    // numeric user ID may be unmapped inside Bazel's Linux sandbox. A named
+    // user entry still requires an extended ACL even when it names the owner.
+    let named_user = fs::metadata(&config_path).unwrap().uid();
     let mut original_acl = 2_u32.to_le_bytes().to_vec();
     for (tag, permissions, id) in [
         (0x01_u16, 0x06_u16, u32::MAX),
-        (0x02, 0x04, 65_534),
+        (0x02, 0x04, named_user),
         (0x04, 0x04, u32::MAX),
         (0x10, 0x04, u32::MAX),
         (0x20, 0x00, u32::MAX),
