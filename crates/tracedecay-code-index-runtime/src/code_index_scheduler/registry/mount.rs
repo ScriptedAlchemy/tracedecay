@@ -2883,22 +2883,27 @@ impl CodeIndexSchedulerRegistryV1 {
                                         &scheduler,
                                         &shutting_down,
                                     )?;
-                                    if !proof_unmoved
-                                        && matches!(
-                                            scheduler.reconcile_retained_text_generation_with(
-                                                &metadata, false,
-                                            )?,
-                                            Some(CodeIndexReconcileOutcomeV1::Noop(_))
-                                        )
-                                    {
-                                        return Ok(true);
+                                    if !proof_unmoved {
+                                        match scheduler.reconcile_retained_text_generation_with(
+                                            &metadata, false,
+                                        )? {
+                                            Some(CodeIndexReconcileOutcomeV1::Noop(_)) => {
+                                                return Ok((true, None));
+                                            }
+                                            Some(
+                                                outcome @ CodeIndexReconcileOutcomeV1::Published(_),
+                                            ) => {
+                                                return Ok((false, Some(outcome)));
+                                            }
+                                            None => {}
+                                        }
                                     }
                                     // A pending hint or observed change already
                                     // carries its own wake; sweeping on top of
                                     // it would turn that targeted pass into an
                                     // overflow rescan.
                                     if source_freshness.source_change_pending() {
-                                        return Ok(false);
+                                        return Ok((false, None));
                                     }
                                     let moved = scheduler.request_fresh_now_background();
                                     if moved {
@@ -2908,12 +2913,23 @@ impl CodeIndexSchedulerRegistryV1 {
                                             CodeIndexCadenceTriggerV1::Overflow,
                                         );
                                     }
-                                    Ok::<_, CodeIndexSchedulerErrorV1>(!moved)
+                                    Ok::<_, CodeIndexSchedulerErrorV1>((!moved, None))
                                 })
                                 .await;
                                 match source_current {
-                                    Ok(Ok(true)) => {}
-                                    Ok(Ok(false)) => tracing::info!(
+                                    Ok(Ok((_, Some(outcome)))) => {
+                                        // Verification can republish a successor whose
+                                        // first seal lost the store lock. Its serving
+                                        // owners still need the normal publication pass;
+                                        // reducing Published to a bool loses that work.
+                                        sealed_successor = Some((outcome, arrival, trigger));
+                                        Self::note_worker_continuation(
+                                            &worker_pending_wake,
+                                            &worker_wake,
+                                        );
+                                    }
+                                    Ok(Ok((true, None))) => {}
+                                    Ok(Ok((false, None))) => tracing::info!(
                                         event = "code_index_post_projection_source_unverified",
                                         "source moved while text projection ran; the completed generation may only take a stale seat"
                                     ),
