@@ -874,14 +874,18 @@ mod tests {
             HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
             HookDeliverySpoolError::Busy
         );
+        let publisher_ready = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                publisher_ready.wait();
                 std::thread::sleep(Duration::from_millis(20));
                 publishing.unlock().unwrap();
             });
-            assert!(
-                HookDeliveryReceiptSpoolV1::open(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET).is_ok()
-            );
+            // Thread startup is not publication work and must not consume
+            // the owner's lock-wait budget before the publisher can run.
+            publisher_ready.wait();
+            let opened = HookDeliveryReceiptSpoolV1::open(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET);
+            assert!(opened.is_ok(), "owner open after publication: {opened:?}");
         });
     }
 
