@@ -97,7 +97,9 @@ fn identity(path: &str) -> ParseDocumentIdentity {
 }
 
 fn source(document: usize) -> String {
-    (0..400)
+    // Exact allocation accounting needs a nontrivial tree, not a large source
+    // whose parse deadline competes with concurrent compiler work.
+    (0..8)
         .map(|item| {
             format!(
                 "pub fn item_{document}_{item}(value: u64) -> u64 {{ \
@@ -107,11 +109,12 @@ fn source(document: usize) -> String {
         .collect()
 }
 
-fn tree_alone(source: &str) -> Tree {
+fn tree_with_parser(source: &str) -> (Parser, Tree) {
     let language = ts_provider::try_language("rust").expect("rust grammar");
     let mut parser = Parser::new();
     parser.set_language(&language).expect("rust grammar loads");
-    parser.parse(source, None).expect("rust source parses")
+    let tree = parser.parse(source, None).expect("rust source parses");
+    (parser, tree)
 }
 
 #[test]
@@ -129,8 +132,17 @@ fn retained_documents_hold_their_trees_and_no_parser() {
     let sources: Vec<String> = (0..8).map(source).collect();
 
     let before_trees = LIVE.load(Ordering::SeqCst);
-    let trees: Vec<Tree> = sources.iter().map(|source| tree_alone(source)).collect();
+    let (parsers, trees): (Vec<Parser>, Vec<Tree>) = sources
+        .iter()
+        .map(|source| tree_with_parser(source))
+        .unzip();
+    let parser_and_tree_bytes = LIVE.load(Ordering::SeqCst) - before_trees;
+    drop(parsers);
     let trees_bytes = LIVE.load(Ordering::SeqCst) - before_trees;
+    assert!(
+        parser_and_tree_bytes > trees_bytes,
+        "the fixture must detect the additional heap of retained parsers"
+    );
     drop(trees);
 
     let before_documents = LIVE.load(Ordering::SeqCst);
