@@ -836,6 +836,9 @@ fn is_build_output_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool 
         if path_component_eq(value, "target") {
             saw_target = true;
         }
+        if path_component_eq(value, "bazel-bin") {
+            return true;
+        }
     }
     false
 }
