@@ -597,21 +597,24 @@ async fn callback_failure_requests_conservative_reconciliation() {
 #[tokio::test]
 async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
     let (_container, primary, linked) = linked_worktree_fixture();
+    let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
+    let marker = linked_git_dir.join("CHERRY_PICK_HEAD");
+    std::fs::write(&marker, b"operation").expect("create operation marker");
+
+    // Register the operating worktree first so even delayed native metadata
+    // events cannot drain before its operation marker belongs to the watcher.
     let watcher = GitWatcher::new(fast_watch_config());
     let max_delay_ms = watcher.inner.config.watch_max_delay_ms;
-    let Some(state) = ensure_watching_or_skip(&watcher, &primary).await else {
+    let Some(state) = ensure_watching_or_skip(&watcher, &linked).await else {
         return;
     };
     assert_eq!(
-        watcher.ensure_watching(&linked).await,
+        watcher.ensure_watching(&primary).await,
         GitWatcherAdmission::Ready
     );
     tokio::time::timeout(TEST_READY_TIMEOUT, state.entered_debounce.notified())
         .await
-        .expect("linked-worktree registration must rebuild the repository watcher");
-    let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
-    let marker = linked_git_dir.join("CHERRY_PICK_HEAD");
-    std::fs::write(&marker, b"operation").expect("create operation marker");
+        .expect("sibling registration must rebuild the repository watcher");
 
     let event = notify::Event {
         kind: EventKind::Create(notify::event::CreateKind::File),

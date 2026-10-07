@@ -33,6 +33,8 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1, sampled_process_resident_bytes_v1,
 };
 
+#[cfg(unix)]
+use super::stage_raw_git_path;
 use super::{
     ALPHA_LIB_V1, GitFixture, OwnerSignals, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     active_text_artifact_path, advance_pointer_to_unseated_successor, application_context,
@@ -5744,13 +5746,18 @@ async fn omitted_sources_carry_their_reason_into_the_snapshot_and_status() {
     );
 
     fixture.edit("src/late\\added.rs", "pub fn late() {}\n");
+    // APFS cannot create non-UTF-8 names. A backslash still exercises live
+    // omission there; immutable Git trees cover exact non-UTF-8 bytes too.
+    let (raw_path, display_path) = if cfg!(target_os = "macos") {
+        (b"src/z\\name.rs".as_slice(), "src/z\\name.rs")
+    } else {
+        (b"src/\xff.rs".as_slice(), "src/\u{fffd}.rs")
+    };
     std::fs::write(
-        fixture
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
-        "pub fn not_utf8() {}\n",
+        fixture.path().join(std::ffi::OsStr::from_bytes(raw_path)),
+        "pub fn unrepresentable() {}\n",
     )
-    .expect("write a non-UTF-8 source name");
+    .expect("write an unrepresentable source name");
     registry.probe_freshness_admission(fixture.path()).await;
     wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
@@ -5777,7 +5784,7 @@ async fn omitted_sources_carry_their_reason_into_the_snapshot_and_status() {
                     StatusOmissionReasonV1::UnrepresentablePath,
                 ),
                 (
-                    "src/\u{fffd}.rs".to_owned(),
+                    display_path.to_owned(),
                     StatusOmissionReasonV1::UnrepresentablePath,
                 ),
             ],
@@ -5789,7 +5796,7 @@ async fn omitted_sources_carry_their_reason_into_the_snapshot_and_status() {
             .as_ref()
             .and_then(|omitted| omitted.sources.last())
             .map(|source| source.git_path_bytes.as_slice()),
-        Some(b"src/\xff.rs".as_slice())
+        Some(raw_path)
     );
     registry.shutdown().await;
 }
@@ -8457,25 +8464,16 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
 #[test]
 fn non_utf8_deletion_never_displaces_the_utf8_path_its_lossy_name_matches() {
     let fixture = GitFixture::new(&[("src/keep.rs", "pub fn keep() -> u32 { 1 }\n")]);
-    std::fs::write(
-        fixture
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
-        "pub fn non_utf8() {}\n",
-    )
-    .expect("write a non-UTF-8 source name");
     write(
         fixture.path(),
         "src/\u{fffd}.rs",
         "pub fn utf8_replacement() {}\n",
     );
-    fixture.commit_all("track both names");
-    std::fs::remove_file(
-        fixture
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
-    )
-    .expect("delete the non-UTF-8 source");
+    fixture.commit_all("track the UTF-8 name");
+    stage_raw_git_path(fixture.path(), b"src/\xff.rs", "src/keep.rs");
+    git(fixture.path(), &["commit", "-qm", "track both names"]);
+    // The raw name is committed but absent from the worktree, exactly the
+    // state after deletion, including on filesystems that reject its spelling.
 
     let classification = WorktreeChangeClassificationV1::classify(
         &tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix"),

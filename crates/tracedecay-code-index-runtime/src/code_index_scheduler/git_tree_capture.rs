@@ -841,8 +841,6 @@ impl CodeIndexWorktreeSchedulerV1 {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
@@ -1143,18 +1141,18 @@ mod tests {
         std::fs::create_dir_all(project.path().join("src")).expect("source directory");
         std::fs::write(project.path().join("src/lib.rs"), "pub fn kept() {}\n")
             .expect("ordinary source");
+        git(project.path(), &["add", "."]);
         for raw in [
             b"src/\xfe.rs".as_slice(),
             b"src/\xff.rs".as_slice(),
             b"src/odd\\name.rs".as_slice(),
         ] {
-            std::fs::write(
-                project.path().join(std::ffi::OsStr::from_bytes(raw)),
-                "pub fn unrepresentable() {}\n",
-            )
-            .expect("unrepresentable source name");
+            crate::code_index_scheduler::tests::stage_raw_git_path(
+                project.path(),
+                raw,
+                "src/lib.rs",
+            );
         }
-        git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "fixture"]);
         let store = TempDir::new().expect("code-index store");
         let scheduler = CodeIndexWorktreeSchedulerV1::open(
