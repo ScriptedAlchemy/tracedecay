@@ -1,3 +1,7 @@
+# Windows otherwise copies every file in runfiles and dependency link trees,
+# duplicating the Rust sysroot and rlibs until the runner disk is exhausted.
+startup --windows_enable_symlinks
+
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
