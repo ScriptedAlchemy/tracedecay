@@ -152,7 +152,7 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
       - name: Download dashboard artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -308,7 +308,7 @@ jobs:
 
       - name: Download validated dashboard artifact
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -368,7 +368,7 @@ jobs:
 
       - name: Download newly built binary artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: binary-*
           path: new-binaries
@@ -376,7 +376,7 @@ jobs:
 
       - name: Download newly built MCPB artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mcpb-*
           path: new-mcpbs
@@ -811,7 +811,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-tarball
           path: artifact
