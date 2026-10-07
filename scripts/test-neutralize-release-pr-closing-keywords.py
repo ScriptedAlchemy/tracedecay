@@ -202,6 +202,14 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
             build = main / path
             build.parent.mkdir(parents=True, exist_ok=True)
             build.write_text('version = "1.0.0-beta.57"\n')
+        (main / "package.json").write_text('{"private":true}\n')
+        subprocess.run(
+            ["pnpm", "install", "--lockfile-only"],
+            cwd=main,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         (main / "version.txt").write_text("1.0.0-beta.58\n")
         (main / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
         (main / "Cargo.lock").write_text("version = 4\n")
