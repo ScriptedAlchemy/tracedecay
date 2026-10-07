@@ -327,6 +327,11 @@ async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
         TraceDecayError::ProjectRoute { reason_code, .. }
+            if reason_code == PROJECT_SERVER_CAPACITY_REASON_CODE =>
+        {
+            Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+        }
+        TraceDecayError::ProjectRoute { reason_code, .. }
             if reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
         {
             Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
@@ -1056,6 +1061,8 @@ pub(super) fn graph_tool_requirement(
 pub(super) enum ProjectServerPublication {
     Pending,
     Core,
+    /// Full admission finished unsuccessfully; the retained core still serves reads.
+    DegradedCore,
     RegisteredHostIngest,
 }
 
