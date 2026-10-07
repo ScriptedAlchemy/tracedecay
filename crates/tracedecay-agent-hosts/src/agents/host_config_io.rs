@@ -761,7 +761,7 @@ fn which_tracedecay_path_from(
     cargo_target_dir: Option<&Path>,
 ) -> Option<PathBuf> {
     if let Some(exe) = current_exe
-        .filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe, cargo_target_dir))
+        .filter(|exe| is_tracedecay_exe(exe) && !is_build_output_binary(exe, cargo_target_dir))
     {
         return absolute_executable_path(exe);
     }
@@ -769,7 +769,7 @@ fn which_tracedecay_path_from(
     let path_match = path_var.and_then(|path_var| {
         std::env::split_paths(path_var).find_map(|dir| {
             let candidate = dir.join(tracedecay_bin_name());
-            (candidate.exists() && !is_cargo_target_binary(&candidate, cargo_target_dir))
+            (candidate.exists() && !is_build_output_binary(&candidate, cargo_target_dir))
                 .then(|| absolute_executable_path(&candidate))
                 .flatten()
         })
@@ -805,8 +805,21 @@ fn is_tracedecay_exe(path: &Path) -> bool {
         })
 }
 
-fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool {
+fn is_build_output_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool {
     if cargo_target_dir.is_some_and(|target_dir| path_starts_with_platform(path, target_dir)) {
+        return true;
+    }
+
+    if path.ancestors().any(|ancestor| {
+        ancestor
+            .file_name()
+            .is_some_and(|name| path_component_eq(name, "bin"))
+            && ancestor
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .is_some_and(|name| path_component_eq(name, "bazel-out"))
+    }) {
         return true;
     }
 
@@ -822,6 +835,9 @@ fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool 
         }
         if path_component_eq(value, "target") {
             saw_target = true;
+        }
+        if path_component_eq(value, "bazel-bin") {
+            return true;
         }
     }
     false

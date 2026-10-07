@@ -58,6 +58,57 @@ fn populated_source(
 }
 
 #[tokio::test]
+async fn empty_host_is_observed_once_without_revising_unchanged_frontier() {
+    let (_temp, project, _sessions, source) = populated_source(0);
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    assert!(
+        admission
+            .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut first = None;
+    let mut coverage = None;
+    for _ in 0..2 {
+        capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            scope.clone(),
+            None,
+            &ObservationCancellation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let frontier = admission
+            .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (frontier.byte_offset, frontier.file_id, frontier.mtime),
+            (0, 0, 1)
+        );
+        let current_coverage = admission
+            .get_parse_offset(&scope, "host-coverage://kimi/v1")
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(first) = first {
+            assert_eq!(frontier, first);
+            assert_eq!(Some(current_coverage), coverage);
+        } else {
+            first = Some(frontier);
+            coverage = Some(current_coverage);
+        }
+    }
+    assert!(admission.observations().is_empty());
+}
+
+#[tokio::test]
 async fn durable_queue_revisits_a_recreated_entry() {
     let (_temp, project, sessions, source) = populated_source(MAX_SESSION_FILES + 1);
     let admission = MemoryHostAdmission::default();

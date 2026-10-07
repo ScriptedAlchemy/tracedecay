@@ -225,15 +225,26 @@ impl IsolatedHome {
 
     /// Reuses the installed toolchain in a child whose `HOME` is this
     /// isolated home: rustup and cargo would otherwise resolve their state
-    /// under the empty throwaway home. The child's hermetic `PATH` gains only
-    /// the toolchain's own `$CARGO_HOME/bin`, where rustup installs `cargo`
-    /// and the `rust-analyzer` proxy the daemon resolves through `PATH`.
+    /// under the empty throwaway home. The child's hermetic `PATH` prefers
+    /// the declared compiler toolchain, then the installed rust-analyzer
+    /// proxy directory retained by the test launcher. Cargo state stays in
+    /// the launcher's isolated `CARGO_HOME`.
     pub fn apply_toolchain_env(&self, command: &mut Command) {
         for (key, value) in &self.toolchain_environment {
             match value {
                 Some(value) => {
                     if *key == "CARGO_HOME" {
-                        command.env("PATH", hermetic_path(&[Path::new(value).join("bin")]));
+                        let compiler = std::env::var_os("RUSTC")
+                            .map(PathBuf::from)
+                            .expect("Bazel must provide the fixture compiler");
+                        let compiler_bin = compiler.parent().expect("compiler directory");
+                        let rustup_bin = std::env::var_os("TRACEDECAY_TEST_RUSTUP_BIN")
+                            .map(PathBuf::from)
+                            .expect("Bazel must provide the installed analyzer proxy directory");
+                        command.env(
+                            "PATH",
+                            hermetic_path(&[compiler_bin.to_owned(), rustup_bin]),
+                        );
                     }
                     command.env(key, value);
                 }

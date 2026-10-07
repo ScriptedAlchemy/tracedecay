@@ -219,11 +219,11 @@ mod path_normalize_tests {
     #[test]
     fn windows_path_classification_is_case_insensitive() {
         assert!(is_tracedecay_exe(Path::new(r"C:\Tools\TraceDecay.EXE")));
-        assert!(is_cargo_target_binary(
+        assert!(is_build_output_binary(
             Path::new(r"C:\Work\TARGET\DEBUG\TraceDecay.EXE"),
             None
         ));
-        assert!(is_cargo_target_binary(
+        assert!(is_build_output_binary(
             Path::new(r"C:\Work\Custom\TraceDecay.EXE"),
             Some(Path::new(r"c:\work\CUSTOM"))
         ));
@@ -304,6 +304,39 @@ mod path_normalize_tests {
             found,
             tracedecay_domain::forward_slash_text(&stable_bin.to_string_lossy())
         );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_installed_path_over_bazel_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        for output in [
+            "bazel-out/k8-fastbuild/bin/crates/tracedecay-cli",
+            "bazel-bin/crates/tracedecay-cli",
+        ] {
+            let build_bin = dir.path().join(output).join(tracedecay_bin_name());
+            std::fs::create_dir_all(build_bin.parent().unwrap()).unwrap();
+            std::fs::write(&build_bin, "").unwrap();
+            let path_var =
+                std::env::join_paths([build_bin.parent().unwrap(), installed.parent().unwrap()])
+                    .unwrap();
+            for current in [None, Some(build_bin.as_path())] {
+                assert_eq!(
+                    which_tracedecay_path_from(current, Some(path_var.as_os_str()), None),
+                    Some(installed.clone()),
+                );
+            }
+            assert_eq!(
+                which_tracedecay_path_from(Some(&build_bin), None, None),
+                Some(build_bin)
+            );
+        }
+        assert!(!is_build_output_binary(
+            &dir.path().join("bazel-out/docs/tracedecay"),
+            None
+        ));
     }
 
     #[test]

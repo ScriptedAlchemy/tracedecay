@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", _rust_test = "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_aspect", _rust_test = "rust_test")
 
 # Every test gets a private TraceDecay profile and Cargo target scratch dir
 # under TEST_TMPDIR and no global database. Each `runfiles_env` variable is
@@ -7,10 +7,24 @@ load("@rules_rust//rust:defs.bzl", _rust_test = "rust_test")
 _POSIX_LAUNCHER = """#!/bin/sh
 set -eu
 : "${{TEST_TMPDIR:?Bazel did not provide TEST_TMPDIR}}"
+export RUSTUP_HOME="${{RUSTUP_HOME:-$HOME/.rustup}}"
+export TRACEDECAY_TEST_RUSTUP_BIN="${{CARGO_HOME:-$HOME/.cargo}}/bin"
+export CARGO_HOME="$TEST_TMPDIR/cargo-home"
+export HOME="$TEST_TMPDIR/home"
+mkdir -p "$HOME"
 export TRACEDECAY_DATA_DIR="$TEST_TMPDIR/.tracedecay"
 export TRACEDECAY_DISABLE_GLOBAL_DB=1
+# Scratch may live below an operator home whose ancestor Cargo config names
+# an undeclared cache wrapper. Fixture compilation uses Bazel's compiler.
+export RUSTC_WRAPPER=""
+export RUSTC_WORKSPACE_WRAPPER=""
 export CARGO_TARGET_TMPDIR="$TEST_TMPDIR/cargo-target-tmp"
 mkdir -p "$CARGO_TARGET_TMPDIR"
+# Cargo runs a test binary from its crate directory, and suites read
+# fixtures relative to it.
+export CARGO_MANIFEST_DIR="$TEST_SRCDIR/$TEST_WORKSPACE/{package}"
+cd "$CARGO_MANIFEST_DIR"
+export PATH="{toolchain_path}:$PATH"
 # Names such as CARGO_BIN_EXE_<bin> may carry `-`, which no shell variable
 # can, so each assignment goes through env as its own argument: a runfiles
 # path with spaces stays one word.
@@ -23,12 +37,30 @@ if not defined TEST_TMPDIR (
   echo Bazel did not provide TEST_TMPDIR 1>&2
   exit /b 1
 )
+if not defined RUSTUP_HOME set "RUSTUP_HOME=%USERPROFILE%/.rustup"
+if not defined CARGO_HOME set "CARGO_HOME=%USERPROFILE%/.cargo"
+set "TRACEDECAY_TEST_RUSTUP_BIN=%CARGO_HOME%/bin"
+set "CARGO_HOME=%TEST_TMPDIR%/cargo-home"
+set "HOME=%TEST_TMPDIR%/home"
+set "USERPROFILE=%HOME%"
+if not exist "%HOME%" mkdir "%HOME%"
 set "TRACEDECAY_DATA_DIR=%TEST_TMPDIR%/.tracedecay"
 set "TRACEDECAY_DISABLE_GLOBAL_DB=1"
 set "CARGO_TARGET_TMPDIR=%TEST_TMPDIR%/cargo-target-tmp"
 if not exist "%CARGO_TARGET_TMPDIR%" mkdir "%CARGO_TARGET_TMPDIR%"
 {runfiles_env}
-"%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}" %*
+set "PATH={toolchain_path};%PATH%"
+set "TEST_PACKAGE=%TEST_SRCDIR%/%TEST_WORKSPACE%/{package}"
+set "CARGO_MANIFEST_DIR=%TEST_PACKAGE%"
+cd /d "%TEST_PACKAGE:/=\\%"
+set "TEST_BINARY=%TEST_SRCDIR%/%TEST_WORKSPACE%/{binary}"
+set "TEST_BINARY=%TEST_BINARY:/=\\%"
+if not exist "%TEST_BINARY%" (
+  echo test binary missing from the runfiles tree: %TEST_BINARY% 1>&2
+  dir /s /b "%TEST_SRCDIR%" 1>&2
+  exit /b 1
+)
+"%TEST_BINARY%" %*
 exit /b %ERRORLEVEL%
 """
 
@@ -41,6 +73,7 @@ def _runfiles_path(file, workspace):
 
 def _isolated_rust_test_impl(ctx):
     test_binary = ctx.executable.test_binary
+    toolchain = ctx.toolchains["@rules_rust//rust:toolchain_type"]
     windows = ctx.target_platform_has_constraint(
         ctx.attr._windows[platform_common.ConstraintValueInfo],
     )
@@ -61,6 +94,8 @@ def _isolated_rust_test_impl(ctx):
         variable: _runfiles_path(files_by_label[label], workspace)
         for variable, label in ctx.attr.runfiles_env.items()
     }
+    for variable, file in {"CARGO": toolchain.cargo, "RUSTC": toolchain.rustc, "RUSTDOC": toolchain.rust_doc}.items():
+        paths[variable] = _runfiles_path(file, workspace)
     if windows:
         runfiles_env = "\n".join([
             'set "{}=%TEST_SRCDIR%/{}"'.format(variable, path)
@@ -71,22 +106,42 @@ def _isolated_rust_test_impl(ctx):
             '"{}=$TEST_SRCDIR/{}"'.format(variable, path)
             for variable, path in paths.items()
         ])
+    # Production test runners invoke literal `cargo` and feedback fixtures
+    # invoke literal `rustc`. Those must use the same declared toolchain as
+    # CARGO/RUSTC, even after a child isolates HOME or changes directory.
+    toolchain_bin = paths["RUSTC"].rsplit("/", 1)[0]
+    toolchain_path = ("%TEST_SRCDIR%/" if windows else "$TEST_SRCDIR/") + toolchain_bin
     ctx.actions.write(
         output = executable,
         content = template.format(
             binary = test_binary.short_path,
+            package = ctx.label.package,
             runfiles_env = runfiles_env,
+            toolchain_path = toolchain_path,
         ),
         is_executable = True,
     )
-    runfiles = ctx.runfiles(files = [test_binary] + runfiles_env_files).merge(
+    runfiles = ctx.runfiles(
+        files = [test_binary] + runfiles_env_files,
+        transitive_files = toolchain.all_files,
+    ).merge(
         ctx.attr.test_binary[DefaultInfo].default_runfiles,
     )
+    for target in ctx.attr.runfiles_env_targets:
+        runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
     test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
+    environment = dict(test_environment.environment)
+    environment["RUSTUP_TOOLCHAIN"] = toolchain.version
+    environment["RUSTC_WRAPPER"] = ""
+    environment["RUSTC_WORKSPACE_WRAPPER"] = ""
     return [
         DefaultInfo(executable = executable, runfiles = runfiles),
+        OutputGroupInfo(
+            clippy_checks = getattr(ctx.attr.test_binary[OutputGroupInfo], "clippy_checks", depset())
+            if OutputGroupInfo in ctx.attr.test_binary else depset(),
+        ),
         RunEnvironmentInfo(
-            environment = test_environment.environment,
+            environment = environment,
             inherited_environment = test_environment.inherited_environment,
         ),
     ]
@@ -97,12 +152,14 @@ _isolated_rust_test = rule(
         "runfiles_env": attr.string_dict(),
         "runfiles_env_targets": attr.label_list(allow_files = True),
         "test_binary": attr.label(
+            aspects = [rust_clippy_aspect],
             executable = True,
             cfg = "target",
             mandatory = True,
         ),
         "_windows": attr.label(default = "@platforms//os:windows"),
     },
+    toolchains = ["@rules_rust//rust:toolchain_type"],
     test = True,
 )
 
@@ -126,6 +183,11 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
     runfiles path the suite reads at run time; each label also joins `data`.
     """
     visibility = kwargs.pop("visibility", None)
+    test_attributes = {
+        attribute: kwargs.pop(attribute)
+        for attribute in ["args", "size", "timeout", "flaky", "local", "shard_count"]
+        if attribute in kwargs
+    }
     binary_name = name + "__binary"
     env = {
         "TRACEDECAY_DATA_DIR": "/dev/null",
@@ -138,6 +200,8 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         if resolved not in present:
             present.append(resolved)
             data.append(label)
+    if "crate" not in kwargs:
+        kwargs.setdefault("crate_name", name.replace("-", "_"))
     _rust_test(
         name = binary_name,
         env = env,
@@ -159,6 +223,7 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
             for label in runfiles_env.values()
         }.keys()),
     }
+    wrapper_args.update(test_attributes)
     if visibility != None:
         wrapper_args["visibility"] = visibility
     _isolated_rust_test(**wrapper_args)

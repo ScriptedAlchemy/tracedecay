@@ -95,6 +95,48 @@ fn record<'a>(
 }
 
 #[tokio::test]
+async fn empty_host_is_observed_once_without_revising_unchanged_frontier() {
+    let layout = Layout::new();
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    let key = super::PI_DISCOVERY_FRONTIER_KEY;
+    assert!(
+        admission
+            .get_parse_offset(&scope, key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    capture(&layout, &admission).await;
+    let first = admission
+        .get_parse_offset(&scope, key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((first.byte_offset, first.file_id, first.mtime), (0, 0, 1));
+    let coverage = admission
+        .get_parse_offset(&scope, "host-coverage://pi/v1")
+        .await
+        .unwrap()
+        .unwrap();
+
+    capture(&layout, &admission).await;
+    assert_eq!(
+        admission.get_parse_offset(&scope, key).await.unwrap(),
+        Some(first)
+    );
+    assert_eq!(
+        admission
+            .get_parse_offset(&scope, "host-coverage://pi/v1")
+            .await
+            .unwrap(),
+        Some(coverage)
+    );
+    assert!(admission.observations().is_empty());
+}
+
+#[tokio::test]
 async fn fixture_session_lands_with_stable_entry_identities_and_messages() {
     let layout = Layout::new();
     layout.write_fixture();
