@@ -113,6 +113,57 @@ fn launchd_service_activity_comes_from_the_owned_job() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_owned_job_requires_a_recognized_activity_state() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+
+    for state in [
+        "",
+        "state = ",
+        "state = unfamiliar",
+        "state = running\nstate = waiting",
+    ] {
+        write_executable_script(
+            &launchctl,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo '{state}'\nfi\n",
+                plist.display()
+            ),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                runner.observe_service_state(),
+                Err(super::runner::ServiceStateError::Failed(
+                    tracedecay_domain::errors::TraceDecayError::Config { message }
+                )) if message.contains("service state")
+            ),
+            "unrecognized activity must fail: {state:?}"
+        );
+    }
+
+    write_executable_script(
+        &launchctl,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = not running'\nfi\n",
+            plist.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        runner.service_state().unwrap(),
+        DaemonServiceState::StoppedEnabled
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn launchd_stop_refuses_a_foreign_loaded_plist_before_mutating_it() {

@@ -945,9 +945,22 @@ fn launchd_owned_service_running(
             .as_deref()
             .is_some_and(|path| same_unit_file(path, &owned))
     {
-        return Ok(Some(
-            text.lines().any(|line| line.trim() == "state = running"),
-        ));
+        let mut states = text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("state = ").map(str::trim));
+        let state = states.next();
+        if states.next().is_none() {
+            match state {
+                Some("running") => return Ok(Some(true)),
+                Some("waiting" | "not running") => return Ok(Some(false)),
+                _ => {}
+            }
+        }
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "launchctl print {target} reported missing, ambiguous, or unrecognized service state: {state:?}"
+            ),
+        });
     }
     Err(TraceDecayError::ServiceUnitNotOwned {
         unit: target.to_owned(),
