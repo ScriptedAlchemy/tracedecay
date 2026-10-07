@@ -307,13 +307,23 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     // which doubles the `\\` separators on Windows.
     let escaped = serde_json::to_string(&root).unwrap();
     let normalized = payload.replace(&escaped[1..escaped.len() - 1], "/fixture");
+    // Native separators are retained. Unlike '/', '\\' does not join the
+    // directory and filename into one high-entropy token for redaction.
+    let expected_transcript = if cfg!(windows) {
+        serde_json::to_string(&fixture.transcript)
+            .unwrap()
+            .replace(&escaped[1..escaped.len() - 1], "/fixture")
+    } else {
+        r#""/fixture/home/.[TraceDecay redacted: high-entropy token].jsonl""#.to_owned()
+    };
+
     // The record embeds the temp directory as `cwd`, so its byte span (the
     // whole one-record file) depends on that path's length.
     let end = fs::metadata(&fixture.transcript).unwrap().len();
     assert_eq!(
         normalized,
         format!(
-            r#"{{"evidence":{{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{{"end":{end},"start":0}}}},"facts":[{{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript","transcript_path":"/fixture/home/.[TraceDecay redacted: high-entropy token].jsonl"}},{{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}}],"native_record_kind":"user","provider":"claude","relations":{{"message_id":"message-production-vertical","session_id":"7f3e2a1b-9c4d-4e5f-a6b7-c8d9e0f1a2b3"}},"stable_record_id":"message-production-vertical","version":1}}"#
+            r#"{{"evidence":{{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{{"end":{end},"start":0}}}},"facts":[{{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript","transcript_path":{expected_transcript}}},{{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}}],"native_record_kind":"user","provider":"claude","relations":{{"message_id":"message-production-vertical","session_id":"7f3e2a1b-9c4d-4e5f-a6b7-c8d9e0f1a2b3"}},"stable_record_id":"message-production-vertical","version":1}}"#
         )
     );
     assert!(!payload.contains("never-persist-this-secret"));
