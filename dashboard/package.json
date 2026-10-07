@@ -36,7 +36,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1",
+    "@playwright/test": "1.63.0",
     "@rsbuild/core": "^1.7.6",
     "@rsbuild/plugin-react": "^1.1.0",
     "@tailwindcss/postcss": "^4.0.0",
