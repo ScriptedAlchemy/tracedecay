@@ -641,6 +641,75 @@ fn assert_capture_transport_response(label: &str, output: &Output, expected_exit
 }
 
 #[test]
+fn native_capture_is_quiet_by_default_and_emits_requested_span_timings() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_native_capture_logging");
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 43 }\n",
+    )
+    .unwrap();
+    let mut event: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
+    )))
+    .unwrap();
+    event["file_path"] = json!(project_path.join("src/lib.rs"));
+    event["workspace_roots"] = json!([&project_path]);
+    event["transcript_path"] = json!(home_path.join("transcripts/session.jsonl"));
+    for trace_enabled in [false, true] {
+        event["generation_id"] = json!(format!("generation-{trace_enabled}"));
+        let mut command = tracedecay_command_with_home(&home_path);
+        command
+            .env_remove("RUST_LOG")
+            .env_remove("TRACEDECAY_SPAN_TIMINGS");
+        if trace_enabled {
+            command
+                .env("RUST_LOG", "tracedecay_hooks=trace")
+                .env("TRACEDECAY_SPAN_TIMINGS", "1");
+        }
+        let mut child = command
+            .current_dir(&project_path)
+            .arg("hook-cursor-after-file-edit")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if trace_enabled {
+            assert!(stderr.contains("hooks.capture.native_event"), "{stderr}");
+            assert!(stderr.contains("time.busy="), "{stderr}");
+            assert!(stderr.contains("hooks.spool.commit"), "{stderr}");
+        } else {
+            assert!(
+                stderr.is_empty(),
+                "default hook logging must be quiet: {stderr}"
+            );
+        }
+    }
+    assert_eq!(
+        native_capture_pending_records(&data_root, NativeHostIdentityV1::CursorDesktop),
+        2,
+        "both logging modes must durably capture their event"
+    );
+}
+
+#[test]
 fn cursor_after_file_edit_hook_captures_bound_spool_record() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
