@@ -4,8 +4,9 @@ description: >
   disk cache named by `cache-key` that only master saves: other refs restore
   master's entry, and their own saves would be multi-GB copies that ordinary
   master and PR runs cannot reuse. Jobs with the same configuration and
-  runner image share one key. With `test-tools`, also installs the host tools
-  the test suites spawn.
+  runner image share a restore prefix; master callers save fresh
+  action outputs after the build, including failed tests. With `test-tools`,
+  also installs the host tools the test suites spawn.
 
 inputs:
   cache-key:
@@ -15,19 +16,57 @@ inputs:
     description: Also install rust-analyzer, node, and ast-grep for `bazel test`.
     default: "false"
 
+outputs:
+  disk-cache-path:
+    description: Action-cache directory to save after the caller's build.
+    value: ${{ steps.disk-cache-config.outputs.path }}
+  disk-cache-key:
+    description: Run-specific save key returned by the cache restore action.
+    value: ${{ steps.disk-cache.outputs.cache-primary-key }}
+
 runs:
   using: composite
   steps:
+    # Cache versions include the literal path. Keep setup-bazel's existing
+    # directory and key prefix to restore previously compiled outputs.
+    - name: Resolve action cache location
+      id: disk-cache-config
+      shell: bash
+      env:
+        CACHE_NAME: ${{ inputs.cache-key }}
+      run: |
+        node <<'JS'
+        const fs = require('node:fs');
+        const os = require('node:os');
+        const path = process.platform === 'win32'
+          ? 'D:/b-disk'
+          : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
+        const prefix = `setup-bazel-1-${process.platform}-${os.arch()}-disk-${process.env.CACHE_NAME}-`;
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${path}\nprefix=${prefix}\n`);
+        JS
+
     - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
       with:
         bazelisk-cache: true
         repository-cache: true
-        disk-cache: ${{ inputs.cache-key }}
+        disk-cache: false
+        bazelrc: >-
+          build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
         cache-save: ${{ github.ref == 'refs/heads/master' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; a short output base (default
         # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
         output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
+
+    # Bazel validates action contents itself. A fresh save key retains new
+    # source-build outputs even when MODULE.bazel and BUILD files are unchanged.
+    - name: Restore master action cache
+      id: disk-cache
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ steps.disk-cache-config.outputs.path }}
+        key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        restore-keys: ${{ steps.disk-cache-config.outputs.prefix }}
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, the ast-grep
