@@ -254,6 +254,31 @@ fn a_late_thread_destructor_charges_its_blocks_to_its_owner_heaps() {
 /// charged for it, never for more than its pages span.
 #[test]
 fn an_owner_heap_charges_the_freed_memory_its_pages_reuse() {
+    const CHILD_ENV: &str = "TRACEDECAY_OWNER_HEAP_REUSE_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // Reuse must observe freed, unpurged pages. Set mimalloc's native
+        // option before initialization and isolate the arena from other tests.
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("owner heap test executable"),
+        )
+        .args([
+            "--exact",
+            "an_owner_heap_charges_the_freed_memory_its_pages_reuse",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env("MIMALLOC_PURGE_DELAY", "-1")
+        .output()
+        .expect("run isolated owner heap reuse test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated owner heap reuse test must run and pass:\n{stdout}\n{stderr}",
+        );
+        return;
+    }
+
     const SIZE_CLASSES: usize = 64;
     const SMALL_PAGE_BYTES: u64 = 64 * 1024;
     mimalloc_v3::install();
