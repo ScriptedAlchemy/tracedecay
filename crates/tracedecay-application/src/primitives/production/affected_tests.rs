@@ -186,7 +186,8 @@ pub(super) fn attributed_tests_outcome(
         let covers_requested_symbol = record
             .attribution
             .covered_occurrences
-            .contains(&request.symbol);
+            .binary_search(&request.symbol)
+            .is_ok();
         if !covers_requested_symbol {
             continue;
         }
