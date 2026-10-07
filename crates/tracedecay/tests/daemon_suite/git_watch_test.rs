@@ -361,7 +361,9 @@ async fn one_reconciliation_covers_a_fifty_commit_frontier() {
     let initial = wait_for_symbol(&harness, &project, "refs/heads/main", None, "on_main").await;
     for index in 0..50 {
         let mut source = format!("pub fn f{index}() {{}}\n");
-        for symbol in 0..128 {
+        // Exercise the commit frontier with a small multi-symbol file per
+        // commit; bulk symbol throughput is independent of frontier coverage.
+        for symbol in 0..8 {
             source.push_str(&format!("pub fn f{index}_{symbol}() {{}}\n"));
         }
         fs::write(project.join(format!("src/f{index}.rs")), source).unwrap();

@@ -1809,8 +1809,10 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
 
 #[test]
 fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
-    let mut source_text = String::with_capacity(1_500_000);
-    for ordinal in 0..24_000_u32 {
+    // Exceed the authenticated segment and page bounds without making
+    // parser throughput part of the cancellation and resume contract.
+    let mut source_text = String::with_capacity(128 * 1024);
+    for ordinal in 0..2_048_u32 {
         source_text.push_str(&format!(
             "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
         ));
