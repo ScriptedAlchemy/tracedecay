@@ -235,16 +235,14 @@ impl ServiceRunner {
         }
     }
 
-    pub(super) fn service_state(&self, socket_path: &Path) -> Result<DaemonServiceState> {
-        self.observe_service_state(socket_path)
-            .map_err(TraceDecayError::from)
+    pub(super) fn service_state(&self) -> Result<DaemonServiceState> {
+        self.observe_service_state().map_err(TraceDecayError::from)
     }
 
     /// Like [`Self::service_state`], but keeps an unreachable service manager
     /// apart from a failed query so status can report the daemon regardless.
     pub(super) fn observe_service_state(
         &self,
-        socket_path: &Path,
     ) -> std::result::Result<DaemonServiceState, ServiceStateError> {
         match self {
             Self::Systemd { systemctl, unit } => {
@@ -279,12 +277,7 @@ impl ServiceRunner {
                 launchctl,
                 id,
                 profile,
-            } => Ok(launchd_service_state(
-                launchctl,
-                id,
-                daemon_socket_state(socket_path),
-                profile,
-            )?),
+            } => Ok(launchd_service_state(launchctl, id, profile)?),
             Self::WindowsTask { profile } => Ok(windows_task::service_state(profile)?),
         }
     }
@@ -921,13 +914,17 @@ fn launchd_service_target(id: &Path, profile: &ProfileRoot) -> Result<String> {
 
 /// A shared launchd domain must never act on a label loaded from another
 /// profile's plist, even when both profiles retain the default label.
-fn launchd_require_owned(launchctl: &Path, target: &str, profile: &ProfileRoot) -> Result<bool> {
+fn launchd_owned_service_running(
+    launchctl: &Path,
+    target: &str,
+    profile: &ProfileRoot,
+) -> Result<Option<bool>> {
     let output = launchctl_spawn(launchctl, &["print", target])?;
     if !output.status.success() {
         if launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stderr))
             || launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stdout))
         {
-            return Ok(false);
+            return Ok(None);
         }
         return Err(launchctl_failure(&["print", target], &output));
     }
@@ -948,7 +945,9 @@ fn launchd_require_owned(launchctl: &Path, target: &str, profile: &ProfileRoot) 
             .as_deref()
             .is_some_and(|path| same_unit_file(path, &owned))
     {
-        return Ok(true);
+        return Ok(Some(
+            text.lines().any(|line| line.trim() == "state = running"),
+        ));
     }
     Err(TraceDecayError::ServiceUnitNotOwned {
         unit: target.to_owned(),
@@ -957,15 +956,19 @@ fn launchd_require_owned(launchctl: &Path, target: &str, profile: &ProfileRoot) 
     })
 }
 
-/// launchd has no liveness query of its own: the agent is running when its
-/// daemon socket accepts a connection.
+/// Service ownership and activity come from launchd; a foreground daemon can
+/// serve the same socket without a registered agent.
 pub(super) fn launchd_service_state(
     launchctl: &Path,
     id: &Path,
-    socket_state: DaemonSocketState,
     profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
-    let running = matches!(socket_state, DaemonSocketState::Connectable);
+    let target = launchd_service_target(id, profile)?;
+    let loaded = launchd_owned_service_running(launchctl, &target, profile)?;
+    if loaded.is_none() && !launchd_user_service_path(profile)?.try_exists()? {
+        return Ok(DaemonServiceState::Missing);
+    }
+    let running = loaded == Some(true);
     let enabled = !launchd_service_is_disabled(launchctl, id, profile)?;
     Ok(match (running, enabled) {
         (true, true) => DaemonServiceState::RunningEnabled,
@@ -983,6 +986,9 @@ fn launchd_service_is_disabled(launchctl: &Path, id: &Path, profile: &ProfileRoo
         .map_err(|error| {
             service_program_spawn_error("launchctl", "launchd service state", &error)
         })?;
+    if !output.status.success() {
+        return Err(launchctl_failure(&["print-disabled", &domain], &output));
+    }
     Ok(launchd_disabled_output_contains_label(
         &String::from_utf8_lossy(&output.stdout),
         &launchd_label(profile),
@@ -1020,7 +1026,7 @@ fn launchd_install(
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
         // so persist a disabled state to keep --no-start meaning "do not run".
-        launchd_require_owned(launchctl, &target, profile)?;
+        launchd_owned_service_running(launchctl, &target, profile)?;
         run_launchctl(launchctl, &["disable", &target])?;
         return Ok(());
     }
@@ -1072,7 +1078,7 @@ fn launchd_start(
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    launchd_require_owned(launchctl, target, profile)?;
+    launchd_owned_service_running(launchctl, target, profile)?;
     let domain = launchd_domain(id)?;
     run_launchd_commands(
         launchctl,
@@ -1091,7 +1097,7 @@ fn launchd_before_uninstall(
         return Ok(());
     }
     let target = launchd_service_target(id, profile)?;
-    if !launchd_require_owned(launchctl, &target, profile)? {
+    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
@@ -1099,7 +1105,7 @@ fn launchd_before_uninstall(
 
 fn launchd_stop(launchctl: &Path, id: &Path, profile: &ProfileRoot) -> Result<()> {
     let target = launchd_service_target(id, profile)?;
-    if !launchd_require_owned(launchctl, &target, profile)? {
+    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])

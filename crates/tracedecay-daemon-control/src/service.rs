@@ -38,10 +38,7 @@ use probe::{
     DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
     daemon_transport_display,
 };
-use runner::{
-    ServiceManagerUnreachable, ServicePlatform, ServiceRunner, ServiceStateError,
-    launchd_service_state,
-};
+use runner::{ServiceManagerUnreachable, ServicePlatform, ServiceRunner, ServiceStateError};
 use unit_file::{
     launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
     service_unit_path, socket_path_from_unit_text, write_service_unit,
@@ -1201,7 +1198,7 @@ fn refresh_installed_service_with_state_and_runner(
     }
     let previous_state = match previous_state {
         Some(state) => state,
-        None => runner.service_state(&refreshed_spec.socket_path)?,
+        None => runner.service_state()?,
     };
     refresh_service_with_runner(runner, &refreshed_spec, previous_state, expected_version).map(Some)
 }
@@ -1247,7 +1244,7 @@ fn quiesce_installed_service_before_lease_with_runner(
     let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    let state = runner.service_state(&socket_path)?;
+    let state = runner.service_state()?;
     if !state.is_running() {
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -1301,7 +1298,7 @@ fn verify_installed_service_quiesced_under_lease_with_runner(
     let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    let state = runner.service_state(&socket_path)?;
+    let state = runner.service_state()?;
     let socket_state = daemon_socket_state(&socket_path);
     if state.is_running() || !socket_state.is_proven_quiesced() {
         return Err(TraceDecayError::Config {
@@ -1422,10 +1419,7 @@ pub fn installed_service_state(profile: &ProfileRoot) -> Result<DaemonServiceSta
     if !service_unit_exists(profile, &service_path)? {
         return Ok(DaemonServiceState::Missing);
     }
-    let unit = read_service_unit(profile, &service_path)?;
-    let socket_path =
-        socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    ServiceRunner::current(profile)?.service_state(&socket_path)
+    ServiceRunner::current(profile)?.service_state()
 }
 
 /// Observe whether the managed unit's process completed initialize.
@@ -1445,7 +1439,7 @@ pub fn installed_service_process_proof(
     let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    let state = ServiceRunner::current(profile)?.service_state(&socket_path)?;
+    let state = ServiceRunner::current(profile)?.service_state()?;
     if !state.is_running() {
         return Ok(DaemonProcessProofV1::Unproven {
             detail: "managed daemon unit is not running".to_owned(),
@@ -1470,7 +1464,7 @@ pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
     let runner = ServiceRunner::current(profile)?;
-    let pre_start_state = runner.service_state(&socket_path)?;
+    let pre_start_state = runner.service_state()?;
     runner.start(&service_path, &socket_path, expected_version)?;
     if matches!(runner, ServiceRunner::WindowsTask { .. }) {
         // `windows_task::start` already polls authenticated readiness
@@ -1624,26 +1618,7 @@ fn installed_service_status_snapshot(
     let unit = read_service_unit(profile, &service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    // launchd's liveness is a socket connect, so the authenticated readiness
-    // probe doubles as that observation instead of the daemon seeing an extra
-    // bare connection ahead of it.
-    if let ServiceRunner::Launchd {
-        launchctl,
-        id,
-        profile,
-    } = runner
-    {
-        let (socket_state, protocol_state) =
-            daemon_readiness_probe(profile, &socket_path, expected_version, READINESS_TIMEOUT);
-        let actual = launchd_service_state(launchctl, id, socket_state, profile)?;
-        let protocol_state = if actual.is_running() {
-            protocol_state
-        } else {
-            DaemonProtocolState::NotRequired
-        };
-        return Ok((actual, socket_path, socket_state, protocol_state));
-    }
-    let actual = runner.service_state(&socket_path)?;
+    let actual = runner.service_state()?;
     let (socket_state, protocol_state) = if actual.is_running() {
         daemon_readiness_probe(profile, &socket_path, expected_version, READINESS_TIMEOUT)
     } else {
@@ -1719,10 +1694,8 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
         |path| path.display().to_string(),
     );
     let runner = ServiceRunner::current(profile);
-    let service_manager = match runner
-        .as_ref()
-        .map(|runner| runner.observe_service_state(&transport_path))
-    {
+    let service_observation = runner.as_ref().map(|runner| runner.observe_service_state());
+    let service_manager = match &service_observation {
         Ok(Ok(state)) => format!("{state:?}"),
         Ok(Err(ServiceStateError::ManagerUnreachable(unreachable))) => format!(
             "unreachable from this shell ({}): {unreachable}",
@@ -1738,10 +1711,14 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
         .and_then(ServiceRunner::service_detail_hint)
         .map(|hint| format!("service-detail: {hint}\n"))
         .unwrap_or_default();
-    let logs = runner.map_or_else(
-        |e| format!("unavailable: {e}"),
-        |runner| runner.log_hint(profile),
-    );
+    let logs = if matches!(service_observation, Ok(Ok(DaemonServiceState::Missing))) {
+        "no managed service; consult the foreground process output".to_owned()
+    } else {
+        runner.map_or_else(
+            |e| format!("unavailable: {e}"),
+            |runner| runner.log_hint(profile),
+        )
+    };
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
     format!(
