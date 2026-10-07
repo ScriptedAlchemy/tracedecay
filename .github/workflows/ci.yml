@@ -326,6 +326,26 @@ jobs:
           Get-Item $probe | Format-List FullName,LinkType,Target,Length
           & $probe
 
+      # tracedecay-lsp and tracedecay-code-index get a bare E0463 for every
+      # --extern their params file names: rustc's locator dropped each
+      # candidate without recording why. Rerun one lsp compile from its own
+      # params with the locator's reasons logged, until that is fixed.
+      - name: Trace rustc crate lookup for tracedecay-lsp
+        if: failure()
+        shell: pwsh
+        run: |
+          $execRoot = (bazel info execution_root).Trim()
+          Set-Location $execRoot
+          $params = Get-ChildItem "bazel-out/x64_windows-fastbuild/bin/crates/tracedecay-lsp/*.params.expanded" | Select-Object -First 1
+          $rustc = Get-ChildItem "external/rules_rust++rust+*_tools/rust_toolchain/bin/rustc.exe" | Select-Object -First 1
+          "params: $($params.FullName)"; "rustc: $($rustc.FullName)"
+          Get-Item (Select-String -Path $params -Pattern '^--extern=tokio=(.*)$').Matches[0].Groups[1].Value |
+            Format-List FullName,LinkType,Target,Length
+          $env:RUSTC_LOG = "rustc_metadata::locator=info"
+          & $rustc.FullName "@$($params.FullName)" 2>&1 |
+            Select-String -Pattern 'tokio|serde-|Rejecting|no metadata|not present|error' |
+            Select-Object -First 200
+
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
