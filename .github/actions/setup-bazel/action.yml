@@ -1,9 +1,9 @@
 name: Set up Bazel
 description: >
   Installs Bazel through the pinned bazelisk with its repository cache, and a
-  disk cache named by `cache-key` that only pushes save: a pull-request run
-  restores the base branch's entry, and its own save would be a multi-GB copy
-  no other ref can restore. Jobs that run the same configuration on the same
+  disk cache named by `cache-key` that only master saves: other refs restore
+  master's entry, and their own saves would be multi-GB copies that ordinary
+  master and PR runs cannot reuse. Jobs with the same configuration and
   runner image share one key. With `test-tools`, also installs the host tools
   the test suites spawn.
 
@@ -23,7 +23,7 @@ runs:
         bazelisk-cache: true
         repository-cache: true
         disk-cache: ${{ inputs.cache-key }}
-        cache-save: ${{ github.event_name != 'pull_request' }}
+        cache-save: ${{ github.ref == 'refs/heads/master' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; a short output base (default
         # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
