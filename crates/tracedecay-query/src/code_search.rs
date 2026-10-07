@@ -47,6 +47,7 @@ pub struct CodeIndexSearchRequestV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeIndexSearchUnavailableReasonV1 {
     CapabilityUnavailable,
+    NotApplicable,
     AuthorityUnavailable,
     LinkedWorktreeDisabled,
     Cancelled,
@@ -66,6 +67,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CapabilityUnavailable => "code_index_unavailable",
+            Self::NotApplicable => "code_index_not_applicable",
             Self::AuthorityUnavailable => "authority_unavailable",
             Self::LinkedWorktreeDisabled => "linked_worktree_disabled",
             Self::Cancelled => "cancelled",
@@ -98,6 +100,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
             | Self::GenerationUnverified
             | Self::GraphWarming => true,
             Self::CapabilityUnavailable
+            | Self::NotApplicable
             | Self::AuthorityUnavailable
             | Self::LinkedWorktreeDisabled
             | Self::InvalidRequest

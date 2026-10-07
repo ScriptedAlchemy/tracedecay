@@ -1297,28 +1297,35 @@ impl CodeIndexPublishedGenerationV1 {
             .collect::<BTreeSet<_>>();
         let test_occurrences = occurrence_files
             .iter()
-            .filter_map(|(occurrence, (file, _))| {
+            .enumerate()
+            .filter_map(|(index, (occurrence, (file, _)))| {
                 callable_occurrences.contains(occurrence).then_some(())?;
                 (annotated_test_occurrences.contains(occurrence)
                     || file_by_occurrence
                         .get(file)
                         .is_some_and(|(path, _)| crate::is_test_file(path)))
-                .then(|| occurrence.clone())
+                .then(|| (occurrence.clone(), index))
             })
             .collect::<Vec<_>>();
-        let mut outgoing: BTreeMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>> = BTreeMap::new();
+        // Canonical indices preserve occurrence ordering while keeping string
+        // cloning and tree lookups out of each test's transitive traversal.
+        let occurrences_by_index = occurrence_files.keys().collect::<Vec<_>>();
+        let occurrence_indices = occurrences_by_index
+            .iter()
+            .enumerate()
+            .map(|(index, occurrence)| (*occurrence, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut outgoing = vec![Vec::new(); occurrences_by_index.len()];
         for edge in &self.edges {
-            if occurrence_files.contains_key(&edge.from_occurrence)
-                && occurrence_files.contains_key(&edge.to_occurrence)
-            {
-                outgoing
-                    .entry(edge.from_occurrence.clone())
-                    .or_default()
-                    .push(edge.to_occurrence.clone());
+            if let (Some(&from), Some(&to)) = (
+                occurrence_indices.get(&edge.from_occurrence),
+                occurrence_indices.get(&edge.to_occurrence),
+            ) {
+                outgoing[from].push(to);
             }
         }
-        for destinations in outgoing.values_mut() {
-            destinations.sort();
+        for destinations in &mut outgoing {
+            destinations.sort_unstable();
             destinations.dedup();
         }
 
@@ -1326,21 +1333,31 @@ impl CodeIndexPublishedGenerationV1 {
             ComponentVersion::new("code-index.test-attribution.conservative.v1")
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         let mut attributions = Vec::with_capacity(test_occurrences.len());
-        for test_occurrence in test_occurrences {
-            let mut covered = BTreeSet::from([test_occurrence.clone()]);
-            let mut pending = VecDeque::from([test_occurrence.clone()]);
-            while let Some(occurrence) = pending.pop_front() {
-                for destination in outgoing.get(&occurrence).into_iter().flatten() {
-                    if covered.insert(destination.clone()) {
-                        pending.push_back(destination.clone());
+        let mut visited = vec![usize::MAX; occurrences_by_index.len()];
+        let mut covered = Vec::new();
+        for (visit, (test_occurrence, test_index)) in test_occurrences.into_iter().enumerate() {
+            covered.clear();
+            covered.push(test_index);
+            visited[test_index] = visit;
+            let mut cursor = 0;
+            while cursor < covered.len() {
+                for &destination in &outgoing[covered[cursor]] {
+                    if visited[destination] != visit {
+                        visited[destination] = visit;
+                        covered.push(destination);
                     }
                 }
+                cursor += 1;
             }
+            covered.sort_unstable();
             attributions.push(GenerationTestAttributionV1 {
                 generation_id: self.manifest.generation_id.clone(),
                 source_revision: self.snapshot.source_revision.clone(),
                 test_occurrence,
-                covered_occurrences: covered.into_iter().collect(),
+                covered_occurrences: covered
+                    .iter()
+                    .map(|&index| occurrences_by_index[index].clone())
+                    .collect(),
                 evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
                 attribution_revision: attribution_revision.clone(),
             });

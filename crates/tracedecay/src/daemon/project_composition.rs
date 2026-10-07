@@ -1842,6 +1842,11 @@ impl ProjectOpenInputs<'_> {
                 Some(("error", error.to_string())),
                 self.started,
             );
+            self.store_administration
+                .project_servers()
+                .lock()
+                .await
+                .mark_degraded_core_if(&opened.key, |current| Arc::ptr_eq(current, resolved));
             return Ok(());
         }
         retire_failed_project_open_owner(

@@ -501,7 +501,21 @@ impl CodeIndexSchedulerRegistryV1 {
             // A retiring owner still holds the store: admitting a fresh mount
             // here would race the dying reconcile task over the same physical
             // shard.
-            let retiring = self.retiring.lock().await;
+            let mut retiring = self.retiring.lock().await;
+            // A deadline can leave a worker owned by retirement after its
+            // caller has returned. Join only a completed exact-root worker
+            // before admitting its replacement; a live worker stays fenced.
+            if retiring
+                .get(&project_root)
+                .is_some_and(|worktree| worktree.task.is_finished())
+                && let Some(mut worktree) = retiring.remove(&project_root)
+            {
+                (&mut worktree.task).await.map_err(|error| {
+                    CodeIndexSchedulerErrorV1::Identity(format!(
+                        "retired code-index scheduler worker failed: {error}"
+                    ))
+                })?;
+            }
             if retiring.contains_key(&project_root) {
                 return Err(CodeIndexSchedulerErrorV1::Identity(
                     "code-index scheduler owner is still retiring".to_owned(),

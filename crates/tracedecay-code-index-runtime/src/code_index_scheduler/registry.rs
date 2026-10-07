@@ -2134,6 +2134,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler is shutting down".to_owned(),
             ));
         }
+        // A retirement waiter may have timed out before the cold owner
+        // released its store. Completion makes only this exact reservation
+        // reusable; pending retired owners and other roots remain fenced.
+        if reservations
+            .get(project_root)
+            .is_some_and(|slot| slot.is_retired() && slot.completed.load(Ordering::Acquire))
+        {
+            reservations.remove(project_root);
+        }
         if let Some(slot) = reservations.get(project_root) {
             return if slot.is_retired() {
                 Err(CodeIndexSchedulerErrorV1::Identity(

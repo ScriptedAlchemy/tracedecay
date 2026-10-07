@@ -51,6 +51,7 @@ use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
 use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
 
+mod attribution_equivalence;
 mod parallel_equivalence;
 
 #[derive(Clone, Default)]

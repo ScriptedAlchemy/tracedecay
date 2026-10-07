@@ -968,13 +968,20 @@ async fn run_production_hook_cycle(
         .await
     {
         Ok(execution) => execution,
-        Err(_) => {
+        Err(error) => {
             observe_hook_feedback_cycle_terminal(
                 observations,
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
-            log_scout_producer_outcome(&producer.project_root, "feedback_cycle_failed");
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "context_scout_producer_work",
+                &[
+                    ("project", producer.project_root.display().to_string()),
+                    ("outcome", "feedback_cycle_failed".to_owned()),
+                    ("error_class", error.class().to_owned()),
+                ],
+            );
             return HookOrchestrationWorkOutcomeV1::RetryableFailure;
         }
     };
