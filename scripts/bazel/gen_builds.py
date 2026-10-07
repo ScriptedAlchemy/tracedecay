@@ -793,6 +793,18 @@ def main():
 
     def render_build(p):
         name = p["name"]
+        test_sizes = (p.get("metadata") or {}).get("bazel", {}).get("test_sizes", {})
+        if not isinstance(test_sizes, dict) or any(
+            size not in ("small", "medium", "large", "enormous")
+            for size in test_sizes.values()
+        ):
+            sys.exit(f"{name}: package.metadata.bazel.test_sizes must map targets to native Bazel sizes")
+        test_sizes = dict(test_sizes)
+
+        def test_size_attr(target):
+            size = test_sizes.pop(target, None)
+            return f'    size = "{size}",' if size else None
+
         # Mirror the Cargo `perf` profile hosted CI tests with: the package's
         # opt-level with debug assertions and overflow checks on. `-c opt`
         # (release) keeps the toolchain's own opt-level 3 without assertions.
@@ -1009,9 +1021,11 @@ def main():
                 if has_build:
                     deps.append(":build_script_build")
                 runfiles_env = runtime_binaries(p, t, bin_pulled)
+                test_name = unique_name(t["name"] + "_unit_test")
                 out += [
                     "rust_test(",
-                    f'    name = "{unique_name(t["name"] + "_unit_test")}",',
+                    f'    name = "{test_name}",',
+                    test_size_attr(test_name),
                     f'    crate = ":{test_flavor}",',
                     f"    crate_features = [{q(sorted(fmap[name]))}],",
                     '    edition = crate_edition(),',
@@ -1095,9 +1109,11 @@ def main():
             for variable, target in runtime_binaries(p, t, mod_pulled).items():
                 runfiles_env.setdefault(variable, target)
             env_attr = "    rustc_env = " + env_dict(rustc_env) + "," if rustc_env else None
+            test_name = unique_name(t["name"])
             out += [
                 "rust_test(",
-                f'    name = "{unique_name(t["name"])}",',
+                f'    name = "{test_name}",',
+                test_size_attr(test_name),
                 "    srcs = " + srcs + ",",
                 f'    crate_root = {crate_root},',
                 '    edition = crate_edition(),',
@@ -1130,6 +1146,7 @@ def main():
             out += [
                 "rust_test(",
                 '    name = "unit_test",',
+                test_size_attr("unit_test"),
                 f'    crate = ":{tname(name, "dev", closure_of(name, dev_tree))}",',
                 # rust_test(crate=) takes its cfgs from its own
                 # crate_features, not the library's.
@@ -1155,6 +1172,8 @@ def main():
             ]
             out = [l for l in out if l is not None]
 
+        if test_sizes:
+            sys.exit(f"{name}: test_sizes names unknown test targets: {', '.join(sorted(test_sizes))}")
         return "\n".join(out)
 
     outputs = {}

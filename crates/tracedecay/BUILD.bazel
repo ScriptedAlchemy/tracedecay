@@ -243,6 +243,7 @@ rust_test(
 
 rust_test(
     name = "mcp_suite",
+    size = "large",
     srcs = glob(["tests/mcp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support"],
     crate_root = "tests/mcp_suite/main.rs",
     edition = crate_edition(),
@@ -468,6 +469,7 @@ rust_test(
 
 rust_test(
     name = "unit_test",
+    size = "large",
     crate = ":tracedecay__+rmcp-benchmark_+test-helpers_+test-transport__dev",
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
     edition = crate_edition(),
