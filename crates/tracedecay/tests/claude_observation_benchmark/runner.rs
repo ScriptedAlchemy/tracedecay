@@ -61,17 +61,25 @@ use super::{
 use super::{baseline, manifest};
 
 fn benchmark_tempdir(prefix: &str) -> TempDir {
-    let executable = fs::canonicalize(std::env::current_exe().expect("resolve test executable"))
-        .expect("canonicalize test executable");
-    let root = executable
-        .parent()
-        .expect("test executable parent")
+    // Bazel's executable tree is read-only; TEST_TMPDIR is its writable,
+    // per-test scratch authority. Native benchmark runs retain target locality.
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let executable =
+                fs::canonicalize(std::env::current_exe().expect("resolve test executable"))
+                    .expect("canonicalize test executable");
+            executable
+                .parent()
+                .expect("test executable parent")
+                .to_path_buf()
+        })
         .join("tracedecay-benchmark-data");
-    fs::create_dir_all(&root).expect("create target-relative benchmark data root");
+    fs::create_dir_all(&root).expect("create benchmark scratch root");
     tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(root)
-        .expect("create target-relative benchmark fixture")
+        .expect("create benchmark fixture")
 }
 
 pub(super) struct Fixture {

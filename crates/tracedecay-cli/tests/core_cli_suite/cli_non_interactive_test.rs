@@ -26,26 +26,32 @@ use tracedecay_runtime_core::storage::{
 use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
-/// that must NOT be classified as "ephemeral" by
-/// `global_db::registry_maintenance`'s `classify_project_root` (which rejects project roots
-/// under the OS temp directory). `env!("CARGO_MANIFEST_DIR")).parent()` used
-/// to serve this purpose, but that only holds when the checkout itself lives
-/// outside the temp directory; a repo cloned under `/tmp` (as some sandboxed
-/// CI/dev environments do) breaks that assumption. Deriving the base from the
-/// running test binary's own on-disk location is robust regardless of where
-/// the checkout lives, because cargo (or any build-cache shim in front of it)
-/// never places build output inside the volatile system temp directory.
-fn ephemeral_safe_fixture_base() -> PathBuf {
-    let exe = std::env::current_exe().expect("test binary has a current_exe path");
-    let profile_dir = exe
-        .parent() // .../target/<profile>/deps
-        .and_then(Path::parent) // .../target/<profile>
-        .expect("test binary sits under a cargo target profile directory")
-        .to_path_buf();
-    let base = profile_dir.join("clone-path-hermetic-fixtures");
-    std::fs::create_dir_all(&base).unwrap();
-    base
+/// Runs each temp-policy fixture with a private OS temporary directory, so
+/// durable fixture paths remain siblings even inside Bazel's writable scratch.
+/// The child boundary keeps temp environment changes away from other tests.
+fn ephemeral_safe_fixture_base(test_path: &str) -> Option<PathBuf> {
+    const ROOT_ENV: &str = "TRACEDECAY_CLI_DURABLE_FIXTURE_ROOT";
+    if let Some(root) = std::env::var_os(ROOT_ENV) {
+        let root = PathBuf::from(root);
+        assert!(!tracedecay_global_db::is_ephemeral_path(&root));
+        return Some(root);
+    }
+    // Keep daemon socket paths short enough for Unix sockaddr_un.
+    let scratch = TempDir::new().expect("isolated temp-policy fixture");
+    let temporary = scratch.path().join("temporary");
+    let durable = scratch.path().join("durable");
+    std::fs::create_dir(&temporary).unwrap();
+    std::fs::create_dir(&durable).unwrap();
+    crate::common::rerun_test_in_child(
+        test_path,
+        &[
+            (ROOT_ENV, Some(durable.as_os_str())),
+            ("TMPDIR", Some(temporary.as_os_str())),
+            ("TMP", Some(temporary.as_os_str())),
+            ("TEMP", Some(temporary.as_os_str())),
+        ],
+    );
+    None
 }
 
 fn profile_root(home: &Path) -> PathBuf {
@@ -2159,10 +2165,15 @@ async fn wipe_all_does_not_repair_host_bundles_before_removing_profile_store() {
 
 #[test]
 fn list_all_reports_orphan_manifest_reconstructable_store() {
+    let Some(durable) = ephemeral_safe_fixture_base(
+        "cli_non_interactive_test::list_all_reports_orphan_manifest_reconstructable_store",
+    ) else {
+        return;
+    };
     let home = TempDir::new().unwrap();
     let project = tempfile::Builder::new()
         .prefix("list-orphan-project-")
-        .tempdir_in(ephemeral_safe_fixture_base())
+        .tempdir_in(durable)
         .unwrap();
     git(project.path(), &["init"]);
     write_profile_sharded_fixture(home.path(), project.path());
@@ -3087,13 +3098,18 @@ async fn branch_gc_preserves_profile_shard_without_repository_evidence() {
 
 #[test]
 fn init_refuses_ephemeral_project_in_persistent_profile() {
+    let Some(durable) = ephemeral_safe_fixture_base(
+        "cli_non_interactive_test::init_refuses_ephemeral_project_in_persistent_profile",
+    ) else {
+        return;
+    };
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("ephemeral project");
     std::fs::write(project.path().join("lib.rs"), "pub fn transient() {}\n")
         .expect("ephemeral source");
     let profile = tempfile::Builder::new()
         .prefix("persistent-profile-")
-        .tempdir_in(ephemeral_safe_fixture_base())
+        .tempdir_in(durable)
         .expect("persistent profile");
     #[cfg(unix)]
     std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(0o700))
