@@ -3,8 +3,8 @@ use tracedecay_code_extraction::NixExtractor;
 use tracedecay_domain::*;
 
 fn extract_sample() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.nix")
-        .expect("failed to read sample.nix");
+    let source =
+        std::fs::read_to_string("tests/fixtures/sample.nix").expect("failed to read sample.nix");
     let extractor = NixExtractor;
     extractor.extract_artifact("sample.nix", &source).result
 }
@@ -123,7 +123,7 @@ fn test_nix_function_signature() {
 }
 
 fn extract_flake() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample-flake.nix")
+    let source = std::fs::read_to_string("tests/fixtures/sample-flake.nix")
         .expect("failed to read sample-flake.nix");
     let extractor = NixExtractor;
     extractor.extract_artifact("flake.nix", &source).result

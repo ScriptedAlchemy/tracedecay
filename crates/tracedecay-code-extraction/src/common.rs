@@ -493,7 +493,10 @@ mod tests {
     fn file_end_line_matches_the_lines_convention_for_every_checked_in_fixture() {
         let registry = LanguageRegistry::new();
         let mut checked = Vec::new();
-        for directory in ["../../tests/fixtures", "fixtures"] {
+        for directory in [
+            "tests/fixtures",
+            "crates/tracedecay-code-extraction/fixtures",
+        ] {
             let mut entries = std::fs::read_dir(Path::new(directory))
                 .unwrap_or_else(|error| panic!("{directory}: {error}"))
                 .map(|entry| entry.expect("fixture entry").path())

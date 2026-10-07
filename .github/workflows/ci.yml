@@ -312,20 +312,6 @@ jobs:
         shell: bash
         run: bazel test --config=ci //...
 
-      - name: Diagnose failed Windows build and test launch
-        if: failure()
-        shell: pwsh
-        run: |
-          $execRoot = (bazel info execution_root).Trim()
-          Get-Content "$execRoot/bazel-out/stable-status.txt"
-          $bin = "$execRoot/bazel-out/x64_windows-fastbuild/bin"
-          Get-Content "$bin/scripts/rust_test_environment_probe.bat"
-          Get-Content "$bin/crates/tracedecay-lsp/*.params.expanded"
-          $testRoot = "$bin/scripts/rust_test_environment_probe.bat.runfiles"
-          $probe = "$testRoot/_main/scripts/rust_test_environment_probe__binary.exe"
-          Get-Item $probe | Format-List FullName,LinkType,Target,Length
-          & $probe
-
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:

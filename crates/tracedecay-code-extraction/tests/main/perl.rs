@@ -4,7 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_perl_call_sites() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
+    let source = std::fs::read_to_string("tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -60,7 +60,7 @@ fn test_perl_call_sites() {
 
 #[test]
 fn test_perl_docstrings() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
+    let source = std::fs::read_to_string("tests/fixtures/sample.pl").unwrap();
     let result = PerlExtractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let docs: Vec<(&str, &str)> = result
@@ -86,7 +86,7 @@ fn test_perl_docstrings() {
 
 #[test]
 fn test_perl_signatures() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
+    let source = std::fs::read_to_string("tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
     let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

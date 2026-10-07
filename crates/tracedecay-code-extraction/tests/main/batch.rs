@@ -4,7 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_batch_call_sites() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string("tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -36,7 +36,7 @@ fn test_batch_call_sites() {
 
 #[test]
 fn test_batch_docstrings() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string("tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
