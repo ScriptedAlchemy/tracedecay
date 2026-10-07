@@ -237,6 +237,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Remove inactive Xcode installations
+        shell: bash
+        run: |
+          df -h /
+          python3 - <<'PYTHON'
+          import pathlib
+          import subprocess
+
+          applications = pathlib.Path("/Applications")
+          selected = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+          active = next((path for path in selected.parents if path.suffix == ".app"), None)
+          if active is None:
+              raise SystemExit(f"Selected developer directory is not an Xcode application: {selected}")
+          print(f"Selected Xcode before cleanup: {active}", flush=True)
+          inactive = [path for path in applications.glob("Xcode*.app") if path.resolve() != active]
+          for path in inactive:
+              print(f"Removing inactive Xcode: {path}", flush=True)
+              subprocess.run(["sudo", "rm", "-rf", "--", str(path)], check=True)
+          after = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+          if after != selected:
+              raise SystemExit(f"Selected developer directory changed: {selected} -> {after}")
+          print(f"Selected Xcode after cleanup: {active}", flush=True)
+          PYTHON
+          df -h /
+
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
