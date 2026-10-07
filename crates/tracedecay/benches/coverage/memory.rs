@@ -222,35 +222,32 @@ pub(crate) async fn seed_feedback_fixture(
         let payload = feedback_payload(&response);
         if let Ok(cycle) =
             serde_json::from_value::<FeedbackAdvisoryCycleSurfaceResultV1>(payload.clone())
-        {
-            if cycle.cycle.published
-                && cycle.read_handles.is_some()
-                && cycle.cycle.cycle.findings.iter().any(|finding| {
-                    finding.safe_bounded_preview.as_deref() == Some(FEEDBACK_DIAGNOSTIC)
-                        && finding.retrieval_anchor_id.is_some()
-                        && finding
-                            .diagnostic_projection
-                            .as_ref()
-                            .is_some_and(|projection| {
-                                projection.safe_bounded_message == FEEDBACK_DIAGNOSTIC
-                                    && projection.span.start_byte == 70
-                                    && projection.span.end_byte == 106
-                                    && cycle
-                                        .cycle
-                                        .cycle
-                                        .impact
-                                        .as_ref()
-                                        .is_some_and(|impact| impact.target.file == projection.file)
-                            })
-                        && cycle.finding_handles.iter().any(|handle| {
-                            handle.finding_id == finding.finding_id
-                                && handle.expansion_handle.is_some()
+            && cycle.cycle.published
+            && cycle.read_handles.is_some()
+            && cycle.cycle.cycle.findings.iter().any(|finding| {
+                finding.safe_bounded_preview.as_deref() == Some(FEEDBACK_DIAGNOSTIC)
+                    && finding.retrieval_anchor_id.is_some()
+                    && finding
+                        .diagnostic_projection
+                        .as_ref()
+                        .is_some_and(|projection| {
+                            projection.safe_bounded_message == FEEDBACK_DIAGNOSTIC
+                                && projection.span.start_byte == 70
+                                && projection.span.end_byte == 106
+                                && cycle
+                                    .cycle
+                                    .cycle
+                                    .impact
+                                    .as_ref()
+                                    .is_some_and(|impact| impact.target.file == projection.file)
                         })
-                })
-            {
-                seeds.feedback = Some(cycle);
-                return Ok(());
-            }
+                    && cycle.finding_handles.iter().any(|handle| {
+                        handle.finding_id == finding.finding_id && handle.expansion_handle.is_some()
+                    })
+            })
+        {
+            seeds.feedback = Some(cycle);
+            return Ok(());
         }
         let problem = response
             .get("problem")
@@ -738,50 +735,48 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             cycle.cycle.cycle.findings.iter().find(|finding| {
                 finding.safe_bounded_preview.as_deref() == Some(FEEDBACK_DIAGNOSTIC)
             })
-        {
-            if let Some(handle) = cycle
+            && let Some(handle) = cycle
                 .finding_handles
                 .iter()
                 .find(|handle| handle.finding_id == finding.finding_id)
-            {
-                for (tool, request_handle) in [
-                    ("tracedecay_feedback_get", Some(&handle.get_handle)),
-                    (
-                        "tracedecay_feedback_expand",
-                        handle.expansion_handle.as_ref(),
-                    ),
-                ] {
-                    if let Some(request_handle) = request_handle {
-                        out.push(ToolGroup {
-                            tool,
-                            queries: five(|_| {
-                                rq(
-                                    tool,
-                                    "fixture_feedback",
-                                    json!({"request_handle": request_handle}),
-                                )
-                            }),
-                        });
-                    }
+        {
+            for (tool, request_handle) in [
+                ("tracedecay_feedback_get", Some(&handle.get_handle)),
+                (
+                    "tracedecay_feedback_expand",
+                    handle.expansion_handle.as_ref(),
+                ),
+            ] {
+                if let Some(request_handle) = request_handle {
+                    out.push(ToolGroup {
+                        tool,
+                        queries: five(|_| {
+                            rq(
+                                tool,
+                                "fixture_feedback",
+                                json!({"request_handle": request_handle}),
+                            )
+                        }),
+                    });
                 }
             }
         }
     }
-    if let Some(path) = &ctx.seeds.compiler_diagnostic_path {
-        if let Ok(document_uri) = url::Url::from_file_path(ctx.project_root.join(path)) {
-            out.push(ToolGroup {
-                tool: "tracedecay_feedback_advisory_cycle",
-                queries: five(|i| {
-                    Query::prepared_read(
-                        "retained_diagnostic_cycle",
-                        "tracedecay_feedback_advisory_cycle",
-                        json!({"document_uri": document_uri.as_str()}),
-                        i,
-                        feedback_cycle_prime,
-                    )
-                }),
-            });
-        }
+    if let Some(path) = &ctx.seeds.compiler_diagnostic_path
+        && let Ok(document_uri) = url::Url::from_file_path(ctx.project_root.join(path))
+    {
+        out.push(ToolGroup {
+            tool: "tracedecay_feedback_advisory_cycle",
+            queries: five(|i| {
+                Query::prepared_read(
+                    "retained_diagnostic_cycle",
+                    "tracedecay_feedback_advisory_cycle",
+                    json!({"document_uri": document_uri.as_str()}),
+                    i,
+                    feedback_cycle_prime,
+                )
+            }),
+        });
     }
     out.push(ToolGroup {
         tool: "tracedecay_test_results",

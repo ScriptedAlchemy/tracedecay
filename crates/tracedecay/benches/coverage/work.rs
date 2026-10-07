@@ -205,10 +205,10 @@ fn verify_work_effect_fixture(
             .or_else(|| response.pointer("/outcome/value"))
             .ok_or("Work effect omitted its canonical result")?;
         let payload = result.get("payload").ok_or("Work effect omitted payload")?;
-        if let Some(receipt) = result.get("receipt") {
-            if receipt["outcome"] != "completed" || result["reconciliation"] != "reconciled" {
-                return Err("Work effect did not complete and reconcile its receipt".to_owned());
-            }
+        if let Some(receipt) = result.get("receipt")
+            && (receipt["outcome"] != "completed" || result["reconciliation"] != "reconciled")
+        {
+            return Err("Work effect did not complete and reconcile its receipt".to_owned());
         }
         let identity = json!({"task_id": args["task_id"], "run_id": args["run_id"], "attempt_id": args["attempt_id"]});
         let run_identity = json!({"task_id": args["task_id"], "run_id": args["run_id"]});

@@ -386,7 +386,7 @@ fn bounded_json(value: &Value) -> String {
     let rendered = value.to_string();
     let mut preview = rendered.chars().take(512).collect::<String>();
     if rendered.chars().count() > 512 {
-        preview.push_str("…");
+        preview.push('…');
     }
     preview
 }
