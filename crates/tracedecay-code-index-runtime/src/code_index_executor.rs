@@ -1901,6 +1901,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_git_control_link_is_unavailable_authority() {
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("missing-git-directory", root.path().join(".git")).unwrap();
+
+        assert_eq!(
+            crate::mcp_admission::RegisteredProjectScopeResolverV1.resolved_scope_for_project(
+                root.path(),
+                &ProjectId::new("project.dangling-git-link").unwrap(),
+            ),
+            Err(CodeIndexScopeUnavailableV1::AuthorityUnavailable),
+            "a broken Git control link must not be described as a non-Git project",
+        );
+    }
+
     #[derive(Clone)]
     struct FixedScopeResolver(ResolvedScope);
 

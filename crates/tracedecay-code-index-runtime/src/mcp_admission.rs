@@ -47,7 +47,12 @@ impl CodeIndexScopeResolverV1 for RegisteredProjectScopeResolverV1 {
     ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
         // Indexing mounts only the root's own Git control path. Do not discover
         // a parent repository or mistake a failed filesystem probe for non-Git.
-        match std::fs::metadata(project_root.join(".git")) {
+        let git_control_path = project_root.join(".git");
+        match std::fs::symlink_metadata(&git_control_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::metadata(&git_control_path)
+                    .map_err(|_| CodeIndexScopeUnavailableV1::AuthorityUnavailable)?;
+            }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return match std::fs::metadata(project_root) {
