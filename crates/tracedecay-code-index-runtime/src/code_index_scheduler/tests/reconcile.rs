@@ -2056,6 +2056,14 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     );
     assert_eq!(registry.retiring_owner_count().await, 0);
 
+    assert!(matches!(
+        registry
+            .mount_worktree(test_project_id(), fixture.path(), store.path().to_path_buf())
+            .await,
+        Err(super::super::CodeIndexSchedulerErrorV1::Identity(message))
+            if message.contains("still retiring")
+    ));
+
     release_cold_commit
         .send(())
         .expect("release paused cold mount final commit");
@@ -2077,14 +2085,19 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
 
     assert!(
         registry
-            .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
-            .await,
-        "the completed retired cold reservation must release"
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf()
+            )
+            .await
+            .expect("remount reaps the completed retired cold reservation"),
+        "the replacement must publish a new owner"
     );
     assert_eq!(registry.retiring_owner_count().await, 0);
     assert!(
-        !registry.mounted.lock().await.contains_key(&root),
-        "the rejected cold mount must not leave a replacement worker"
+        registry.mounted.lock().await.contains_key(&root),
+        "only the replacement mount must publish a worker"
     );
 
     registry.shutdown().await;
@@ -7042,7 +7055,7 @@ async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() {
+async fn project_retirement_retains_blocked_worker_until_remount_joins_completion() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -7097,16 +7110,46 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
         .await;
     let retained = registry.retiring_owner_count().await;
-    drop(release);
     assert!(!drained, "blocked writer must report settling");
     assert_eq!(retained, 1);
+    assert!(matches!(
+        registry
+            .mount_worktree(test_project_id(), fixture.path(), store.path().to_path_buf())
+            .await,
+        Err(super::super::CodeIndexSchedulerErrorV1::Identity(message))
+            if message.contains("still retiring")
+    ));
+    drop(release);
+    drop(scheduler);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let finished = registry
+                .retiring
+                .lock()
+                .await
+                .values()
+                .all(|worktree| worktree.task.is_finished());
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released retired worker must complete");
     assert!(
         registry
-            .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
-            .await,
-        "retry must join the retained owner"
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf()
+            )
+            .await
+            .expect("remount joins the completed retired worker"),
+        "remount must publish a replacement owner"
     );
     assert_eq!(registry.retiring_owner_count().await, 0);
+    registry.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
