@@ -71,6 +71,8 @@ test:ci --test_summary=terse
 # Suites spawn host tools (ast-grep, node, git, and rust-analyzer through
 # the rustup proxy, which needs its homes to find the pinned toolchain).
 test:ci --test_env=PATH
+# Let the launcher resolve default toolchain homes before it isolates HOME.
+test:ci --test_env=HOME
 test:ci --test_env=RUSTUP_HOME
 test:ci --test_env=CARGO_HOME
 
