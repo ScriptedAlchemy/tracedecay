@@ -9,8 +9,13 @@ build --workspace_status_command=scripts/bazel/workspace_status.sh
 build:windows --workspace_status_command=scripts\\bazel\\workspace_status.bat
 # .cargo/config.toml compiles vendored C deps with NDEBUG. Keep parity for
 # cc crates built inside cargo_build_script actions (tree-sitter grammars).
-build --action_env=CFLAGS=-DNDEBUG
-build --action_env=CXXFLAGS=-DNDEBUG
+# rules_rust replaces a build script's CFLAGS/CXXFLAGS with the C toolchain's
+# own arguments, so the flags travel as HOST_ and TARGET_ variants, which
+# cc-rs appends to them; it reads HOST_ for native builds, TARGET_ for cross.
+build --action_env=HOST_CFLAGS=-DNDEBUG
+build --action_env=TARGET_CFLAGS=-DNDEBUG
+build --action_env=HOST_CXXFLAGS=-DNDEBUG
+build --action_env=TARGET_CXXFLAGS=-DNDEBUG
 # rules_rust compiles env!("CARGO_MANIFEST_DIR") to "${pwd}/<pkg>", which is the
 # sandbox execroot. Crates that read CARGO_MANIFEST_DIR with env! instead of
 # env::var (arborium grammars) then use a dead sandbox path when the build
@@ -31,8 +36,10 @@ build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-fuse-ld=b
 # MSVC encodes narrow string literals in the host ANSI code page unless told
 # otherwise, so tree-sitter grammars that spell symbol names as universal
 # character names become invalid UTF-8 (see .cargo/config.toml).
-build:windows "--action_env=CFLAGS=-DNDEBUG /utf-8"
-build:windows "--action_env=CXXFLAGS=-DNDEBUG /utf-8"
+build:windows "--action_env=HOST_CFLAGS=-DNDEBUG /utf-8"
+build:windows "--action_env=TARGET_CFLAGS=-DNDEBUG /utf-8"
+build:windows "--action_env=HOST_CXXFLAGS=-DNDEBUG /utf-8"
+build:windows "--action_env=TARGET_CXXFLAGS=-DNDEBUG /utf-8"
 # Genrules run Git Bash under a stripped PATH that holds no Python; hand
 # actions the runner's PATH, as Linux and macOS find python3 in /usr/bin.
 build:windows --action_env=PATH
