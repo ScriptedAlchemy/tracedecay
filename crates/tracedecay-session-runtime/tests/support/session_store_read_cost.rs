@@ -13,15 +13,12 @@
 //! the public ingest and retention paths on the same store before and after
 //! it, or one live session in it, grows.
 
-#![cfg(target_os = "linux")]
-
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -56,28 +53,25 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 use tracedecay_sessions::runtime::{
     TranscriptIngestOutcome, ingest_project_sources_for_provider, with_transcript_source_profile,
 };
-use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
-const PROVIDER: &str = "codex";
-const MESSAGES_PER_SESSION: u64 = 5;
-const BASE_SESSIONS: u64 = 100;
-const GROWN_SESSIONS: u64 = 8 * BASE_SESSIONS;
-const SEED_TIMESTAMP: i64 = 1_780_000_000;
-const DRAIN_WINDOW: usize = 4_096;
-const MAX_REFRESH_PASSES: usize = 4_096;
+pub const PROVIDER: &str = "codex";
+pub const MESSAGES_PER_SESSION: u64 = 5;
+pub const BASE_SESSIONS: u64 = 100;
+pub const GROWN_SESSIONS: u64 = 8 * BASE_SESSIONS;
+pub const SEED_TIMESTAMP: i64 = 1_780_000_000;
+pub const DRAIN_WINDOW: usize = 4_096;
+pub const MAX_REFRESH_PASSES: usize = 4_096;
 /// Retention runs long after the seeded messages, so every window has passed.
-const RETENTION_NOW: i64 = SEED_TIMESTAMP + 400 * 86_400;
+pub const RETENTION_NOW: i64 = SEED_TIMESTAMP + 400 * 86_400;
 
-/// Reads are measured for the whole process, so the probes must not overlap.
-static MEASURED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Hosts title a session with its opening prompt, so real session rows carry
 // kilobytes of text.
-const PROMPT_TITLE_WORDS: usize = 500;
-const BACKLOG_SESSIONS: u64 = 4;
-const BASE_BACKLOG_MESSAGES: u64 = 40;
-const GROWN_BACKLOG_MESSAGES: u64 = 16 * BASE_BACKLOG_MESSAGES;
+pub const PROMPT_TITLE_WORDS: usize = 500;
+pub const BACKLOG_SESSIONS: u64 = 4;
+pub const BASE_BACKLOG_MESSAGES: u64 = 40;
+pub const GROWN_BACKLOG_MESSAGES: u64 = 16 * BASE_BACKLOG_MESSAGES;
 
-fn process_read_bytes() -> u64 {
+pub fn process_read_bytes() -> u64 {
     let io = std::fs::read_to_string("/proc/self/io").unwrap();
     io.lines()
         .find_map(|line| line.strip_prefix("rchar: "))
@@ -87,13 +81,13 @@ fn process_read_bytes() -> u64 {
         .unwrap()
 }
 
-struct SessionCursor {
-    session_id: SessionId,
-    next_ordinal: u64,
-    next_offset: u64,
+pub struct SessionCursor {
+    pub session_id: SessionId,
+    pub next_ordinal: u64,
+    pub next_offset: u64,
 }
 
-fn session_cursor(index: u64) -> SessionCursor {
+pub fn session_cursor(index: u64) -> SessionCursor {
     SessionCursor {
         session_id: SessionId::new(format!("session.drain-read-cost.{index:05}")).unwrap(),
         next_ordinal: 0,
@@ -101,7 +95,7 @@ fn session_cursor(index: u64) -> SessionCursor {
     }
 }
 
-fn message_requests(
+pub fn message_requests(
     project: &Path,
     scope: &ObservationScopeV1,
     cursor: &mut SessionCursor,
@@ -205,7 +199,7 @@ fn message_requests(
         .collect()
 }
 
-async fn capture(facade: &HostAdmissionFacade<'_>, requests: Vec<CaptureObservationRequest>) {
+pub async fn capture(facade: &HostAdmissionFacade<'_>, requests: Vec<CaptureObservationRequest>) {
     let expected = requests.len();
     let outcomes = facade.capture_observations(requests).await.unwrap();
     assert_eq!(outcomes.len(), expected);
@@ -216,7 +210,7 @@ async fn capture(facade: &HostAdmissionFacade<'_>, requests: Vec<CaptureObservat
     )));
 }
 
-async fn drain(facade: &HostAdmissionFacade<'_>, scope: &ObservationScopeV1) -> u64 {
+pub async fn drain(facade: &HostAdmissionFacade<'_>, scope: &ObservationScopeV1) -> u64 {
     let mut projected = 0;
     loop {
         let outcome = facade
@@ -237,7 +231,7 @@ async fn drain(facade: &HostAdmissionFacade<'_>, scope: &ObservationScopeV1) -> 
 
 /// Seeds `sessions` with a full history each and returns the first session's
 /// cursor, which the probes extend.
-async fn seed_sessions(
+pub async fn seed_sessions(
     facade: &HostAdmissionFacade<'_>,
     project: &Path,
     scope: &ObservationScopeV1,
@@ -267,7 +261,7 @@ async fn seed_sessions(
 
 /// Captures and drains one new message on an existing session, returning the
 /// bytes the process read to do it.
-async fn probe_one_message(
+pub async fn probe_one_message(
     facade: &HostAdmissionFacade<'_>,
     project: &Path,
     scope: &ObservationScopeV1,
@@ -291,7 +285,7 @@ async fn probe_one_message(
     read
 }
 
-fn run_git(project: &Path, args: &[&str]) {
+pub fn run_git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(project)
@@ -300,16 +294,16 @@ fn run_git(project: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?} failed");
 }
 
-struct DrainFixture {
-    _tmp: TempDir,
-    project: PathBuf,
-    project_id: ProjectId,
-    provenance: RepositoryProvenanceAdmissionContext,
-    runtime: HostAdmissionTestRuntimeV1,
+pub struct DrainFixture {
+    pub _tmp: TempDir,
+    pub project: PathBuf,
+    pub project_id: ProjectId,
+    pub provenance: RepositoryProvenanceAdmissionContext,
+    pub runtime: HostAdmissionTestRuntimeV1,
 }
 
 impl DrainFixture {
-    async fn open() -> Self {
+    pub async fn open() -> Self {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("drain-read-cost");
         std::fs::create_dir_all(&project).unwrap();
@@ -360,7 +354,7 @@ impl DrainFixture {
         }
     }
 
-    fn facade(&self) -> HostAdmissionFacade<'_> {
+    pub fn facade(&self) -> HostAdmissionFacade<'_> {
         let database = self
             .runtime
             .registered_database(HostAdmissionScope::Project)
@@ -380,7 +374,7 @@ impl DrainFixture {
         )
     }
 
-    fn scope(&self) -> ObservationScopeV1 {
+    pub fn scope(&self) -> ObservationScopeV1 {
         ObservationScopeV1::Project {
             project_id: self.project_id.clone(),
         }
@@ -392,7 +386,7 @@ impl DrainFixture {
 /// one probe measures periodic maintenance rather than this message's reads.
 /// Ordinary capture/drain writes on a separate session advance the log to its
 /// next generation; checkpoint policy and the probed session stay unchanged.
-async fn probe_drain_after_wal_restart(
+pub async fn probe_drain_after_wal_restart(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
     probed: &mut SessionCursor,
@@ -433,64 +427,10 @@ async fn probe_drain_after_wal_restart(
     read
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn single_message_drain_reads_do_not_scale_with_the_session_store() {
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-
-    let mut probed = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
-    let mut padding = session_cursor(GROWN_SESSIONS);
-    let base_read = probe_drain_after_wal_restart(
-        &facade,
-        &fixture,
-        &mut probed,
-        &mut padding,
-        probe_timestamp,
-    )
-    .await;
-
-    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
-    assert_eq!(
-        fixture
-            .runtime
-            .project_session_message_count_for_test()
-            .await
-            .unwrap(),
-        i64::try_from(GROWN_SESSIONS * MESSAGES_PER_SESSION + 1 + padding.next_ordinal).unwrap(),
-    );
-    let grown_read = probe_drain_after_wal_restart(
-        &facade,
-        &fixture,
-        &mut probed,
-        &mut padding,
-        probe_timestamp + 1,
-    )
-    .await;
-
-    assert_eq!(
-        fixture
-            .runtime
-            .project_session_message_count_for_test()
-            .await
-            .unwrap(),
-        i64::try_from(GROWN_SESSIONS * MESSAGES_PER_SESSION + 2 + padding.next_ordinal).unwrap(),
-    );
-
-    eprintln!("single-message drain read bytes: base={base_read} grown={grown_read}");
-    assert!(
-        grown_read <= base_read * 2,
-        "an 8x larger session store must not double one message's drain reads: \
-         base={base_read} grown={grown_read}"
-    );
-}
-
 /// Captures `messages_per_session` new messages on each of `sessions` without
 /// draining, then drains that whole backlog, returning the bytes read per
 /// projected message.
-async fn backlog_drain_read_per_message(
+pub async fn backlog_drain_read_per_message(
     facade: &HostAdmissionFacade<'_>,
     project: &Path,
     scope: &ObservationScopeV1,
@@ -524,41 +464,9 @@ async fn backlog_drain_read_per_message(
     read / backlog
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pending_backlog_drain_reads_scale_with_the_backlog() {
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-
-    let base = backlog_drain_read_per_message(
-        &facade,
-        project,
-        &scope,
-        0..BACKLOG_SESSIONS,
-        BASE_BACKLOG_MESSAGES,
-    )
-    .await;
-    let grown = backlog_drain_read_per_message(
-        &facade,
-        project,
-        &scope,
-        BACKLOG_SESSIONS..2 * BACKLOG_SESSIONS,
-        GROWN_BACKLOG_MESSAGES,
-    )
-    .await;
-
-    eprintln!("backlog drain read bytes per message: base={base} grown={grown}");
-    assert!(
-        grown <= base * 2,
-        "draining a 16x larger backlog must not double each message's reads: \
-         base={base} grown={grown}"
-    );
-}
-
 /// Runs temporal refresh passes until one finds nothing to begin, project, or
 /// complete, returning the refreshes completed.
-async fn refresh_until_idle(
+pub async fn refresh_until_idle(
     database: &RegisteredGlobalDbLeaseV1,
     state: &Arc<SessionTemporalRefreshWakeState>,
 ) -> usize {
@@ -594,58 +502,11 @@ async fn refresh_until_idle(
     panic!("temporal refresh did not settle within {MAX_REFRESH_PASSES} passes");
 }
 
-/// Each probe starts from emptied connection caches, so the comparison counts
-/// the pages one message touches rather than how much of each store the
-/// caches still hold after seeding: a cache that holds the whole base store
-/// but only part of the grown one would otherwise read as growth.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-
-    let mut probed = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    assert_eq!(
-        refresh_until_idle(&database, &refresh).await,
-        usize::try_from(BASE_SESSIONS).unwrap()
-    );
-    let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
-    database.release_connection_memory().await.unwrap();
-    let before = process_read_bytes();
-    probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp).await;
-    assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
-    let base_read = process_read_bytes() - before;
-
-    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
-    assert_eq!(
-        refresh_until_idle(&database, &refresh).await,
-        usize::try_from(GROWN_SESSIONS - BASE_SESSIONS).unwrap()
-    );
-    database.release_connection_memory().await.unwrap();
-    let before = process_read_bytes();
-    probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp + 1).await;
-    assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
-    let grown_read = process_read_bytes() - before;
-
-    eprintln!("streamed message ingest read bytes: base={base_read} grown={grown_read}");
-    assert!(
-        grown_read <= base_read * 2,
-        "an 8x larger session store must not double one streamed message's reads: \
-         base={base_read} grown={grown_read}"
-    );
-}
-
 /// Streams `count` messages into the live session one at a time, capturing,
 /// draining, and refreshing each, and returns the bytes the process read and
 /// the VM steps the store's writer executed per message across that whole
 /// ingest.
-async fn ingest_live_messages(
+pub async fn ingest_live_messages(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
     database: &RegisteredGlobalDbLeaseV1,
@@ -672,100 +533,7 @@ async fn ingest_live_messages(
     (read / count, steps / count)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
-    const BASE_LENGTH: u64 = 16;
-    const PROBE_MESSAGES: u64 = 4;
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
-    let mut live = session_cursor(0);
-
-    ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut live,
-        BASE_LENGTH - PROBE_MESSAGES,
-    )
-    .await;
-    let (base_read, base_steps) = ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut live,
-        PROBE_MESSAGES,
-    )
-    .await;
-    assert_eq!(live.next_ordinal, BASE_LENGTH);
-
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    capture(
-        &facade,
-        message_requests(
-            project,
-            &scope,
-            &mut live,
-            6 * BASE_LENGTH,
-            SEED_TIMESTAMP + i64::try_from(BASE_LENGTH).unwrap(),
-            PROMPT_TITLE_WORDS,
-        ),
-    )
-    .await;
-    drain(&facade, &scope).await;
-    assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
-    ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut live,
-        BASE_LENGTH - PROBE_MESSAGES,
-    )
-    .await;
-    let (grown_read, grown_steps) = ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut live,
-        PROBE_MESSAGES,
-    )
-    .await;
-    assert_eq!(live.next_ordinal, 8 * BASE_LENGTH);
-    assert_eq!(
-        fixture
-            .runtime
-            .project_session_message_count_for_test()
-            .await
-            .unwrap(),
-        i64::try_from(8 * BASE_LENGTH).unwrap(),
-    );
-
-    eprintln!(
-        "live-session streamed message ingest: read bytes base={base_read} \
-         grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}"
-    );
-    assert!(
-        grown_read * 5 <= base_read * 6,
-        "an 8x longer live session must keep each streamed message's ingest reads \
-         within 1.2x: base={base_read} grown={grown_read}"
-    );
-    assert!(
-        grown_steps * 5 <= base_steps * 6,
-        "an 8x longer live session must keep each streamed message's ingest writer \
-         work within 1.2x: base={base_steps} grown={grown_steps}"
-    );
-}
-
-fn session_store_path(fixture: &DrainFixture) -> PathBuf {
+pub fn session_store_path(fixture: &DrainFixture) -> PathBuf {
     let mut stores = Vec::new();
     let mut pending = vec![fixture._tmp.path().join("profile")];
     while let Some(dir) = pending.pop() {
@@ -784,7 +552,7 @@ fn session_store_path(fixture: &DrainFixture) -> PathBuf {
 
 /// The WAL header's checkpoint sequence, which SQLite advances each time the
 /// writer restarts the log from its head after a complete checkpoint.
-fn wal_checkpoint_sequence(wal: &Path) -> u32 {
+pub fn wal_checkpoint_sequence(wal: &Path) -> u32 {
     let mut header = [0; 16];
     std::fs::File::open(wal)
         .unwrap()
@@ -793,98 +561,16 @@ fn wal_checkpoint_sequence(wal: &Path) -> u32 {
     u32::from_be_bytes(header[12..16].try_into().unwrap())
 }
 
-/// Ingest keeps writing while readers keep reading, as in a live daemon. The
-/// writer checkpoints once the log crosses the soft limit, and the log is
-/// reused from its head only once a checkpoint returned every frame and no
-/// reader still needs the old ones. A reader that pins the log, or a
-/// checkpoint that never completes, leaves the writer appending without
-/// bound; a restarted log stays at its retained size, the soft limit, plus
-/// at most the one batch that crossed it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sustained_stream_with_concurrent_readers_keeps_the_wal_bounded() {
-    const STREAMED_SESSIONS: u64 = 2 * BASE_SESSIONS;
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let wal = session_store_path(&fixture).with_extension("db-wal");
-    let streaming = AtomicBool::new(true);
-    let reads = AtomicU64::new(0);
-    let probe = format!("{}.message.00000", session_cursor(0).session_id.as_str());
-    seed_sessions(&facade, project, &scope, 0..1).await;
-    let restarts_before = wal_checkpoint_sequence(&wal);
-
-    let stream = async {
-        let mut largest = 0;
-        for index in 1..STREAMED_SESSIONS {
-            let mut cursor = session_cursor(index);
-            let timestamp = SEED_TIMESTAMP + i64::try_from(index * MESSAGES_PER_SESSION).unwrap();
-            capture(
-                &facade,
-                message_requests(
-                    project,
-                    &scope,
-                    &mut cursor,
-                    MESSAGES_PER_SESSION,
-                    timestamp,
-                    PROMPT_TITLE_WORDS,
-                ),
-            )
-            .await;
-            drain(&facade, &scope).await;
-            refresh_until_idle(&database, &refresh).await;
-            largest = largest.max(std::fs::metadata(&wal).unwrap().len());
-        }
-        streaming.store(false, Ordering::Release);
-        largest
-    };
-    let reader = || async {
-        while streaming.load(Ordering::Acquire) {
-            assert!(
-                facade
-                    .has_session_message(&scope, PROVIDER, &probe)
-                    .await
-                    .unwrap()
-            );
-            reads.fetch_add(1, Ordering::Relaxed);
-            tokio::task::yield_now().await;
-        }
-    };
-    let (largest_wal, (), ()) = tokio::join!(stream, reader(), reader());
-    let restarts = wal_checkpoint_sequence(&wal) - restarts_before;
-
-    eprintln!(
-        "sustained stream: largest WAL {largest_wal} bytes, {restarts} log restarts, {} \
-         concurrent reads",
-        reads.load(Ordering::Relaxed)
-    );
-    assert!(reads.load(Ordering::Relaxed) > 0);
-    assert!(
-        largest_wal <= 2 * WAL_SOFT_LIMIT_BYTES,
-        "the WAL must stay within twice its soft limit under a sustained stream with \
-         concurrent readers: largest={largest_wal}"
-    );
-    assert!(
-        restarts >= 4,
-        "the stream must cross the soft limit and restart the log repeatedly: {restarts}"
-    );
-}
-
 /// The writer's position in the log: the checkpoint sequence of the log
 /// generation and the last valid frame (`mxFrame` of the `-shm` wal-index
 /// header).
 #[derive(Clone, Copy)]
-struct WalMark {
-    sequence: u32,
-    max_frame: u32,
+pub struct WalMark {
+    pub sequence: u32,
+    pub max_frame: u32,
 }
 
-fn wal_mark(store: &Path) -> WalMark {
+pub fn wal_mark(store: &Path) -> WalMark {
     let shm = std::fs::read(store.with_extension("db-shm")).unwrap();
     WalMark {
         sequence: wal_checkpoint_sequence(&store.with_extension("db-wal")),
@@ -895,7 +581,7 @@ fn wal_mark(store: &Path) -> WalMark {
 /// Commit frames the writer appended between two marks, or `None` when the log
 /// restarted since the first mark. A commit frame's header carries the
 /// database size after the commit; every other frame carries zero there.
-fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
+pub fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
     use std::os::unix::fs::FileExt;
     if from.sequence != to.sequence || to.max_frame < from.max_frame {
         return None;
@@ -921,68 +607,9 @@ fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
     (sequence(&header) == from.sequence).then_some(commits)
 }
 
-/// One streamed message commits once per durability boundary.
-///
-/// Capture commits source presence, the observation, its external-source
-/// receipt, and the message's Git evidence span before the host is
-/// acknowledged. The drain commits the external-source replay, the
-/// observation projection, and the Git evidence convergence. The temporal
-/// refresh commits its projected batch: the operation's begin folds into
-/// that same commit, the pending relation receipt the native graph write
-/// recovers from, and the activation that settles that receipt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_message_commits_once_per_durability_boundary() {
-    const MESSAGES: u64 = 8;
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let store = session_store_path(&fixture);
-
-    let mut live = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    refresh_until_idle(&database, &refresh).await;
-    let mut measured = Vec::new();
-    for _ in 0..MESSAGES {
-        let timestamp = SEED_TIMESTAMP + i64::try_from(live.next_ordinal).unwrap();
-        let start = wal_mark(&store);
-        capture(
-            &facade,
-            message_requests(project, &scope, &mut live, 1, timestamp, PROMPT_TITLE_WORDS),
-        )
-        .await;
-        let captured = wal_mark(&store);
-        assert_eq!(drain(&facade, &scope).await, 1);
-        let drained = wal_mark(&store);
-        assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
-        let refreshed = wal_mark(&store);
-        if let (Some(capture), Some(drain), Some(refresh)) = (
-            wal_commits(&store, start, captured),
-            wal_commits(&store, captured, drained),
-            wal_commits(&store, drained, refreshed),
-        ) {
-            measured.push((capture, drain, refresh));
-        }
-    }
-
-    eprintln!("streamed message commits (capture, drain, refresh): {measured:?}");
-    assert!(
-        measured.len() >= 4,
-        "most messages must land within one log generation: {measured:?}"
-    );
-    assert!(
-        measured.iter().all(|commits| *commits == (4, 3, 3)),
-        "one streamed message must commit once per durability boundary: {measured:?}"
-    );
-}
-
 /// One project history pass over every host provider, as the session
 /// temporal refresh runs it, reading transcripts under `home`.
-async fn project_history_pass(
+pub async fn project_history_pass(
     fixture: &DrainFixture,
     database: &RegisteredGlobalDbLeaseV1,
     home: &Path,
@@ -1006,48 +633,9 @@ async fn project_history_pass(
     .await
 }
 
-/// The daemon reruns the history pass every idle minute whether or not a
-/// host wrote anything. A pass that finds nothing new must leave the store
-/// as it was: every commit it makes is WAL every reader and checkpoint then
-/// rereads, for as long as the daemon idles.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn idle_history_pass_commits_nothing() {
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let store = session_store_path(&fixture);
-    let home = fixture._tmp.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-
-    let start = wal_mark(&store);
-    let first = project_history_pass(&fixture, &database, &home).await;
-    let settled = wal_mark(&store);
-    let idle = project_history_pass(&fixture, &database, &home).await;
-    let idled = wal_mark(&store);
-
-    assert!(
-        first.failures.is_empty() && idle.failures.is_empty(),
-        "history passes must not fail: first={:?} idle={:?}",
-        first.failures,
-        idle.failures,
-    );
-    assert!(
-        wal_commits(&store, start, settled).is_some_and(|commits| commits > 0),
-        "the first pass records each provider's coverage"
-    );
-    assert_eq!(
-        wal_commits(&store, settled, idled),
-        Some(0),
-        "a history pass that finds nothing new must commit nothing"
-    );
-}
-
 /// Levels of every B-tree in the fixture's project session store: the pages
 /// one point lookup in that tree reads on a cold reader.
-fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
+pub fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
     let connection = rusqlite::Connection::open_with_flags(
         session_store_path(fixture),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1072,9 +660,9 @@ fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
 /// cost of the frames every message wrote, which
 /// `sustained_stream_with_concurrent_readers_keeps_the_wal_bounded` bounds,
 /// so the median measures what reading one message costs.
-const MEDIAN_PROBE_MESSAGES: u64 = 4;
+pub const MEDIAN_PROBE_MESSAGES: u64 = 4;
 
-async fn median_streamed_message_reads(
+pub async fn median_streamed_message_reads(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
     database: &RegisteredGlobalDbLeaseV1,
@@ -1100,121 +688,9 @@ async fn median_streamed_message_reads(
     reads[windows / 2]
 }
 
-/// An 8x larger store may only deepen the B-trees a streamed message looks
-/// up. A tree of n pages with interior fanout f has 1 + ceil(log_f n) levels,
-/// and session-store interior pages hold far more than 8 keys, so 8x the rows
-/// adds at most one level to any tree. A point lookup in a tree of d levels
-/// reads d pages, so one that gains a level reads at most (d + 1) / d as much,
-/// and the worst case over the trees that gained a level, the shallowest of
-/// them, bounds a message whose reads are all point lookups. A scan of any
-/// store-sized range grows 8x and breaks that bound.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_message_ingest_reads_grow_only_with_index_depth() {
-    const LIVE_LENGTH: u64 = 16;
-    const WINDOWS: usize = 5;
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database_lease(HostAdmissionScope::Project)
-        .unwrap();
-    let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-
-    seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    refresh_until_idle(&database, &refresh).await;
-    let mut base_live = session_cursor(GROWN_SESSIONS);
-    ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut base_live,
-        LIVE_LENGTH,
-    )
-    .await;
-    let base_read = median_streamed_message_reads(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut base_live,
-        WINDOWS,
-    )
-    .await;
-    let base_depths = session_store_tree_depths(&fixture);
-
-    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
-    refresh_until_idle(&database, &refresh).await;
-    let mut grown_live = session_cursor(GROWN_SESSIONS + 1);
-    ingest_live_messages(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut grown_live,
-        LIVE_LENGTH,
-    )
-    .await;
-    let grown_read = median_streamed_message_reads(
-        &facade,
-        &fixture,
-        &database,
-        &refresh,
-        &mut grown_live,
-        WINDOWS,
-    )
-    .await;
-    let grown_depths = session_store_tree_depths(&fixture);
-    assert_eq!(
-        fixture
-            .runtime
-            .project_session_message_count_for_test()
-            .await
-            .unwrap(),
-        i64::try_from(
-            GROWN_SESSIONS * MESSAGES_PER_SESSION
-                + 2 * (LIVE_LENGTH + MEDIAN_PROBE_MESSAGES * u64::try_from(WINDOWS).unwrap())
-        )
-        .unwrap(),
-    );
-
-    let mut deepened = Vec::new();
-    for (tree, grown) in &grown_depths {
-        let base = base_depths.get(tree).copied().unwrap_or(1);
-        assert!(
-            *grown <= base + 1,
-            "an 8x larger store must add at most one level to {tree}: {base} -> {grown}"
-        );
-        if *grown > base {
-            deepened.push((tree.as_str(), base));
-        }
-    }
-    let shallowest = deepened
-        .iter()
-        .map(|(_, base)| *base)
-        .min()
-        .unwrap_or(u32::MAX);
-    eprintln!(
-        "8x store streamed message ingest read bytes: base={base_read} grown={grown_read}; \
-         trees that gained a level (base depth): {deepened:?}"
-    );
-    assert!(
-        !deepened.is_empty(),
-        "an 8x larger store must deepen a tree"
-    );
-    assert!(
-        grown_read * u64::from(shallowest) <= base_read * u64::from(shallowest + 1),
-        "an 8x larger store must grow a streamed message's reads by at most \
-         (d + 1) / d for the shallowest deepened tree d={shallowest}: \
-         base={base_read} grown={grown_read}"
-    );
-}
-
 /// SQLite VM steps the store's writer executed, and its rolled-back
 /// transactions: the work retention does inside its write transactions.
-fn writer_work(database: &RegisteredGlobalDb) -> (u64, u64) {
+pub fn writer_work(database: &RegisteredGlobalDb) -> (u64, u64) {
     let writer = writer_telemetry(database);
     (
         writer.sqlite_vm.vm_steps,
@@ -1224,7 +700,7 @@ fn writer_work(database: &RegisteredGlobalDb) -> (u64, u64) {
 
 /// Runs one maintenance retention tick and returns the VM steps its write
 /// transactions executed.
-async fn retention_writer_steps(database: &RegisteredGlobalDb) -> u64 {
+pub async fn retention_writer_steps(database: &RegisteredGlobalDb) -> u64 {
     let (steps_before, rolled_back_before) = writer_work(database);
     let report = run_registered_store_retention(
         database,
@@ -1242,32 +718,8 @@ async fn retention_writer_steps(database: &RegisteredGlobalDb) -> u64 {
     steps_after - steps_before
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retention_write_transactions_do_not_scale_with_the_session_store() {
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-
-    seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    let base_steps = retention_writer_steps(database).await;
-    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
-    let grown_steps = retention_writer_steps(database).await;
-
-    eprintln!("retention writer VM steps: base={base_steps} grown={grown_steps}");
-    assert!(
-        grown_steps <= base_steps * 2,
-        "an 8x larger session store must not double the work retention does inside \
-         its write transactions: base={base_steps} grown={grown_steps}"
-    );
-}
-
 /// Runs one maintenance retention tick and returns the bytes the process read.
-async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
+pub async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
     let before = process_read_bytes();
     let report = run_registered_store_retention(
         database,
@@ -1278,57 +730,4 @@ async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
     .await;
     assert!(report.succeeded(), "retention must succeed");
     process_read_bytes() - before
-}
-
-/// Every retention tick after the store settles follows the messages streamed
-/// since the previous tick. Payload GC, observation release, session
-/// retention, and observability pruning each select from their own cursors or
-/// candidate indexes, so an 8x larger store costs the same tick.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retention_tick_reads_do_not_scale_with_the_session_store() {
-    const STREAMED: u64 = 64;
-    let _measured = MEASURED.lock().await;
-    let fixture = DrainFixture::open().await;
-    let facade = fixture.facade();
-    let database = fixture
-        .runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
-
-    let mut streamed = seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
-    retention_tick_read_bytes(database).await;
-    for offset in 0..STREAMED {
-        probe_one_message(
-            &facade,
-            project,
-            &scope,
-            &mut streamed,
-            probe_timestamp + i64::try_from(offset).unwrap(),
-        )
-        .await;
-    }
-    let base_read = retention_tick_read_bytes(database).await;
-
-    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
-    retention_tick_read_bytes(database).await;
-    for offset in STREAMED..2 * STREAMED {
-        probe_one_message(
-            &facade,
-            project,
-            &scope,
-            &mut streamed,
-            probe_timestamp + i64::try_from(offset).unwrap(),
-        )
-        .await;
-    }
-    let grown_read = retention_tick_read_bytes(database).await;
-
-    eprintln!("retention tick read bytes: base={base_read} grown={grown_read}");
-    assert!(
-        grown_read * 10 <= base_read * 12,
-        "one retention tick on an 8x larger session store must stay within 1.2x of the \
-         base store's reads: base={base_read} grown={grown_read}"
-    );
 }

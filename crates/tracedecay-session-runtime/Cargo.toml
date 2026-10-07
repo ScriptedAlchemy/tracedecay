@@ -61,5 +61,41 @@ tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
 
 [[test]]
-name = "session_store_read_cost"
+name = "session_drain_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_backlog_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_refresh_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_live_ingest_work"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_wal_streaming"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_ingest_commit_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_idle_history_commits"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_ingest_index_read_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_retention_write_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_retention_read_cost"
 required-features = ["test-helpers"]
