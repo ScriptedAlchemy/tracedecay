@@ -4,7 +4,7 @@
 //! per session; replacing that row allocates a new SQLite sequence in the
 //! same transaction that changes the retained messages or session metadata.
 
-use tracedecay_runtime_core::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use super::GitCorrelationError;
 
@@ -107,5 +107,25 @@ pub async fn install_history_change_schema(
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Requeue retained history when a captured observation invalidates inference.
+/// The caller holds the same write transaction as the evidence retraction.
+pub(super) async fn invalidate_session_history(
+    conn: &(impl Executor + ?Sized),
+    provider: &str,
+    session_id: &str,
+) -> Result<(), GitCorrelationError> {
+    conn.execute(
+        "DELETE FROM git_history_session_change WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id],
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO git_history_session_change(provider, session_id) VALUES (?1, ?2)",
+        params![provider, session_id],
+    )
+    .await?;
     Ok(())
 }

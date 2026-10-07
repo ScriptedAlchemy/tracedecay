@@ -200,6 +200,20 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         if published == Some(revision) {
             return Ok(());
         }
+        self.clear_session_inference(provider, session_id).await?;
+        self.transaction.execute(
+            "INSERT INTO git_history_session_publication(provider, session_id, sequence) VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider, session_id) DO UPDATE SET sequence = excluded.sequence",
+            params![provider, session_id, revision],
+        ).await?;
+        Ok(())
+    }
+
+    async fn clear_session_inference(
+        &mut self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<(), GitCorrelationError> {
         let (spans, commits) =
             load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
         let mut cleared = BTreeSet::new();
@@ -272,11 +286,6 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
                 session_id,
             ))?);
         }
-        self.transaction.execute(
-            "INSERT INTO git_history_session_publication(provider, session_id, sequence) VALUES (?1, ?2, ?3)
-             ON CONFLICT(provider, session_id) DO UPDATE SET sequence = excluded.sequence",
-            params![provider, session_id, revision],
-        ).await?;
         Ok(())
     }
 
@@ -339,10 +348,57 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
                     .map(|record| record.session_id.clone()),
             )
             .collect::<BTreeSet<_>>();
-        let (stored_spans, stored_commits) =
+        let (mut stored_spans, mut stored_commits) =
             load_session_rows(self.transaction, &session_ids).await?;
-
         let mut spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
+        // A newly captured observation can invalidate the inferred window.
+        // Retract that inference before merging, so the capture keeps its
+        // identity without stretching a branch beyond its retained evidence.
+        // Only canonical ingest has retained message history to reattribute.
+        let invalidated = observations
+            .iter()
+            .filter(|observation| {
+                spans
+                    .get(&observation.session_id)
+                    .is_some_and(|session_spans| {
+                        session_spans.iter().any(|span| {
+                            span.branch_provenance == super::BranchProvenance::Inferred
+                                && span.source == super::SpanSource::Ingest
+                                && span.provider == observation.provider
+                                && span.session_id == observation.session_id
+                                && span.thread_id == observation.thread_id
+                                && observation.branch.is_none()
+                                && span.worktree == normalize_worktree(&observation.worktree)
+                                && span.source == observation.source
+                                && (observation.ts < span.first_ts || observation.ts > span.last_ts)
+                                && span.capture_window.is_some_and(|capture| {
+                                    super::observation_extends_span(
+                                        capture.first_ts,
+                                        capture.last_ts,
+                                        observation.ts,
+                                        merge_gap_secs,
+                                    )
+                                })
+                        })
+                    })
+            })
+            .map(|observation| (observation.provider.clone(), observation.session_id.clone()))
+            .collect::<BTreeSet<_>>();
+        for (provider, session_id) in &invalidated {
+            self.clear_session_inference(provider, session_id).await?;
+            super::history_changes::invalidate_session_history(
+                self.transaction,
+                provider,
+                session_id,
+            )
+            .await?;
+        }
+        if !invalidated.is_empty() {
+            (stored_spans, stored_commits) =
+                load_session_rows(self.transaction, &session_ids).await?;
+            spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
+        }
+
         let mut commits = group_by_session(stored_commits.values().cloned(), |record| {
             &record.session_id
         });

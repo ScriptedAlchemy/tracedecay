@@ -836,6 +836,125 @@ async fn folded_inference_absorbs_the_segment_window() {
     assert_eq!(hits[0].sources, ["backfill", "ingest"]);
 }
 
+/// New contiguous capture retracts stale inference, retaining the capture identity.
+#[tokio::test]
+async fn branchless_capture_extension_retracts_and_requeues_inference() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let active_at = head_commit_time(repository.path());
+    let apply_observation = |ts: i64| GitEvidenceBatch {
+        observations: vec![crate::runtime::git_correlation::SpanObservation {
+            provider: "codex".to_owned(),
+            session_id: "session-1".to_owned(),
+            thread_id: None,
+            branch: None,
+            worktree: repository.path().to_string_lossy().into_owned(),
+            ts,
+            source: crate::runtime::git_correlation::SpanSource::Ingest,
+        }],
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        ..GitEvidenceBatch::default()
+    };
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer.apply(apply_observation(active_at)).await.unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    store
+        .connection
+        .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE lcm_raw_messages SET timestamp = ?1",
+            params![active_at],
+        )
+        .await
+        .unwrap();
+    converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_evidence_span").await,
+        1,
+        "capture and inference share one span"
+    );
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (before, before_commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert!(
+        !before_commits.is_empty(),
+        "the initial inference attributes the repository commit"
+    );
+    let captured_span_id = before[0].span_id.clone();
+    drop(view);
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(apply_observation(active_at + 600))
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (spans, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert!(
+        commits.is_empty(),
+        "stale inferred commit relations are retracted atomically"
+    );
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].span_id, captured_span_id);
+    assert_eq!(
+        (spans[0].first_ts, spans[0].last_ts),
+        (active_at, active_at + 600)
+    );
+    assert_eq!(spans[0].branch, None);
+    assert_eq!(
+        spans[0].branch_provenance,
+        crate::runtime::git_correlation::BranchProvenance::Captured
+    );
+    drop(view);
+    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        revisited.pass.backfill.sessions_scanned, 1,
+        "capture invalidation requeues already-published history"
+    );
+    let view = open_git_evidence_view(&store.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    let (reattributed, commits) = view
+        .session_evidence(&std::collections::BTreeSet::from(["session-1".to_owned()]))
+        .await
+        .unwrap();
+    assert_eq!(reattributed.len(), 1);
+    assert_eq!(reattributed[0].span_id, captured_span_id);
+    assert_eq!(reattributed[0].branch.as_deref(), Some("main"));
+    assert!(
+        !commits.is_empty(),
+        "convergence restores commit attribution"
+    );
+}
+
 /// An inference-tagged span is bounded by its evidence window. A branchless
 /// observation beyond it does not stretch the inferred branch over time the
 /// reflog segment never covered: capture opens its own span instead.
@@ -889,7 +1008,9 @@ async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
     let transaction = store.open_write_transaction().await.unwrap();
     let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
     writer
-        .apply(apply_observation(active_at + 600))
+        .apply(apply_observation(
+            active_at + DEFAULT_SPAN_MERGE_GAP_SECS + 1,
+        ))
         .await
         .unwrap();
     writer.finish().await.unwrap();
@@ -921,7 +1042,10 @@ async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
         .iter()
         .find(|span| span.branch.is_none())
         .expect("the later observation is captured, not inferred");
-    assert_eq!(captured.first_ts, active_at + 600);
+    assert_eq!(
+        captured.first_ts,
+        active_at + DEFAULT_SPAN_MERGE_GAP_SECS + 1
+    );
     assert_eq!(
         captured.branch_provenance,
         crate::runtime::git_correlation::BranchProvenance::Captured
