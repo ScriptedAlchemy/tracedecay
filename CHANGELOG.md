@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.74](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.73...v1.0.0-beta.74) (2026-10-07)
+
+
+### Bug Fixes
+
+* **ci:** correct action version hints for dependency updates ([901e9c7](https://github.com/ScriptedAlchemy/tracedecay/commit/901e9c75d1af082310ca52ced0eaae7118ecab95))
+* **daemon:** refuse unrecognized launchd activity states ([beac4af](https://github.com/ScriptedAlchemy/tracedecay/commit/beac4af0e0f404d2ef854393d755ea7d0e90bf48)), closes [#3162](https://github.com/ScriptedAlchemy/tracedecay/issues/3162)
+* **daemon:** report launchd service state independently of sockets ([2099773](https://github.com/ScriptedAlchemy/tracedecay/commit/2099773b1523e9a203997355b83fc4f9c6450c9e))
+* **daemon:** retire idle degraded project owners ([fd136d4](https://github.com/ScriptedAlchemy/tracedecay/commit/fd136d4d4407f60e89e4edda3dabb116c87a343f)), closes [#3157](https://github.com/ScriptedAlchemy/tracedecay/issues/3157)
+* **git:** preserve terminal runtime publication refusals ([08544d2](https://github.com/ScriptedAlchemy/tracedecay/commit/08544d2b76c4af5ead0217f583855cb337db873f)), closes [#3159](https://github.com/ScriptedAlchemy/tracedecay/issues/3159)
+* **hooks:** expose typed feedback cycle failure classes ([ddfda03](https://github.com/ScriptedAlchemy/tracedecay/commit/ddfda031a13516eccd9a41c3cf608fffc98f2f6a)), closes [#3168](https://github.com/ScriptedAlchemy/tracedecay/issues/3168)
+* **index:** compress oversized graph records without data loss ([a768f3d](https://github.com/ScriptedAlchemy/tracedecay/commit/a768f3dddd2e70c9dfec835661eb310d9a918abf)), closes [#3167](https://github.com/ScriptedAlchemy/tracedecay/issues/3167)
+* **index:** reap completed retiring owners before remount ([362e621](https://github.com/ScriptedAlchemy/tracedecay/commit/362e621816282acc246bfec9956451e9c5070135)), closes [#3166](https://github.com/ScriptedAlchemy/tracedecay/issues/3166)
+* **memory:** honor native pages and retained mutex ownership ([4f1c6b2](https://github.com/ScriptedAlchemy/tracedecay/commit/4f1c6b29ece2036aa42b07f5cc40ce18563d4d0d))
+* recover project availability and speed up feedback ([65827d8](https://github.com/ScriptedAlchemy/tracedecay/commit/65827d8544231e56348213ed2128d42a93962808))
+* **search:** distinguish scanned files in grep summaries ([ca892db](https://github.com/ScriptedAlchemy/tracedecay/commit/ca892dbc40608b05172b97c83d256d91bee8b55f)), closes [#3158](https://github.com/ScriptedAlchemy/tracedecay/issues/3158)
+* **search:** refuse dangling Git control links ([158e76b](https://github.com/ScriptedAlchemy/tracedecay/commit/158e76b74246fd5cad1305da06616a554819950f)), closes [#3163](https://github.com/ScriptedAlchemy/tracedecay/issues/3163)
+* **search:** refuse non-git indexing without warming retries ([9a6ad6d](https://github.com/ScriptedAlchemy/tracedecay/commit/9a6ad6d90bfc8d71181a8f44e1f1b075246ae0c5))
+
+
+### Performance Improvements
+
+* **index:** index test attribution traversal and lookups ([95d88a4](https://github.com/ScriptedAlchemy/tracedecay/commit/95d88a41c63813b99840f93a710c2030c10ae9c7)), closes [#3169](https://github.com/ScriptedAlchemy/tracedecay/issues/3169)
+
 ## [1.0.0-beta.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.72...v1.0.0-beta.73) (2026-10-07)
 
 
