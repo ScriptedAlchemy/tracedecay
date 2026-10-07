@@ -9,9 +9,13 @@ import { DaemonAuthorityRecordSchema } from "../src/server/authority.js";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
 export function tracedecayBinary(): string {
-  const candidate = process.env.TRACEDECAY_BIN ?? path.join(REPO_ROOT, "target/debug/tracedecay");
+  const candidate = process.env.TRACEDECAY_BIN ?? path.join(
+    REPO_ROOT,
+    "bazel-bin/crates/tracedecay-cli/test",
+    process.platform === "win32" ? "tracedecay.exe" : "tracedecay",
+  );
   if (!existsSync(candidate)) {
-    throw new Error(`tracedecay binary not found at ${candidate}; run cargo build -p tracedecay-cli or set TRACEDECAY_BIN`);
+    throw new Error(`tracedecay binary not found at ${candidate}; run bazel build //crates/tracedecay-cli:tracedecay__test or set TRACEDECAY_BIN`);
   }
   return candidate;
 }
