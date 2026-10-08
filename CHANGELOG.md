@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.75](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.74...v1.0.0-beta.75) (2026-10-08)
+
+
+### Bug Fixes
+
+* **code-index:** preserve freshness during attribution preparation ([594eef0](https://github.com/ScriptedAlchemy/tracedecay/commit/594eef0cc42bc0300eb11b47d88fb110cd907380))
+* **dashboard:** label project identity aliases accurately ([744225d](https://github.com/ScriptedAlchemy/tracedecay/commit/744225d9395e5173e5654ca8498f2c12681a8906))
+* **feedback:** prepare attribution under retained workers ([231b23b](https://github.com/ScriptedAlchemy/tracedecay/commit/231b23b9489f860503b759b0e074a97a49ab0f78))
+* **feedback:** prepare cold attribution in retained workers ([827f593](https://github.com/ScriptedAlchemy/tracedecay/commit/827f593a1a7b7d2aacb419f3211510c6451df1ea))
+* **feedback:** yield attribution to source changes ([9c2b525](https://github.com/ScriptedAlchemy/tracedecay/commit/9c2b525ea6c965688095771eef2897a1717e672c))
+
+
+### Performance Improvements
+
+* **code-index:** hash exact attribution join lookups ([5fe6d0c](https://github.com/ScriptedAlchemy/tracedecay/commit/5fe6d0c641a47b8a841743e0722ae753f874d8c0))
+* **code-index:** reuse resolved attribution identities ([c1d2d1a](https://github.com/ScriptedAlchemy/tracedecay/commit/c1d2d1a90d1ea80e1e1caf60ddcfc800edef83fa))
+* **code-index:** share canonical attribution construction ([0e4c07e](https://github.com/ScriptedAlchemy/tracedecay/commit/0e4c07e7fd9ea817f018a41b1b4aca9ca19e2df1))
+* **feedback:** batch affected-test retrieval by generation ([de6dd3a](https://github.com/ScriptedAlchemy/tracedecay/commit/de6dd3adee7d7834d804ba9632fefb6c891d2ce6))
+
 ## [1.0.0-beta.74](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.73...v1.0.0-beta.74) (2026-10-07)
 
 
