@@ -10,7 +10,8 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ComponentVersion, ContentDigest,
@@ -54,8 +55,36 @@ struct TestAttributionEvidenceDigestInput<'a> {
     source_revision: &'a Option<CommitId>,
     attribution_revision: &'a ComponentVersion,
     coverage: &'a TestAttributionJoinInputCoverageV1,
-    attributions: &'a [&'a GenerationTestAttributionV1],
-    occurrences: &'a [&'a TestAttributionOccurrenceV1],
+    attributions: CheckedSlice<'a, &'a GenerationTestAttributionV1>,
+    occurrences: CheckedSlice<'a, &'a TestAttributionOccurrenceV1>,
+}
+
+/// Preserve ordinary slice serialization while checking the owning operation
+/// between records. Canonical ordering and hashing stay with canonical_sha256.
+struct CheckedSlice<'a, T> {
+    items: &'a [T],
+    interrupted: &'a dyn Fn() -> bool,
+}
+
+impl<T: Serialize> Serialize for CheckedSlice<'_, T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.items.len()))?;
+        for item in self.items {
+            if (self.interrupted)() {
+                return Err(serde::ser::Error::custom("test attribution interrupted"));
+            }
+            sequence.serialize_element(item)?;
+        }
+        sequence.end()
+    }
+}
+
+fn checkpoint(interrupted: &dyn Fn() -> bool) -> Result<(), GenerationTestJoinErrorV1> {
+    if interrupted() {
+        Err(GenerationTestJoinErrorV1::Interrupted)
+    } else {
+        Ok(())
+    }
 }
 
 impl TestAttributionWatermarkV1 {
@@ -83,8 +112,14 @@ impl TestAttributionWatermarkV1 {
             source_revision: &self.source_revision,
             attribution_revision: &self.attribution_revision,
             coverage: &self.coverage,
-            attributions,
-            occurrences,
+            attributions: CheckedSlice {
+                items: attributions,
+                interrupted: &|| false,
+            },
+            occurrences: CheckedSlice {
+                items: occurrences,
+                interrupted: &|| false,
+            },
         })
         .map_err(|error| GenerationTestJoinErrorV1::Contract(error.to_string()))
     }
@@ -183,6 +218,8 @@ pub struct GenerationTestJoinV1 {
 /// result.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GenerationTestJoinErrorV1 {
+    #[error("test attribution preparation was interrupted")]
+    Interrupted,
     #[error("the code generation does not seal the supplied sanitized snapshot")]
     StaleGenerationWatermark,
     #[error("the test-attribution watermark is stale")]
@@ -257,13 +294,14 @@ impl GenerationTestJoinV1 {
         {
             return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
         }
-        Ok(Self::join_canonical(
+        Self::join_canonical(
             generation,
             snapshot,
             attributions,
             occurrence_by_id,
             watermark,
-        ))
+            &|| false,
+        )
     }
 
     /// Mint evidence from the owning producer without immediately rehashing
@@ -275,10 +313,13 @@ impl GenerationTestJoinV1 {
         occurrences: &[TestAttributionOccurrenceV1],
         attribution_revision: ComponentVersion,
         coverage: TestAttributionJoinInputCoverageV1,
+        interrupted: &dyn Fn() -> bool,
     ) -> Result<Self, GenerationTestJoinErrorV1> {
+        checkpoint(interrupted)?;
         validate_generation_snapshot(generation, snapshot)?;
         let occurrence_by_id = index_occurrences(occurrences)?;
         let attributions = canonical_attributions(attributions)?;
+        checkpoint(interrupted)?;
         let digest = tracing::trace_span!("code_index.test_attribution.digest").entered();
         let evidence_digest = canonical_sha256(&TestAttributionEvidenceDigestInput {
             domain: TEST_ATTRIBUTION_EVIDENCE_SEPARATOR,
@@ -288,10 +329,22 @@ impl GenerationTestJoinV1 {
             source_revision: &snapshot.snapshot.source_revision,
             attribution_revision: &attribution_revision,
             coverage: &coverage,
-            attributions: &attributions.iter().collect::<Vec<_>>(),
-            occurrences: &canonical_occurrences(occurrences),
+            attributions: CheckedSlice {
+                items: &attributions.iter().collect::<Vec<_>>(),
+                interrupted,
+            },
+            occurrences: CheckedSlice {
+                items: &canonical_occurrences(occurrences),
+                interrupted,
+            },
         })
-        .map_err(|error| GenerationTestJoinErrorV1::Contract(error.to_string()))?;
+        .map_err(|error| {
+            if interrupted() {
+                GenerationTestJoinErrorV1::Interrupted
+            } else {
+                GenerationTestJoinErrorV1::Contract(error.to_string())
+            }
+        })?;
         drop(digest);
         let watermark = TestAttributionWatermarkV1 {
             generation_id: generation.generation_id.clone(),
@@ -303,13 +356,14 @@ impl GenerationTestJoinV1 {
             coverage,
         };
         validate_watermark(generation, snapshot, &watermark)?;
-        Ok(Self::join_canonical(
+        Self::join_canonical(
             generation,
             snapshot,
             attributions,
             occurrence_by_id,
             &watermark,
-        ))
+            interrupted,
+        )
     }
 
     fn join_canonical(
@@ -318,7 +372,8 @@ impl GenerationTestJoinV1 {
         attributions: Vec<GenerationTestAttributionV1>,
         occurrence_by_id: HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
         watermark: &TestAttributionWatermarkV1,
-    ) -> Self {
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Self, GenerationTestJoinErrorV1> {
         // These indices are used only for exact lookups. Canonical record and
         // evidence ordering is established separately, so repeated covered
         // occurrences need not compare their long identities down a tree.
@@ -378,14 +433,18 @@ impl GenerationTestJoinV1 {
                 .iter()
                 .map(|(id, occurrence)| (*id, Arc::new((*occurrence).clone())))
                 .collect();
+        checkpoint(interrupted)?;
         let mut records = Vec::with_capacity(attributions.len());
         for attribution in attributions {
+            checkpoint(interrupted)?;
             let test_occurrence = occurrence_by_id.get(&attribution.test_occurrence).copied();
-            let covered_occurrences = attribution
-                .covered_occurrences
-                .iter()
-                .filter_map(|occurrence| shared_occurrences.get(occurrence).map(Arc::clone))
-                .collect::<Vec<_>>();
+            let mut covered_occurrences = Vec::with_capacity(attribution.covered_occurrences.len());
+            for occurrence in &attribution.covered_occurrences {
+                checkpoint(interrupted)?;
+                if let Some(covered) = shared_occurrences.get(occurrence) {
+                    covered_occurrences.push(Arc::clone(covered));
+                }
+            }
             // Resolution already proved presence for every requested identity
             // when no entry was filtered. With no content drift, checking the
             // same covered identities again cannot change the disposition.
@@ -419,14 +478,15 @@ impl GenerationTestJoinV1 {
                 reasons: partial_reasons,
             }
         };
-        Self {
+        checkpoint(interrupted)?;
+        Ok(Self {
             generation_id: generation.generation_id.clone(),
             code_snapshot_digest: generation.snapshot_digest.clone(),
             code_content_identity: snapshot.snapshot.content_identity.clone(),
             test_watermark: watermark.clone(),
             records,
             coverage,
-        }
+        })
     }
 }
 
@@ -674,4 +734,56 @@ fn validate_watermark(
         return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn attribution_digest_slice_keeps_canonical_bytes_and_interrupts_between_records() {
+        struct Record<'a> {
+            value: u64,
+            visited: &'a Cell<usize>,
+            stop: &'a Cell<bool>,
+        }
+        impl Serialize for Record<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.visited.set(self.visited.get() + 1);
+                let result = self.value.serialize(serializer);
+                self.stop.set(true);
+                result
+            }
+        }
+        let values = [3_u64, 7, 11];
+        let checked = CheckedSlice {
+            items: &values,
+            interrupted: &|| false,
+        };
+        assert_eq!(
+            canonical_sha256(&checked).unwrap(),
+            canonical_sha256(&values).unwrap()
+        );
+        let visited = Cell::new(0);
+        let stop = Cell::new(false);
+        let records = values.map(|value| Record {
+            value,
+            visited: &visited,
+            stop: &stop,
+        });
+        let interrupted = || stop.get();
+        assert!(
+            canonical_sha256(&CheckedSlice {
+                items: &records,
+                interrupted: &interrupted
+            })
+            .is_err()
+        );
+        assert_eq!(
+            visited.get(),
+            1,
+            "cancellation stops inside serialization, before the next record"
+        );
+    }
 }

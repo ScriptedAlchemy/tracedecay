@@ -33,7 +33,7 @@ use super::super::{
 };
 use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
-    CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+    AttributionPreparationControlV1, CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
@@ -828,7 +828,7 @@ impl CodeIndexSchedulerRegistryV1 {
             // query owners already serving, so its finish changes no owner the
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
-            loop {
+            'worker: loop {
                 // Memory given back while the last pass was being refused
                 // reached the watcher before that refusal was visible.
                 let headroom_moved = worker_owner_headroom.has_changed().unwrap_or(false)
@@ -3666,10 +3666,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok(seated) => seated.as_ref().map(|latest| {
                             (
                                 Arc::clone(&latest.generation),
-                                DaemonCodeIndexControlV1::new(
-                                    Arc::clone(&worker_serving_generation_epoch),
-                                    Arc::clone(&worker_shutting_down),
-                                ),
+                                AttributionPreparationControlV1 {
+                                    generation: DaemonCodeIndexControlV1::new(
+                                        Arc::clone(&worker_serving_generation_epoch),
+                                        Arc::clone(&worker_shutting_down),
+                                    ),
+                                    source_epoch: Arc::clone(&worker_control_epoch),
+                                    expected_source_epoch: pass_control_epoch,
+                                },
                             )
                         }),
                         Err(error) => {
@@ -3678,25 +3682,42 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     };
                     if let Some((generation, control)) = candidate
-                        && generation.test_attribution_read().provider_state
-                            == tracedecay_domain::ProviderEvaluationStateV1::Indexing
+                        && matches!(
+                            generation.test_attribution_read().provider_state,
+                            tracedecay_domain::ProviderEvaluationStateV1::Indexing
+                                | tracedecay_domain::ProviderEvaluationStateV1::Cancelled
+                        )
                     {
                         // Source publication gates are released before this
                         // optional work joins the shared background bound.
                         let admission =
                             Arc::clone(&worker_background_reconcile_admission).acquire_owned();
                         tokio::pin!(admission);
+                        let mut saw_wake = false;
                         let permit = loop {
+                            if control.source_changed() {
+                                break None;
+                            }
                             if worker_shutting_down.load(Ordering::Acquire) {
                                 break None;
                             }
                             tokio::select! {
                                 permit = &mut admission => break permit.ok(),
+                                () = worker_wake.notified() => { saw_wake = true; }
                                 changed = shutdown_observed.changed() => {
                                     if changed.is_err() { break None; }
                                 }
                             }
                         };
+                        if saw_wake {
+                            worker_wake.notify_one();
+                        }
+                        if control.source_changed() {
+                            // Its real source arrival retains the next pass;
+                            // never consume that wake as optional derivation.
+                            worker_wake.notify_one();
+                            continue 'worker;
+                        }
                         let Some(_permit) = permit else {
                             Self::join_retained_text_projection_on_worker_exit(
                                 &mut retained_text_projection,

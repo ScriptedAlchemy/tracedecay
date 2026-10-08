@@ -881,7 +881,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(root) = canonical_existing_identity(project_root) else {
             return ProviderEvaluationStateV1::Unavailable;
         };
-        {
+        let shutting_down = {
             let mounted = self.mounted.lock().await;
             let Some((mounted_root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique()
             else {
@@ -890,10 +890,11 @@ impl CodeIndexSchedulerRegistryV1 {
             if mounted_root != &root || !worktree.graph_activation.policy().is_enabled() {
                 return ProviderEvaluationStateV1::Unavailable;
             }
-        }
+            Arc::clone(&worktree.shutting_down)
+        };
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
         loop {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() || shutting_down.load(Ordering::Acquire) {
                 return ProviderEvaluationStateV1::Cancelled;
             }
             let Some(current) = self.retained_text_owner_for_root(&root).await else {
@@ -910,17 +911,19 @@ impl CodeIndexSchedulerRegistryV1 {
                     return ProviderEvaluationStateV1::Stale;
                 }
                 let state = latest.generation().test_attribution_read().provider_state;
-                if state != ProviderEvaluationStateV1::Indexing
-                    && (!matches!(
-                        state,
-                        ProviderEvaluationStateV1::Partial
-                            | ProviderEvaluationStateV1::SupportedCompletedComplete
-                    ) || self
-                        .latest_feedback_generation_for_scope(&root, scope)
-                        .await
-                        .is_some_and(|current| {
-                            &current.metadata().manifest().generation_id == generation
-                        }))
+                if !matches!(
+                    state,
+                    ProviderEvaluationStateV1::Indexing | ProviderEvaluationStateV1::Cancelled
+                ) && (!matches!(
+                    state,
+                    ProviderEvaluationStateV1::Partial
+                        | ProviderEvaluationStateV1::SupportedCompletedComplete
+                ) || self
+                    .latest_feedback_generation_for_scope(&root, scope)
+                    .await
+                    .is_some_and(|current| {
+                        &current.metadata().manifest().generation_id == generation
+                    }))
                 {
                     return state;
                 }

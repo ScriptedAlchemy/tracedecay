@@ -51,7 +51,8 @@ use super::{
     },
     retained_parse::{RetainedParsePoolStats, SharedRetainedParsePool},
     test_attribution::{
-        GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
+        GenerationTestJoinErrorV1, GenerationTestJoinV1, TestAttributionJoinInputCoverageV1,
+        TestAttributionOccurrenceV1,
     },
 };
 
@@ -1456,8 +1457,12 @@ impl CodeIndexPublishedGenerationV1 {
             &occurrences,
             attribution_revision,
             input_coverage,
+            &|| control.is_cancelled() || control.is_deadline_exceeded(),
         )
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        .map_err(|error| match error {
+            GenerationTestJoinErrorV1::Interrupted => interruption_error(control),
+            other => CodeIndexProductionErrorV1::Contract(other.to_string()),
+        })?;
         drop(joining);
         lexical_page_source::checkpoint(control)?;
         let (provider_state, coverage) = if unknown == 0 {

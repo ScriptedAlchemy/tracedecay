@@ -23,7 +23,8 @@ use std::sync::Condvar;
 
 use super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
 use tracedecay_code_index::production::{
-    CodeIndexPublishedGenerationV1, VerifiedSealedTextGenerationMetadataV1,
+    CodeIndexExecutionControlV1, CodeIndexPublishedGenerationV1,
+    VerifiedSealedTextGenerationMetadataV1,
 };
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
@@ -1496,6 +1497,29 @@ impl MemoryRefusalRetryV1 {
 
     fn waiting(&self) -> bool {
         self.waiting.load(Ordering::Acquire)
+    }
+}
+
+/// Optional derivation yields to source work accepted after this pass began.
+/// Neutral query wakes leave the source epoch unchanged.
+struct AttributionPreparationControlV1 {
+    generation: DaemonCodeIndexControlV1,
+    source_epoch: Arc<AtomicU64>,
+    expected_source_epoch: u64,
+}
+
+impl AttributionPreparationControlV1 {
+    fn source_changed(&self) -> bool {
+        self.source_epoch.load(Ordering::Acquire) != self.expected_source_epoch
+    }
+}
+
+impl CodeIndexExecutionControlV1 for AttributionPreparationControlV1 {
+    fn is_cancelled(&self) -> bool {
+        self.source_changed() || self.generation.is_cancelled()
+    }
+    fn is_deadline_exceeded(&self) -> bool {
+        self.generation.is_deadline_exceeded()
     }
 }
 
