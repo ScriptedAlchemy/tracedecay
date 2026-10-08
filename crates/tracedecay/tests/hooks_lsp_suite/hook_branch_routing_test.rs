@@ -32,6 +32,7 @@ fn git(project: &Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn git_head_oid(project: &Path) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -49,6 +50,7 @@ fn git_head_oid(project: &Path) -> String {
 /// anywhere. A subsequent write on another branch rolls the store to a newer
 /// generation under the new ref while the first branch keeps its sealed
 /// provenance record.
+#[cfg(unix)]
 #[tokio::test]
 async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     let dir = TempDir::new().unwrap();
@@ -298,4 +300,38 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         !shard_root.join("branches").exists(),
         "no write may create a per-branch database"
     );
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn hook_branch_write_refuses_when_scheduler_authority_is_unavailable() {
+    let dir = TempDir::new().unwrap();
+    let temp_root = canonical_temp_path(dir.path());
+    let project = temp_root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-b", "main"]);
+    let harness = ProductionProjectCompositionHarnessV1::open(&temp_root, [project.clone()])
+        .await
+        .unwrap();
+    let shard_root = harness.project_data_root(&project).await.unwrap();
+    let before = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root);
+    let error = harness
+        .track_worktree_branch(&project, &project, "feature/hook")
+        .await
+        .expect_err("branch activation requires the scheduler authority");
+    assert!(matches!(
+        error,
+        tracedecay_domain::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable: true,
+            ..
+        } if reason_code == "code_index_scheduler_unavailable"
+    ));
+    let after = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root);
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    assert!(!shard_root.join("branches").exists());
+    harness.shutdown().await;
 }

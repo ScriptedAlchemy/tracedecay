@@ -271,7 +271,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
-    data = glob(["tests/memory_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"],
+    data = glob(["tests/memory_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"] + ["//evals/memory:scenarios"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )

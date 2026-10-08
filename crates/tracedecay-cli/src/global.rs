@@ -371,6 +371,7 @@ mod gather_tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
     fn make_enrolled_project(profile: &ProfileRoot, root: &Path, project_id: &str) {
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project_id)
@@ -384,8 +385,8 @@ mod gather_tests {
 
     fn git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
+            .args(plain_git_args(args))
+            .current_dir(plain_host_path(dir))
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");

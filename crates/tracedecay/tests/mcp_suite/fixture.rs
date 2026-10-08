@@ -92,7 +92,7 @@ pub fn write_indexed_fixture_sources(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
-        project.join("src/main.rs"),
+        project.join("src").join("main.rs"),
         r#"
 use crate::utils::helper;
 mod utils;
@@ -106,7 +106,7 @@ fn main() {
     .unwrap();
 
     fs::write(
-        project.join("src/utils.rs"),
+        project.join("src").join("utils.rs"),
         r#"
 /// Returns a greeting string.
 pub fn helper() -> String {
@@ -123,7 +123,7 @@ fn format_greeting(name: &str) -> String {
     // Test file so affected-tests can find something
     fs::create_dir_all(project.join("tests")).unwrap();
     fs::write(
-        project.join("tests/test_utils.rs"),
+        project.join("tests").join("test_utils.rs"),
         r#"
 use crate::utils::helper;
 
@@ -188,7 +188,7 @@ impl SeedTargets {
 /// rewrites the absolute paths embedded in `store_manifest.json`.
 fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::Result<()> {
     fs::create_dir_all(project_root)?;
-    let src_home = flavor.join("home/.tracedecay");
+    let src_home = flavor.join("home").join(".tracedecay");
     let src_data = sole_subdir(&src_home.join("projects"))?;
 
     let project_id = default_profile_project_id(project_root);
@@ -303,7 +303,7 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     let project = root.join("project");
     fs::create_dir_all(&project)?;
 
-    let profile_root = root.join("home/.tracedecay");
+    let profile_root = root.join("home").join(".tracedecay");
     let global_db_path = profile_root.join("global.db");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
@@ -558,7 +558,9 @@ async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
 
     let global_db = selected
         .join(EMPTY_FLAVOR)
-        .join("home/.tracedecay/global.db");
+        .join("home")
+        .join(".tracedecay")
+        .join("global.db");
     let connection = Connection::open(&global_db).unwrap();
     let mut statement = connection
         .prepare("SELECT name FROM pragma_table_info('graph_scopes') ORDER BY cid")
@@ -594,9 +596,15 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
 
     // What a build before the Git correlation bump left in a warm target.
     let stale = ensure_template(&tmp_root, older).await.unwrap();
-    let stale_sessions = sole_subdir(&stale.join(EMPTY_FLAVOR).join("home/.tracedecay/projects"))
-        .unwrap()
-        .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    let stale_sessions = sole_subdir(
+        &stale
+            .join(EMPTY_FLAVOR)
+            .join("home")
+            .join(".tracedecay")
+            .join("projects"),
+    )
+    .unwrap()
+    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     let downgraded = Connection::open(&stale_sessions)
         .unwrap()
         .execute(
@@ -610,7 +618,7 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
     );
 
     let template = ensure_template(&tmp_root, current).await.unwrap();
-    let profile_root = tmp_root.join("home/.tracedecay");
+    let profile_root = tmp_root.join("home").join(".tracedecay");
     let cg = match init_project_from_template_root(
         Some(&template),
         &tmp_root.join("project"),
@@ -649,7 +657,9 @@ async fn template_seed_opens_the_copied_store_for_the_requested_project() {
     let template_store = sole_subdir(
         &template
             .join(EMPTY_FLAVOR)
-            .join("home/.tracedecay/projects"),
+            .join("home")
+            .join(".tracedecay")
+            .join("projects"),
     )
     .unwrap();
     let template_manifest: Value = serde_json::from_str(
@@ -668,7 +678,7 @@ async fn template_seed_opens_the_copied_store_for_the_requested_project() {
 
     let project = tmp_root.join("requested-project");
     fs::create_dir_all(&project).unwrap();
-    let profile_root = tmp_root.join("profile/.tracedecay");
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
     let cg = init_project_from_template_root(
         Some(&template),
         &project,
@@ -713,7 +723,7 @@ async fn template_seed_does_not_fall_back_when_the_destination_exists() {
         .expect("template builds from a real init");
     let project = tmp_root.join("requested-project");
     fs::create_dir_all(&project).unwrap();
-    let profile_root = tmp_root.join("profile/.tracedecay");
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
     let project_id = default_profile_project_id(&project);
     fs::create_dir_all(profile_root.join("projects").join(&project_id)).unwrap();
 

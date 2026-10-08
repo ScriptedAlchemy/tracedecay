@@ -124,7 +124,7 @@ fn fixture_children_run_only_admitted_fake_hosts_never_ambient_ones() {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    tracedecay_runtime_core::path_safety::canonical_root_identity(path)
 }
 
 #[test]

@@ -48,8 +48,9 @@ pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
 pub fn assert_sanitized_path_text_eq(actual: &str, expected: &Path) {
     const REDACTED: &str = "[TraceDecay redacted: high-entropy token]";
     let expected_text = normalize_path_text(&expected.to_string_lossy());
+    let actual_text = normalize_path_text(actual);
     let mut cursor = 0;
-    for part in actual.split(REDACTED).filter(|part| !part.is_empty()) {
+    for part in actual_text.split(REDACTED).filter(|part| !part.is_empty()) {
         let found = expected_text[cursor..]
             .find(part)
             .map(|index| cursor + index);

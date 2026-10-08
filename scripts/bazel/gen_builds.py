@@ -1081,6 +1081,8 @@ def main():
             # Suites read the shared fixtures as ../../tests/fixtures from the
             # crate directory, where the launcher starts them.
             data += ' + ["//tests:fixtures"]'
+            if name == "tracedecay" and t["name"] == "memory_suite":
+                data += ' + ["//evals/memory:scenarios"]'
             # include_str!/include_bytes! are compile-time inputs. They cover crate-root
             # resource dirs beside tests/ and repo-root fixtures under //tests.
             compile_data = (
