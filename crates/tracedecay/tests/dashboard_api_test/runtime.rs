@@ -22,6 +22,8 @@ use tracedecay_graph_query::{
     VerifiedCodeGraphRead,
 };
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_lcm::payload::PayloadFileRollback;
+use tracedecay_lcm::raw::{commit_staged_raw_message, stage_raw_message_with_payload_tracked};
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -519,19 +521,46 @@ impl DashboardTestRuntimeV1 {
                     operation: "seed dashboard test session message".to_owned(),
                     message: "registered session database has no storage root".to_owned(),
                 })?;
-        for message in messages {
-            database
-                .lcm_ingest_raw_message(storage_root, message)
-                .await
+        // Keep fixture write leases bounded like the host projection drain.
+        for chunk in messages.chunks(32) {
+            let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
+            let staged = chunk
+                .iter()
+                .map(|message| {
+                    stage_raw_message_with_payload_tracked(storage_root, message, &mut rollback)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|error| TraceDecayError::Database {
                     operation: "seed dashboard test session message".to_owned(),
                     message: error.to_string(),
                 })?;
+            let transaction = database.begin_write_transaction().await?;
+            for (message, staged) in chunk.iter().zip(staged) {
+                commit_staged_raw_message(&transaction, message, staged)
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        operation: "seed dashboard test session message".to_owned(),
+                        message: error.to_string(),
+                    })?;
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "commit dashboard test session messages".to_owned(),
+                    message: error.to_string(),
+                })?;
+            rollback.disarm();
         }
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let raw = load_registered_raw_message(database, &message.provider, &message.message_id)
+            let store_id = database
+                .lcm_raw_message_store_id(&message.provider, &message.message_id)
                 .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
+                })?
                 .ok_or_else(|| TraceDecayError::Database {
                     operation: "read dashboard test transcript store id".to_owned(),
                     message: format!(
@@ -539,7 +568,7 @@ impl DashboardTestRuntimeV1 {
                         message.provider, message.message_id
                     ),
                 })?;
-            store_ids.push(raw.store_id);
+            store_ids.push(store_id);
         }
         Ok(store_ids)
     }
@@ -685,20 +714,6 @@ fn dashboard_test_graph_error(operation: &str, error: impl Display) -> TraceDeca
     TraceDecayError::Config {
         message: format!("dashboard fixture could not {operation}: {error}"),
     }
-}
-
-async fn load_registered_raw_message(
-    database: &RegisteredGlobalDb,
-    provider: &str,
-    message_id: &str,
-) -> Option<tracedecay_lcm::LcmRawMessage> {
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("dashboard test raw-message snapshot must remain registered");
-    tracedecay_lcm::schema::load_raw_message(&snapshot, provider, message_id)
-        .await
-        .expect("dashboard test raw-message load must not hide database or receipt failure")
 }
 
 /// Gives the fixture root the same registered-repository identity a
