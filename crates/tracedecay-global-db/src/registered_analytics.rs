@@ -221,15 +221,7 @@ impl RegisteredGlobalDb {
                 append_analytics_events_in_existing_tx(&transaction, events).await?
             }
             AnalyticsAppendKind::Observability => {
-                let mut ids = Vec::with_capacity(events.len());
-                for event in events {
-                    ids.push(
-                        append_observability_event_in_existing_tx(&transaction, event)
-                            .await
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
-                ids
+                append_observability_events_in_existing_tx(&transaction, events).await?
             }
         };
         transaction
@@ -1417,6 +1409,69 @@ enum ObservabilityAppendError {
     Conflict,
     #[error("{0}")]
     Failed(String),
+}
+
+/// Resolve replay and in-batch duplicates before inserting each bounded run.
+/// All runs share the caller's transaction, so a later conflict rolls back
+/// earlier appends just as the single-event path does.
+async fn append_observability_events_in_existing_tx(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    events: &[AnalyticsEventInsert],
+) -> Result<Vec<i64>, String> {
+    let mut ids = Vec::with_capacity(events.len());
+    for chunk in events.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
+        let keys = chunk
+            .iter()
+            .filter_map(|event| {
+                event
+                    .hint_id
+                    .as_ref()
+                    .map(|hint| (event.project_id.clone(), hint.clone()))
+            })
+            .collect();
+        let stored = stored_observability_events(transaction, keys).await?;
+        let mut pending = BTreeMap::<(String, String), usize>::new();
+        let mut appends = Vec::<AnalyticsEventInsert>::new();
+        let mut ordered_keys = Vec::with_capacity(chunk.len());
+        let mut resolved = BTreeMap::new();
+        for event in chunk {
+            validate_observability_event(event)?;
+            let hint = event
+                .hint_id
+                .as_ref()
+                .ok_or("invalid canonical observability event")?;
+            let key = (event.project_id.clone(), hint.clone());
+            if let Some(record) = stored.get(&key) {
+                if !analytics_record_matches_insert(record, event) {
+                    return Err(ObservabilityAppendError::Conflict.to_string());
+                }
+                resolved.insert(key.clone(), record.id);
+            } else if let Some(index) = pending.get(&key) {
+                if appends[*index] != *event {
+                    return Err(ObservabilityAppendError::Conflict.to_string());
+                }
+            } else {
+                pending.insert(key.clone(), appends.len());
+                appends.push(event.clone());
+            }
+            ordered_keys.push(key);
+        }
+        let appended = append_analytics_events_in_existing_tx(transaction, &appends).await?;
+        for (key, index) in pending {
+            let id = appended
+                .get(index)
+                .ok_or("observability batch lost an appended event id")?;
+            resolved.insert(key, *id);
+        }
+        for key in ordered_keys {
+            ids.push(
+                *resolved
+                    .get(&key)
+                    .ok_or("observability batch left an event unresolved")?,
+            );
+        }
+    }
+    Ok(ids)
 }
 
 async fn append_observability_event_in_existing_tx(

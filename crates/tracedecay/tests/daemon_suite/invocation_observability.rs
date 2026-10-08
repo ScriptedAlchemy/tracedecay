@@ -1309,6 +1309,86 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
 }
 
 #[tokio::test]
+async fn registered_persistence_failure_releases_only_after_join_and_writer_fence() {
+    let (_project, project_id, database, _runtime) = runtime("observability-shutdown-fenced").await;
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:shutdown-failure".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('e').as_str().to_owned(),
+        policy_revision: digest('f').as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start_with_deadlines(
+        database.clone(),
+        identity.clone(),
+        1,
+        ObservabilityProducerDeadlinesV1 {
+            persistence: Duration::from_millis(50),
+            shutdown: Duration::from_millis(250),
+        },
+    )
+    .expect("producer");
+    let registry = StoreObservabilityRegistryV1::default();
+    let registered = registry
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
+        .expect("registered observability producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "shutdown:blocked"))
+        .expect("enqueue blocked event");
+    tokio::task::yield_now().await;
+
+    let retained = registered.producer();
+    assert!(!retained.shutdown_settled());
+    let shutdown = tokio::spawn(registered.shutdown());
+    // Hold the writer past persistence's deadline, then release it within
+    // shutdown's existing budget so its fence can observe transaction closure.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!retained.shutdown_settled());
+    blocker.commit().await.expect("release registered writer");
+    let error = shutdown
+        .await
+        .expect("shutdown task")
+        .expect_err("successful fencing must preserve the persistence failure");
+    assert!(retained.shutdown_settled());
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "shutdown:after-fence"))
+            .unwrap_err(),
+        "observability_producer_closed",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("observability_persistence_deadline"),
+        "unexpected shutdown error: {error}"
+    );
+    let start_called = Arc::new(AtomicBool::new(false));
+    let observed_start = Arc::clone(&start_called);
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&replacement_identity);
+    let replacement = registry.acquire_or_start(&database, &replacement_mount, || {
+        observed_start.store(true, Ordering::Release);
+        BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)
+    });
+    let replacement = replacement.expect("settled store can reopen without resetting data");
+    assert!(start_called.load(Ordering::Acquire));
+    replacement
+        .producer()
+        .try_emit(envelope(&project_id, "replacement:accepted"))
+        .unwrap();
+    replacement.shutdown().await.expect("replacement drains");
+}
+
+#[tokio::test]
 async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let (_project, project_id, database, _runtime) =
         runtime("observability-shutdown-failure").await;
@@ -1343,10 +1423,15 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         .expect("enqueue blocked event");
     tokio::task::yield_now().await;
 
+    let retained = registered.producer();
     let error = registered
         .shutdown()
         .await
         .expect_err("blocked flush must fail the registered shutdown");
+    assert!(
+        !retained.shutdown_settled(),
+        "an unfinished writer fence cannot release the store"
+    );
     blocker.commit().await.expect("release registered writer");
     assert!(
         error

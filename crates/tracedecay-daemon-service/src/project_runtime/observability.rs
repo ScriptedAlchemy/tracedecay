@@ -54,7 +54,7 @@ impl StoreObservabilityCoreV1 {
         })
     }
 
-    async fn shutdown(&self) -> Result<(), tracedecay_contracts::ApplicationContractError> {
+    async fn shutdown(&self) -> (Result<(), ApplicationContractError>, bool) {
         let mut first_error = None;
         if let Err(error) = self.work_observations.shutdown().await {
             tracing::warn!(%error, "registered Work owner-observation recovery was incomplete");
@@ -66,13 +66,17 @@ impl StoreObservabilityCoreV1 {
                 first_error = Some(error);
             }
         }
+        let ancillary_joined = first_error.is_none();
         if let Err(error) = self.producer.shutdown().await {
             tracing::warn!(%error, "registered observability producer shutdown was incomplete");
             if first_error.is_none() {
                 first_error = Some(error);
             }
         }
-        first_error.map_or(Ok(()), Err)
+        (
+            first_error.map_or(Ok(()), Err),
+            ancillary_joined && self.producer.shutdown_settled(),
+        )
     }
 }
 
@@ -387,11 +391,11 @@ impl StoreObservabilityRegistryV1 {
         let registry = self.clone();
         self.retirement_drains.spawn_on(
             async move {
-                let result = core.shutdown().await;
+                let (result, settled) = core.shutdown().await;
                 if let Err(error) = &result {
                     tracing::warn!(%error, "background observability owner drain was incomplete");
                 }
-                if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
+                if let Err(error) = registry.finish_retirement(&core, settled) {
                     tracing::warn!(%error, "background observability retirement was incomplete");
                 }
             },
@@ -410,9 +414,9 @@ impl StoreObservabilityRegistryV1 {
         self.retirement_drains.wait().await;
     }
 
-    /// Settles a `Stopping` entry: a releasable retirement removes it so a
-    /// fresh owner may mount; a genuine shutdown failure is remembered as
-    /// `Failed` and refuses all future mounts.
+    /// A confirmed join and writer fence remove the retiring owner even when persistence
+    /// reported an error. The caller still receives that error; incomplete
+    /// shutdown remains failed closed to prevent overlapping producers.
     fn finish_retirement(
         &self,
         core: &Arc<StoreObservabilityCoreV1>,
@@ -588,8 +592,8 @@ impl RegisteredObservabilityProducerV1 {
         if !registry.begin_retirement(&core, StoreObservabilityDrainV1::InFlight)? {
             return Ok(());
         }
-        let result = core.shutdown().await;
-        let retirement = registry.finish_retirement(&core, result.is_ok());
+        let (result, settled) = core.shutdown().await;
+        let retirement = registry.finish_retirement(&core, settled);
         match result {
             Ok(()) => retirement,
             Err(error) => {

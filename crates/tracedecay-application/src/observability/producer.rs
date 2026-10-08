@@ -32,6 +32,7 @@ use rollup_rebuild::{RollupAdvanceOutcome, run_one_rollup_maintenance};
 const PRODUCER_RUNNING: u8 = 0;
 const PRODUCER_STOPPING: u8 = 1;
 const PRODUCER_STOPPED: u8 = 2;
+const PRODUCER_SETTLED: u8 = 3;
 const MAX_PRODUCER_CAPACITY: usize = 1_024;
 const OBSERVABILITY_WRITE_BATCH: usize = 32;
 const MAX_PRODUCER_DEADLINE: Duration = Duration::from_secs(60);
@@ -428,6 +429,12 @@ impl BoundedObservabilityProducerV1 {
         self.core.stop(false).await
     }
 
+    /// Confirms worker join and the writer fence completed. Persistence
+    /// failures remain in the shutdown result and the stream's coverage.
+    pub fn shutdown_settled(&self) -> bool {
+        self.core.state.load(Ordering::Acquire) == PRODUCER_SETTLED
+    }
+
     pub async fn cancel(&self) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
         self.core.stop(true).await
     }
@@ -575,6 +582,36 @@ impl ObservabilityProducerCoreV1 {
                     "observability worker join failed: {error}"
                 ))
             })?;
+            // A persistence timeout can drop an await while its database
+            // command still owns the transaction. The canonical writer fence
+            // proves those commands settled before replacement is permitted.
+            let fence = timeout_at(shutdown_deadline, async {
+                let transaction = self.db.begin_write_transaction().await.map_err(|error| {
+                    ApplicationContractError::Domain(format!(
+                        "observability writer fence failed: {error}"
+                    ))
+                })?;
+                transaction.rollback().await.map_err(|error| {
+                    ApplicationContractError::Domain(format!(
+                        "observability writer fence failed: {error}"
+                    ))
+                })
+            })
+            .await;
+            match fence {
+                Ok(Ok(())) => self.state.store(PRODUCER_SETTLED, Ordering::Release),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "observability shutdown writer fence failed");
+                    return outcome.and(Err(error));
+                }
+                Err(_) => {
+                    let error = ApplicationContractError::Domain(
+                        "observability_shutdown_deadline".to_owned(),
+                    );
+                    tracing::warn!(%error, "observability shutdown writer fence incomplete");
+                    return outcome.and(Err(error));
+                }
+            }
         }
         outcome
     }
