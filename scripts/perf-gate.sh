@@ -99,7 +99,6 @@ PERF_REINDEX_WORKTREES="${PERF_REINDEX_WORKTREES:-0}"
 # Load shape. Overridable so a laptop can run a shorter pass than CI.
 PERF_WORKERS="${PERF_WORKERS:-6}"
 PERF_DURATION_SECONDS="${PERF_DURATION_SECONDS:-60}"
-PERF_CARGO_PROFILE="${PERF_CARGO_PROFILE:-release}"
 PERF_DAEMON_READY_TIMEOUT="${PERF_DAEMON_READY_TIMEOUT:-300}"
 PERF_INDEX_TIMEOUT="${PERF_INDEX_TIMEOUT:-$((PERF_BUDGET_INDEX_SECONDS + 120))}"
 
@@ -227,23 +226,20 @@ mkdir -p "$RUN_DIR/home/.local/share" "$RUN_DIR/home/.config" "$RUN_DIR/profile"
 mkdir -p "$PERF_OUTPUT_DIR"
 
 # ── PHASE BUILD ──────────────────────────────────────────────────────────────
-# Runs before the environment is redirected so cargo keeps the real HOME, and
-# with it the real ~/.cargo registry and toolchain.
+# Build before redirecting the environment so Bazel keeps its configured cache.
 
 if [[ -n "${TRACEDECAY_PERF_BIN:-}" ]]; then
   [[ -x "$TRACEDECAY_PERF_BIN" ]] || die "TRACEDECAY_PERF_BIN '$TRACEDECAY_PERF_BIN' is not executable"
   BIN="$(cd "$(dirname "$TRACEDECAY_PERF_BIN")" && pwd)/$(basename "$TRACEDECAY_PERF_BIN")"
   log "==> PHASE BUILD: using prebuilt binary $BIN"
 else
-  command -v cargo >/dev/null 2>&1 || die "cargo is required unless TRACEDECAY_PERF_BIN is set"
-  log "==> PHASE BUILD: cargo build -p tracedecay-cli --profile $PERF_CARGO_PROFILE --bin tracedecay"
-  # No CARGO_TARGET_DIR override: .cargo/config.toml already pins a repo-local
-  # target dir, which is exactly what the CI cache restores.
-  (cd "$REPO_ROOT" && cargo build --locked -p tracedecay-cli --profile "$PERF_CARGO_PROFILE" --bin tracedecay) >&2 ||
+  command -v bazel >/dev/null 2>&1 || die "bazel is required unless TRACEDECAY_PERF_BIN is set"
+  log "==> PHASE BUILD: bazel build --config=release //crates/tracedecay-cli:tracedecay"
+  (cd "$REPO_ROOT" && bazel build --config=release //crates/tracedecay-cli:tracedecay) >&2 ||
     die "the tracedecay binary failed to build"
-  BUILD_DIR="$PERF_CARGO_PROFILE"
-  [[ "$BUILD_DIR" == "dev" ]] && BUILD_DIR="debug"
-  BIN="$REPO_ROOT/target/$BUILD_DIR/tracedecay"
+  BUILD_DIR="$(cd "$REPO_ROOT" && bazel info --config=release bazel-bin)" ||
+    die "could not resolve the Bazel output directory"
+  BIN="$BUILD_DIR/crates/tracedecay-cli/tracedecay"
   [[ -x "$BIN" ]] || die "expected a binary at $BIN after the build"
 fi
 BUILD_VERSION="$("$BIN" --version 2>/dev/null | tr -d '\n' || echo unknown)"
