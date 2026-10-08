@@ -9,6 +9,5 @@ target
 .codex-worktrees
 .claude-worktrees
 .claude/worktrees
-evals
 mockups
 vendor
