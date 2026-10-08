@@ -46,7 +46,11 @@ fn indexed_test_traversal_preserves_complete_authority_and_digest() {
         )
         .unwrap();
     let generation = store.generation(&published);
-    let authority = generation.test_attribution_authority().unwrap();
+    let authority = generation
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
+        .unwrap();
     let actual = authority.read_test_attribution(&generation.manifest().generation_id);
     let actual_join = actual.evidence.as_ref().unwrap();
     assert_eq!(actual_join.records.len(), 66);

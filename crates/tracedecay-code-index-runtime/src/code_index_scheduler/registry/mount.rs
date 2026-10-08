@@ -23,8 +23,8 @@ use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 use super::super::{
     CodeIndexArrivalV1, CodeIndexCadenceTriggerV1, CodeIndexHintPolicyV1, CodeIndexNoopEvidenceV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
-    RetainedTextGenerationRestoreV1,
+    DaemonCodeIndexControlV1, DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
     reconcile_panic_guard::{
@@ -33,7 +33,7 @@ use super::super::{
 };
 use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
-    CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+    AttributionPreparationControlV1, CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
@@ -828,7 +828,7 @@ impl CodeIndexSchedulerRegistryV1 {
             // query owners already serving, so its finish changes no owner the
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
-            loop {
+            'worker: loop {
                 // Memory given back while the last pass was being refused
                 // reached the watcher before that refusal was visible.
                 let headroom_moved = worker_owner_headroom.has_changed().unwrap_or(false)
@@ -1596,9 +1596,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // Source reconciliation is complete: release the background
                 // admission permit before HeadOpening / graph work so sibling
-                // stores can start. The permit is never re-acquired inside
-                // this pass: `_build_publication` is held for the rest of the
-                // iteration, and `run_ignored_dependency_admission` takes the
+                // stores can start. Do not re-acquire it until this pass
+                // drops `_build_publication` at its optional derivation tail:
+                // `run_ignored_dependency_admission` takes the
                 // admission *before* that same gate, so waiting on admission
                 // here would invert that order (see
                 // `background_worker_waits_for_global_admission_before_publication_gate`).
@@ -3656,6 +3656,119 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                     return;
+                }
+                drop(_build_publication);
+                // Optional attribution follows every already-decoded serving
+                // seat; later reads need not manufacture a source-verification
+                // wake to prepare it. A native-only head stays decode-free.
+                // This retained worker joins preparation even on retirement.
+                {
+                    let candidate = match worker_serving_generation.read() {
+                        Ok(seated) => seated.as_ref().map(|latest| {
+                            (
+                                Arc::clone(&latest.generation),
+                                AttributionPreparationControlV1 {
+                                    generation: DaemonCodeIndexControlV1::new(
+                                        Arc::clone(&worker_serving_generation_epoch),
+                                        Arc::clone(&worker_shutting_down),
+                                    ),
+                                    source_epoch: Arc::clone(&worker_control_epoch),
+                                    expected_source_epoch: pass_control_epoch,
+                                },
+                            )
+                        }),
+                        Err(error) => {
+                            tracing::error!(error = %error, "attribution serving seat is poisoned");
+                            None
+                        }
+                    };
+                    if let Some((generation, control)) = candidate
+                        && matches!(
+                            generation.test_attribution_read().provider_state,
+                            tracedecay_domain::ProviderEvaluationStateV1::Indexing
+                                | tracedecay_domain::ProviderEvaluationStateV1::Cancelled
+                        )
+                    {
+                        // Source publication gates are released before this
+                        // optional work joins the shared background bound.
+                        super::CodeIndexWorkerPhaseV1::enter(
+                            &worker_phase_signal,
+                            super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
+                        );
+                        let admission =
+                            Arc::clone(&worker_background_reconcile_admission).acquire_owned();
+                        tokio::pin!(admission);
+                        let mut saw_wake = false;
+                        let permit = loop {
+                            if control.source_changed() {
+                                break None;
+                            }
+                            if worker_shutting_down.load(Ordering::Acquire) {
+                                break None;
+                            }
+                            tokio::select! {
+                                permit = &mut admission => break permit.ok(),
+                                () = worker_wake.notified() => { saw_wake = true; }
+                                changed = shutdown_observed.changed() => {
+                                    if changed.is_err() { break None; }
+                                }
+                            }
+                        };
+                        if saw_wake {
+                            worker_wake.notify_one();
+                        }
+                        if control.source_changed() {
+                            // Its real source arrival retains the next pass;
+                            // never consume that wake as optional derivation.
+                            worker_wake.notify_one();
+                            continue 'worker;
+                        }
+                        let Some(_permit) = permit else {
+                            Self::join_retained_text_projection_on_worker_exit(
+                                &mut retained_text_projection,
+                            )
+                            .await;
+                            return;
+                        };
+                        super::CodeIndexWorkerPhaseV1::enter(
+                            &worker_phase_signal,
+                            super::CodeIndexWorkerPhaseV1::Working,
+                        );
+                        let preparing = Arc::clone(&generation);
+                        let completion = tokio::task::spawn_blocking(move || {
+                            preparing.prepare_test_attribution(&control)
+                        })
+                        .await;
+                        match completion {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(error)) => tracing::warn!(
+                                error = %error,
+                                generation_id = %generation.manifest().generation_id,
+                                "background test attribution preparation failed"
+                            ),
+                            Err(error) => tracing::error!(
+                                error = %error,
+                                "background test attribution task failed"
+                            ),
+                        }
+                        // A completion for an old owner cannot announce a
+                        // successor's readiness. The memo itself is scoped to
+                        // the captured immutable generation.
+                        match worker_serving_generation.read() {
+                            Ok(seated) => {
+                                if !worker_shutting_down.load(Ordering::Acquire)
+                                    && seated.as_ref().is_some_and(|latest| {
+                                        Arc::ptr_eq(&latest.generation, &generation)
+                                    })
+                                {
+                                    worker_serving_generation_changed.send_replace(());
+                                }
+                            }
+                            Err(error) => tracing::error!(
+                                error = %error, "attribution completion seat is poisoned"
+                            ),
+                        }
+                    }
                 }
                 let _ = result;
             }
