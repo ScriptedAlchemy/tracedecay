@@ -114,6 +114,9 @@ jobs:
         working-directory: benchmark_data/runtime
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
+      - name: Test benchmark result publication
+        run: python3 scripts/test-claude-observation-benchmark-publication.py
+
   # The cheap repository gates in one job: commit lint, cache lineage, the
   # release guards, and rustfmt. Each used to hold its own ubuntu-latest
   # runner for a couple of minutes of work; on 20 free slots that is three

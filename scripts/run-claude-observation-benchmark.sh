@@ -29,10 +29,39 @@ if ! grep -q '"current_acceptance": null' "$index_path"; then
 fi
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/claude-observation-bench.XXXXXXXX")
+result_move_started=false
 cleanup() {
-  rm -rf "$staging"
+  local status=$? index_status=0
+  trap - EXIT INT TERM
+  if [[ $result_move_started == true ]]; then
+    # The index is the publication authority, including when a signal arrives
+    # after its rename but before the shell can record another state change.
+    python3 - "$index_path" "$result_name" <<'PY' || index_status=$?
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as source:
+        selected = json.load(source)["current_acceptance"]
+    if selected is not None and not isinstance(selected, str):
+        raise ValueError("invalid current_acceptance")
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print(f"cannot determine benchmark publication; preserving result: {error}", file=sys.stderr)
+    sys.exit(2)
+sys.exit(1 if selected == sys.argv[2] else 0)
+PY
+    case "$index_status" in
+      0) rm -f "$result_path" || status=1 ;;
+      1) ;;
+      *) [[ $status -ne 0 ]] || status=1 ;;
+    esac
+  fi
+  rm -rf "$staging" || status=1
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 capture="$staging/capture.log"
 
 bazel test --config=release --config=ci //crates/tracedecay:claude_observation_benchmark \
@@ -68,6 +97,7 @@ scripts/require-exact-test.sh bazel test --config=release --config=ci //crates/t
   --test_arg=evidence_directory_matches_index_contract --test_arg=--exact \
   --test_arg=--test-threads=1
 
+result_move_started=true
 mv "$staging/$result_name" "$result_path"
 mv "$staging/evidence-index.json" "$index_path"
 echo "validated $result_path"
