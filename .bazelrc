@@ -63,10 +63,6 @@ build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
-build:fmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
-build:fmt --output_groups=rustfmt_checks
-build:fmt --@rules_rust//rust/settings:rustfmt.toml=//:rustfmt.toml
-
 # The shipped binary: Cargo's release profile (opt-level 3, no debug
 # assertions). Externals return to opt-level 3 over the perf overrides below.
 build:release --compilation_mode=opt

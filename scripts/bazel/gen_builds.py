@@ -800,9 +800,52 @@ def main():
             for _, text in target_sources(t, tuple(extra_dirs))
         )
 
+    formatting_targets = []
+
+    def formatting_rules(package, sources_by_edition):
+        rules = []
+        for edition, expressions in sorted(sources_by_edition.items()):
+            sources = f"rustfmt_sources_{edition}"
+            check = f"rustfmt_check_{edition}"
+            formatting_targets.append(f"//{package}:{check}")
+            args = (
+                '--config-path "$(location //:rustfmt.toml)" '
+                f'--edition {edition} --config skip_children=true --check'
+            )
+            command = f'"$(RUSTFMT)" {args} $(locations :{sources}) && touch "$@"'
+            # PowerShell executes the generated command as a script. Invoke
+            # the formatter per file there to stay below Windows' argv limit.
+            powershell = (
+                f"foreach ($$source in ('$(locations :{sources})' -split ' ')) {{ "
+                f'& "$(RUSTFMT)" {args} $$source; '
+                'if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; '
+                'New-Item -ItemType File -Path "$@" -Force | Out-Null'
+            )
+            rules.extend([
+                'filegroup(\n'
+                f'    name = "{sources}",\n'
+                '    srcs = depset(' + " + ".join(sorted(expressions)) + ').to_list(),\n'
+                '    tags = ["manual"],\n)\n',
+                'genrule(\n'
+                f'    name = "{check}",\n'
+                f'    srcs = [":{sources}", "//:rustfmt.toml"],\n'
+                f'    outs = ["{check}.ok"],\n'
+                f'    cmd = {json.dumps(command)},\n'
+                f'    cmd_ps = {json.dumps(powershell)},\n'
+                '    tools = ["//:rustfmt_toolchain"],\n'
+                '    toolchains = ["//:rustfmt_toolchain"],\n'
+                '    tags = ["manual"],\n'
+                '    visibility = ["//visibility:public"],\n)\n',
+            ])
+        return rules
+
     def render_build(p):
         name = p["name"]
         manifest = tomllib.loads(Path(p["manifest_path"]).read_text())
+        formatting_sources = {}
+
+        def format_sources(expression, edition):
+            formatting_sources.setdefault(edition, set()).add(expression)
         test_sizes = (p.get("metadata") or {}).get("bazel", {}).get("test_sizes", {})
         if not isinstance(test_sizes, dict) or any(
             size not in ("small", "medium", "large", "enormous")
@@ -882,6 +925,7 @@ def main():
                     srcs_expr_lib += " + glob([" + q(lib_extra) + "])"
                 if lib_mod_labels:
                     srcs_expr_lib += " + [" + q(lib_mod_labels) + "]"
+                format_sources(srcs_expr_lib, lib_t["edition"])
                 out += [
                     "rust_library(",
                     f'    name = "{tgt}",',
@@ -909,6 +953,7 @@ def main():
 
         if has_build:
             srcs = srcs_expr(["build.rs"] + BUILD_SCRIPT_SRCS_EXTRA.get(name, []))
+            format_sources(srcs, p["edition"])
             build_edges = dedup(
                 label(d, build_tree) for d in md["build"] if d in build_tree
             )
@@ -955,6 +1000,7 @@ def main():
                 srcs += " + glob([" + q(bin_local) + "])"
             if bin_labels:
                 srcs += " + [" + q(bin_labels) + "]"
+            format_sources(srcs, t["edition"])
             req = frozenset(t.get("required-features") or [])
             # Cargo builds examples against the dev resolution, and builds the
             # binaries a test run spawns with that run's features too (test
@@ -1085,6 +1131,7 @@ def main():
                 srcs += " + glob([" + q(mod_local) + "])"
             if mod_labels:
                 srcs += " + [" + q(mod_labels) + "]"
+            format_sources(srcs, t["edition"])
             runtime_globs = dedup([
                 f"{Path(rel_src(p, t)).parent}/**",
                 *[f"{directory}/**" for directory in RESOURCE_DIRS if directory != "src"],
@@ -1209,6 +1256,7 @@ def main():
                 '    visibility = ["//visibility:public"],',
                 ')\n',
             ]
+        out.extend(formatting_rules(dir_of[name], formatting_sources))
         return "\n".join(out)
 
     outputs = {}
@@ -1340,10 +1388,27 @@ def main():
             obsolete.append(path)
         else:
             outputs[path] = rendered
+    # Handwritten Rust targets outside Cargo members use the same source-only
+    # checks. SDK generator sources are already covered by tracedecay-sdk.
+    for package, sources in {
+        "scripts": {"2024": {'["bazel/rust_test_environment_probe.rs"]'}},
+        "sdks/codegen": {"2024": {'["dashboard_schema.rs"]'}},
+    }.items():
+        path = REPO / package / "BUILD.bazel"
+        rules = formatting_rules(package, sources)
+        block = GEN_BEGIN + "\n" + "\n\n".join(rules) + "\n" + GEN_END
+        outputs[path] = splice_generated(path.read_text(), block, path)
+    root_build = REPO / "BUILD.bazel"
+    format_aggregate = (
+        GEN_BEGIN + '\nfilegroup(\n    name = "rustfmt_check",\n'
+        + "    srcs = [" + q(sorted(formatting_targets)) + "],\n"
+        + '    tags = ["manual"],\n)\n' + GEN_END
+    )
+    outputs[root_build] = splice_generated(root_build.read_text(), format_aggregate, root_build)
     # A generated block or fully generated file can also go stale when its
     # last Cargo reference disappears; re-render the marked ones too.
     for path in sorted(REPO.glob("*/BUILD.bazel")):
-        if path in outputs or not path.exists():
+        if path.resolve() in outputs or not path.exists():
             continue
         text = path.read_text()
         if (

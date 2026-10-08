@@ -491,6 +491,24 @@ rust_test(
 )
 
 filegroup(
+    name = "rustfmt_sources_2024",
+    srcs = depset(["//tests:storage_runtime_rusqlite_suite_sources"] + glob(["benches/**/*.rs"]) + glob(["examples/**/*.rs"]) + glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + ["//crates/tracedecay-domain:tests_domain_suite_work_product_contract_sources", "//crates/tracedecay-domain:tests_sources", "//tests:support_sources"] + glob(["tests/agent_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/automation_runner_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/claude_observation_benchmark/**/*.rs"]) + glob(["tests/daemon_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/dashboard_api_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/graph_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hermes_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hooks_lsp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/mcp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/memory_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/product_surface_suite/**/*.rs"]) + glob(["tests/runtime_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs", "tests/session_suite/**/*.rs", "tests/session_suite/temporal_projection/**/*.rs", "tests/storage_suite/**/*.rs"]) + ["//crates/tracedecay-domain:tests_domain_suite_work_product_contract_sources", "//crates/tracedecay-domain:tests_sources", "//tests:support_sources"] + glob(["tests/session_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/storage_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transcript_ingest_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transport_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"]).to_list(),
+    tags = ["manual"],
+)
+
+genrule(
+    name = "rustfmt_check_2024",
+    srcs = [":rustfmt_sources_2024", "//:rustfmt.toml"],
+    outs = ["rustfmt_check_2024.ok"],
+    cmd = "\"$(RUSTFMT)\" --config-path \"$(location //:rustfmt.toml)\" --edition 2024 --config skip_children=true --check $(locations :rustfmt_sources_2024) && touch \"$@\"",
+    cmd_ps = "foreach ($$source in ('$(locations :rustfmt_sources_2024)' -split ' ')) { & \"$(RUSTFMT)\" --config-path \"$(location //:rustfmt.toml)\" --edition 2024 --config skip_children=true --check $$source; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; New-Item -ItemType File -Path \"$@\" -Force | Out-Null",
+    tools = ["//:rustfmt_toolchain"],
+    toolchains = ["//:rustfmt_toolchain"],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "tests_common",
     srcs = glob(["tests/common/**"]),
     visibility = ["//visibility:public"],

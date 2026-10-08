@@ -197,15 +197,7 @@ jobs:
           cache-key: ci-format-linux
 
       - name: Check formatting
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The isolated test launchers do not expose Rust source providers.
-          # Explicit native labels include their private manual test binaries.
-          targets="$(bazel query 'kind("rust_(library|binary|test|proc_macro) rule", //...)')"
-          test -n "$targets"
-          mapfile -t rust_targets <<< "$targets"
-          bazel build --config=ci --config=fmt "${rust_targets[@]}"
+        run: bazel build --config=ci //:rustfmt_check
 
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
