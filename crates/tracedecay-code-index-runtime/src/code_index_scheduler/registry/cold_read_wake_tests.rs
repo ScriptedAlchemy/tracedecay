@@ -188,7 +188,7 @@ fn run_git_in(root: &Path, args: &[&str]) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generation() {
     use super::AttributionPreparationControlV1;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -244,12 +244,55 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
         .await
         .unwrap();
     let root = canonical_existing_identity(&project).unwrap();
+    registry.request_complete_generation(&root).await;
+    let mut activity = registry.subscribe_owner_activity(&root).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while activity.worker_phase() != super::CodeIndexWorkerPhaseV1::AwaitingAdmission {
+            activity.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // The current-thread runtime observes the phase after the worker yields
+    // on its admission future, so its semaphore request is already queued.
+    // Queue behind the source pass but ahead of its optional preparation.
+    // This holds the actual published memo cold, rather than constructing an
+    // unrelated scheduler handle which residency may replace before seating.
+    let next_admission = registry.background_reconcile_admission().acquire_owned();
+    tokio::pin!(next_admission);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(next_admission.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(admission);
+    let admission = next_admission.await.unwrap();
+    let mut signals =
+        super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let seated = {
+                let mounted = registry.mounted.lock().await;
+                mounted
+                    .get(&root)
+                    .unwrap()
+                    .serving_generation
+                    .read()
+                    .unwrap()
+                    .is_some()
+            };
+            if seated {
+                break;
+            }
+            signals.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
     let (generation, scope, control) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&root).unwrap();
-        let mut scheduler = worktree.scheduler.lock().unwrap();
-        scheduler.reconcile_now().unwrap();
-        let latest = scheduler.latest_complete().unwrap();
+        let latest = worktree.serving_generation.read().unwrap().clone().unwrap();
         let scope = ResolvedScope::new(
             project_id,
             worktree.repository_id.clone(),

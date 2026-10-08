@@ -630,13 +630,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     // it releases the lock; a proof that is still expired
                     // afterwards is requested by the next read that acquires
                     // the scheduler.
-                    if first_complete_demand && serving.is_some() {
-                        Self::note_wake(
-                            &pending_wake,
-                            &wake,
-                            CodeIndexCadenceTriggerV1::QueryAdmission,
-                        );
-                    }
                     return serving;
                 }
             };
@@ -659,13 +652,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(latest) = servable {
-                if first_complete_demand {
-                    Self::note_wake(
-                        &pending_wake,
-                        &wake,
-                        CodeIndexCadenceTriggerV1::QueryAdmission,
-                    );
-                }
                 // The proof is the only source-currentness work a read
                 // performs. A proof that source evidence moved leaves the
                 // immutable owner servable and hands exact verification to the

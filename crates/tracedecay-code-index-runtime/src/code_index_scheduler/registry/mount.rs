@@ -3658,10 +3658,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 drop(_build_publication);
-                // Optional attribution follows the published serving seat. It
-                // belongs to this retained worker and is always joined, even
-                // when retirement cancels the independently shared control.
-                if worker_complete_generation_requested.load(Ordering::Acquire) {
+                // Optional attribution follows every already-decoded serving
+                // seat; later reads need not manufacture a source-verification
+                // wake to prepare it. A native-only head stays decode-free.
+                // This retained worker joins preparation even on retirement.
+                {
                     let candidate = match worker_serving_generation.read() {
                         Ok(seated) => seated.as_ref().map(|latest| {
                             (
@@ -3690,6 +3691,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     {
                         // Source publication gates are released before this
                         // optional work joins the shared background bound.
+                        super::CodeIndexWorkerPhaseV1::enter(
+                            &worker_phase_signal,
+                            super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
+                        );
                         let admission =
                             Arc::clone(&worker_background_reconcile_admission).acquire_owned();
                         tokio::pin!(admission);
@@ -3725,6 +3730,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             .await;
                             return;
                         };
+                        super::CodeIndexWorkerPhaseV1::enter(
+                            &worker_phase_signal,
+                            super::CodeIndexWorkerPhaseV1::Working,
+                        );
                         let preparing = Arc::clone(&generation);
                         let completion = tokio::task::spawn_blocking(move || {
                             preparing.prepare_test_attribution(&control)
