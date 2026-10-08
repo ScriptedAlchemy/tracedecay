@@ -17,6 +17,8 @@ mod payload_gc_cost;
 mod schema_install_cancellation;
 #[cfg(test)]
 mod session_sync;
+#[cfg(test)]
+mod source_rewrite;
 
 #[cfg(test)]
 use super::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT;
