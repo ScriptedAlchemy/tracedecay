@@ -6,6 +6,7 @@ exports_files(
     [
         "version.txt",
         "Cargo.toml",
+        "rustfmt.toml",
         "pnpm-lock.yaml",
         "pnpm-lock.bazel.yaml",
     ],

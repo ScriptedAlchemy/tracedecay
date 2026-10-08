@@ -3,6 +3,7 @@ load("//scripts:bazel/rust_test.bzl", "rust_test")
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "bazel/gen_builds.py",
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
     ],
