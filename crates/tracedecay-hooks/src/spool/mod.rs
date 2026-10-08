@@ -583,6 +583,25 @@ impl HookSpoolV1 {
         Ok(record)
     }
 
+    /// Prepare the exact records file before publishing a daemon binding.
+    /// No event is appended: the empty file and its directory entry become
+    /// durable here so the first callback only commits its own record data.
+    #[tracing::instrument(name = "hooks.spool.prepare", level = "trace", skip_all)]
+    pub fn prepare(self) -> Result<(), HookSpoolError> {
+        self.ensure_healthy()?;
+        if self.recovery_required {
+            return Err(HookSpoolError::RecoveryRequired);
+        }
+        // append_frame writes its bytes verbatim through append_unsynced;
+        // an empty slice creates the file without inventing a frame/sequence.
+        append_frame(&records_path(&self.root), &[])?;
+        let revision =
+            records_file_revision(&self.root)?.ok_or(HookSpoolError::MetadataCorrupted)?;
+        let root = self.root.clone();
+        drop(self);
+        commit_records(&root, revision.identity, revision.length, COMMIT_WAIT)
+    }
+
     /// Release the writer lease, then make every frame this handle appended or
     /// deduplicated against durable. Concurrent committers share one sync of
     /// the records file, so the lease covers only writing frames; a caller

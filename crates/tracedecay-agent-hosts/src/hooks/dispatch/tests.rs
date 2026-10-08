@@ -856,6 +856,21 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     publish_daemon_bindings(&runtime, &layout).unwrap();
 
     let host = NativeHostIdentityV1::ClaudeCode;
+    let capture_root = tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host);
+    let (prepared, report) =
+        HookSpoolV1::open(&capture_root, HookSpoolConfigV1::stock(host), UtcMicros(1)).unwrap();
+    assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(
+        &capture_root,
+        std::time::Duration::ZERO,
+    );
+    prepared.prepare().unwrap();
+    assert_eq!(
+        barriers.syncs(),
+        0,
+        "publication already prepared this exact file"
+    );
+    drop(barriers);
     let held = std::time::Duration::from_millis(20);
     let (capture, _) = HookSpoolV1::open(
         tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
