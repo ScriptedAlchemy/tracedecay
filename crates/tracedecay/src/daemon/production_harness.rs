@@ -852,6 +852,42 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    /// Await optional attribution for the exact current publication without
+    /// making it a prerequisite for ordinary composition or graph readiness.
+    pub async fn await_test_attribution(
+        &self,
+        project_root: impl AsRef<Path>,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    ) -> Result<tracedecay_domain::ProviderEvaluationStateV1> {
+        let graph = self.server(project_root)?.cg().await;
+        let target = graph.configuration_runtime().configuration_target();
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+            graph.project_root(),
+            &target.project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("production-composition code-index scope is invalid: {error:?}"),
+        })?;
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let schedulers = &resources.invocation.code_index_schedulers;
+        let Some(current) = schedulers.latest_text_serving_for_scope(&scope).await else {
+            return Ok(tracedecay_domain::ProviderEvaluationStateV1::Unavailable);
+        };
+        Ok(schedulers
+            .await_test_attribution_for_scope(
+                graph.project_root(),
+                &scope,
+                &current.metadata().manifest().generation_id,
+                cancellation,
+            )
+            .await)
+    }
+
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
