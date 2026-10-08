@@ -439,8 +439,9 @@ impl BoundedObservabilityProducerV1 {
         self.core.state.load(Ordering::Acquire) == PRODUCER_SETTLED
     }
 
-    /// The worker and admissions are closed, but timed-out database commands
-    /// may still need the canonical writer fence before the store can reopen.
+    /// Admissions closed and the worker completed its coverage settlement
+    /// attempt before joining. Timed-out database commands may still need the
+    /// canonical writer fence; a forced abort never establishes this state.
     pub fn shutdown_joined(&self) -> bool {
         matches!(
             self.core.state.load(Ordering::Acquire),
@@ -587,26 +588,13 @@ impl ObservabilityProducerCoreV1 {
                 ));
             }
             Err(_) => {
-                let joined = if let Some(worker) = worker.take() {
+                if let Some(worker) = worker.take() {
                     worker.abort();
-                    match worker.await {
-                        Ok(()) => true,
-                        Err(error) => error.is_cancelled(),
-                    }
-                } else {
-                    false
-                };
-                // Both admission fences passed before this worker wait. An
-                // aborted, joined worker can leave only database commands,
-                // which a later bounded writer fence can settle safely.
-                self.state.store(
-                    if joined {
-                        PRODUCER_JOINED
-                    } else {
-                        PRODUCER_STOPPED
-                    },
-                    Ordering::Release,
-                );
+                    let _ = worker.await;
+                }
+                // Abort may discard accepted observations before their terminal
+                // coverage is attempted; writer settlement cannot repair that.
+                self.state.store(PRODUCER_STOPPED, Ordering::Release);
                 return Err(ApplicationContractError::Domain(
                     "observability_shutdown_deadline".to_owned(),
                 ));

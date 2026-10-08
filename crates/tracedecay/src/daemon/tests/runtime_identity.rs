@@ -977,7 +977,7 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
         "recovery preserves the canonical store identity"
     );
     assert_reopened_linked_route_is_not_degraded(
-        &engine.store_administration.project_servers().lock().await,
+        &*engine.store_administration.project_servers().lock().await,
         &key,
     );
     drop(graph);

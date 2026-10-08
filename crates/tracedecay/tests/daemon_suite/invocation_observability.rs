@@ -1390,31 +1390,34 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
 
 #[tokio::test]
 async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
-    assert_blocked_writer_reopens(
+    assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(50),
             shutdown: Duration::from_millis(250),
         },
         "observability_persistence_deadline",
+        true,
     )
     .await;
 }
 
 #[tokio::test]
-async fn registered_aborted_worker_reopens_only_after_writer_settlement() {
-    assert_blocked_writer_reopens(
+async fn registered_aborted_worker_keeps_unsettled_coverage_failed_closed() {
+    assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(250),
             shutdown: Duration::from_millis(50),
         },
         "observability_shutdown_deadline",
+        false,
     )
     .await;
 }
 
-async fn assert_blocked_writer_reopens(
+async fn assert_blocked_writer_retirement(
     deadlines: ObservabilityProducerDeadlinesV1,
     expected_error: &str,
+    worker_settled: bool,
 ) {
     let (_project, project_id, database, _runtime) =
         runtime("observability-shutdown-failure").await;
@@ -1477,6 +1480,21 @@ async fn assert_blocked_writer_reopens(
             .unwrap_err(),
         "observability_producer_closed"
     );
+    if !worker_settled {
+        assert!(
+            !retained.shutdown_joined(),
+            "abort never proves coverage settlement"
+        );
+        assert!(matches!(
+            failed,
+            Err(StoreObservabilityMountErrorV1::ShutdownFailed)
+        ));
+        assert!(!start_called.load(Ordering::Acquire));
+        blocker.commit().await.expect("release registered writer");
+        assert!(retained.finish_shutdown_settlement().await.is_err());
+        assert!(!retained.shutdown_settled());
+        return;
+    }
     assert!(
         retained.shutdown_joined(),
         "worker closed before fence retry"
