@@ -719,7 +719,6 @@ jobs:
           cache_dependency_path: |
             pnpm-lock.yaml
             Cargo.lock
-            sdks/codegen/Cargo.lock
 
       - name: Install npm packages and Cargo sources
         run: pnpm install --frozen-lockfile

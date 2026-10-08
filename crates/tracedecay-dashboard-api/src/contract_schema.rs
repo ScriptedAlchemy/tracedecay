@@ -294,17 +294,6 @@ mod tests {
     use super::render_dashboard_contract_schema;
 
     #[test]
-    #[ignore = "invoked by dashboard contracts:generate/check"]
-    fn writes_dashboard_contract_schema() {
-        let output = std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT")
-            .map(std::path::PathBuf::from)
-            .expect("contract codegen must provide an output path");
-        let schema =
-            render_dashboard_contract_schema().expect("serialize dashboard contract schema");
-        std::fs::write(output, schema).expect("write dashboard contract schema");
-    }
-
-    #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
     }

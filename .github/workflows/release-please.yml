@@ -144,7 +144,6 @@ jobs:
           cache_dependency_path: |
             pnpm-lock.yaml
             Cargo.lock
-            sdks/codegen/Cargo.lock
 
       - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'
