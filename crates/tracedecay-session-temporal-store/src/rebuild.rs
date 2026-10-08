@@ -233,10 +233,49 @@ pub(super) async fn validate_candidate_frontier(
         expected.insert(occurrence_id.clone());
     }
     if expected.is_empty() && source_frontier != base_frontier {
-        return Err(storage_message(
-            ACTIVATE_OPERATION,
-            "candidate generation has no canonical message outputs past its base frontier",
-        ));
+        // A frontier advance whose every observation was deterministically
+        // skipped (effects recorded with zero outputs, e.g. host
+        // non-conversational records) legitimately introduces no canonical
+        // outputs. Refusing those activations wedged the refresh worker in a
+        // permanent retry loop. Only an advance that processed no
+        // observation at all is a validation failure.
+        let mut processed_any = conn
+            .query(
+                "SELECT EXISTS (
+                     SELECT 1 FROM session_temporal_observation_effects
+                     WHERE session_id = ?1
+                       AND observation_sequence > ?2
+                       AND observation_sequence <= ?3
+                 )",
+                params![
+                    session_id,
+                    i64::try_from(base_frontier)
+                        .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
+                    i64::try_from(source_frontier)
+                        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+                ],
+            )
+            .await
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        let processed = match processed_any
+            .next()
+            .await
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+        {
+            Some(row) => {
+                row.get::<i64>(0)
+                    .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+                    != 0
+            }
+            None => false,
+        };
+        drop(processed_any);
+        if !processed {
+            return Err(storage_message(
+                ACTIVATE_OPERATION,
+                "candidate generation advanced its source frontier without processing any observations",
+            ));
+        }
     }
     require_unsettled_message_ids(conn, session_id, generation, &parent_resolver).await?;
 
