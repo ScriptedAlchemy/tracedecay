@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Read the macOS daemon's own launchd state without confusing nested coalition states, so status and managed-service wipes work for running jobs.
+- Keep hook analytics writes outside exclusive profile maintenance so they cannot recreate stores during a wipe.
+
 ## [1.0.0-beta.76](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.75...v1.0.0-beta.76) (2026-10-08)
 
 

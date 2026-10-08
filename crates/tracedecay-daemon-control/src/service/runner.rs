@@ -930,8 +930,14 @@ fn launchd_owned_service_running(
     }
     let owned = launchd_user_service_path(profile)?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut paths = text.lines().filter_map(|line| {
-        let value = line.trim().strip_prefix("path = ")?.trim();
+    // Nested resource and jetsam coalitions have their own state fields.
+    // launchctl indents job fields once and nested fields at least twice.
+    let job_fields = || {
+        text.lines()
+            .map(|line| line.strip_prefix('\t').unwrap_or(line))
+    };
+    let mut paths = job_fields().filter_map(|line| {
+        let value = line.strip_prefix("path = ")?.trim();
         Some(PathBuf::from(
             value
                 .strip_prefix('"')
@@ -945,9 +951,8 @@ fn launchd_owned_service_running(
             .as_deref()
             .is_some_and(|path| same_unit_file(path, &owned))
     {
-        let mut states = text
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("state = ").map(str::trim));
+        let mut states =
+            job_fields().filter_map(|line| line.strip_prefix("state = ").map(str::trim));
         let state = states.next();
         if states.next().is_none() {
             match state {
