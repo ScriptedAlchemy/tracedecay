@@ -94,7 +94,7 @@ fn launchd_service_activity_comes_from_the_owned_job() {
     );
     write_executable_script(
         &launchctl,
-        &format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nfi\n", plist.display()),
+        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nfi\n", plist.display()),
     ).unwrap();
     assert_eq!(
         runner.service_state().unwrap(),
@@ -102,7 +102,7 @@ fn launchd_service_activity_comes_from_the_owned_job() {
     );
     write_executable_script(
         &launchctl,
-        &format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nelse\n  echo 'permission denied' >&2\n  exit 1\nfi\n", plist.display()),
+        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nelse\n  echo 'permission denied' >&2\n  exit 1\nfi\n", plist.display()),
     ).unwrap();
     assert!(
         runner
@@ -133,7 +133,7 @@ fn launchd_owned_job_requires_a_recognized_activity_state() {
     ] {
         write_executable_script(
             &launchctl,
-            &format!(
+            format!(
                 "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo '{state}'\nfi\n",
                 plist.display()
             ),
@@ -152,7 +152,7 @@ fn launchd_owned_job_requires_a_recognized_activity_state() {
 
     write_executable_script(
         &launchctl,
-        &format!(
+        format!(
             "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = not running'\nfi\n",
             plist.display()
         ),

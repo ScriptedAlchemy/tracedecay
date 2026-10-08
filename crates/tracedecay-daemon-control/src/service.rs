@@ -1694,7 +1694,7 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
         |path| path.display().to_string(),
     );
     let runner = ServiceRunner::current(profile);
-    let service_observation = runner.as_ref().map(|runner| runner.observe_service_state());
+    let service_observation = runner.as_ref().map(ServiceRunner::observe_service_state);
     let service_manager = match &service_observation {
         Ok(Ok(state)) => format!("{state:?}"),
         Ok(Err(ServiceStateError::ManagerUnreachable(unreachable))) => format!(
