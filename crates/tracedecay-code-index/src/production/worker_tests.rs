@@ -615,3 +615,78 @@ fn parallel_collection_reports_the_lowest_index_failure_across_panics() {
 
     assert_eq!(error, WorkerTestError::Mapping(2));
 }
+
+#[test]
+fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .unwrap();
+    let published = owner.build_and_publish(
+        worker_request_with_source(
+            "file.worker.attribution", 1_100_000,
+            b"fn target() {}\n#[test] fn first() { target(); }\n#[test] fn second() { target(); }\n",
+        ),
+        &UninterruptibleCodeIndexControlV1,
+    ).unwrap();
+    let generation = published.decoded().unwrap();
+    let start = std::sync::Barrier::new(4);
+    let reads = std::thread::scope(|scope| {
+        let workers = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    generation
+                        .test_attribution_authority()
+                        .unwrap()
+                        .read_test_attribution(&generation.manifest().generation_id)
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(reads.iter().all(|read| Arc::ptr_eq(&reads[0], read)));
+    let _building = generation.attribution_build.lock().unwrap();
+    assert!(generation.retained_bytes() > 0);
+    let cached = generation
+        .test_attribution_authority()
+        .unwrap()
+        .read_test_attribution(&generation.manifest().generation_id);
+    assert!(Arc::ptr_eq(&reads[0], &cached));
+}
+
+#[test]
+fn failed_attribution_build_can_retry_and_resident_accounting_never_waits_for_it() {
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .unwrap();
+    let published = owner
+        .build_and_publish(
+            worker_request_with_source(
+                "file.worker.attribution-retry",
+                1_100_000,
+                b"fn target() {}\n#[test] fn test() { target(); }\n",
+            ),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .unwrap();
+    let mut generation = (**published.decoded().unwrap()).clone();
+    let files = std::mem::take(&mut generation.snapshot.files);
+    assert!(generation.test_attribution_authority().is_err());
+    assert!(generation.attribution.get().is_none());
+    {
+        let _building = generation.attribution_build.lock().unwrap();
+        assert!(generation.retained_bytes() > 0);
+    }
+    generation.snapshot.files = files;
+    assert!(generation.test_attribution_authority().is_ok());
+    assert!(generation.attribution.get().is_some());
+}

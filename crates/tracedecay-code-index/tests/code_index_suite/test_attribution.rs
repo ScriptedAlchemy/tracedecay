@@ -228,6 +228,21 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
         &attributions,
         &occurrences,
     );
+    let mut owned_reference = attributions.clone();
+    owned_reference.sort_by_key(|attribution| attribution.evidence_class);
+    let legacy_digest = tracedecay_domain::canonical_sha256(&serde_json::json!({
+        "domain": "tracedecay.test-attribution-evidence.v1",
+        "generation_id": watermark.generation_id,
+        "snapshot_digest": watermark.snapshot_digest,
+        "content_identity": watermark.content_identity,
+        "source_revision": watermark.source_revision,
+        "attribution_revision": watermark.attribution_revision,
+        "coverage": watermark.coverage,
+        "attributions": owned_reference,
+        "occurrences": occurrences,
+    }))
+    .unwrap();
+    assert_eq!(watermark.evidence_digest, legacy_digest);
     let mut reversed_attributions = attributions.clone();
     reversed_attributions.reverse();
     let mut reversed_occurrences = occurrences.clone();

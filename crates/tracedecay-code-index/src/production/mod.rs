@@ -52,7 +52,6 @@ use super::{
     retained_parse::{RetainedParsePoolStats, SharedRetainedParsePool},
     test_attribution::{
         GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
-        TestAttributionWatermarkV1,
     },
 };
 
@@ -936,11 +935,12 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// exact and lexical query owners have consumed the staging corpus, the
     /// weak memo lets its duplicate chunk allocation be reclaimed.
     admitted: OnceLock<Arc<Mutex<Weak<Vec<ExtractionAdmittedCodeSearchChunkV1>>>>>,
-    /// Amortized test-attribution join. Query admission rebuilds this authority
-    /// per call even when the generation is unchanged; the traversal and its
-    /// evidence digest are a pure function of the immutable generation. Only
-    /// success is cached.
+    /// Amortized test-attribution join. The traversal and its evidence digest
+    /// are a pure function of the immutable generation. Only success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
+    /// Serialize fallible cold construction without blocking cached reads or
+    /// resident accounting behind it. Failures leave the memo uninitialized.
+    attribution_build: Arc<Mutex<()>>,
     /// Amortized chunk policy-revision census. Owner-compatibility dispatch
     /// needs the one policy revision the chunks were sealed under; scanning
     /// every chunk on each `active_generation` call re-derived a value that is
@@ -1212,6 +1212,14 @@ impl CodeIndexPublishedGenerationV1 {
         if let Some(attribution) = self.attribution.get() {
             return Ok(attribution.clone());
         }
+        let _building = self.attribution_build.lock().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "test attribution construction lock is poisoned: {error}"
+            ))
+        })?;
+        if let Some(attribution) = self.attribution.get() {
+            return Ok(attribution.clone());
+        }
         let authority = self.build_test_attribution_authority()?;
         let _ = self.attribution.set(authority.clone());
         Ok(authority)
@@ -1389,37 +1397,23 @@ impl CodeIndexPublishedGenerationV1 {
                 reason: "canonical graph or source coverage is incomplete".to_owned(),
             }
         };
-        let mut watermark = TestAttributionWatermarkV1 {
-            generation_id: self.manifest.generation_id.clone(),
-            snapshot_digest: self.manifest.snapshot_digest.clone(),
-            content_identity: self.snapshot.content_identity.clone(),
-            source_revision: self.snapshot.source_revision.clone(),
-            attribution_revision,
-            evidence_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
-            coverage: input_coverage,
-        };
-        let digest = tracing::trace_span!("code_index.test_attribution.digest").entered();
-        watermark.evidence_digest = watermark
-            .recompute_evidence_digest(&attributions, &occurrences)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        drop(digest);
+        let eligible = attributions.len() as u64;
         let joining = tracing::trace_span!("code_index.test_attribution.join").entered();
         let snapshot = ValidatedCodeSnapshotV1 {
             snapshot: self.snapshot.clone(),
             intake_digest: self.manifest.snapshot_digest.clone(),
             validated_at: self.manifest.seal.sealed_at,
         };
-        let join = GenerationTestJoinV1::join(
+        let join = GenerationTestJoinV1::produce(
             &self.manifest,
             &snapshot,
-            &attributions,
+            attributions,
             &occurrences,
-            &watermark,
+            attribution_revision,
+            input_coverage,
         )
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         drop(joining);
-        let eligible = attributions.len() as u64;
         let (provider_state, coverage) = if unknown == 0 {
             (
                 ProviderEvaluationStateV1::SupportedCompletedComplete,
@@ -2232,6 +2226,7 @@ where
                     validated: OnceLock::new(),
                     admitted: OnceLock::new(),
                     attribution: OnceLock::new(),
+                    attribution_build: Arc::new(Mutex::new(())),
                     chunk_policy: OnceLock::new(),
                     retained_bytes: OnceLock::new(),
                     decode_peak_growth_bytes: None,
