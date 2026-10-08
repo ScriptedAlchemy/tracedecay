@@ -385,12 +385,19 @@ impl GenerationTestJoinV1 {
                 .covered_occurrences
                 .iter()
                 .filter_map(|occurrence| shared_occurrences.get(occurrence).map(Arc::clone))
-                .collect();
+                .collect::<Vec<_>>();
+            // Resolution already proved presence for every requested identity
+            // when no entry was filtered. With no content drift, checking the
+            // same covered identities again cannot change the disposition.
+            let occurrences_to_check = (test_occurrence.is_none()
+                || covered_occurrences.len() != attribution.covered_occurrences.len()
+                || !content_drift.is_empty())
+            .then_some(&occurrence_by_id);
             let disposition = disposition_for(
                 generation,
                 snapshot,
                 watermark,
-                &occurrence_by_id,
+                occurrences_to_check,
                 &content_drift,
                 &attribution,
                 &mut partial_reasons,
@@ -464,7 +471,7 @@ fn disposition_for(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
     watermark: &TestAttributionWatermarkV1,
-    occurrences: &HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
+    occurrences_to_check: Option<&HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>>,
     content_drift: &HashMap<
         &SymbolOccurrenceId,
         (
@@ -504,20 +511,22 @@ fn disposition_for(
         };
     }
 
-    for occurrence_id in
-        std::iter::once(&attribution.test_occurrence).chain(attribution.covered_occurrences.iter())
-    {
-        if !occurrences.contains_key(occurrence_id) {
-            partial_reasons.push(GenerationTestJoinPartialReasonV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            });
-            return GenerationTestJoinDispositionV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            };
-        }
-        if let Some((disposition, reason)) = content_drift.get(occurrence_id) {
-            partial_reasons.push(reason.clone());
-            return disposition.clone();
+    if let Some(occurrences) = occurrences_to_check {
+        for occurrence_id in std::iter::once(&attribution.test_occurrence)
+            .chain(attribution.covered_occurrences.iter())
+        {
+            if !occurrences.contains_key(occurrence_id) {
+                partial_reasons.push(GenerationTestJoinPartialReasonV1::MissingOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                });
+                return GenerationTestJoinDispositionV1::MissingOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                };
+            }
+            if let Some((disposition, reason)) = content_drift.get(occurrence_id) {
+                partial_reasons.push(reason.clone());
+                return disposition.clone();
+            }
         }
     }
 

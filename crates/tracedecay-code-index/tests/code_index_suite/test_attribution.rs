@@ -414,3 +414,32 @@ fn join_preserves_first_duplicate_and_first_stale_covered_occurrence() {
         ))),
     );
 }
+
+#[test]
+fn join_checks_missing_test_and_covered_occurrences_without_content_drift() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    )];
+    for missing in ["symbol.source", "symbol.test"] {
+        let mut evidence = occurrences();
+        evidence.retain(|occurrence| occurrence.occurrence_id.as_str() != missing);
+        let watermark = watermark(
+            &snapshot,
+            &manifest,
+            TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &evidence,
+        );
+        let joined =
+            GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+                .unwrap();
+        assert_eq!(
+            joined.records[0].disposition,
+            GenerationTestJoinDispositionV1::MissingOccurrence {
+                occurrence_id: id(missing),
+            },
+        );
+    }
+}

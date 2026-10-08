@@ -1230,7 +1230,7 @@ impl CodeIndexPublishedGenerationV1 {
         &self,
     ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
         let indexing = tracing::trace_span!("code_index.test_attribution.index").entered();
-        let mut file_by_occurrence = BTreeMap::new();
+        let mut file_by_occurrence = HashMap::new();
         for file in &self.snapshot.files {
             file_by_occurrence.insert(
                 file.file_occurrence_id.clone(),
@@ -1238,10 +1238,10 @@ impl CodeIndexPublishedGenerationV1 {
             );
         }
 
-        let mut occurrence_files: BTreeMap<
+        let mut occurrence_files: HashMap<
             SymbolOccurrenceId,
             (FileOccurrenceId, tracedecay_domain::ContentDigest),
-        > = BTreeMap::new();
+        > = HashMap::new();
         for chunk in self.chunks.chunks() {
             let Some(occurrence) = &chunk.anchor.symbol_occurrence_id else {
                 continue;
@@ -1254,22 +1254,25 @@ impl CodeIndexPublishedGenerationV1 {
                 ));
             };
             match occurrence_files.entry(occurrence.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
+                std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert((
                         chunk.anchor.file_occurrence_id.clone(),
                         content_digest.clone(),
                     ));
                 }
-                std::collections::btree_map::Entry::Occupied(entry)
+                std::collections::hash_map::Entry::Occupied(entry)
                     if entry.get().0 != chunk.anchor.file_occurrence_id =>
                 {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "test attribution occurrence crosses snapshot files".to_owned(),
                     ));
                 }
-                std::collections::btree_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Occupied(_) => {}
             }
         }
+
+        let mut occurrence_files = occurrence_files.into_iter().collect::<Vec<_>>();
+        occurrence_files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
         let callable_occurrences = self
             .symbols
@@ -1287,15 +1290,15 @@ impl CodeIndexPublishedGenerationV1 {
                         | "procedure"
                 )
             })
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|symbol| &symbol.occurrence)
+            .collect::<HashSet<_>>();
         let test_markers = self
             .symbols
             .symbols
             .iter()
             .filter(|symbol| crate::is_test_marker(symbol))
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|symbol| &symbol.occurrence)
+            .collect::<HashSet<_>>();
         let annotated_test_occurrences = self
             .edges
             .iter()
@@ -1303,8 +1306,8 @@ impl CodeIndexPublishedGenerationV1 {
                 edge.kind == RelationEdgeKindV1::Annotates
                     && test_markers.contains(&edge.from_occurrence)
             })
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|edge| &edge.to_occurrence)
+            .collect::<HashSet<_>>();
         let test_occurrences = occurrence_files
             .iter()
             .enumerate()
@@ -1319,12 +1322,15 @@ impl CodeIndexPublishedGenerationV1 {
             .collect::<Vec<_>>();
         // Canonical indices preserve occurrence ordering while keeping string
         // cloning and tree lookups out of each test's transitive traversal.
-        let occurrences_by_index = occurrence_files.keys().collect::<Vec<_>>();
+        let occurrences_by_index = occurrence_files
+            .iter()
+            .map(|(occurrence, _)| occurrence)
+            .collect::<Vec<_>>();
         let occurrence_indices = occurrences_by_index
             .iter()
             .enumerate()
             .map(|(index, occurrence)| (*occurrence, index))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let mut outgoing = vec![Vec::new(); occurrences_by_index.len()];
         for edge in &self.edges {
             if let (Some(&from), Some(&to)) = (
