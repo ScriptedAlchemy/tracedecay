@@ -160,9 +160,8 @@ with `-D warnings`:
 bazel build --config=clippy //...
 ```
 
-`cargo clippy --workspace --all-targets -- -D warnings` checks the same targets
-in the Cargo edit loop. Either way the check is blocking: the workflow fails on
-any Clippy warning. The composition-root lint policy in
+The check is blocking: the workflow fails on any Clippy warning.
+The composition-root lint policy in
 `crates/tracedecay/src/lib.rs` currently denies `clippy::all`, `clippy::unwrap_used`, and
 `clippy::expect_used`; new violations of those lints must be fixed or justified
 with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
@@ -298,17 +297,16 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Pull request | Nothing automatically. Dispatch CI on its branch ref when the head is ready. |
-| `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: Bazel build and test, clippy, feature gates, the shipped CLI, and the dashboard. |
-| `CI` with `run_os=true` | Adds the macOS and Windows Bazel build and test lanes. |
+| Draft pull request | Repository gates and benchmark-harness self-tests. |
+| Ready pull request, push to `master`, or `CI` dispatch | Repository gates, benchmark-harness self-tests, Linux and Windows Bazel build and test, Clippy, feature gates, the shipped CLI, and the dashboard. |
+| `CI` with `run_os=true` | Adds the macOS Bazel build and test lane. |
 | `CI` with `run_hosts=true` | Adds stock host integrations. |
-| Push to `master` | Everything. |
 
-Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add
-`-f run_os=true` or `-f run_hosts=true` only for those lanes. Opening,
-pushing, labeling, and marking ready create no run at all. A newer
-master push cancels the one in flight. Closing or merging a PR cancels
-its remaining runs and drops its Actions caches. Nothing runs on a
+Use `gh workflow run ci.yml --ref <branch>` to request an additional run; add
+`-f run_os=true` or `-f run_hosts=true` for the optional lanes. A newer PR
+head replaces its prior run. Master finishes its current snapshot and retains
+only the newest pending run. Closing or merging a PR cancels its remaining
+runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.
 

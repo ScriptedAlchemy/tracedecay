@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       run_os:
-        description: "Also run macOS and Windows matrices"
+        description: "Also run the macOS matrix"
         type: boolean
         default: false
       run_hosts:
