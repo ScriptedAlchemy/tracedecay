@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::graph_projection::{CodeGraphReadCostMeter, CodeGraphSymbolSummaryV1};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphReadCostMeter, CodeGraphReadinessRequirement, CodeGraphSymbolSummaryV1,
+};
 use tracedecay_contracts::retrieval::{
     HealthDeltaRequest, HealthDeltaResult, PrimitiveFailureKind, RetrievalPortContext,
     SymbolPrimitiveRecord,
@@ -567,14 +569,24 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let reader = match open_code_graph(
-                    self.code_graph.as_ref(),
-                    context.request,
-                    now_observed(),
-                    Arc::clone(&cancellation),
-                )
-                .await
-                {
+                let opened = self
+                    .code_graph
+                    .open(
+                        CodeGraphReadRequest::new(
+                            context.request,
+                            now_observed(),
+                            Arc::clone(&cancellation),
+                        )
+                        .with_readiness(CodeGraphReadinessRequirement::Engine),
+                    )
+                    .await;
+                let reader = match opened.and_then(|graph| {
+                    graph.reader_with_cancellation(
+                        context.request,
+                        now_observed(),
+                        Arc::clone(&cancellation),
+                    )
+                }) {
                     Ok(reader) => reader,
                     Err(error) => {
                         return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
