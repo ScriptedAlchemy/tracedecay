@@ -992,16 +992,6 @@ async fn settle_worker(
             state.deadlines.persistence,
         )
         .await;
-        // Finish optional maintenance before the final carrier. Its successful
-        // transaction then fences every earlier write, including timed-out
-        // commands, without acquiring the shared writer again after closure.
-        let _ = run_one_rollup_maintenance(
-            db,
-            identity,
-            state.deadlines.persistence,
-            &mut progress.rollup_frontier_initialized,
-        )
-        .await;
         let pending = match take_pending_drops(state) {
             Ok(pending) => pending,
             Err(error) => {
@@ -1046,6 +1036,17 @@ async fn settle_worker(
             )
             .await;
         }
+        // The mandatory terminal precedes optional maintenance so its day
+        // can be rebuilt before shutdown. A deferred maintenance operation
+        // may still own a timed-out database command and requires the fence.
+        let maintenance = run_one_rollup_maintenance(
+            db,
+            identity,
+            state.deadlines.persistence,
+            &mut progress.rollup_frontier_initialized,
+        )
+        .await;
+        writer_settled &= maintenance != RollupAdvanceOutcome::Deferred;
     }
     (state.total_dropped.load(Ordering::Acquire), writer_settled)
 }
