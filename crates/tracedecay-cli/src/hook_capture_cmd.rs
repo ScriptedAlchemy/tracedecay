@@ -4,6 +4,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_daemon_service::logging::{StderrTracingDefault, install_stderr_tracing};
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::lifecycle_lease::{
+    LifecycleLease, SharedLeaseAttempt, try_acquire_shared_for_profile,
+};
 
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
@@ -300,6 +303,8 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 /// admission must not spend the budget an uncontended spool lock would then
 /// be refused for. The response hooks' output write waits the same way.
 struct PreparedNativeCapture {
+    // Keep maintenance excluded through the delivery receipt append.
+    _lease: Option<LifecycleLease>,
     outcome: NativeHookCaptureOutcomeV1,
     /// The spooled event's data root and material, retained for its delivery
     /// receipt.
@@ -314,6 +319,7 @@ struct PreparedNativeCapture {
 impl PreparedNativeCapture {
     fn plain(outcome: NativeHookCaptureOutcomeV1) -> Self {
         Self {
+            _lease: None,
             outcome,
             delivery: None,
             cause: None,
@@ -334,6 +340,18 @@ fn prepare_native_capture(
     payload: &[u8],
     working_directory: &std::io::Result<std::path::PathBuf>,
 ) -> PreparedNativeCapture {
+    if !profile.data_dir().is_dir() {
+        return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unbound);
+    }
+    let lease = match try_acquire_shared_for_profile(profile.data_dir(), "native hook capture") {
+        Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
+        Ok(SharedLeaseAttempt::Busy) => {
+            return PreparedNativeCapture::scope_unavailable(
+                "profile maintenance is in progress".to_owned(),
+            );
+        }
+        Err(error) => return PreparedNativeCapture::scope_unavailable(error.to_string()),
+    };
     let project_root = match working_directory {
         Ok(project_root) => project_root,
         Err(error) => {
@@ -384,6 +402,7 @@ fn prepare_native_capture(
             let delivery = (outcome == NativeHookCaptureOutcomeV1::Captured)
                 .then_some((layout.data_root, material));
             PreparedNativeCapture {
+                _lease: Some(lease),
                 outcome,
                 delivery,
                 cause: None,
