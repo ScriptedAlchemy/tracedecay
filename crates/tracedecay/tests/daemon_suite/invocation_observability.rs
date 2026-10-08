@@ -1405,7 +1405,7 @@ async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
 async fn registered_aborted_worker_keeps_unsettled_coverage_failed_closed() {
     assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
-            persistence: Duration::from_millis(250),
+            persistence: Duration::from_millis(50),
             shutdown: Duration::from_millis(50),
         },
         "observability_shutdown_deadline",
