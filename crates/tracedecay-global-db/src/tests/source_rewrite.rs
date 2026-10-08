@@ -48,7 +48,7 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
 
     harness
         .registered
-        .begin_observation_source_rewrite(&source, &scope, previous, generation.clone(), 0)
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
         .await
         .unwrap();
 
