@@ -33,6 +33,7 @@ const PRODUCER_RUNNING: u8 = 0;
 const PRODUCER_STOPPING: u8 = 1;
 const PRODUCER_STOPPED: u8 = 2;
 const PRODUCER_SETTLED: u8 = 3;
+const PRODUCER_JOINED: u8 = 4;
 const MAX_PRODUCER_CAPACITY: usize = 1_024;
 const OBSERVABILITY_WRITE_BATCH: usize = 32;
 const MAX_PRODUCER_DEADLINE: Duration = Duration::from_secs(60);
@@ -438,6 +439,23 @@ impl BoundedObservabilityProducerV1 {
         self.core.state.load(Ordering::Acquire) == PRODUCER_SETTLED
     }
 
+    /// The worker and admissions are closed, but timed-out database commands
+    /// may still need the canonical writer fence before the store can reopen.
+    pub fn shutdown_joined(&self) -> bool {
+        matches!(
+            self.core.state.load(Ordering::Acquire),
+            PRODUCER_JOINED | PRODUCER_SETTLED
+        )
+    }
+
+    /// A later mount demand may retry only the writer fence, never the worker
+    /// shutdown or accepted observations. Each attempt has the existing bound.
+    pub async fn finish_shutdown_settlement(&self) -> Result<(), ApplicationContractError> {
+        self.core
+            .finish_shutdown_settlement(Instant::now() + self.core.deadlines.shutdown)
+            .await
+    }
+
     pub async fn cancel(&self) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
         self.core.stop(true).await
     }
@@ -569,11 +587,26 @@ impl ObservabilityProducerCoreV1 {
                 ));
             }
             Err(_) => {
-                if let Some(worker) = worker.take() {
+                let joined = if let Some(worker) = worker.take() {
                     worker.abort();
-                    let _ = worker.await;
-                }
-                self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                    match worker.await {
+                        Ok(()) => true,
+                        Err(error) => error.is_cancelled(),
+                    }
+                } else {
+                    false
+                };
+                // Both admission fences passed before this worker wait. An
+                // aborted, joined worker can leave only database commands,
+                // which a later bounded writer fence can settle safely.
+                self.state.store(
+                    if joined {
+                        PRODUCER_JOINED
+                    } else {
+                        PRODUCER_STOPPED
+                    },
+                    Ordering::Release,
+                );
                 return Err(ApplicationContractError::Domain(
                     "observability_shutdown_deadline".to_owned(),
                 ));
@@ -589,38 +622,48 @@ impl ObservabilityProducerCoreV1 {
                 self.state.store(PRODUCER_SETTLED, Ordering::Release);
                 return outcome;
             }
-            // A persistence timeout can drop an await while its database
-            // command still owns the transaction. The canonical writer fence
-            // proves those commands settled before replacement is permitted.
-            let fence = timeout_at(shutdown_deadline, async {
-                let transaction = self.db.begin_write_transaction().await.map_err(|error| {
-                    ApplicationContractError::Domain(format!(
-                        "observability writer fence failed: {error}"
-                    ))
-                })?;
-                transaction.rollback().await.map_err(|error| {
-                    ApplicationContractError::Domain(format!(
-                        "observability writer fence failed: {error}"
-                    ))
-                })
-            })
-            .await;
-            match fence {
-                Ok(Ok(())) => self.state.store(PRODUCER_SETTLED, Ordering::Release),
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "observability shutdown writer fence failed");
-                    return outcome.and(Err(error));
-                }
-                Err(_) => {
-                    let error = ApplicationContractError::Domain(
-                        "observability_shutdown_deadline".to_owned(),
-                    );
-                    tracing::warn!(%error, "observability shutdown writer fence incomplete");
-                    return outcome.and(Err(error));
-                }
+            self.state.store(PRODUCER_JOINED, Ordering::Release);
+            if let Err(error) = self.finish_shutdown_settlement(shutdown_deadline).await {
+                tracing::warn!(%error, "observability shutdown writer fence incomplete");
+                return outcome.and(Err(error));
             }
         }
         outcome
+    }
+
+    async fn finish_shutdown_settlement(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), ApplicationContractError> {
+        match self.state.load(Ordering::Acquire) {
+            PRODUCER_SETTLED => return Ok(()),
+            PRODUCER_JOINED => {}
+            _ => {
+                return Err(ApplicationContractError::Domain(
+                    "observability_worker_not_joined".to_owned(),
+                ));
+            }
+        }
+        // Timed-out statements may retain a transaction after the worker joins.
+        // The canonical writer fence proves those commands settled before reuse.
+        timeout_at(deadline, async {
+            let transaction = self.db.begin_write_transaction().await.map_err(|error| {
+                ApplicationContractError::Domain(format!(
+                    "observability writer fence failed: {error}"
+                ))
+            })?;
+            transaction.rollback().await.map_err(|error| {
+                ApplicationContractError::Domain(format!(
+                    "observability writer fence failed: {error}"
+                ))
+            })
+        })
+        .await
+        .map_err(|_| {
+            ApplicationContractError::Domain("observability_shutdown_deadline".to_owned())
+        })??;
+        self.state.store(PRODUCER_SETTLED, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -1307,6 +1350,13 @@ mod shutdown_settlement_tests {
                 },
             )
             .unwrap(),
+        );
+        assert!(!producer.shutdown_joined());
+        let premature = producer.finish_shutdown_settlement().await.unwrap_err();
+        assert!(
+            premature
+                .to_string()
+                .contains("observability_worker_not_joined")
         );
         let worker = producer.core.worker.lock().unwrap().take().unwrap();
         let (release, released) = oneshot::channel();
