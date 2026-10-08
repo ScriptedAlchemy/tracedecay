@@ -129,7 +129,10 @@ impl ObservabilityProducerDeadlinesV1 {
 enum ProducerControl {
     Shutdown {
         cancelled: bool,
-        reply: oneshot::Sender<Result<ObservabilityProducerSummaryV1, ApplicationContractError>>,
+        reply: oneshot::Sender<(
+            Result<ObservabilityProducerSummaryV1, ApplicationContractError>,
+            bool,
+        )>,
     },
 }
 
@@ -554,7 +557,7 @@ impl ObservabilityProducerCoreV1 {
                 "observability_control_lane_closed".to_owned(),
             ));
         }
-        let outcome = match timeout_at(shutdown_deadline, result).await {
+        let (outcome, writer_settled) = match timeout_at(shutdown_deadline, result).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => {
                 if let Some(worker) = worker.take() {
@@ -582,6 +585,10 @@ impl ObservabilityProducerCoreV1 {
                     "observability worker join failed: {error}"
                 ))
             })?;
+            if writer_settled {
+                self.state.store(PRODUCER_SETTLED, Ordering::Release);
+                return outcome;
+            }
             // A persistence timeout can drop an await while its database
             // command still owns the transaction. The canonical writer fence
             // proves those commands settled before replacement is permitted.
@@ -655,7 +662,7 @@ async fn run_worker(
                     .await;
                     break;
                 };
-                let dropped_count = settle_worker(
+                let (dropped_count, writer_settled) = settle_worker(
                     &db,
                     &identity,
                     &mut data,
@@ -674,7 +681,7 @@ async fn run_worker(
                     }),
                     Err,
                 );
-                let _ = reply.send(result);
+                let _ = reply.send((result, writer_settled));
                 break;
             }
             observation = data.recv() => {
@@ -844,9 +851,9 @@ async fn record_batch(
     persisted: &mut u64,
     first_error: &mut Option<ApplicationContractError>,
     persistence_deadline: Duration,
-) {
+) -> bool {
     if envelopes.is_empty() {
-        return;
+        return false;
     }
     let count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
     match timeout(
@@ -855,14 +862,21 @@ async fn record_batch(
     )
     .await
     {
-        Ok(Ok(_)) => *persisted = persisted.saturating_add(count),
-        Ok(Err(error)) if first_error.is_none() => *first_error = Some(error),
+        Ok(Ok(_)) => {
+            *persisted = persisted.saturating_add(count);
+            true
+        }
+        Ok(Err(error)) if first_error.is_none() => {
+            *first_error = Some(error);
+            false
+        }
         Err(_) if first_error.is_none() => {
             *first_error = Some(ApplicationContractError::Domain(
                 "observability_persistence_deadline".to_owned(),
             ));
+            false
         }
-        Ok(Err(_)) | Err(_) => {}
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
@@ -895,8 +909,9 @@ async fn settle_worker(
     progress: &mut ProducerWorkerProgress,
     discard_pending: bool,
     clean_shutdown_observed: bool,
-) -> u64 {
+) -> (u64, bool) {
     data.close();
+    let mut writer_settled = false;
     if discard_pending {
         let mut ranges = Vec::new();
         while let Ok(observation) = data.try_recv() {
@@ -947,7 +962,7 @@ async fn settle_worker(
         }
         for range in ranges {
             let drop_envelope = telemetry_drop_envelope(range, false);
-            record(
+            writer_settled = record(
                 db,
                 drop_envelope,
                 &mut progress.persisted,
@@ -977,6 +992,16 @@ async fn settle_worker(
             state.deadlines.persistence,
         )
         .await;
+        // Finish optional maintenance before the final carrier. Its successful
+        // transaction then fences every earlier write, including timed-out
+        // commands, without acquiring the shared writer again after closure.
+        let _ = run_one_rollup_maintenance(
+            db,
+            identity,
+            state.deadlines.persistence,
+            &mut progress.rollup_frontier_initialized,
+        )
+        .await;
         let pending = match take_pending_drops(state) {
             Ok(pending) => pending,
             Err(error) => {
@@ -990,7 +1015,7 @@ async fn settle_worker(
         for pending in pending {
             let closes_cleanly = clean_shutdown_observed && progress.first_error.is_none();
             let drop_envelope = telemetry_drop_envelope(pending, closes_cleanly);
-            record(
+            writer_settled = record(
                 db,
                 drop_envelope,
                 &mut progress.persisted,
@@ -1012,7 +1037,7 @@ async fn settle_worker(
                 },
                 progress.first_error.is_none(),
             );
-            record(
+            writer_settled = record(
                 db,
                 zero_terminal,
                 &mut progress.persisted,
@@ -1021,15 +1046,8 @@ async fn settle_worker(
             )
             .await;
         }
-        let _ = run_one_rollup_maintenance(
-            db,
-            identity,
-            state.deadlines.persistence,
-            &mut progress.rollup_frontier_initialized,
-        )
-        .await;
     }
-    state.total_dropped.load(Ordering::Acquire)
+    (state.total_dropped.load(Ordering::Acquire), writer_settled)
 }
 
 fn take_pending_drops(
@@ -1154,7 +1172,7 @@ async fn record(
     persisted: &mut u64,
     first_error: &mut Option<ApplicationContractError>,
     persistence_deadline: Duration,
-) {
+) -> bool {
     record_batch(
         db,
         vec![envelope],
@@ -1162,7 +1180,7 @@ async fn record(
         first_error,
         persistence_deadline,
     )
-    .await;
+    .await
 }
 
 fn telemetry_drop_envelope(
@@ -1243,5 +1261,77 @@ mod cheaper_frontier_tests {
         );
         assert!(should_wake_rollup_now(true, true, true));
         assert!(!should_wake_rollup_now(true, true, false));
+    }
+}
+
+#[cfg(test)]
+mod shutdown_settlement_tests {
+    use super::{
+        BoundedObservabilityProducerV1, ObservabilityProducerDeadlinesV1,
+        ObservabilityProducerIdentityV1,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+
+    #[tokio::test]
+    async fn completed_terminal_does_not_wait_for_a_subsequent_unrelated_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project_id = tracedecay_domain::ProjectId::new("project.shutdown-terminal").unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            directory.path().join("profile"),
+            &project,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        let db = runtime.project_database_arc().unwrap();
+        let producer = Arc::new(
+            BoundedObservabilityProducerV1::start_with_deadlines(
+                db.clone(),
+                ObservabilityProducerIdentityV1 {
+                    authorized_scope_ref: project_id.as_str().to_owned(),
+                    process_boot_id: "boot.shutdown-terminal".to_owned(),
+                    producer_revision: "producer.v1".to_owned(),
+                    configuration_revision: "configuration.v1".to_owned(),
+                    policy_revision: "policy.v1".to_owned(),
+                },
+                1,
+                ObservabilityProducerDeadlinesV1 {
+                    persistence: Duration::from_millis(50),
+                    shutdown: Duration::from_millis(250),
+                },
+            )
+            .unwrap(),
+        );
+        let worker = producer.core.worker.lock().unwrap().take().unwrap();
+        let (release, released) = oneshot::channel();
+        let (blocker_ready, blocker_handle) = oneshot::channel();
+        // Keep the real worker and its terminal write, but make its join
+        // observe another writer already owning the database afterward.
+        *producer.core.worker.lock().unwrap() = Some(tokio::spawn(async move {
+            worker.await.unwrap();
+            let (acquired, acquired_rx) = oneshot::channel();
+            let blocker = tokio::spawn(async move {
+                let transaction = db.begin_write_transaction().await.unwrap();
+                acquired.send(()).unwrap();
+                released.await.unwrap();
+                transaction.rollback().await.unwrap();
+            });
+            acquired_rx.await.unwrap();
+            blocker_ready.send(blocker).unwrap();
+        }));
+        let stopping = Arc::clone(&producer);
+        let shutdown = tokio::spawn(async move { stopping.shutdown().await });
+        let blocker = blocker_handle.await.unwrap();
+        let outcome = shutdown.await.unwrap();
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        let summary = outcome.expect("completed producer never waits on the unrelated writer");
+        assert_eq!(summary.persisted, 1);
+        assert!(producer.shutdown_settled());
     }
 }
