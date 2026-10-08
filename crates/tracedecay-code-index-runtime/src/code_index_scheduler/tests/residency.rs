@@ -59,8 +59,10 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
         .expect("the seated generation answers");
     assert!(!fresh.served_stale);
     let generation = fresh.generation.as_str().to_owned();
-    // A pass still finishing the mount can re-seat the decode it measures.
+    // Attribution can hold the decode while awaiting admission after the
+    // source pass settles. Wait for the worker to release that last handle.
     wait_for_settled_owner(&registry, fixture.path()).await;
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
 
     let used = owners.report(Instant::now());
     assert_eq!(
