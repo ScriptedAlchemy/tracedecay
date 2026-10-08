@@ -3985,12 +3985,7 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
                 _ => None,
             }
         };
-        let Some(Ok(authority)) = seated.map(|seated| seated.test_attribution_authority()) else {
-            return unavailable();
-        };
-        crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
-            &authority, generation,
-        )
+        seated.map_or_else(unavailable, |seated| seated.test_attribution_read())
     }
 }
 

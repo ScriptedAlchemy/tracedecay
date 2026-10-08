@@ -632,6 +632,11 @@ fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
         &UninterruptibleCodeIndexControlV1,
     ).unwrap();
     let generation = published.decoded().unwrap();
+    let cloned_generation = (**generation).clone();
+    assert_eq!(
+        cloned_generation.test_attribution_read().provider_state,
+        ProviderEvaluationStateV1::Indexing
+    );
     let start = std::sync::Barrier::new(4);
     let reads = std::thread::scope(|scope| {
         let workers = (0..4)
@@ -639,7 +644,7 @@ fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
                 scope.spawn(|| {
                     start.wait();
                     generation
-                        .test_attribution_authority()
+                        .prepare_test_attribution(&UninterruptibleCodeIndexControlV1)
                         .unwrap()
                         .read_test_attribution(&generation.manifest().generation_id)
                 })
@@ -654,10 +659,18 @@ fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
     let _building = generation.attribution_build.lock().unwrap();
     assert!(generation.retained_bytes() > 0);
     let cached = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(&UninterruptibleCodeIndexControlV1)
         .unwrap()
         .read_test_attribution(&generation.manifest().generation_id);
     assert!(Arc::ptr_eq(&reads[0], &cached));
+    assert!(Arc::ptr_eq(
+        &cached,
+        &cloned_generation.test_attribution_read()
+    ));
+    assert_eq!(
+        cloned_generation.manifest().generation_id,
+        generation.manifest().generation_id
+    );
 }
 
 #[test]
@@ -680,13 +693,70 @@ fn failed_attribution_build_can_retry_and_resident_accounting_never_waits_for_it
         .unwrap();
     let mut generation = (**published.decoded().unwrap()).clone();
     let files = std::mem::take(&mut generation.snapshot.files);
-    assert!(generation.test_attribution_authority().is_err());
+    assert!(
+        generation
+            .prepare_test_attribution(&UninterruptibleCodeIndexControlV1)
+            .is_err()
+    );
     assert!(generation.attribution.get().is_none());
+    assert_eq!(
+        generation.test_attribution_read().provider_state,
+        ProviderEvaluationStateV1::Failed
+    );
     {
         let _building = generation.attribution_build.lock().unwrap();
         assert!(generation.retained_bytes() > 0);
+        let warming = generation.test_attribution_read();
+        assert_eq!(warming.provider_state, ProviderEvaluationStateV1::Indexing);
+        assert!(warming.evidence.is_none());
     }
     generation.snapshot.files = files;
-    assert!(generation.test_attribution_authority().is_ok());
+    assert!(
+        generation
+            .prepare_test_attribution(&UninterruptibleCodeIndexControlV1)
+            .is_ok()
+    );
     assert!(generation.attribution.get().is_some());
+}
+
+#[test]
+fn attribution_preparation_checks_cancellation_and_can_retry() {
+    struct CancelAfterChecks(std::sync::atomic::AtomicUsize);
+    impl CodeIndexExecutionControlV1 for CancelAfterChecks {
+        fn is_cancelled(&self) -> bool {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 8
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .unwrap();
+    let published = owner.build_and_publish(worker_request_with_source(
+        "file.worker.attribution-cancel", 1_100_000,
+        b"fn target() {}\n#[test] fn first() { target(); }\n#[test] fn second() { first(); }\n",
+    ), &UninterruptibleCodeIndexControlV1).unwrap();
+    let generation = published.decoded().unwrap();
+    let control = CancelAfterChecks(std::sync::atomic::AtomicUsize::new(0));
+    assert!(matches!(
+        generation.prepare_test_attribution(&control),
+        Err(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled
+        ))
+    ));
+    let cancelled = generation.test_attribution_read();
+    assert_eq!(
+        cancelled.provider_state,
+        ProviderEvaluationStateV1::Cancelled
+    );
+    assert!(cancelled.evidence.is_none());
+    assert!(generation.attribution.get().is_none());
+    generation
+        .prepare_test_attribution(&UninterruptibleCodeIndexControlV1)
+        .unwrap();
+    assert!(generation.test_attribution_read().evidence.is_some());
 }

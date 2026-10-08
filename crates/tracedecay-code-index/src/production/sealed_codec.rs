@@ -1280,8 +1280,10 @@ pub(super) fn assemble_published_generation(
         projection,
         validated: OnceLock::new(),
         admitted: OnceLock::new(),
-        attribution: OnceLock::new(),
-        attribution_build: Arc::new(Mutex::new(())),
+        attribution: Arc::new(OnceLock::new()),
+        attribution_build: Arc::new(Mutex::new(
+            tracedecay_domain::ProviderEvaluationStateV1::Indexing,
+        )),
         chunk_policy: OnceLock::new(),
         retained_bytes: OnceLock::new(),
         decode_peak_growth_bytes: None,

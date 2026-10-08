@@ -1103,7 +1103,9 @@ fn published_generation_serves_current_conservative_test_attribution() {
         .expect("test generation publishes");
     let generation = store.generation(&generation);
     let authority = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);
@@ -1192,7 +1194,9 @@ fn root_feedback_entry_test() {
         .expect("test generation publishes");
     let generation = store.generation(&generation);
     let authority = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);

@@ -8,9 +8,11 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+use super::owner_signals::CodeIndexOwnerSignalsV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
-use tracedecay_domain::CodeGenerationId;
+use tracedecay_domain::{CodeGenerationId, ProviderEvaluationStateV1};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::super::{
     CodeIndexCadenceTriggerV1, CodeIndexSchedulerErrorV1, GenerationDecodeAdmissionV1,
@@ -588,6 +590,11 @@ impl CodeIndexSchedulerRegistryV1 {
             let first_complete_demand = !worktree
                 .complete_generation_requested
                 .swap(true, Ordering::AcqRel);
+            if first_complete_demand {
+                worktree
+                    .complete_generation_requested_changed
+                    .send_replace(true);
+            }
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
@@ -623,6 +630,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     // it releases the lock; a proof that is still expired
                     // afterwards is requested by the next read that acquires
                     // the scheduler.
+                    if first_complete_demand && serving.is_some() {
+                        Self::note_wake(
+                            &pending_wake,
+                            &wake,
+                            CodeIndexCadenceTriggerV1::QueryAdmission,
+                        );
+                    }
                     return serving;
                 }
             };
@@ -645,6 +659,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(latest) = servable {
+                if first_complete_demand {
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
+                    );
+                }
                 // The proof is the only source-currentness work a read
                 // performs. A proof that source evidence moved leaves the
                 // immutable owner servable and hands exact verification to the
@@ -845,6 +866,75 @@ impl CodeIndexSchedulerRegistryV1 {
         // [`latest_matches_scope_identity`]), and the ladder has already
         // scheduled the rebuild that will replace this generation.
         latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// Wait within an existing owned background operation for attribution of
+    /// one exact publication. Reads demand decoding without blocking ordinary
+    /// admission; the serving watch also announces readiness within a generation.
+    pub async fn await_test_attribution_for_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+        generation: &CodeGenerationId,
+        cancellation: &CancellationToken,
+    ) -> ProviderEvaluationStateV1 {
+        let Ok(root) = canonical_existing_identity(project_root) else {
+            return ProviderEvaluationStateV1::Unavailable;
+        };
+        {
+            let mounted = self.mounted.lock().await;
+            let Some((mounted_root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique()
+            else {
+                return ProviderEvaluationStateV1::Unavailable;
+            };
+            if mounted_root != &root || !worktree.graph_activation.policy().is_enabled() {
+                return ProviderEvaluationStateV1::Unavailable;
+            }
+        }
+        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
+        loop {
+            if cancellation.is_cancelled() {
+                return ProviderEvaluationStateV1::Cancelled;
+            }
+            let Some(current) = self.retained_text_owner_for_root(&root).await else {
+                return ProviderEvaluationStateV1::Unavailable;
+            };
+            if !text_matches_scope_identity(&current, scope) {
+                return ProviderEvaluationStateV1::Unavailable;
+            }
+            if &current.metadata().manifest().generation_id != generation {
+                return ProviderEvaluationStateV1::Stale;
+            }
+            if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
+                if &latest.generation().manifest().generation_id != generation {
+                    return ProviderEvaluationStateV1::Stale;
+                }
+                let state = latest.generation().test_attribution_read().provider_state;
+                if state != ProviderEvaluationStateV1::Indexing
+                    && (!matches!(
+                        state,
+                        ProviderEvaluationStateV1::Partial
+                            | ProviderEvaluationStateV1::SupportedCompletedComplete
+                    ) || self
+                        .latest_feedback_generation_for_scope(&root, scope)
+                        .await
+                        .is_some_and(|current| {
+                            &current.metadata().manifest().generation_id == generation
+                        }))
+                {
+                    return state;
+                }
+            }
+            if self.convergence_park(project_root).await.is_some() {
+                return ProviderEvaluationStateV1::Failed;
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return ProviderEvaluationStateV1::Cancelled,
+                changed = signals.changed() => if changed.is_err() {
+                    return ProviderEvaluationStateV1::Unavailable;
+                },
+            }
+        }
     }
 
     /// [`Self::latest_complete_fresh_for_scope`] for a read that needs the
