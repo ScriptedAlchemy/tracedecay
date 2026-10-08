@@ -241,6 +241,27 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
             .recompute_evidence_digest(&reversed_attributions, &reversed_occurrences)
             .expect("canonical digest")
     );
+    let joined = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &attributions,
+        &occurrences,
+        &watermark,
+    )
+    .unwrap();
+    let reversed = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &reversed_attributions,
+        &reversed_occurrences,
+        &watermark,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&joined).unwrap(),
+        serde_json::to_vec(&reversed).unwrap()
+    );
+    assert_eq!(joined.retained_bytes(), reversed.retained_bytes());
 }
 
 #[test]
@@ -340,5 +361,41 @@ fn records_covering_one_occurrence_share_a_single_resident_copy() {
         std::ptr::eq(covered(0), covered(1)),
         "every test covering an occurrence must share it; a transitive closure \
          copied per test makes the join quadratic in resident memory"
+    );
+}
+
+#[test]
+fn join_preserves_first_duplicate_and_first_stale_covered_occurrence() {
+    let (snapshot, manifest) = generation();
+    let mut attribution = attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    );
+    attribution.covered_occurrences.push(id("symbol.z-missing"));
+    let attributions = vec![attribution];
+    let mut evidence = occurrences();
+    evidence[0].content_digest = content('c');
+    let watermark = watermark(
+        &snapshot,
+        &manifest,
+        TestAttributionJoinInputCoverageV1::Complete,
+        &attributions,
+        &evidence,
+    );
+    evidence.reverse();
+    let joined =
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+            .unwrap();
+    assert!(matches!(
+        &joined.records[0].disposition,
+        GenerationTestJoinDispositionV1::StaleContent { occurrence_id, .. }
+            if occurrence_id.as_str() == "symbol.source"
+    ));
+    evidence.extend(evidence.clone());
+    assert_eq!(
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark),
+        Err(GenerationTestJoinErrorV1::DuplicateOccurrence(id(
+            "symbol.test"
+        ))),
     );
 }

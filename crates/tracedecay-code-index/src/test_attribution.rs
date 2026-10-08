@@ -6,7 +6,7 @@
 //! class is preserved verbatim, and stale/unknown evidence can never be
 //! upgraded to proof of execution or correctness.
 
-use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -189,7 +189,6 @@ impl GenerationTestJoinV1 {
     /// copies once each.
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
-        use std::collections::BTreeSet;
         use std::mem::size_of;
         let occurrence_bytes = |occurrence: &TestAttributionOccurrenceV1| {
             size_of::<TestAttributionOccurrenceV1>()
@@ -197,7 +196,7 @@ impl GenerationTestJoinV1 {
                 .saturating_add(occurrence.file_occurrence_id.as_str().len())
                 .saturating_add(occurrence.content_digest.as_str().len())
         };
-        let mut shared = BTreeSet::new();
+        let mut shared = HashSet::new();
         let bytes = self.records.iter().fold(0_usize, |bytes, record| {
             let covered_ids =
                 record
@@ -246,7 +245,10 @@ impl GenerationTestJoinV1 {
         {
             return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
         }
-        let content_by_file: BTreeMap<&FileOccurrenceId, &ContentDigest> = snapshot
+        // These indices are used only for exact lookups. Canonical record and
+        // evidence ordering is established separately, so repeated covered
+        // occurrences need not compare their long identities down a tree.
+        let content_by_file: HashMap<&FileOccurrenceId, &ContentDigest> = snapshot
             .snapshot
             .files
             .iter()
@@ -261,7 +263,7 @@ impl GenerationTestJoinV1 {
                 }]
             }
         };
-        let shared_occurrences: BTreeMap<&SymbolOccurrenceId, Arc<TestAttributionOccurrenceV1>> =
+        let shared_occurrences: HashMap<&SymbolOccurrenceId, Arc<TestAttributionOccurrenceV1>> =
             occurrence_by_id
                 .iter()
                 .map(|(id, occurrence)| (*id, Arc::new((*occurrence).clone())))
@@ -352,8 +354,8 @@ fn disposition_for(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
     watermark: &TestAttributionWatermarkV1,
-    occurrences: &BTreeMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
-    content_by_file: &BTreeMap<&FileOccurrenceId, &ContentDigest>,
+    occurrences: &HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
+    content_by_file: &HashMap<&FileOccurrenceId, &ContentDigest>,
     attribution: &GenerationTestAttributionV1,
     partial_reasons: &mut Vec<GenerationTestJoinPartialReasonV1>,
 ) -> GenerationTestJoinDispositionV1 {
@@ -442,9 +444,8 @@ fn disposition_for(
 
 fn index_occurrences(
     occurrences: &[TestAttributionOccurrenceV1],
-) -> Result<BTreeMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1>
-{
-    let mut by_id = BTreeMap::new();
+) -> Result<HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1> {
+    let mut by_id = HashMap::with_capacity(occurrences.len());
     for occurrence in occurrences {
         occurrence
             .occurrence_id

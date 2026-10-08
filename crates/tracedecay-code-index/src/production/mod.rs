@@ -1217,9 +1217,11 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(authority)
     }
 
+    #[tracing::instrument(name = "code_index.test_attribution.build", level = "trace", skip_all)]
     fn build_test_attribution_authority(
         &self,
     ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
+        let indexing = tracing::trace_span!("code_index.test_attribution.index").entered();
         let mut file_by_occurrence = BTreeMap::new();
         for file in &self.snapshot.files {
             file_by_occurrence.insert(
@@ -1332,6 +1334,8 @@ impl CodeIndexPublishedGenerationV1 {
         let attribution_revision =
             ComponentVersion::new("code-index.test-attribution.conservative.v1")
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        drop(indexing);
+        let traversal = tracing::trace_span!("code_index.test_attribution.traverse").entered();
         let mut attributions = Vec::with_capacity(test_occurrences.len());
         let mut visited = vec![usize::MAX; occurrences_by_index.len()];
         let mut covered = Vec::new();
@@ -1363,6 +1367,7 @@ impl CodeIndexPublishedGenerationV1 {
             });
         }
 
+        drop(traversal);
         let occurrences = occurrence_files
             .into_iter()
             .map(|(occurrence_id, (file_occurrence_id, content_digest))| {
@@ -1394,9 +1399,12 @@ impl CodeIndexPublishedGenerationV1 {
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
             coverage: input_coverage,
         };
+        let digest = tracing::trace_span!("code_index.test_attribution.digest").entered();
         watermark.evidence_digest = watermark
             .recompute_evidence_digest(&attributions, &occurrences)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        drop(digest);
+        let joining = tracing::trace_span!("code_index.test_attribution.join").entered();
         let snapshot = ValidatedCodeSnapshotV1 {
             snapshot: self.snapshot.clone(),
             intake_digest: self.manifest.snapshot_digest.clone(),
@@ -1410,6 +1418,7 @@ impl CodeIndexPublishedGenerationV1 {
             &watermark,
         )
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        drop(joining);
         let eligible = attributions.len() as u64;
         let (provider_state, coverage) = if unknown == 0 {
             (
@@ -1434,10 +1443,13 @@ impl CodeIndexPublishedGenerationV1 {
         };
         let read = GenerationProviderReadV1::new(provider_state, coverage, Some(join))
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let measuring =
+            tracing::trace_span!("code_index.test_attribution.retained_bytes").entered();
         let retained_bytes = read
             .evidence
             .as_ref()
             .map_or(0, GenerationTestJoinV1::retained_bytes);
+        drop(measuring);
         Ok(PublishedGenerationTestAttributionAuthorityV1 {
             generation_id: self.manifest.generation_id.clone(),
             read: Arc::new(read),
