@@ -257,6 +257,7 @@ rust_test(
 
 rust_test(
     name = "code_lexical_catchup",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_lexical_catchup.rs",
     edition = crate_edition(),

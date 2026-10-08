@@ -108,6 +108,7 @@ rust_test(
 
 rust_test(
     name = "work_rollup",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]) + glob(["tests/application_suite/**/*.rs", "tests/application_suite/github_stack_coordinator/**/*.rs"]),
     crate_root = "benches/work_rollup.rs",
     edition = crate_edition(),

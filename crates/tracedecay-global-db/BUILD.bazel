@@ -125,6 +125,7 @@ rust_test(
 
 rust_test(
     name = "lcm_expansion",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/lcm_expansion.rs",
     edition = crate_edition(),
@@ -140,6 +141,7 @@ rust_test(
 
 rust_test(
     name = "session_activity_reads",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/session_activity_reads.rs",
     edition = crate_edition(),
@@ -155,6 +157,7 @@ rust_test(
 
 rust_test(
     name = "stack_delivery_batch",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/stack_delivery_batch.rs",
     edition = crate_edition(),

@@ -5,12 +5,12 @@ usage() {
   cat <<'EOF'
 Usage: scripts/run-session-temporal-benchmark.sh --dry-run|--run|--refresh-contract
 
-  --dry-run  Read-only, Cargo-free validation of harness artifacts and
+  --dry-run  Read-only, build-free validation of harness artifacts and
              Codex fixture provenance. Does not mutate the checkout.
-  --run      Diagnostic measurement through the optimized bench profile on
+  --run      Diagnostic measurement through the Bazel release configuration on
              Linux and macOS.
              Isolates HOME and TRACEDECAY_DATA_DIR for the child process.
-             Windows CI proves temporal durability via nextest.
+             Windows CI proves temporal durability via Bazel.
   --refresh-contract
              Run the same real measurement from a clean source commit, then
              publish the result with its clean-commit provenance (Linux-hosted).
@@ -37,7 +37,6 @@ validate_harness_evidence() {
 import json
 import pathlib
 import sys
-import tomllib
 
 root = pathlib.Path(sys.argv[1])
 benchmark_root = root / "benchmark_data/session-temporal"
@@ -165,17 +164,6 @@ require("attestation" not in json.dumps(historical_result).lower(),
 require("attestation" not in json.dumps(workload).lower(),
         "deleted attestation terminology remains in workload")
 
-with (root / "Cargo.toml").open("rb") as handle:
-    cargo = tomllib.load(handle)
-profile = cargo.get("profile", {}).get("bench", {})
-require(profile == {
-    "opt-level": 3,
-    "debug": False,
-    "debug-assertions": False,
-    "overflow-checks": False,
-    "incremental": False,
-}, "optimized bench profile mismatch")
-
 storage = workload.get("storage_isolation") or {}
 require("HOME" in storage.get("required_environment", []), "HOME isolation required")
 require("TRACEDECAY_DATA_DIR" in storage.get("required_environment", []),
@@ -194,23 +182,16 @@ run_benchmark() {
       exit 64
       ;;
     *)
-      printf '%s\n' "Session-temporal ${mode} measurement harness supports Linux and macOS; use CI nextest durable coverage on other platforms" >&2
+      printf '%s\n' "Session-temporal ${mode} measurement harness supports Linux and macOS; use CI Bazel durable coverage on other platforms" >&2
       exit 64
       ;;
   esac
-  isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/session-temporal-bench.XXXXXX")"
-  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-  rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
-  cleanup() {
-    rm -rf "$isolation_root"
-  }
-  trap cleanup EXIT
-  export HOME="$isolation_root/home"
-  export TRACEDECAY_DATA_DIR="$isolation_root/tracedecay-data"
-  export CARGO_HOME="$cargo_home"
-  export RUSTUP_HOME="$rustup_home"
-  mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
-  cargo bench -p tracedecay --bench session_temporal --all-features -- "$mode"
+  # The Bazel test launcher owns HOME and TraceDecay profile isolation.
+  # Local execution lets contract refresh publish into this exact checkout.
+  bazel test --config=release --config=ci //crates/tracedecay:session_temporal \
+    --test_strategy=standalone --nocache_test_results --test_output=all \
+    --test_env=TRACEDECAY_BENCHMARK_REPO_ROOT="$repo_root" \
+    --test_arg=--bench --test_arg="$mode"
 }
 
 if [[ $# -ne 1 ]]; then
@@ -224,7 +205,7 @@ cd "$repo_root"
 case "$1" in
   --dry-run)
     validate_harness_evidence
-    printf 'OK: session-temporal dry-run validated harness_ready evidence (Cargo-free, no mutation)\n'
+    printf 'OK: session-temporal dry-run validated harness_ready evidence (build-free, no mutation)\n'
     ;;
   --run)
     run_benchmark --run

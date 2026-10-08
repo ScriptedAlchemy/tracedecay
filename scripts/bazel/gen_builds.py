@@ -802,6 +802,7 @@ def main():
 
     def render_build(p):
         name = p["name"]
+        manifest = tomllib.loads(Path(p["manifest_path"]).read_text())
         test_sizes = (p.get("metadata") or {}).get("bazel", {}).get("test_sizes", {})
         if not isinstance(test_sizes, dict) or any(
             size not in ("small", "medium", "large", "enormous")
@@ -1057,6 +1058,11 @@ def main():
             kinds = t["kind"]
             if not ({"test", "bench"} & set(kinds)):
                 continue
+            declared_target = next(
+                (target for kind in kinds for target in manifest.get(kind, [])
+                 if target.get("name") == t["name"]),
+                {},
+            )
             req = frozenset(t.get("required-features") or [])
             fmap = contexts[(name, "normal,build,dev", req)]
             deps = dedup(
@@ -1093,6 +1099,13 @@ def main():
             data += ' + ["//tests:fixtures"]'
             if name == "tracedecay" and t["name"] == "memory_suite":
                 data += ' + ["//evals/memory:scenarios"]'
+            if name == "tracedecay" and t["name"] == "claude_observation_benchmark":
+                data += ' + ["//benchmark_data:claude-observation"]'
+            if name == "tracedecay" and t["name"] == "session_temporal":
+                workload, _, _ = group_label(
+                    Path("benchmark_data/session-temporal/workload-v1.json")
+                )
+                data += " + [" + q([workload]) + "]"
             # include_str!/include_bytes! are compile-time inputs. They cover crate-root
             # resource dirs beside tests/ and repo-root fixtures under //tests.
             compile_data = (
@@ -1126,6 +1139,8 @@ def main():
                 "rust_test(",
                 f'    name = "{test_name}",',
                 test_size_attr(test_name),
+                "    use_libtest_harness = False,"
+                if not declared_target.get("harness", True) else None,
                 "    srcs = " + srcs + ",",
                 f'    crate_root = {crate_root},',
                 '    edition = crate_edition(),',

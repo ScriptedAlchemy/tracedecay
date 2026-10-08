@@ -37,8 +37,7 @@ fn main() {
             })
         }
         _ => Err(
-            "usage: cargo bench -p tracedecay --bench session_temporal --features test-helpers [-- --run|--refresh-contract]"
-                .to_owned(),
+            "usage: scripts/run-session-temporal-benchmark.sh --run|--refresh-contract".to_owned(),
         ),
     };
     if let Err(error) = result {

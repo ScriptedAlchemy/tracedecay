@@ -159,6 +159,7 @@ rust_test(
 
 rust_test(
     name = "code_index_chunks",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_index_chunks.rs",
     edition = crate_edition(),
@@ -174,6 +175,7 @@ rust_test(
 
 rust_test(
     name = "git_ancestry",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/git_ancestry.rs",
     edition = crate_edition(),
@@ -189,6 +191,7 @@ rust_test(
 
 rust_test(
     name = "partitioned_codec",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/partitioned_codec.rs",
     edition = crate_edition(),
@@ -204,6 +207,7 @@ rust_test(
 
 rust_test(
     name = "restore_generation",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/restore_generation.rs",
     edition = crate_edition(),
@@ -219,6 +223,7 @@ rust_test(
 
 rust_test(
     name = "retained_parse",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/retained_parse.rs",
     edition = crate_edition(),
@@ -234,6 +239,7 @@ rust_test(
 
 rust_test(
     name = "sealed_storage",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/sealed_storage.rs",
     edition = crate_edition(),
@@ -249,6 +255,7 @@ rust_test(
 
 rust_test(
     name = "source_search",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/source_search.rs",
     edition = crate_edition(),

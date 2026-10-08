@@ -61,6 +61,7 @@ rust_library(
 
 rust_test(
     name = "cursor_dispatch_model",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/cursor_dispatch_model.rs",
     edition = crate_edition(),
@@ -76,6 +77,7 @@ rust_test(
 
 rust_test(
     name = "host_transcript_io",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/host_transcript_io.rs",
     edition = crate_edition(),

@@ -19,16 +19,13 @@ use super::model::{
     ProviderBenchmarkSuiteResult, ProviderPhaseResult, RawPhaseSample, WorkloadIdentity,
 };
 use super::{
-    BENCHMARK_COMMAND, BUILD_CARGO_CONFIG_IDENTITY, BUILD_CARGO_VERSION, BUILD_COMMIT,
-    BUILD_PROFILE, BUILD_RUSTC_VERSION, BUILD_RUSTC_WORKSPACE_WRAPPER, BUILD_RUSTC_WRAPPER,
-    BUILD_RUSTFLAGS, BUILD_SOURCE_MANIFEST_SHA256, BUILD_SOURCE_MODE, BUILD_TARGET_TRIPLE,
-    BUILD_TREE, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
+    BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
     PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, RETIRED_WORKLOAD_ID,
     WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH,
     WORKLOAD_SCHEMA_VERSION,
 };
 
-pub(super) struct AttestedBuild {
+pub(super) struct MeasuredBuild {
     pub(super) evidence_status: EvidenceStatus,
     pub(super) build_identity: BuildIdentity,
 }
@@ -241,24 +238,18 @@ fn validate_acceptance_result(result: &BenchmarkResult) -> Result<(), String> {
         || !is_lower_hex(&result.build_identity.commit, 40)
         || !is_lower_hex(&result.build_identity.tree, 40)
         || result.build_identity.profile != "release"
-        || result.build_identity.source_mode != "git_archive_read_only_v1"
-        || !is_lower_hex(&result.build_identity.source_manifest_sha256, 64)
-        || result.build_identity.source_file_count == 0
+        || result.build_identity.source_mode != "clean_git_worktree_v1"
         || result.build_identity.target_triple.is_empty()
         || result.build_identity.rustc_version != result.rustc
-        || result.build_identity.cargo_version != result.cargo
-        || result.build_identity.rustflags != "normalized-empty"
-        || result.build_identity.rustc_wrapper.is_empty()
-        || result.build_identity.rustc_workspace_wrapper.is_empty()
-        || !is_lower_hex(&result.build_identity.cargo_config_identity, 40)
-        || result.build_identity.data_root_basis != "current_executable_parent"
+        || result.build_identity.bazel_version != result.bazel
+        || result.build_identity.data_root_basis != "TEST_TMPDIR"
         || !is_lower_hex(&result.build_identity.executable_sha256, 64)
         || result.build_identity.executable_size_bytes == 0
     {
-        return Err("acceptance result build attestation is invalid".to_string());
+        return Err("acceptance result build identity is invalid".to_string());
     }
     if result.rustc.is_empty()
-        || result.cargo.is_empty()
+        || result.bazel.is_empty()
         || result.kernel.is_empty()
         || result.cpu_identity.is_empty()
         || result.logical_cpu_count == 0
@@ -689,70 +680,41 @@ pub(super) fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
     Ok((hex::encode(digest.finalize()), size))
 }
 
-pub(super) fn validate_release_profile(
-    debug_assertions: bool,
-    profile: Option<&str>,
-) -> Result<(), String> {
-    if debug_assertions {
-        return Err("benchmark evidence cannot run with debug assertions".to_string());
+pub(super) fn measure_build_identity(git: &GitSnapshot) -> Result<MeasuredBuild, String> {
+    if cfg!(debug_assertions) {
+        return Err("benchmark requires Bazel --config=release".to_owned());
     }
-    if profile != Some("release") {
-        return Err("benchmark evidence requires release build attestation".to_string());
-    }
-    Ok(())
-}
-
-pub(super) fn attest_build(git: &GitSnapshot) -> AttestedBuild {
-    validate_release_profile(cfg!(debug_assertions), BUILD_PROFILE)
-        .expect("benchmark must use the release evidence runner");
-    let commit = BUILD_COMMIT.expect("missing build-time Git commit attestation");
-    let tree = BUILD_TREE.expect("missing build-time Git tree attestation");
-    assert_eq!(commit, git.commit, "build commit differs from runtime HEAD");
-    assert_eq!(tree, git.tree, "build tree differs from runtime HEAD tree");
     let executable = fs::canonicalize(std::env::current_exe().expect("resolve executable"))
         .expect("canonicalize executable");
     let (executable_sha256, executable_size_bytes) =
         sha256_file(&executable).expect("hash benchmark executable");
-    let rustc_version = BUILD_RUSTC_VERSION.expect("missing build-time rustc identity");
-    let cargo_version = BUILD_CARGO_VERSION.expect("missing build-time Cargo identity");
-    assert_eq!(rustc_version, command_output("rustc", &["-Vv"]));
-    assert_eq!(cargo_version, command_output("cargo", &["-V"]));
-    let (_, source_file_count) = validate_source_archive();
-    AttestedBuild {
+    let rustc_version = command_output("rustc", &["-Vv"]);
+    let target_triple = rustc_version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc host target")
+        .to_owned();
+    assert!(
+        std::env::var_os("TEST_TMPDIR").is_some(),
+        "benchmark requires Bazel test isolation"
+    );
+    let bazel_version = std::env::var("TRACEDECAY_BENCHMARK_BAZEL_VERSION")
+        .expect("run benchmark through its Bazel runner");
+    Ok(MeasuredBuild {
         evidence_status: EvidenceStatus::Acceptance,
         build_identity: BuildIdentity {
-            commit: commit.to_string(),
-            tree: tree.to_string(),
+            commit: git.commit.clone(),
+            tree: git.tree.clone(),
             profile: "release".to_string(),
-            source_mode: BUILD_SOURCE_MODE
-                .expect("missing immutable source mode")
-                .to_string(),
-            source_manifest_sha256: BUILD_SOURCE_MANIFEST_SHA256
-                .expect("missing source manifest identity")
-                .to_string(),
-            source_file_count,
-            target_triple: BUILD_TARGET_TRIPLE
-                .expect("missing build target triple")
-                .to_string(),
-            rustc_version: rustc_version.to_string(),
-            cargo_version: cargo_version.to_string(),
-            rustflags: BUILD_RUSTFLAGS
-                .expect("missing normalized Rust flags")
-                .to_string(),
-            rustc_wrapper: BUILD_RUSTC_WRAPPER
-                .expect("missing rustc wrapper identity")
-                .to_string(),
-            rustc_workspace_wrapper: BUILD_RUSTC_WORKSPACE_WRAPPER
-                .expect("missing workspace wrapper identity")
-                .to_string(),
-            cargo_config_identity: BUILD_CARGO_CONFIG_IDENTITY
-                .expect("missing Cargo configuration identity")
-                .to_string(),
-            data_root_basis: "current_executable_parent".to_string(),
+            source_mode: "clean_git_worktree_v1".to_string(),
+            target_triple,
+            rustc_version,
+            bazel_version,
+            data_root_basis: "TEST_TMPDIR".to_string(),
             executable_sha256,
             executable_size_bytes,
         },
-    }
+    })
 }
 
 pub(super) fn validate_git_snapshots(
@@ -869,65 +831,12 @@ pub(super) fn command_output(command: &str, args: &[&str]) -> String {
 }
 
 pub(super) fn git_snapshot() -> GitSnapshot {
-    if BUILD_SOURCE_MODE == Some("git_archive_read_only_v1") {
-        return validate_source_archive().0;
-    }
     verify_git_toplevel();
     GitSnapshot {
         commit: git_output(&["rev-parse", "HEAD"]),
         tree: git_output(&["rev-parse", "HEAD^{tree}"]),
         dirty: worktree_is_dirty(),
     }
-}
-
-fn validate_source_archive() -> (GitSnapshot, usize) {
-    let manifest_path = repository_root().join(".tracedecay-benchmark-source-manifest");
-    let manifest = fs::read(&manifest_path).expect("read immutable source manifest");
-    assert_eq!(
-        sha256_hex(&manifest),
-        BUILD_SOURCE_MANIFEST_SHA256.expect("missing source manifest identity"),
-        "source manifest differs from build attestation"
-    );
-    let manifest = String::from_utf8(manifest).expect("source manifest is UTF-8");
-    let mut source_file_count = 0;
-    for line in manifest.lines() {
-        let mut fields = line.splitn(3, '\t');
-        let mode = fields.next().expect("source manifest mode");
-        let digest = fields.next().expect("source manifest digest");
-        let relative = fields.next().expect("source manifest path");
-        if mode == "160000" {
-            continue;
-        }
-        let path = repository_root().join(relative);
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("read immutable compiler input {relative}: {error}"));
-        assert_eq!(
-            sha256_hex(&bytes),
-            digest,
-            "compiler input changed: {relative}"
-        );
-        assert!(
-            fs::metadata(&path)
-                .expect("compiler input metadata")
-                .permissions()
-                .readonly(),
-            "compiler input is writable: {relative}"
-        );
-        source_file_count += 1;
-    }
-    assert!(source_file_count > 0, "source manifest contains no files");
-    (
-        GitSnapshot {
-            commit: BUILD_COMMIT
-                .expect("missing source commit identity")
-                .to_string(),
-            tree: BUILD_TREE
-                .expect("missing source tree identity")
-                .to_string(),
-            dirty: false,
-        },
-        source_file_count,
-    )
 }
 
 fn worktree_is_dirty() -> bool {
@@ -952,17 +861,21 @@ pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
 /// The product package directory. `HARNESS_SOURCES` records paths relative to
 /// the package (`tests/claude_observation_benchmark/...`), a different anchor from the
 /// workspace-level fixtures and benchmark data below.
-pub(super) fn package_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+pub(super) fn package_root() -> PathBuf {
+    repository_root().join("crates/tracedecay")
 }
 
-pub(super) fn repository_root() -> &'static Path {
-    // The product package sits at `crates/tracedecay`; the fixtures, benchmark
-    // data, and git metadata this module reads all live at the workspace root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root above crates/tracedecay")
+pub(super) fn repository_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("TRACEDECAY_BENCHMARK_REPO_ROOT") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+    )
+    .parent()
+    .and_then(Path::parent)
+    .expect("workspace root above crates/tracedecay")
+    .to_owned()
 }
 
 fn git_output(args: &[&str]) -> String {

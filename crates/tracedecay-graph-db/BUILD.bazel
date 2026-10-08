@@ -166,6 +166,7 @@ rust_test(
 
 rust_test(
     name = "code_traversal",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_traversal.rs",
     edition = crate_edition(),
@@ -181,6 +182,7 @@ rust_test(
 
 rust_test(
     name = "mixed_read_write",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/mixed_read_write.rs",
     edition = crate_edition(),
@@ -196,6 +198,7 @@ rust_test(
 
 rust_test(
     name = "native_state_100k",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/native_state_100k.rs",
     edition = crate_edition(),
@@ -211,6 +214,7 @@ rust_test(
 
 rust_test(
     name = "publication_scale",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/publication_scale.rs",
     edition = crate_edition(),
@@ -226,6 +230,7 @@ rust_test(
 
 rust_test(
     name = "replay_after_mismatch",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/replay_after_mismatch.rs",
     edition = crate_edition(),

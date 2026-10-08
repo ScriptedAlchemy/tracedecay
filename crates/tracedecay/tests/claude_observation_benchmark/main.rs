@@ -19,7 +19,7 @@ const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;
 const CONCURRENCY: usize = 1;
-const BENCHMARK_COMMAND: &str = "cargo test --quiet --release -p tracedecay --features test-helpers --test claude_observation_benchmark production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
+const BENCHMARK_COMMAND: &str = "scripts/run-claude-observation-benchmark.sh";
 const EVIDENCE_RUNNER: &str = "scripts/run-claude-observation-benchmark.sh";
 const WORKLOAD_IMPLEMENTATION: &str = "tests/claude_observation_benchmark/main.rs";
 const WORKLOAD_MANIFEST_PATH: &str = "benchmark_data/claude-observation/workload-v1.json";
@@ -113,22 +113,6 @@ const HARNESS_SOURCES: &[(&str, &str)] = &[
         include_str!("tests.rs"),
     ),
 ];
-const BUILD_COMMIT: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_COMMIT");
-const BUILD_TREE: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_TREE");
-const BUILD_PROFILE: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_PROFILE");
-const BUILD_SOURCE_MODE: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_SOURCE_MODE");
-const BUILD_SOURCE_MANIFEST_SHA256: Option<&str> =
-    option_env!("TRACEDECAY_BENCHMARK_SOURCE_MANIFEST_SHA256");
-const BUILD_TARGET_TRIPLE: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_TARGET_TRIPLE");
-const BUILD_RUSTC_VERSION: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_RUSTC_VERSION");
-const BUILD_CARGO_VERSION: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_CARGO_VERSION");
-const BUILD_RUSTFLAGS: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_RUSTFLAGS");
-const BUILD_RUSTC_WRAPPER: Option<&str> = option_env!("TRACEDECAY_BENCHMARK_BUILD_RUSTC_WRAPPER");
-const BUILD_RUSTC_WORKSPACE_WRAPPER: Option<&str> =
-    option_env!("TRACEDECAY_BENCHMARK_BUILD_RUSTC_WORKSPACE_WRAPPER");
-const BUILD_CARGO_CONFIG_IDENTITY: Option<&str> =
-    option_env!("TRACEDECAY_BENCHMARK_BUILD_CARGO_CONFIG_IDENTITY");
-
 #[tokio::test]
 #[ignore = "release-mode claude-observation performance baseline; run the documented exact command"]
 async fn production_observation_pipeline_baseline() {

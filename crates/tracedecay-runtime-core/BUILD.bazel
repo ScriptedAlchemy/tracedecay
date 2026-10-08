@@ -136,6 +136,7 @@ rust_test(
 
 rust_test(
     name = "exact_sql_writer_workload",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/exact_sql_writer_workload.rs",
     edition = crate_edition(),
@@ -151,6 +152,7 @@ rust_test(
 
 rust_test(
     name = "git_repository_authority_bin",
+    use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/git_repository_authority.rs",
     edition = crate_edition(),
