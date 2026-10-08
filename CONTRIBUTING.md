@@ -20,11 +20,10 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
 installs every crate into `.pnpm/crates`, which the committed
 `.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
 `cargo` cannot resolve dependencies until it has run. Bazel is the workspace
-build, lint, test, and release runner on every CI host. Cargo remains for the
-local edit loop, packaging, Hawk, the Windows cross-target type check, and the
-`sdks/codegen` workspace; install `cargo-nextest` only for the local
-`cargo test-ci` / `cargo test-all` aliases. Commands below run from the
-repository root unless noted.
+build, test, check, run, benchmark, and code-generation authority locally
+and in CI. Cargo metadata and dependency resolution remain inputs to Bazel;
+formatting does not compile or execute the workspace. Commands below run
+from the repository root unless noted.
 
 Two Cargo errors mean "run `pnpm install` at the repository root". Before any
 install, Cargo reports `failed to read root of directory source
@@ -50,9 +49,9 @@ Inside the checkout `cargo update` refuses the vendored git sources and
 member directory it regenerates the whole `Cargo.lock`, and at the root it
 fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
 stay in place after `pnpm install` and are inert once the lock stops naming
-them. Cargo reads `.cargo/config.toml` from its working directory, so run
-`sdks/codegen` cargo commands from `sdks/codegen`; the dashboard
-`contracts:generate` and `contracts:check` scripts do this themselves.
+them. Dashboard `contracts:generate` and `contracts:check` run the
+`//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets
+from the repository root.
 
 Use your current checkout; no particular absolute path or historical PR branch
 is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
@@ -214,8 +213,8 @@ ecosystem bundle correctly.
 `dashboard/src/contracts/generated.ts`, and
 `dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
 hand-written. The Rust `schemars` output is authoritative: the codegen CLI
-exports the schema through the `tracedecay-dashboard-api` library's ignored
-`contract_schema::tests::writes_dashboard_contract_schema` test. In
+exports the schema through `//sdks/codegen:dashboard_schema`, which calls
+the `tracedecay-dashboard-api` library's canonical renderer. In
 `contracts:check` mode, it generates all four dashboard files and the
 TypeScript SDK sources, then compares every generated output byte-for-byte
 with the committed files.
