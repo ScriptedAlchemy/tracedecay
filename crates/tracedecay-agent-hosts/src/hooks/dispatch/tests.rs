@@ -860,6 +860,10 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     let (prepared, report) =
         HookSpoolV1::open(&capture_root, HookSpoolConfigV1::stock(host), UtcMicros(1)).unwrap();
     assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    assert!(
+        !report.checkpoint_rewritten,
+        "publication prepares the first callback's checkpoint"
+    );
     let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(
         &capture_root,
         std::time::Duration::ZERO,

@@ -597,6 +597,12 @@ impl HookSpoolV1 {
         append_frame(&records_path(&self.root), &[])?;
         let revision =
             records_file_revision(&self.root)?.ok_or(HookSpoolError::MetadataCorrupted)?;
+        if self.observed_records_revision.is_none() {
+            // Opening a new spool checkpointed the absent records file. Bind
+            // that empty checkpoint to the file just created, so the first
+            // callback can reuse it rather than rebuilding under its lease.
+            write_checkpoint(&self.root, self.config, &self.pending, &self.records_prefix)?;
+        }
         let root = self.root.clone();
         drop(self);
         commit_records(&root, revision.identity, revision.length, COMMIT_WAIT)

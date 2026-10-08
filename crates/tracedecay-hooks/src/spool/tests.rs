@@ -187,6 +187,10 @@ fn preparation_commits_empty_records_and_reset_invalidates_its_extent() {
     );
     let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
     assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    assert!(
+        !report.checkpoint_rewritten,
+        "first callback must reuse the prepared records checkpoint"
+    );
     let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(&root.0, Duration::ZERO);
     let record = spool
         .append(envelope(1, 9), &binding(), UtcMicros(11))
