@@ -1196,8 +1196,13 @@ pub(in super::super) async fn read_output_authorities(
             let observation_json = row
                 .get::<String>(3)
                 .map_err(|error| storage("read canonical projection output authority", error))?;
-            let canonical = serde_json::from_str(&observation_json)
-                .map_err(|error| storage("decode canonical projection output authority", error))?;
+            let canonical = crate::observation::decode_observation_json(
+                conn,
+                &observation_json,
+                "decode canonical projection output authority",
+            )
+            .await
+            .map_err(|error| storage("decode canonical projection output authority", error))?;
             resolved.insert(
                 (provider, message_id),
                 ProjectionOutputAuthority {
