@@ -1318,21 +1318,16 @@ impl CodeGraphInteractiveReader {
         let mut symbols = Vec::new();
         let mut matched = 0_usize;
         let mut has_more = false;
-        let mut accept = |occurrence: &SymbolOccurrenceId| -> bool {
-            if matched >= offset {
-                if symbols.len() == limit {
-                    has_more = true;
-                    return true;
-                }
-                if let Some(summary) = catalog.summary(occurrence) {
-                    symbols.push(summary);
-                }
-            }
-            matched += 1;
-            false
-        };
         for occurrence in exact_hits {
-            if accept(occurrence) {
+            if take_search_hit(
+                occurrence,
+                catalog.as_ref(),
+                offset,
+                limit,
+                &mut symbols,
+                &mut matched,
+            ) {
+                has_more = true;
                 break;
             }
         }
@@ -1351,7 +1346,18 @@ impl CodeGraphInteractiveReader {
                     contains_ignore_ascii_case(&metadata.simple_name, query)
                         || contains_ignore_ascii_case(&metadata.qualified_name, query)
                 });
-                if named && admitted(occurrence, symbol) && accept(occurrence) {
+                if named
+                    && admitted(occurrence, symbol)
+                    && take_search_hit(
+                        occurrence,
+                        catalog.as_ref(),
+                        offset,
+                        limit,
+                        &mut symbols,
+                        &mut matched,
+                    )
+                {
+                    has_more = true;
                     break;
                 }
             }
@@ -2020,6 +2026,26 @@ fn code_relation_kinds(
         .iter()
         .map(|kind| GraphRelationKind::new(code_edge_kind(*kind)).map_err(Into::into))
         .collect()
+}
+
+fn take_search_hit(
+    occurrence: &SymbolOccurrenceId,
+    catalog: &InteractiveCatalog,
+    offset: usize,
+    limit: usize,
+    symbols: &mut Vec<CodeGraphSymbolSummaryV1>,
+    matched: &mut usize,
+) -> bool {
+    if *matched >= offset {
+        if symbols.len() == limit {
+            return true;
+        }
+        if let Some(summary) = catalog.summary(occurrence) {
+            symbols.push(summary);
+        }
+    }
+    *matched += 1;
+    false
 }
 
 fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
