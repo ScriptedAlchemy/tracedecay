@@ -340,8 +340,17 @@ fn prepare_native_capture(
     payload: &[u8],
     working_directory: &std::io::Result<std::path::PathBuf>,
 ) -> PreparedNativeCapture {
-    if !profile.data_dir().is_dir() {
-        return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unbound);
+    match std::fs::metadata(profile.data_dir()) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return PreparedNativeCapture::scope_unavailable(
+                "profile path is not a directory".to_owned(),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unbound);
+        }
+        Err(error) => return PreparedNativeCapture::scope_unavailable(error.to_string()),
     }
     let lease = match try_acquire_shared_for_profile(profile.data_dir(), "native hook capture") {
         Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
@@ -599,4 +608,33 @@ fn current_time() -> Option<UtcMicros> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     let micros = i64::try_from(elapsed.as_micros()).ok()?;
     Some(UtcMicros(micros))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, prepare_native_capture};
+    use tracedecay_domain::NativeHostIdentityV1;
+    use tracedecay_runtime_core::config::ProfileRoot;
+
+    #[test]
+    fn capture_distinguishes_missing_and_invalid_profile_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let source = NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop);
+        let directory = Ok(home.path().to_path_buf());
+        let capture = prepare_native_capture(&profile, source, b"{}", &directory);
+        assert_eq!(capture.outcome, NativeHookCaptureOutcomeV1::Unbound);
+        assert!(!profile.data_dir().exists());
+
+        std::fs::write(profile.data_dir(), "not a directory").unwrap();
+        let capture = prepare_native_capture(&profile, source, b"{}", &directory);
+        assert_eq!(
+            capture.outcome,
+            NativeHookCaptureOutcomeV1::ScopeUnavailable
+        );
+        assert_eq!(
+            capture.cause.as_deref(),
+            Some("profile path is not a directory")
+        );
+    }
 }

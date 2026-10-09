@@ -660,7 +660,9 @@ fn native_capture_does_not_recreate_spools_during_profile_maintenance() {
         "conversation_id": "conv-maintenance",
         "generation_id": "gen-maintenance",
         "hook_event_name": "stop",
+        "model": "auto",
         "status": "completed",
+        "loop_count": 0,
         "workspace_roots": [project_path],
     });
     let output = run_native_capture_hook(&home_path, &project_path, "hook-cursor-stop", &event);
