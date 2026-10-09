@@ -136,7 +136,10 @@ fn fixture_observation_from_facts(
     .unwrap();
     let observation = DurableObservationV1::new(
         identity,
-        fixture_receipt(&format!("receipt.projector.{ordinal}"), &payload),
+        fixture_receipt(
+            &format!("receipt.projector.{}", record_id.as_str()),
+            &payload,
+        ),
         RetentionClass::new("retention.projector-test").unwrap(),
         payload,
     )
