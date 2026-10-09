@@ -157,19 +157,46 @@ pub(super) async fn configuration_definition_digest(
 }
 
 /// Writer-ledger objects are installed with the connection, before registered
-/// schema admission. They are not application schema.
+/// schema admission, so the objects alone are not application schema. Their
+/// rows are persisted commit receipts, though: a store that retains any is not
+/// fresh, and admission must refuse it instead of starting a new history that
+/// keeps the old one.
 pub(super) async fn registered_store_is_empty(
     connection: &impl QueryExecutor,
 ) -> Result<bool, ConfigurationSchemaError> {
     let mut rows = connection
         .query(
-            "SELECT 1
+            "SELECT type, name
              FROM sqlite_master
-             WHERE name NOT LIKE 'sqlite_%'
-               AND name NOT LIKE 'td_runtime_%'
-             LIMIT 1",
+             WHERE name NOT LIKE 'sqlite_%'",
             (),
         )
         .await?;
-    Ok(rows.next().await?.is_none())
+    let mut runtime_tables = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let object_type = row.get::<String>(0)?;
+        let name = row.get::<String>(1)?;
+        if !name.starts_with("td_runtime_") {
+            return Ok(false);
+        }
+        match object_type.as_str() {
+            "table" => runtime_tables.push(name),
+            // An index carries no rows beyond its table's own receipts.
+            "index" => {}
+            _ => return Ok(false),
+        }
+    }
+    drop(rows);
+    for table in runtime_tables {
+        let mut receipts = connection
+            .query(
+                &format!("SELECT 1 FROM \"{}\" LIMIT 1", table.replace('"', "\"\"")),
+                (),
+            )
+            .await?;
+        if receipts.next().await?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
