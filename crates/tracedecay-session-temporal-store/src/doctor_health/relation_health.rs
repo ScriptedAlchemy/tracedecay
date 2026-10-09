@@ -149,7 +149,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     continue;
                 }
             };
-            match stale_summary_closure_count(&snapshot, &projection).await {
+            match stale_summary_closure_count(snapshot, &projection).await {
                 Ok(count) if count > 0 => merge_finding(
                     &mut report.findings,
                     SessionTemporalHealthFindingKind::StaleSummaryClosure,
