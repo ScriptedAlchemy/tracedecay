@@ -3010,7 +3010,7 @@ fn fixture_realistic_observation(
     fixture_observation_from_facts(
         session_id,
         ordinal,
-        ProviderId::new("codex").unwrap(),
+        ProviderId::new(format!("codex-{session}-{ordinal}")).unwrap(),
         ObservationId::new(format!("record.realistic.{session}.{ordinal}")).unwrap(),
         CanonicalObservationRelationsV1::new(session_id.clone())
             .with_thread_id(ObservationId::new(format!("thread.realistic.{session}")).unwrap())
