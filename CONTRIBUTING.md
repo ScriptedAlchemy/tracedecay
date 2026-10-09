@@ -304,12 +304,13 @@ integration branch waits behind, so a run spends only what its state earns:
 
 Use `gh workflow run ci.yml --ref <branch>` to request an additional run; add
 `-f run_os=true` or `-f run_hosts=true` for the optional lanes. A newer PR
-head or master tip replaces its prior run in the same coverage group; explicit
-`run_os` / `run_hosts` dispatches keep separate concurrency groups so a default
-push cannot cancel them while they are queued or running. Closing or merging a
-PR cancels its remaining runs and drops its Actions caches. Nothing runs on a
-timer: the packaged-crate distribution battery and the Hawk lint are
-`workflow_dispatch` only.
+head replaces its prior run. Master finishes its current snapshot and retains
+only the newest pending tip, so merges faster than the long pole still produce
+a complete green/red signal. Explicit `run_os` / `run_hosts` dispatches keep
+separate concurrency groups so a default push cannot cancel them while they
+are queued or running. Closing or merging a PR cancels its remaining runs and
+drops its Actions caches. Nothing runs on a timer: the packaged-crate
+distribution battery and the Hawk lint are `workflow_dispatch` only.
 
 ## Reporting Issues
 
