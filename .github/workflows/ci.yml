@@ -309,8 +309,22 @@ jobs:
       # SDKs this job never uses.
       - name: Free runner disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          set -euo pipefail
           df -h /
+          status=0
+          sudo rm -rf /usr/local/lib/android &
+          p1=$!
+          sudo rm -rf /usr/share/dotnet &
+          p2=$!
+          sudo rm -rf /opt/ghc &
+          p3=$!
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          p4=$!
+          for pid in "$p1" "$p2" "$p3" "$p4"; do
+            wait "$pid" || status=1
+          done
+          df -h /
+          exit "$status"
 
       - uses: ./.github/actions/setup-bazel
         id: bazel
@@ -420,18 +434,21 @@ jobs:
     name: Feature gates
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    # x86 shares the pnpm store Repository gates and Dashboard already warm.
+    # ubuntu-26.04-arm missed that cache on run 37707017494 and spent 325s
+    # in `pnpm install` for an 8s `cargo tree`.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-pnpm
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
       - name: Check the production feature graph
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: python3 scripts/check-production-feature-profile.py
 
   # The configuration users actually receive: the release build of
