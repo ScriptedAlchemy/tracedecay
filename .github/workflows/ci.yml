@@ -306,8 +306,7 @@ jobs:
 
       # The workspace build plus its test outputs outgrow the runner's free
       # space (run 37403143722 died with ENOSPC mid-test); drop preinstalled
-      # SDKs this job never uses. Delete the trees in parallel. Run
-      # 37707017494 spent 93s on one sequential `rm`.
+      # SDKs this job never uses.
       - name: Free runner disk space
         run: |
           set -euo pipefail
@@ -447,8 +446,6 @@ jobs:
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
-      # Feature resolution does not need rust-toolchain.toml's rust-analyzer
-      # set. Use the image stable cargo and skip dtolnay/rust-toolchain.
       - name: Check the production feature graph
         env:
           RUSTUP_TOOLCHAIN: stable
