@@ -871,6 +871,110 @@ fn sealed_point_read_completes_while_staging_snapshot_gate_is_held() {
     );
 }
 
+/// The un-gated sealed probe runs before the gated staging read. A
+/// publication that installs the sealed store and releases the staging rows
+/// in between must not strand the read on the released rows: the gate-held
+/// fallback probes the sealed store again.
+#[test]
+fn point_read_observes_sealed_store_installed_while_waiting_on_staging_gate() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:gate-adopt", "code");
+    let manifest = rich_manifest(identity.clone(), "adopted-g1", "adopted");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:adopted-g1",
+        None,
+        '8',
+    );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    // The end-state a staging release leaves behind: duplicate rows gone,
+    // the proven artifact on disk.
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    );
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (0, 0)
+    );
+    // Unseat the reader so the point read's un-gated probe misses, exactly
+    // as it does before this process installs a sealed store.
+    database
+        .discard_sealed_generation_reader(&manifest.identity())
+        .unwrap();
+    assert!(!commit.snapshot.serves_from_sealed_store());
+
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holding_snapshot = commit.snapshot.clone();
+    let holding = std::thread::spawn(move || {
+        holding_snapshot.hold_staging_snapshot_gate_for_test(|| {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+    });
+    held_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let reader_snapshot = commit.snapshot.clone();
+    let reader_identity = identity.clone();
+    let reader = std::thread::spawn(move || {
+        done_tx
+            .send(reader_snapshot.entity(
+                &GraphEntityRef::new(reader_identity, GraphEntityId::new("entity:a").unwrap()),
+                Arc::new(TestCancellation),
+            ))
+            .unwrap();
+    });
+    // The read needs one scheduling slice to clear its un-gated probe and
+    // reach the gate wait; the reader seated below is what a publication
+    // leaves mid-wait.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    database
+        .adopt_sealed_generation_reader(&manifest.identity(), &commit.head.recovered_digest)
+        .unwrap();
+    drop(release_tx);
+    holding.join().unwrap();
+
+    let result = done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the gated point read must finish once the staging gate is released");
+    reader.join().unwrap();
+    let entity = result
+        .unwrap()
+        .expect("entity:a must resolve from the sealed store installed mid-wait");
+    assert_eq!(
+        entity
+            .properties
+            .get(&GraphPropertyName::new("marker").unwrap()),
+        Some(&GraphProperty::String("adopted".to_owned())),
+    );
+}
+
 /// Generations carrying Bytes properties seal in compact form and read every
 /// byte back exactly: the compact dictionary carries a typed Bytes entry, so
 /// no size threshold or replay fallback stands between a Bytes row and the
