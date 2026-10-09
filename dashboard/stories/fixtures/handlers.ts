@@ -16,7 +16,7 @@ import { lookupFixture } from './data.ts';
 
 /**
  * The fixture for a request, or nothing. A resolver that returns nothing leaves
- * the request unhandled, so a server listening with `onUnhandledRequest:
+ * the request unhandled, so a server listening with `onUnhandledFrame:
  * 'error'` fails on a path no fixture models instead of answering it.
  */
 function fixtureResponse(request: Request): Response | undefined {
