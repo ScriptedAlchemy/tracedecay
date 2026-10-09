@@ -150,9 +150,10 @@ pub(super) async fn native_summary_evidence(
     let (candidate_sql, candidate_params) = if let Some(required) = required_source {
         (
             format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                "SELECT message.message_id, message.content, message.kind,
                     message.metadata_json, source_range.from_store_id, source_range.to_store_id,
-                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
+                    message.store_id, {MESSAGE_ENVELOPE_COLUMN},
+                    message.content_hash, message.placeholder_text
              FROM lcm_raw_predecessor_ranges AS source_range
              JOIN lcm_raw_messages AS message
                ON message.provider = source_range.provider
@@ -169,9 +170,10 @@ pub(super) async fn native_summary_evidence(
     } else {
         (
             format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                "SELECT message.message_id, message.content, message.kind,
                     message.metadata_json, source_range.from_store_id, source_range.to_store_id,
-                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
+                    message.store_id, {MESSAGE_ENVELOPE_COLUMN},
+                    message.content_hash, message.placeholder_text
              FROM lcm_raw_messages AS message
              LEFT JOIN lcm_raw_predecessor_ranges AS source_range
                ON source_range.provider = message.provider
@@ -198,7 +200,7 @@ pub(super) async fn native_summary_evidence(
         candidates.push((
             row.get::<String>(0)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<String>(1)
+            row.get::<Option<String>>(1)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
             row.get::<Option<String>>(2)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
@@ -212,17 +214,33 @@ pub(super) async fn native_summary_evidence(
                 .map_err(|error| LcmError::Db(error.to_string()))?,
             row.get::<Option<String>>(7)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
+            row.get::<String>(8)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
+            row.get::<Option<String>>(9)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
         ));
     }
     drop(rows);
     let recognizers = native_summary_recognizers(provider);
     let mut previous_native_store_id = None;
     let mut matched = None;
-    for (message_id, text, kind, metadata_json, range_from, range_to, store_id, envelope_json) in
-        candidates.into_iter().rev()
+    for (
+        message_id,
+        content,
+        kind,
+        metadata_json,
+        range_from,
+        range_to,
+        store_id,
+        envelope_json,
+        content_hash,
+        placeholder_text,
+    ) in candidates.into_iter().rev()
     {
         let metadata = parse_message_metadata(metadata_json.as_deref());
         let envelope = decode_message_envelope(&snapshot, envelope_json.as_deref()).await?;
+        let text =
+            stored_candidate_text(&snapshot, content, &content_hash, placeholder_text).await?;
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -311,8 +329,9 @@ async fn native_store_is_recognized(
     let mut rows = snapshot
         .query(
             &format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
-                        message.metadata_json, {MESSAGE_ENVELOPE_COLUMN}
+                "SELECT message.message_id, message.content, message.kind,
+                        message.metadata_json, {MESSAGE_ENVELOPE_COLUMN},
+                        message.content_hash, message.placeholder_text
              FROM lcm_raw_messages AS message
              WHERE message.provider = ?1 AND message.session_id = ?2
                AND message.store_id = ?3
@@ -332,8 +351,8 @@ async fn native_store_is_recognized(
     let message_id = row
         .get::<String>(0)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let text = row
-        .get::<String>(1)
+    let content = row
+        .get::<Option<String>>(1)
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let kind = row
         .get::<Option<String>>(2)
@@ -350,6 +369,13 @@ async fn native_store_is_recognized(
             .as_deref(),
     )
     .await?;
+    let content_hash = row
+        .get::<String>(5)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let placeholder_text = row
+        .get::<Option<String>>(6)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let text = stored_candidate_text(snapshot, content, &content_hash, placeholder_text).await?;
     drop(rows);
     let candidate = NativeSummaryCandidate {
         provider,
@@ -385,6 +411,49 @@ fn parse_message_metadata(metadata: Option<&str>) -> Value {
     metadata
         .and_then(|metadata| serde_json::from_str(metadata).ok())
         .unwrap_or(Value::Null)
+}
+
+/// A canonical-body row stores NULL content and keeps only its bounded
+/// placeholder; recognition and the published `AuthoritativeSummary` need the
+/// whole verified body. Rows whose body is not canonical (external payload,
+/// legacy inline) keep the placeholder they were ingested with.
+async fn stored_candidate_text(
+    conn: &(impl QueryExecutor + ?Sized),
+    content: Option<String>,
+    content_hash: &str,
+    placeholder_text: Option<String>,
+) -> Result<String, LcmError> {
+    if let Some(text) = content {
+        return Ok(text);
+    }
+    let mut rows = conn
+        .query(
+            tracedecay_store::LOAD_CANONICAL_BODY_SQL,
+            params![content_hash],
+        )
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?
+    else {
+        return Ok(placeholder_text.unwrap_or_default());
+    };
+    let encoding: String = row
+        .get(0)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let blob: Vec<u8> = row
+        .get(1)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let uncompressed: i64 = row
+        .get(2)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    drop(rows);
+    let bytes = tracedecay_store::unpack_body(content_hash, &encoding, &blob, uncompressed)
+        .map_err(|error| LcmError::Db(format!("raw message body decode failed: {error}")))?;
+    String::from_utf8(bytes)
+        .map_err(|error| LcmError::Db(format!("raw message body is not UTF-8: {error}")))
 }
 
 /// A projected row's observation payload is a validated canonical envelope, so

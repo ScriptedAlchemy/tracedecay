@@ -401,7 +401,11 @@ async fn raw_like_grep_hits(
         }
     }
 
-    values.push(Value::Integer(limit as i64));
+    // No SQL LIMIT here: canonical-body rows verified against their hydrated
+    // body may be misses, and a pre-verification limit would let misses crowd
+    // out real hits deeper in the admitted window. The candidate list is
+    // already bounded by the scope budget above, so the row stream is
+    // complete; dedupe and the caller's limit run after verification.
     let order_by = grep_order_by(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
@@ -420,8 +424,7 @@ async fn raw_like_grep_hits(
          LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
          WHERE r.store_id IN ({})
            AND {}
-         ORDER BY {order_by}
-         LIMIT ?",
+         ORDER BY {order_by}",
         candidate_ids
             .iter()
             .map(|_| "?")
@@ -1111,5 +1114,73 @@ mod tests {
             .find(|hit| hit.message_id.as_deref() == Some("m-cas-match"))
             .expect("canonical-body hit");
         assert!(cas_hit.snippet.contains("needleword"));
+    }
+
+    #[tokio::test]
+    async fn like_grep_misses_do_not_crowd_out_matches() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(&format!(
+            "{CANONICAL_BODIES_TABLE_SQL}{LIKE_GREP_TEST_SCHEMA_TAIL}"
+        ))
+        .await
+        .expect("like grep schema");
+
+        let matching_body = format!(
+            "{}pre needleword post{}",
+            "x".repeat(2100),
+            "y".repeat(2100)
+        );
+        let matching = StoredCanonicalBody::pack(matching_body.as_bytes()).expect("pack matching");
+        insert_canonical_body(&conn, &matching).await;
+        insert_raw_message(
+            &conn,
+            1,
+            "m-cas-match",
+            None,
+            &matching.content_hash,
+            "placeholder",
+        )
+        .await;
+
+        for store_id in 2..=4 {
+            let body = format!(
+                "{}unrelated-{store_id}{}",
+                "a".repeat(2100),
+                "b".repeat(2100)
+            );
+            let packed = StoredCanonicalBody::pack(body.as_bytes()).expect("pack miss");
+            insert_canonical_body(&conn, &packed).await;
+            insert_raw_message(
+                &conn,
+                store_id,
+                &format!("m-cas-miss-{store_id}"),
+                None,
+                &packed.content_hash,
+                "placeholder",
+            )
+            .await;
+        }
+
+        // The three misses are newer than the match; a limit applied before
+        // body verification would return only misses.
+        let hits = raw_grep_hits(
+            &conn,
+            &like_grep_request(),
+            &LcmGrepFilters::default(),
+            Some("session-a"),
+            LcmGitScopeSessions::Unscoped,
+            &GrepQueryPlan {
+                fts_query: String::new(),
+                like_terms: vec!["needleword".to_string()],
+                requires_like_fallback: true,
+            },
+            2,
+        )
+        .await
+        .expect("like grep hits");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id.as_deref(), Some("m-cas-match"));
     }
 }
