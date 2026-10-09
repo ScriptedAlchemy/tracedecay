@@ -1301,6 +1301,15 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_task_sampler_reads_current_process_memory() {
+    let sample = super::process_resident_sample_from_task_v1().expect("current task sample");
+    assert!(sample.resident_bytes > 0);
+    assert!(sample.unreclaimable_bytes > 0);
+    assert!(sample.resident_bytes >= sample.unreclaimable_bytes);
+}
+
 #[test]
 fn macos_phys_footprint_is_the_admission_charge() {
     let sample = super::process_resident_sample_from_macos_vm_info_v1(
