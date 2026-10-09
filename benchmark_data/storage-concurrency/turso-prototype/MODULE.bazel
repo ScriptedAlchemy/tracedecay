@@ -1,0 +1,12 @@
+module(name = "turso_prototype", version = "0.1.0")
+
+# Official native Rust engine binding, pinned to both version and wheel bytes.
+# This prototype currently targets macOS arm64 with CPython >= 3.10.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "pyturso_arm64",
+    urls = ["https://files.pythonhosted.org/packages/19/4a/0ccab2668da503a16110f40a62082f95352de420a4955a7b91ceed504fef/pyturso-0.8.0-cp310-abi3-macosx_11_0_arm64.whl"],
+    sha256 = "62bf87c6966f6b1d9c8b71ae060779758cbc55ee649567cef4399a15c7a4c65b",
+    type = "zip",
+    build_file_content = 'filegroup(name="wheel", srcs=glob(["**"]), visibility=["//visibility:public"])',
+)

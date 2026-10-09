@@ -1,0 +1,10 @@
+load(":prototype.bzl", "turso_python_test")
+
+turso_python_test(
+    name = "turso_probe",
+    script = "turso_probe.py",
+    wheel = "@pyturso_arm64//:wheel",
+    data = ["turso_ledger_schema.sql"],
+    timeout = "short",
+    tags = ["manual"],
+)

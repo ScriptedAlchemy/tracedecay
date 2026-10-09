@@ -1,0 +1,26 @@
+Verified 2026-10-09.
+Working directory: benchmark_data/storage-concurrency/turso-prototype
+
+Bazel command:
+  bazel test //:turso_probe --test_env=TURSO_PYTHON=/opt/homebrew/bin/python3.11 --test_output=all
+
+Local cache options used for the observed host, outside the repository:
+  BAZELISK_HOME=/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazelisk
+  --output_user_root=/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache
+
+Result: 1 test passed; 0 failed; uncached execution; test duration 1.8 seconds.
+Runtime: macOS 27.0 arm64, CPython 3.11.15, embedded Turso engine 0.8.0.
+SQLite dialect version reported by the engine: 3.50.4.
+Actual engine wheel SHA-256:
+  62bf87c6966f6b1d9c8b71ae060779758cbc55ee649567cef4399a15c7a4c65b
+
+The strict test verified two concurrently begun and mutated independent-row
+transactions, their successful commits, snapshot isolation, singleton-checkpoint
+write conflict at UPDATE, full rollback and fresh retry, contiguous receipts,
+actual replay/conflict admission, and fresh-process reopen with integrity_check=ok.
+
+Exact production ledger DDL compatibility is an expected, specifically asserted
+negative result: both WAL and MVCC reject CREATE INDEX on WITHOUT ROWID tables.
+The passing test does not mean TraceDecay's full schema is Turso-compatible.
+No application-throughput, crash/power-loss, or production-readiness claim.
+See results.json for the exact emitted JSON.
