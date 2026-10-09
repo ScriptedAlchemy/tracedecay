@@ -224,3 +224,50 @@ async fn predecessor_range_skips_policy_anchor_roles() {
     assert_eq!(row.get::<i64>(0).expect("from"), 1);
     assert_eq!(row.get::<i64>(1).expect("to"), 1);
 }
+
+#[tokio::test]
+async fn message_record_readers_restore_compacted_bodies_and_reject_missing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("body-record.db"));
+    conn.execute_batch(&format!(
+        "{CANONICAL_BODIES_TABLE_SQL}{RAW_MESSAGE_TEST_SCHEMA}"
+    ))
+    .await
+    .unwrap();
+    let text = "complete canonical message".repeat(super::INLINE_BODY_BYTES);
+    let body = super::StoredCanonicalBody::pack(text.as_bytes()).unwrap();
+    conn.execute(
+        super::UPSERT_CANONICAL_BODY_SQL,
+        super::params![
+            body.content_hash.as_str(),
+            body.encoding,
+            body.blob.as_slice(),
+            body.uncompressed_bytes
+        ],
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO lcm_raw_messages (provider, message_id, session_id, role, ordinal, content_hash, storage_kind, placeholder_text) VALUES ('codex', 'message', 'session', 'user', 1, ?1, 'inline', 'short placeholder')", super::params![body.content_hash.as_str()]).await.unwrap();
+    for columns in [
+        super::message_body_record_select_columns("message"),
+        super::stored_message_record_select_columns("message"),
+    ] {
+        let sql = format!("SELECT {columns} FROM lcm_raw_messages AS message");
+        let mut rows = conn.query(&sql, ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(super::message_body_from_record_row(&row, 0).unwrap(), text);
+    }
+    conn.execute("DELETE FROM session_canonical_bodies", ())
+        .await
+        .unwrap();
+    let sql = format!(
+        "SELECT {} FROM lcm_raw_messages AS message",
+        super::message_body_record_select_columns("message")
+    );
+    let mut rows = conn.query(&sql, ()).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        super::message_body_from_record_row(&row, 0),
+        Err(super::LcmError::PayloadIntegrityMismatch)
+    );
+}

@@ -1637,7 +1637,13 @@ async fn read_staged_output_state(
         .get(1)
         .map_err(|error| storage("read staged projection output state", error))?;
     Ok(Some(RebuildOutputState {
-        latest_observation: decode_json(&json, "decode staged projection output state")?,
+        latest_observation: crate::observation::decode_observation_json(
+            conn,
+            &json,
+            "decode staged projection output state",
+        )
+        .await
+        .map_err(|error| storage("decode staged projection output state", error))?,
         latest_sequence,
         projector_owned: row
             .get::<i64>(2)

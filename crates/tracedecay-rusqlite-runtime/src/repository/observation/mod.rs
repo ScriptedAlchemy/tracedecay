@@ -5,7 +5,7 @@
 //! and a replay verifies, and [`rows`] the single projection every read decodes
 //! through.
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
@@ -541,23 +541,37 @@ fn encode_stored_observation(
     Ok(slim)
 }
 
+fn decode_stored_observation(
+    connection: &Connection,
+    json: &str,
+) -> rusqlite::Result<DurableObservationV1> {
+    parse_stored_observation(
+        json,
+        |hash| -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            let (encoding, blob, uncompressed): (String, Vec<u8>, i64) = connection
+                .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?
+                .ok_or_else(|| CanonicalBodyError::Missing {
+                    content_hash: hash.to_owned(),
+                })?;
+            tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed).map_err(Into::into)
+        },
+    )
+    .map_err(|error| match error.downcast::<rusqlite::Error>() {
+        Ok(error) => *error,
+        Err(error) => {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error)
+        }
+    })
+}
+
 fn decode_stored_observation_on_savepoint(
     savepoint: &Savepoint<'_>,
     json: String,
 ) -> rusqlite::Result<DurableObservationV1> {
-    parse_stored_observation(&json, |hash| {
-        savepoint
-            .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
-                let encoding = row.get::<_, String>(0)?;
-                let blob = row.get::<_, Vec<u8>>(1)?;
-                tracedecay_store::unpack_body(hash, &encoding, &blob)
-                    .map_err(|error| invalid(error.to_string()))
-            })
-            .map_err(|error| CanonicalBodyError::Missing {
-                content_hash: format!("{hash}: {error}"),
-            })
-    })
-    .map_err(|error| invalid(error.to_string()))
+    decode_stored_observation(savepoint, &json)
 }
 
 fn decode_hydrated_observation_row(
@@ -577,19 +591,7 @@ fn decode_hydrated_observation_row(
         queued,
     ) = row;
     let json = if tracedecay_store::stored_json_needs_hydrate(&json) {
-        let observation = parse_stored_observation(&json, |hash| {
-            snapshot
-                .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
-                    let encoding = row.get::<_, String>(0)?;
-                    let blob = row.get::<_, Vec<u8>>(1)?;
-                    tracedecay_store::unpack_body(hash, &encoding, &blob)
-                        .map_err(|error| invalid(error.to_string()))
-                })
-                .map_err(|error| CanonicalBodyError::Missing {
-                    content_hash: format!("{hash}: {error}"),
-                })
-        })
-        .map_err(|error| invalid(error.to_string()))?;
+        let observation = decode_stored_observation(snapshot, &json)?;
         encode(&observation)?
     } else {
         json

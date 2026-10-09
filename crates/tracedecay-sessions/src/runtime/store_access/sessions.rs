@@ -10,7 +10,9 @@ use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, 
 
 use crate::runtime::SessionMessageSearchResult;
 use crate::runtime::hosts::codex::codex_cursor_key;
-use tracedecay_lcm::raw::{message_body_record_select_columns, message_record_select_columns};
+use tracedecay_lcm::raw::{
+    message_body_from_record_row, message_body_record_select_columns, message_record_select_columns,
+};
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
@@ -640,9 +642,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         else {
             return Ok(None);
         };
-        row_to_message(&row, 0)
-            .map(Some)
-            .map_err(|message| session_db_operation_message(OPERATION, message))
+        let mut message = row_to_message(&row, 0)
+            .map_err(|message| session_db_operation_message(OPERATION, message))?;
+        message.text = message_body_from_record_row(&row, 0)
+            .map_err(|error| session_db_operation_message(OPERATION, error.to_string()))?;
+        Ok(Some(message))
     }
 
     /// Searches message text for a provider, optionally constrained to one project.

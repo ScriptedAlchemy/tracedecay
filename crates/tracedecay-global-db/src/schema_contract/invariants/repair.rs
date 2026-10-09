@@ -10,7 +10,8 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL;
 
 use super::rows::{
-    audit_read_error, authority_violation, decode_authority_json, encode_authority_json,
+    audit_read_error, authority_violation, decode_authority_json, decode_authority_observation,
+    encode_authority_json,
 };
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS};
 
@@ -251,7 +252,7 @@ async fn latest_committed_source_cursors(
             let observation_json = row.get::<String>(1).map_err(audit_read_error)?;
             let cursor_json = row.get::<String>(2).map_err(audit_read_error)?;
             let observation: DurableObservationV1 =
-                decode_authority_json(&observation_json, "committed observation authority JSON")?;
+                decode_authority_observation(conn, &observation_json).await?;
             let cursor: ObservationSourceCursorV1 =
                 decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
             let source_json =

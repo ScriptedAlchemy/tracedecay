@@ -4,7 +4,7 @@ use tracedecay_domain::ObservationScopeV1;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
-use tracedecay_lcm::raw::stored_message_record_select_columns;
+use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_select_columns};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeResponse, LcmError, LcmExpandQueryRequest,
     LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport,
@@ -65,13 +65,13 @@ async fn require_current_protection_input(
     };
     let actual_message = message_record_from_row(&row)?;
     let actual_raw_revision = RawProtectionRevision {
-        role: row.get(13)?,
-        ordinal: row.get(14)?,
-        timestamp: row.get(15)?,
-        content_hash: row.get(16)?,
-        storage_kind: row.get(17)?,
-        payload_ref: row.get(18)?,
-        metadata_json: row.get(19)?,
+        role: row.get(19)?,
+        ordinal: row.get(20)?,
+        timestamp: row.get(21)?,
+        content_hash: row.get(22)?,
+        storage_kind: row.get(23)?,
+        payload_ref: row.get(24)?,
+        metadata_json: row.get(25)?,
     };
     if actual_message != expected.message || actual_raw_revision != expected.raw_revision {
         return Err(LcmError::StaleRawProtectionSource {
@@ -91,7 +91,7 @@ fn message_record_from_row(
         role: row.get(3)?,
         timestamp: row.get(4)?,
         ordinal: row.get(5)?,
-        text: row.get(6)?,
+        text: message_body_from_record_row(row, 0)?,
         kind: row.get(7)?,
         model: row.get(8)?,
         tool_names: row.get(9)?,
@@ -441,7 +441,7 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                         metadata_json,
                         '$.ingest_protection.sanitization_receipt'
                     ) IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(length(CAST(content AS BLOB)), 0)
+                    COALESCE(length(CAST(content AS BLOB)), (SELECT uncompressed_bytes FROM session_canonical_bodies WHERE content_hash = raw.content_hash), 0)
              FROM lcm_raw_messages AS raw
              WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
              ORDER BY store_id
@@ -468,9 +468,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         let mut frontier_store_id = after_store_id;
         let mut byte_limited = false;
         while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(20)?;
-            let needs_protection = row.get::<i64>(21)? != 0;
-            let row_bytes = u64::try_from(row.get::<i64>(22)?).map_err(|error| {
+            let store_id: i64 = row.get(26)?;
+            let needs_protection = row.get::<i64>(27)? != 0;
+            let row_bytes = u64::try_from(row.get::<i64>(28)?).map_err(|error| {
                 LcmError::Db(format!("invalid LCM protection row byte count: {error}"))
             })?;
             if bytes_scanned.saturating_add(row_bytes) > page_max_bytes {
@@ -484,13 +484,13 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             bytes_scanned = bytes_scanned.saturating_add(row_bytes);
             frontier_store_id = store_id;
             let raw_revision = RawProtectionRevision {
-                role: row.get(13)?,
-                ordinal: row.get(14)?,
-                timestamp: row.get(15)?,
-                content_hash: row.get(16)?,
-                storage_kind: row.get(17)?,
-                payload_ref: row.get(18)?,
-                metadata_json: row.get(19)?,
+                role: row.get(19)?,
+                ordinal: row.get(20)?,
+                timestamp: row.get(21)?,
+                content_hash: row.get(22)?,
+                storage_kind: row.get(23)?,
+                payload_ref: row.get(24)?,
+                metadata_json: row.get(25)?,
             };
             scanned_revisions.push((store_id, raw_revision.clone()));
             if !needs_protection {
