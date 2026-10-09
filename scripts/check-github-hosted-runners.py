@@ -16,6 +16,8 @@ import yaml
 STANDARD_GITHUB_HOSTED_RUNNERS = frozenset(
     {
         "ubuntu-latest",
+        "ubuntu-26.04",
+        "ubuntu-26.04-arm",
         "ubuntu-24.04",
         "ubuntu-22.04",
         "ubuntu-24.04-arm",
