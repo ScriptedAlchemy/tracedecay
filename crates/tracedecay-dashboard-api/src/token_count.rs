@@ -3,10 +3,11 @@
 //! Content-size estimation has two quality tiers:
 //!
 //! 1. **tokenized**, stored text counted with a
-//!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
-//!    (`o200k_base` / `cl100k_base` per family); for other vendors
-//!    (Claude/Gemini have no public tokenizer) `o200k_base` is a
-//!    much-better-than-chars/4 approximation and is labeled as such.
+//!    real BPE tokenizer (tiktoken). Exact for modern OpenAI-family models
+//!    on `o200k_base`; legacy GPT-4 / GPT-3.5 / embeddings and other vendors
+//!    (Claude/Gemini have no public tokenizer) use the same vocabulary as a
+//!    labeled approximation. Shipping only `o200k_base` keeps ~1.6 MiB of
+//!    `cl100k_base` vocabulary out of the binary.
 //! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
@@ -34,7 +35,7 @@ use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
-use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
+use tiktoken_rs::o200k_base_singleton;
 
 /// Per-message content-token columns, derived once and reused by every savings
 /// aggregate. Billing usage never enters this content-sizing projection.
@@ -59,15 +60,14 @@ pub struct ModelEncoder {
 }
 
 pub const O200K: &str = "o200k_base";
-pub const CL100K: &str = "cl100k_base";
 
 /// Maps a transcript model id to its tokenizer.
 ///
-/// `OpenAI` families are exact: GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5,
-/// o-series, codex, and gpt-oss use `o200k_base`; legacy GPT-4 / GPT-3.5 /
-/// embeddings use `cl100k_base`. Everything else (Claude, Gemini, Grok, …)
-/// has no public tokenizer, so `o200k_base` is used as an approximation
-/// with `exact: false` so the UI can label it honestly.
+/// Modern OpenAI families are exact on the single shipped vocabulary
+/// (`o200k_base`): GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5, o-series, codex, and
+/// gpt-oss. Legacy GPT-4 / GPT-3.5 / embeddings and every other vendor
+/// (Claude, Gemini, Grok, …) reuse `o200k_base` with `exact: false` so the UI
+/// can label the count honestly. A second vocabulary is not linked.
 pub fn encoder_for_model(model: &str) -> ModelEncoder {
     let id = model.trim().to_ascii_lowercase();
     let exact_o200k = id.starts_with("gpt-5")
@@ -79,21 +79,9 @@ pub fn encoder_for_model(model: &str) -> ModelEncoder {
         || id.starts_with("codex")
         || matches!(id.as_str(), "o1" | "o3" | "o4")
         || ["o1-", "o3-", "o4-"].iter().any(|p| id.starts_with(p));
-    if exact_o200k {
-        return ModelEncoder {
-            name: O200K,
-            exact: true,
-        };
-    }
-    if id.starts_with("gpt-4") || id.starts_with("gpt-3.5") || id.starts_with("text-embedding") {
-        return ModelEncoder {
-            name: CL100K,
-            exact: true,
-        };
-    }
     ModelEncoder {
         name: O200K,
-        exact: false,
+        exact: exact_o200k,
     }
 }
 
@@ -102,15 +90,13 @@ pub fn counting_available() -> bool {
     cfg!(feature = "token-counting")
 }
 
-/// Counts `text` with the BPE the model maps to. The singletons decode the
-/// embedded vocabularies lazily, so the first call pays the init cost and
-/// builds without the feature never do.
+/// Counts `text` with the shipped BPE. The singleton decodes the embedded
+/// vocabulary lazily, so the first call pays the init cost and builds without
+/// the feature never do. `model` selects exact vs approximate labeling via
+/// [`encoder_for_model`]; counting always uses `o200k_base`.
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, model: &str) -> Option<i64> {
-    let bpe = match encoder_for_model(model).name {
-        CL100K => cl100k_base_singleton(),
-        _ => o200k_base_singleton(),
-    };
+pub fn count_text_tokens(text: &str, _model: &str) -> Option<i64> {
+    let bpe = o200k_base_singleton();
     i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
@@ -605,8 +591,11 @@ mod tests {
         }
         for model in ["gpt-4", "gpt-3.5-turbo", "text-embedding-3-small"] {
             let enc = encoder_for_model(model);
-            assert_eq!(enc.name, CL100K, "{model}");
-            assert!(enc.exact, "{model} should be exact");
+            assert_eq!(enc.name, O200K, "{model}");
+            assert!(
+                !enc.exact,
+                "{model} must be labeled approximate without cl100k_base"
+            );
         }
     }
 
