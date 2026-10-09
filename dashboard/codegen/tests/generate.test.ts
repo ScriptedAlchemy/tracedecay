@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { z, type ZodTypeAny } from "zod";
-import ts from "typescript";
+import { checkContractTypes } from "../src/typecheck.ts";
 import { generateContracts, type JsonSchema, OUTPUT_FILES } from "../src/generate.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -25,12 +25,6 @@ function contractText(files: Record<string, string>): string {
   ].join("\n");
 }
 
-function diagnosticText(diagnostics: readonly ts.Diagnostic[]): string[] {
-  return diagnostics.map((diagnostic) =>
-    ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
-  );
-}
-
 function emittedPropertyDecoder(generated: string, property: string): ZodTypeAny {
   const match = generated.match(new RegExp(`^  ${property}: (.+),$`, "m"));
   if (!match?.[1]) {
@@ -42,6 +36,16 @@ function emittedPropertyDecoder(generated: string, property: string): ZodTypeAny
 
 describe("contracts generator", () => {
   const bundles = loadBundles();
+
+  it("rejects invalid generated types with compiler diagnostics", () => {
+    const directory = mkdtempSync(join(HERE, ".contract-fixture-"));
+    try {
+      writeFileSync(join(directory, "invalid.ts"), 'const value: string = 42;\n');
+      expect(() => checkContractTypes(directory, ["invalid.ts"])).toThrow(/TS2322/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
   it("is deterministic: identical bundles produce byte-identical output", () => {
     const a = generateContracts(bundles);
@@ -313,28 +317,9 @@ function unwrap(result: Result): Node | undefined {
 }
 export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, closedMissing, closed, open, extended, field, status, choice, unwrap };
 `);
-      const options: ts.CompilerOptions = {
-        strict: true, noEmit: true, skipLibCheck: true,
-        target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        allowImportingTsExtensions: true,
-        exactOptionalPropertyTypes: true,
-        // The fixture needs only zod and ES2022; the default DOM lib and the
-        // installed @types packages were most of the program.
-        lib: ["lib.es2022.d.ts"],
-        types: [],
-      };
-      const program = ts.createProgram([decodersPath, consumerPath], options);
-      expect(diagnosticText(ts.getPreEmitDiagnostics(program))).toEqual([]);
-
-      const javascript = ts.transpileModule(files[OUTPUT_FILES.DECODERS_FILE]!, {
-        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-      }).outputText;
-      const runtimePath = join(directory, "runtime.cjs");
-      writeFileSync(runtimePath, javascript);
-      // Node's own loader: a vitest `import()` waits on the shared transform
-      // server, which a full parallel run keeps busy for seconds.
-      const runtime = createRequire(import.meta.url)(runtimePath) as Record<string, ZodTypeAny>;
+      checkContractTypes(directory, ["decoders.ts", "consumer.ts"]);
+      // Node's loader avoids waiting on Vitest's shared transform server.
+      const runtime = createRequire(import.meta.url)(decodersPath) as Record<string, ZodTypeAny>;
       const node = {
         id: "root",
         label: null,
