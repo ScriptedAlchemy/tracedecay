@@ -787,7 +787,6 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
             )
         },
         root_sessions,
-        observation_count,
     ))
     .await?;
     let rebuild_activate_ns = elapsed_ns(started);
