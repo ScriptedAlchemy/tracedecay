@@ -417,6 +417,15 @@ mod tests {
         Ok(())
     }
 
+    /// Shipping `full` keeps niche languages such as COBOL registered.
+    #[test]
+    #[cfg(feature = "lang-cobol")]
+    fn full_tier_registers_cobol() -> Result<(), String> {
+        super::try_language("cobol")
+            .map(|_| ())
+            .map_err(|err| format!("cobol must stay registered in the shipping full tier: {err}"))
+    }
+
     /// A build without the large bundle registers none of its grammars, so a
     /// `lite` build that only wants Markdown cannot reach them.
     #[test]
