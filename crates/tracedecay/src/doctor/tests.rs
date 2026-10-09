@@ -715,20 +715,21 @@ fn overlapping_latest_version()
     Ok("1.2.3".to_owned())
 }
 
-#[test]
-fn independent_network_probes_overlap() {
+#[tokio::test]
+async fn independent_network_probes_overlap() {
     use std::sync::atomic::Ordering;
 
     NETWORK_PROBE_STARTED.store(0, Ordering::SeqCst);
     let mut counters = DoctorCounters::quiet();
-    check_network(
-        &mut counters,
-        Ok(&UploadSetting::Resolved(true)),
-        AdmittedDoctorNetworkProbes {
-            fetch_worldwide_total: overlapping_worldwide_total,
-            fetch_latest_version: overlapping_latest_version,
-        },
-    );
+    let mut network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
+        fetch_worldwide_total: overlapping_worldwide_total,
+        fetch_latest_version: overlapping_latest_version,
+    });
+    network.admit_worldwide(Ok(&UploadSetting::Resolved(true)));
+    network
+        .report(&mut counters, Ok(&UploadSetting::Resolved(true)))
+        .await
+        .unwrap();
     assert!(
         counters.checks.iter().any(|check| check
             .message
