@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,6 +49,12 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
     def assert_rejected_after(self, old: str, new: str, violation: str) -> None:
         self.assertIn(old, self.workflow)
         self.assert_rejected(self.workflow.replace(old, new, 1), violation)
+
+    def workflow_fragment(self, pattern: str, *, missing: str) -> str:
+        match = re.search(pattern, self.workflow)
+        self.assertIsNotNone(match, missing)
+        assert match is not None
+        return match.group(0)
 
     def test_rejects_dropping_the_release_dispatch(self) -> None:
         self.assert_rejected_after(
@@ -135,10 +142,14 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
 
     def test_rejects_mutable_action_reference(self) -> None:
+        old = self.workflow_fragment(
+            r"      - uses: dtolnay/rust-toolchain@[0-9a-f]{40} # stable\n"
+            r"        with:\n"
+            r"          toolchain: stable",
+            missing="build-typescript rust-toolchain pin missing from release.yml",
+        )
         self.assert_rejected_after(
-            "      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable\n"
-            "        with:\n"
-            "          toolchain: stable",
+            old,
             "      - uses: dtolnay/rust-toolchain@stable\n"
             "        with:\n"
             "          toolchain: stable",
@@ -242,16 +253,21 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
 
     def test_rejects_setup_node_token_authentication(self) -> None:
+        old = self.workflow_fragment(
+            r"      - uses: actions/setup-node@[0-9a-f]{40} # [^\n]+\n"
+            r"        with:\n"
+            r'          node-version: "[^"]+"\n\n'
+            r"      # Prerelease SDK versions mirror the beta release convention",
+            missing="publish-typescript setup-node pin missing from release.yml",
+        )
         self.assert_rejected_after(
-            "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
-            "        with:\n"
-            "          node-version: \"22.23.3\"\n\n"
-            "      # Prerelease SDK versions mirror the beta release convention",
-            "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
-            "        with:\n"
-            "          node-version: \"22.23.3\"\n"
-            "          registry-url: https://registry.npmjs.org\n\n"
-            "      # Prerelease SDK versions mirror the beta release convention",
+            old,
+            old.replace(
+                "\n\n      # Prerelease SDK versions mirror the beta release convention",
+                "\n          registry-url: https://registry.npmjs.org\n\n"
+                "      # Prerelease SDK versions mirror the beta release convention",
+                1,
+            ),
             "'publish-typescript' must not configure setup-node registry auth; "
             "it would shadow the OIDC exchange",
         )
