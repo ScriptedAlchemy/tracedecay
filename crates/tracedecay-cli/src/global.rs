@@ -107,64 +107,6 @@ pub(crate) fn try_flush(
     }
 }
 
-/// Best-effort version check with 5-minute network cache. If `skip_cache` is
-/// true, always fetches from GitHub (used during sync where the call runs in
-/// parallel). If `skip_suppression` is false, the warning is suppressed for 15
-/// minutes after it was last shown; if true it is always shown (used for status).
-pub(crate) fn check_for_update(
-    profile: &ProfileRoot,
-    config: &mut tracedecay_session_memory::user_config::UserConfig,
-    skip_cache: bool,
-    skip_suppression: bool,
-) {
-    let current_version = env!("CARGO_PKG_VERSION");
-    let now = current_unix_timestamp();
-
-    let latest = if !skip_cache && elapsed_since(now, config.last_version_check_at) < 300 {
-        if config.cached_latest_version.is_empty() {
-            return;
-        }
-        config.cached_latest_version.clone()
-    } else {
-        match crate::cloud::fetch_latest_version() {
-            Ok(v) => {
-                config.cached_latest_version = v.clone();
-                config.last_version_check_at = now;
-                if let Err(err) = config.save_if_exists(profile.data_dir()) {
-                    eprintln!("warning: could not save tracedecay config: {err}");
-                }
-                v
-            }
-            Err(error) => {
-                tracing::debug!(%error, "version-update check could not read releases");
-                return;
-            }
-        }
-    };
-
-    // The status page (skip_suppression=true) warns on any newer version;
-    // the CLI only warns on minor+ bumps to avoid nagging on patch releases.
-    let dominated = if skip_suppression {
-        crate::cloud::is_newer_version(current_version, &latest)
-    } else {
-        crate::cloud::is_newer_minor_version(current_version, &latest)
-    };
-
-    if dominated && (skip_suppression || elapsed_since(now, config.last_version_warning_at) >= 900)
-    {
-        eprintln!(
-            "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
-            current_version, latest
-        );
-        if !skip_suppression {
-            config.last_version_warning_at = now;
-            if let Err(err) = config.save_if_exists(profile.data_dir()) {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
-        }
-    }
-}
-
 /// Returns the project paths the `wipe` command should act on.
 ///
 /// `--all` returns every path tracked in the global DB (including stale rows).

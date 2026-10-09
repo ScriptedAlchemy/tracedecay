@@ -256,13 +256,47 @@ fn async_worker_threads() -> usize {
 
 fn async_runtime_flavor(command: Option<&Commands>) -> AsyncRuntimeFlavor {
     match command {
-        // `tool` is a one-shot daemon client. A multi-thread runtime eagerly
-        // starts up to 16 workers even though the command drives one socket
-        // request and exits; the current thread already has a fixed 16 MiB
-        // stack and Tokio's blocking pool remains available when needed.
-        Some(Commands::Tool { .. }) => AsyncRuntimeFlavor::CurrentThread,
+        // One-shot daemon clients drive a single socket request and exit. A
+        // multi-thread runtime eagerly starts up to 16 workers they never
+        // use; the current thread already has a fixed 16 MiB stack and
+        // Tokio's blocking pool remains available when needed.
+        Some(Commands::Tool { .. } | Commands::Status { .. }) => AsyncRuntimeFlavor::CurrentThread,
         _ => AsyncRuntimeFlavor::MultiThread,
     }
+}
+
+/// `tool` and `status` talk to an already-running daemon and then exit. They
+/// do not ingest transcripts, open a local graph, or serve the dashboard, so
+/// the inverted runtime ports, cloud probes, and C-library allocator route
+/// are work they never read.
+fn is_one_shot_daemon_client(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Tool { .. } | Commands::Status { .. })
+    )
+}
+
+/// Print the clap version line without constructing the command tree or
+/// installing process-global runtime slots. Only the lone `--version` / `-V`
+/// form is handled here; mixed argv still goes through clap.
+fn try_print_cli_version(args: &[std::ffi::OsString]) -> Option<ExitCode> {
+    let mut saw_version = false;
+    for arg in args.iter().skip(1) {
+        let arg = arg.to_str()?;
+        if arg == "--version" || arg == "-V" {
+            saw_version = true;
+            continue;
+        }
+        return None;
+    }
+    if !saw_version {
+        return None;
+    }
+    println!(
+        "tracedecay {}",
+        crate::product_runtime::PRODUCT_BUILD_VERSION
+    );
+    Some(ExitCode::SUCCESS)
 }
 
 /// Keep enough bounded blocking workers to run every admitted background CPU
@@ -391,8 +425,11 @@ fn restore_sigpipe_default() -> std::io::Result<()> {
 }
 
 fn main() -> ExitCode {
-    admit_process_host_program_search_path();
     let args = std::env::args_os().collect::<Vec<_>>();
+    if let Some(code) = try_print_cli_version(&args) {
+        return code;
+    }
+    admit_process_host_program_search_path();
 
     if let Some(command) = args.get(1).and_then(|value| value.to_str()) {
         tracing::trace!(name: "cli.command.name", value = ?command);
@@ -448,21 +485,6 @@ fn main() -> ExitCode {
 }
 
 fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
-    // This binary is the sole generator of source provenance and the embedded
-    // dashboard bundle; the composition library reads both through this
-    // set-once registration.
-    tracedecay_project::product_runtime::register_product_runtime(
-        crate::product_runtime::provider(),
-    )?;
-    crate::cloud::admit_sync_probes();
-    // Every process-global runtime port the extracted crates invert back into
-    // the composition root. Must precede argument parsing: hook, install, and
-    // ingest paths all read these slots, and an unregistered slot fails quietly
-    // (no LCM redaction, no memory injection, zero turn costs) rather than
-    // loudly. The agent-host MCP catalog is no longer among them, host
-    // installers read it from `tracedecay-mcp` on demand, so `tool` still
-    // pays nothing for the ~160 schemas it never looks at.
-    tracedecay::register_runtime_ports()?;
     let args: Vec<String> = std::env::args().collect();
 
     if let Some(command) = args.get(1) {
@@ -513,7 +535,20 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     tracedecay_daemon_service::logging::install_stderr_tracing(stderr_tracing_default(
         cli.command.as_ref(),
     ));
-    process_allocator::configure_process_allocator();
+    // Handshake advertises this binary's registered build version. Help and
+    // clap version already returned above, so only a command that may talk
+    // to the daemon pays the registration.
+    tracedecay_project::product_runtime::register_product_runtime(
+        crate::product_runtime::provider(),
+    )?;
+    if !is_one_shot_daemon_client(cli.command.as_ref()) {
+        crate::cloud::admit_sync_probes();
+        // Inverted runtime ports are read by ingest, installers, hooks, and
+        // project open. One-shot daemon clients call the daemon directly and
+        // never read those slots.
+        tracedecay::register_runtime_ports()?;
+        process_allocator::configure_process_allocator();
+    }
     // Bound only Rayon's global pool for daemon workloads that actually use
     // it. Code indexing owns a separately planned pool shared by semantic
     // projection, so changing this ceiling cannot silently narrow that budget.
@@ -1854,6 +1889,7 @@ impl CommandStartupPolicy {
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
             Commands::Tool { .. }
+            | Commands::Status { .. }
             | Commands::Work { .. }
             | Commands::Workflow { .. }
             | Commands::Remote { .. }
@@ -1886,8 +1922,7 @@ impl CommandStartupPolicy {
             | Commands::Serve { .. } => Self::SkipAll,
             // Inspection-only commands retain ordinary startup maintenance but
             // do not need the unrelated agent-install health check.
-            Commands::Status { .. }
-            | Commands::CurrentCounter { .. }
+            Commands::CurrentCounter { .. }
             | Commands::Cost { .. }
             | Commands::Gain { .. }
             | Commands::Monitor
