@@ -876,8 +876,7 @@ impl DoctorCounters {
     pub fn replay_from(&mut self, src: Self) {
         let mut sections = src.sections.into_iter().peekable();
         for (index, check) in src.checks.into_iter().enumerate() {
-            while sections.peek().is_some_and(|(at, _)| *at == index) {
-                let (_, title) = sections.next().expect("peeked section");
+            while let Some((_, title)) = sections.next_if(|(at, _)| *at == index) {
                 self.section(&title);
             }
             match check.level {

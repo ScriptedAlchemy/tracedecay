@@ -28,7 +28,7 @@
     "echarts": "^6.1.0",
     "graphology": "^0.26.0",
     "graphology-layout-forceatlas2": "^0.10.1",
-    "lucide-react": "^0.577.0",
+    "lucide-react": "^1.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router": "^7.18.2",

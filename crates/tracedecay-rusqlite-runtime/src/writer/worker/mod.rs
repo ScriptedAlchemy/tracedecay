@@ -38,10 +38,10 @@ use crate::{
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
     connection::{self, OpenedDatabaseFile},
-    ledger,
     exact_sql::{
         WriterCommand as ExactSqlWriterCommand, reject_writer_command, run_writer_command,
     },
+    ledger,
     telemetry::{
         LockWorkScope, WalCheckpointSample, WriterTelemetry, duration_micros, take_observed_vm,
     },
