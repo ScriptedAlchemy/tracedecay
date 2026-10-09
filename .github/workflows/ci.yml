@@ -293,10 +293,11 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Root suites and the full-daemon memory journey retain exclusive CPU
-  # reservation: overlapping compiler work can exhaust their test budgets.
-  # The remaining workspace suites may overlap compilation on two runners.
-  # root-b and workspace-b catch unlisted targets in their respective groups.
+  # Root suites and the full-daemon memory journey keep the global
+  # HOST_CPUS reservation. Workspace shards reserve one CPU per test and
+  # set local_test_jobs=1 so a suite still runs alone (no multi-suite
+  # libtest pile-up) while jobs=4 rustc can use the leftover cores.
+  # root-b and workspace-b catch unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
@@ -329,7 +330,7 @@ jobs:
           # Alphabetical a–g member crates. New crates land in workspace-b
           # via the catch-all until listed here for balance.
           - shard: workspace-a
-            test_resources: --default_test_resources=cpu=1
+            test_resources: --default_test_resources=cpu=1 --local_test_jobs=1
             targets: >-
               --
               //crates/tracedecay-agent-hosts/...
@@ -357,7 +358,7 @@ jobs:
               //crates/tracedecay-graph-query/...
               -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
-            test_resources: --default_test_resources=cpu=1
+            test_resources: --default_test_resources=cpu=1 --local_test_jobs=1
             targets: >-
               --
               //...

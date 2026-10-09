@@ -153,6 +153,7 @@ rust_test(
 
 rust_test(
     name = "refresh_memory_journey",
+    size = "large",
     srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + glob(["build-support/**/*.rs", "src/**/*.rs"]) + ["//crates/tracedecay:tests_common_sources", "//tests:support_sources"],
     crate_root = "tests/refresh_memory_journey.rs",
     edition = crate_edition(),
