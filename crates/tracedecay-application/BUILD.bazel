@@ -108,6 +108,7 @@ rust_test(
 
 rust_test(
     name = "work_rollup",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]) + glob(["tests/application_suite/**/*.rs", "tests/application_suite/github_stack_coordinator/**/*.rs"]),
     crate_root = "benches/work_rollup.rs",
@@ -120,6 +121,12 @@ rust_test(
     crate_features = ["default", "test-helpers", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+)
+
+filegroup(
+    name = "benchmark_binaries",
+    testonly = True,
+    srcs = [":work_rollup__binary"],
 )
 
 rust_test(

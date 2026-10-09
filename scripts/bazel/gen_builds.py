@@ -1100,6 +1100,7 @@ def main():
                 ]
                 out = [l for l in out if l is not None]
 
+        benchmark_binaries = []
         for t in p["targets"]:
             kinds = t["kind"]
             if not ({"test", "bench"} & set(kinds)):
@@ -1182,10 +1183,16 @@ def main():
                 runfiles_env.setdefault(variable, target)
             env_attr = "    rustc_env = " + env_dict(rustc_env) + "," if rustc_env else None
             test_name = unique_name(t["name"])
+            manual_benchmark = "bench" in kinds and not t["test"]
+            if manual_benchmark:
+                benchmark_binaries.append(f":{test_name}__binary")
             out += [
                 "rust_test(",
                 f'    name = "{test_name}",',
                 test_size_attr(test_name),
+                # Cargo metadata distinguishes opt-in measurements from default tests.
+                '    tags = ["manual"],'
+                if manual_benchmark else None,
                 "    use_libtest_harness = False,"
                 if not declared_target.get("harness", True) else None,
                 "    srcs = " + srcs + ",",
@@ -1206,6 +1213,15 @@ def main():
                 ")\n",
             ]
             out = [l for l in out if l is not None]
+
+        if benchmark_binaries:
+            out += [
+                "filegroup(",
+                '    name = "benchmark_binaries",',
+                "    testonly = True,",
+                "    srcs = [" + q(benchmark_binaries) + "],",
+                ")\n",
+            ]
 
         if lib_t:
             lib_runfiles_env = runtime_binaries(p, lib_t, lib_pulled)

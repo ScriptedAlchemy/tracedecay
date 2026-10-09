@@ -166,6 +166,7 @@ rust_test(
 
 rust_test(
     name = "code_traversal",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_traversal.rs",
@@ -182,6 +183,7 @@ rust_test(
 
 rust_test(
     name = "mixed_read_write",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/mixed_read_write.rs",
@@ -198,6 +200,7 @@ rust_test(
 
 rust_test(
     name = "native_state_100k",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/native_state_100k.rs",
@@ -214,6 +217,7 @@ rust_test(
 
 rust_test(
     name = "publication_scale",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/publication_scale.rs",
@@ -230,6 +234,7 @@ rust_test(
 
 rust_test(
     name = "replay_after_mismatch",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/replay_after_mismatch.rs",
@@ -242,6 +247,12 @@ rust_test(
     crate_features = ["eval-helpers", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+)
+
+filegroup(
+    name = "benchmark_binaries",
+    testonly = True,
+    srcs = [":code_traversal__binary", ":mixed_read_write__binary", ":native_state_100k__binary", ":publication_scale__binary", ":replay_after_mismatch__binary"],
 )
 
 rust_test(

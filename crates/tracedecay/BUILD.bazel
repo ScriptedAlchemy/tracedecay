@@ -394,6 +394,7 @@ rust_test(
 
 rust_test(
     name = "large_repos",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/large_repos.rs",
@@ -410,6 +411,7 @@ rust_test(
 
 rust_test(
     name = "session_temporal",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/session_temporal.rs",
@@ -426,6 +428,7 @@ rust_test(
 
 rust_test(
     name = "transcript_ingest",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/transcript_ingest.rs",
@@ -442,6 +445,7 @@ rust_test(
 
 rust_test(
     name = "rmcp_connection_pipeline",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/rmcp_connection_pipeline.rs",
@@ -458,6 +462,7 @@ rust_test(
 
 rust_test(
     name = "mcp_server_construction",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/mcp_server_construction.rs",
@@ -470,6 +475,12 @@ rust_test(
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+)
+
+filegroup(
+    name = "benchmark_binaries",
+    testonly = True,
+    srcs = [":large_repos__binary", ":session_temporal__binary", ":transcript_ingest__binary", ":rmcp_connection_pipeline__binary", ":mcp_server_construction__binary"],
 )
 
 rust_test(

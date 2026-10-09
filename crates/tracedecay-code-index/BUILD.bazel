@@ -159,6 +159,7 @@ rust_test(
 
 rust_test(
     name = "code_index_chunks",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_index_chunks.rs",
@@ -175,6 +176,7 @@ rust_test(
 
 rust_test(
     name = "git_ancestry",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/git_ancestry.rs",
@@ -191,6 +193,7 @@ rust_test(
 
 rust_test(
     name = "partitioned_codec",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/partitioned_codec.rs",
@@ -207,6 +210,7 @@ rust_test(
 
 rust_test(
     name = "restore_generation",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/restore_generation.rs",
@@ -223,6 +227,7 @@ rust_test(
 
 rust_test(
     name = "retained_parse",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/retained_parse.rs",
@@ -239,6 +244,7 @@ rust_test(
 
 rust_test(
     name = "sealed_storage",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/sealed_storage.rs",
@@ -255,6 +261,7 @@ rust_test(
 
 rust_test(
     name = "source_search",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/source_search.rs",
@@ -267,6 +274,12 @@ rust_test(
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+)
+
+filegroup(
+    name = "benchmark_binaries",
+    testonly = True,
+    srcs = [":code_index_chunks__binary", ":git_ancestry__binary", ":partitioned_codec__binary", ":restore_generation__binary", ":retained_parse__binary", ":sealed_storage__binary", ":source_search__binary"],
 )
 
 rust_test(

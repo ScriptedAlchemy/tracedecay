@@ -257,6 +257,7 @@ rust_test(
 
 rust_test(
     name = "code_lexical_catchup",
+    tags = ["manual"],
     use_libtest_harness = False,
     srcs = glob(["benches/**/*.rs"]),
     crate_root = "benches/code_lexical_catchup.rs",
@@ -269,6 +270,12 @@ rust_test(
     crate_features = ["production", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+)
+
+filegroup(
+    name = "benchmark_binaries",
+    testonly = True,
+    srcs = [":code_lexical_catchup__binary"],
 )
 
 rust_test(
