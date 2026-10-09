@@ -923,12 +923,18 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
         (authority, result)
     });
     let busy_completion = result_rx.recv_timeout(Duration::from_millis(100));
+    let engines_during_read = database.sealed_generation_engine_census();
     release.wait();
     assert!(reader.join().unwrap().unwrap().is_some());
     assert_eq!(
         busy_completion,
-        Err(mpsc::RecvTimeoutError::Timeout),
-        "staging-row mutation remains serialized behind the snapshot's parent gate"
+        Ok(()),
+        "staging-row release must complete independently of a sealed reader"
+    );
+    assert_eq!(
+        engines_during_read,
+        (1, 1),
+        "the active sealed reader stays resident during staging release"
     );
     let (mut authority, sweep_result) = sweep.join().unwrap();
     assert_eq!(
