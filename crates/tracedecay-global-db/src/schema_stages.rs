@@ -1331,6 +1331,7 @@ async fn inspect_workflow_schema_for_admission(
         .query(
             "SELECT type, name, sql FROM sqlite_master
              WHERE name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'td_runtime_%'
              ORDER BY type, name",
             (),
         )
