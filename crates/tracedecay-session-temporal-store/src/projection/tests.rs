@@ -2890,6 +2890,24 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
             lcm_copy, 0,
             "N={n}: lcm_raw_messages.content must not keep the canonical body"
         );
+        let placeholder_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("lcm placeholder leak query")
+            .next()
+            .await
+            .expect("lcm placeholder leak row")
+            .expect("lcm placeholder leak missing row")
+            .get(0)
+            .expect("lcm placeholder leak count");
+        assert_eq!(
+            placeholder_copy, 0,
+            "N={n}: placeholder_text must not keep a second full body"
+        );
         println!(
             "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes} stored_body_bytes={stored_body_bytes}"
         );
@@ -2981,4 +2999,232 @@ async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_conten
     super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
         .await
         .expect_err("a divergent canonical digest must still reject replay");
+}
+
+fn realistic_words(seed: u64, bytes: usize) -> String {
+    const WORDS: [&str; 16] = [
+        "select", "from", "where", "join", "index", "session", "tool", "output", "error",
+        "trace", "payload", "cursor", "anchor", "query", "store", "graph",
+    ];
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
+    let mut out = String::with_capacity(bytes + 16);
+    while out.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+        out.push(' ');
+    }
+    out.truncate(bytes);
+    out
+}
+
+fn fixture_realistic_observation(
+    session_id: &SessionId,
+    session: usize,
+    ordinal: u64,
+    facts: Vec<CanonicalObservationFactV1>,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    fixture_observation_from_facts(
+        session_id,
+        ordinal,
+        ProviderId::new(format!("codex-{session}-{ordinal}")).unwrap(),
+        ObservationId::new(format!("record.realistic.{session}.{ordinal}")).unwrap(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(ObservationId::new(format!("thread.realistic.{session}")).unwrap())
+            .with_turn_id(ObservationId::new(format!("turn.realistic.{session}.{}", ordinal / 4)).unwrap())
+            .with_message_id(ObservationId::new(format!("message.realistic.{session}.{ordinal}")).unwrap())
+            .with_agent_id(ObservationId::new(format!("agent.realistic.{session}")).unwrap()),
+        facts,
+        None,
+    )
+}
+
+async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes: u64, n: usize) {
+    let mut rows = snapshot
+        .query(
+            "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC",
+            (),
+        )
+        .await
+        .expect("dbstat query");
+    let mut accounted = 0u64;
+    while let Some(row) = rows.next().await.expect("dbstat row") {
+        let name: String = row.get(0).expect("dbstat name");
+        let bytes = u64::try_from(row.get::<i64>(1).expect("dbstat pgsize")).unwrap();
+        accounted = accounted.saturating_add(bytes);
+        if bytes >= 32_768 {
+            println!("user-sessions dbstat N={n} name={name} pgsize={bytes}");
+        }
+    }
+    let unused_sql = "SELECT name, SUM(pgsize), SUM(unused), SUM(payload)
+         FROM dbstat
+         WHERE name IN (
+            'lcm_raw_messages', 'observations', 'retrieval_anchors',
+            'lcm_raw_messages_fts_data', 'session_canonical_bodies',
+            'sanitization_receipts', 'observation_projection_provenance'
+         )
+         GROUP BY name
+         ORDER BY SUM(pgsize) DESC";
+    let mut unused_rows = snapshot.query(unused_sql, ()).await.expect("dbstat unused");
+    while let Some(row) = unused_rows.next().await.expect("unused row") {
+        println!(
+            "user-sessions unused N={n} name={} pgsize={} unused={} payload={}",
+            row.get::<String>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<i64>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        );
+    }
+    let lcm_sql = "SELECT
+            COALESCE(SUM(length(COALESCE(content, ''))), 0),
+            COALESCE(SUM(length(COALESCE(metadata_json, ''))), 0),
+            COALESCE(SUM(length(COALESCE(placeholder_text, ''))), 0),
+            COALESCE(SUM(length(COALESCE(payload_ref, ''))), 0),
+            COALESCE(SUM(length(content_hash)), 0),
+            COALESCE(SUM(length(provider)+length(message_id)+length(session_id)+length(role)+length(storage_kind)), 0)
+         FROM lcm_raw_messages";
+    let mut lcm = snapshot.query(lcm_sql, ()).await.expect("lcm census");
+    let lcm_row = lcm.next().await.expect("lcm row").expect("lcm");
+    println!(
+        "user-sessions lcm-cols N={n} content={} metadata={} placeholder={} payload_ref={} content_hash={} ids={}",
+        lcm_row.get::<i64>(0).unwrap(),
+        lcm_row.get::<i64>(1).unwrap(),
+        lcm_row.get::<i64>(2).unwrap(),
+        lcm_row.get::<i64>(3).unwrap(),
+        lcm_row.get::<i64>(4).unwrap(),
+        lcm_row.get::<i64>(5).unwrap(),
+    );
+    let column_sql = "SELECT
+            (SELECT COUNT(*) FROM observations),
+            (SELECT COALESCE(SUM(length(observation_json)), 0) FROM observations),
+            (SELECT COALESCE(SUM(length(anchor_json)), 0) FROM retrieval_anchors),
+            (SELECT COALESCE(SUM(length(availability_json)), 0) FROM observation_repository_provenance),
+            (SELECT COALESCE(SUM(length(COALESCE(capture_json, ''))), 0) FROM observation_repository_provenance),
+            (SELECT COALESCE(SUM(length(COALESCE(content, ''))), 0) FROM lcm_raw_messages),
+            (SELECT COALESCE(SUM(length(index_text)), 0) FROM session_occurrences),
+            (SELECT COUNT(*) FROM session_canonical_bodies),
+            (SELECT COALESCE(SUM(length(body)), 0) FROM session_canonical_bodies),
+            (SELECT COALESCE(SUM(uncompressed_bytes), 0) FROM session_canonical_bodies)";
+    let mut cols = snapshot
+        .query(column_sql, ())
+        .await
+        .expect("column census");
+    let row = cols.next().await.expect("column census row").expect("column census");
+    println!(
+        "user-sessions census N={n} family_bytes={family_bytes} dbstat_accounted={accounted} observations={} observation_json={} anchor_json={} availability_json={} capture_json={} lcm_content={} occurrence_index_text={} cas_rows={} cas_stored={} cas_uncompressed={}",
+        row.get::<i64>(0).unwrap(),
+        row.get::<i64>(1).unwrap(),
+        row.get::<i64>(2).unwrap(),
+        row.get::<i64>(3).unwrap(),
+        row.get::<i64>(4).unwrap(),
+        row.get::<i64>(5).unwrap(),
+        row.get::<i64>(6).unwrap(),
+        row.get::<i64>(7).unwrap(),
+        row.get::<i64>(8).unwrap(),
+        row.get::<i64>(9).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
+    const SESSION_COUNTS: [usize; 2] = [4, 8];
+    const TURNS: usize = 32;
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let mut next_session = 0usize;
+    let mut previous_family = 0u64;
+    for n in SESSION_COUNTS {
+        while next_session < n {
+            let session_id = fixture_session(&format!("session.realistic.{next_session}"));
+            let mut ordinal = 0u64;
+            for turn in 0..TURNS {
+                let seed = ((next_session as u64) << 32) | (turn as u64);
+                let user = realistic_words(seed, 280);
+                let assistant = realistic_words(seed ^ 1, 280);
+                let tool_out = if turn % 4 == 3 {
+                    realistic_words(seed ^ 2, 48_000)
+                } else {
+                    realistic_words(seed ^ 2, 1_200)
+                };
+                let wrap = realistic_words(seed ^ 3, 280);
+                let call = ObservationId::new(format!("tool.realistic.{next_session}.{turn}")).unwrap();
+                let facts = [
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::User,
+                        content: json!({"text": user}),
+                        model: None,
+                        timestamp: Some(1_750_000_000 + ordinal as i64),
+                    }],
+                    vec![
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::Assistant,
+                            content: json!({"text": assistant}),
+                            model: Some("gpt-bench".to_owned()),
+                            timestamp: Some(1_750_000_001 + ordinal as i64),
+                        },
+                        CanonicalObservationFactV1::ToolInvocation {
+                            invocation_id: Some(call.clone()),
+                            name: "Bash".to_owned(),
+                            arguments: json!({"command": "rg --json tracedecay crates"}),
+                        },
+                    ],
+                    vec![CanonicalObservationFactV1::ToolResult {
+                        invocation_id: Some(call),
+                        content: json!({"text": tool_out}),
+                        success: Some(true),
+                    }],
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::Assistant,
+                        content: json!({"text": wrap}),
+                        model: Some("gpt-bench".to_owned()),
+                        timestamp: Some(1_750_000_003 + ordinal as i64),
+                    }],
+                ];
+                for fact in facts {
+                    let (observation, write) =
+                        fixture_realistic_observation(&session_id, next_session, ordinal, fact);
+                    Box::pin(persist_fixture(&runtime, observation, write)).await;
+                    ordinal += 1;
+                }
+            }
+            let sequence = session_effect_sequence(&runtime, &session_id).await;
+            refresh_through(&store, &session_id, sequence, 0).await;
+            next_session += 1;
+        }
+        let snapshot = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database")
+            .read_snapshot()
+            .await
+            .expect("dbstat snapshot");
+        let family = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        assert!(
+            family > previous_family,
+            "N={n}: family must grow ({family} vs {previous_family})"
+        );
+        let oversized: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("placeholder cap query")
+            .next()
+            .await
+            .expect("placeholder cap row")
+            .expect("placeholder cap missing row")
+            .get(0)
+            .expect("placeholder cap count");
+        assert_eq!(
+            oversized, 0,
+            "N={n}: LCM placeholder must stay on the snippet budget"
+        );
+        print_user_sessions_dbstat(&snapshot, family, n).await;
+        previous_family = family;
+    }
 }

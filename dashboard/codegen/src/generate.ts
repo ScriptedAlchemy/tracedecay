@@ -182,7 +182,7 @@ interface Resolved {
 
 function typeAnn(ts: string): string {
   // Wire decoders accept unknown input, including catch defaults and lazy refs.
-  return `z.ZodType<${ts}, z.ZodTypeDef, unknown>`;
+  return `z.ZodType<${ts}, unknown>`;
 }
 
 function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
@@ -215,7 +215,7 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
         return { ts: value, zod: `z.literal(${value})`, ann: `z.ZodLiteral<${value}>` };
       }
       const zodList = sorted.map(literal).join(", ");
-      return { ts: tsUnion, zod: `z.enum([${zodList}])`, ann: `z.ZodEnum<[${zodList}]>` };
+      return { ts: tsUnion, zod: `z.enum([${zodList}])`, ann: `z.ZodEnum<{ ${sorted.map((value) => `${literal(value)}: ${literal(value)}`).join("; ")} }>` };
     }
   }
 
@@ -254,7 +254,7 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
     return applyNullable(
       {
         ts: "number",
-        zod: applyNumericBounds(applySafeIntegerFormat("z.number().int()", schema), schema),
+        zod: applyNumericBounds(integerDecoder(schema), schema),
         ann: typeAnn("number"),
       },
       nullable,
@@ -290,14 +290,15 @@ function unionResolved(parts: Resolved[]): Resolved {
   return { ts, zod, ann: typeAnn(ts) };
 }
 
-function applySafeIntegerFormat(zod: string, schema: JsonSchema): string {
+function integerDecoder(schema: JsonSchema): string {
   switch (schema.format) {
     case "int64":
     case "uint64":
     case "uint":
-      return `${zod}.safe()`;
+      return "z.number().int()";
     default:
-      return zod;
+      // Unformatted JSON Schema integers retain their full numeric domain.
+      return "z.number().refine(Number.isInteger)";
   }
 }
 
@@ -331,7 +332,7 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   if (keys.length === 0 && extra !== undefined && extra !== false) {
     const value = extra === true ? { ts: "unknown", zod: "z.unknown()", ann: typeAnn("unknown") } : resolveType(extra, ctx);
     const ts = `Record<string, ${value.ts}>`;
-    return { ts, zod: `z.record(${value.zod})`, ann: typeAnn(ts) };
+    return { ts, zod: `z.record(z.string(), ${value.zod})`, ann: typeAnn(ts) };
   }
 
   const tsFields: string[] = [];
@@ -340,11 +341,8 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   for (const key of keys) {
     const resolved = resolveType(props[key] as JsonSchema, ctx);
     const optional = !required.has(key);
-    // `z.infer` of a required `z.unknown()` / `z.any()` still makes the key
-    // optional, because `undefined` extends those outputs. Match that, or a
-    // decoder result is not assignable to the alias.
     const unknownOutput = resolved.ts === "unknown" || resolved.ts === "any";
-    const optionalKey = optional || unknownOutput;
+    const optionalKey = optional;
     // Optional decoder output includes `undefined`, which is what `z.infer`
     // of `.optional()` produces. `unknown` already contains it.
     const value = optional && !unknownOutput ? `${resolved.ts} | undefined` : resolved.ts;
@@ -360,7 +358,7 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): Resolved {
   const object = zodFields.length ? `z.object({\n${zodFields.join("\n")}\n})` : "z.object({})";
   const zod = extra === false ? `${object}.strict()` : object;
   const shape = annFields.length ? `{\n${annFields.join("\n")}\n}` : "{}";
-  const ann = extra === false ? `z.ZodObject<${shape}, "strict">` : `z.ZodObject<${shape}>`;
+  const ann = extra === false ? `z.ZodObject<${shape}, z.core.$strict>` : `z.ZodObject<${shape}>`;
   return { ts, zod, ann };
 }
 

@@ -11,6 +11,7 @@ use super::codec::storage;
 
 pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-v1";
 const LCM_CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-lcm-v1";
+const LCM_PLACEHOLDER_SNIPPET_MIGRATION: &str = "session-canonical-bodies-lcm-snippet-v1";
 const OPERATION: &str = "compact session canonical bodies";
 const COMPACT_PAGE: i64 = 64;
 const LIFT_OBSERVATION_IMMUTABILITY: &str = "
@@ -56,13 +57,16 @@ pub(crate) async fn converge_canonical_bodies(
     let mut after = 0;
     loop {
         let transaction = database.begin_write_transaction(OPERATION).await?;
-        if migration_recorded(&transaction, LCM_CANONICAL_BODY_MIGRATION).await? {
+        if migration_recorded(&transaction, LCM_CANONICAL_BODY_MIGRATION).await?
+            && migration_recorded(&transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?
+        {
             transaction.commit().await?;
             break;
         }
         let page = compact_lcm_page(&transaction, after).await?;
         if page.next.is_none() {
             record_migration(&transaction, LCM_CANONICAL_BODY_MIGRATION).await?;
+            record_migration(&transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?;
         }
         transaction.commit().await?;
         let Some(next) = page.next else {
@@ -183,7 +187,7 @@ async fn compact_lcm_page(
         });
     }
     let mut rows = conn.query(
-        "SELECT store_id, content FROM lcm_raw_messages WHERE store_id > ?1 ORDER BY store_id LIMIT ?2",
+        "SELECT store_id, content, placeholder_text FROM lcm_raw_messages WHERE store_id > ?1 ORDER BY store_id LIMIT ?2",
         params![after, COMPACT_PAGE]
     ).await.map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut page = Vec::new();
@@ -197,20 +201,35 @@ async fn compact_lcm_page(
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
             row.get::<Option<String>>(1)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            row.get::<Option<String>>(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
         ));
     }
     drop(rows);
     let mut next = None;
     let mut rewrote = false;
-    for (id, content) in page {
+    for (id, content, placeholder) in page {
         next = Some(id);
         let Some(content) = content.filter(|content| content.len() >= INLINE_BODY_BYTES) else {
+            if let Some(placeholder) = placeholder {
+                let snippet =
+                    tracedecay_lcm::retrieval_content::derived_text_for_snippet(&placeholder);
+                if snippet != placeholder {
+                    conn.execute(
+                        "UPDATE lcm_raw_messages SET placeholder_text = ?1 WHERE store_id = ?2",
+                        params![snippet, id],
+                    )
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                    rewrote = true;
+                }
+            }
             continue;
         };
         let body = StoredCanonicalBody::pack(content.as_bytes())
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         persist_bodies(conn, std::slice::from_ref(&body)).await?;
-        let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_index(&content);
+        let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&content);
         conn.execute(
             "UPDATE lcm_raw_messages SET content = NULL, placeholder_text = ?1 WHERE store_id = ?2",
             params![placeholder, id],
@@ -564,6 +583,24 @@ mod tests {
             .get(0)
             .unwrap();
         assert_eq!(lcm_copy, 0);
+        let long_placeholder: i64 = conn
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > ?1",
+                params![SNIPPET_CAP_SQL],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(
+            long_placeholder, 0,
+            "CAS rows must not keep a second full body in placeholder_text"
+        );
 
         let expected = format!("payload-00-{stem}");
         let stored_json: String = conn

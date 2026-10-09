@@ -78,8 +78,8 @@ use tracedecay_mcp::tools::response_trailers::{
     TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, get_tool_definitions, render_tool_cli_help,
-    short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, cli_tool_definition,
+    get_tool_definitions_ref, render_tool_cli_help, short_tool_name,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
@@ -137,6 +137,18 @@ fn tool_deadline_range_error() -> TraceDecayError {
 
 pub(crate) fn tool_command_deadline() -> Result<Duration> {
     tool_request_deadline()
+}
+
+fn catalog_discovery_unavailable(error: tracedecay_mcp::McpCatalogError) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "mcp.catalog_discovery_unavailable",
+        false,
+        format!("MCP tool discovery is unavailable: {error}"),
+    )
+}
+
+fn advertised_cli_definition(operation: ApplicationSurfaceOperation) -> Result<ToolDefinition> {
+    cli_tool_definition(operation.mcp_tool_name()).map_err(catalog_discovery_unavailable)
 }
 
 /// Entry point for `tracedecay tool ...`.
@@ -210,16 +222,28 @@ fn run_inner(
             .as_deref()
             .map(canonical_tool_name)
             .and_then(|canonical| ApplicationSurfaceOperation::from_tool_name(&canonical));
-        if let Some(operation) = requested_operation
-            && let Some(parsed) = parse_whole_payload_invocation(&args)?
-        {
+        if let Some(operation) = requested_operation {
+            let parsed = if let Some(parsed) = parse_whole_payload_invocation(&args)? {
+                parsed
+            } else {
+                let def = advertised_cli_definition(operation)?;
+                parse_invocation(&def, &args)?
+            };
+            if parsed.show_help {
+                print_tool_help(&advertised_cli_definition(operation)?);
+                return Ok(());
+            }
             let ParsedInvocation {
                 tool_args,
                 project: parsed_project,
                 raw_json,
-                dry_run: _,
+                dry_run,
                 show_help: _,
             } = parsed;
+            if dry_run {
+                println!("{}", serde_json::to_string_pretty(&tool_args)?);
+                return Ok(());
+            }
             let explicit_project = project.or(parsed_project);
             let deadline = Instant::now()
                 .checked_add(tool_command_deadline()?)
@@ -294,16 +318,10 @@ fn run_inner(
             )
             .await;
         }
-        let defs = get_tool_definitions().map_err(|error| {
-            TraceDecayError::project_route(
-                "mcp.catalog_discovery_unavailable",
-                false,
-                format!("MCP tool discovery is unavailable: {error}"),
-            )
-        })?;
+        let defs = get_tool_definitions_ref().map_err(catalog_discovery_unavailable)?;
 
         let Some(raw_name) = name else {
-            print_tool_list(&defs);
+            print_tool_list(defs);
             return Ok(());
         };
 
@@ -345,10 +363,7 @@ fn run_inner(
         } = parsed;
 
         if dry_run {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tool_args).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(&tool_args)?);
             return Ok(());
         }
 

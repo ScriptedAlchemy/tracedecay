@@ -522,7 +522,7 @@ async fn upsert_inline_raw_message(
     let content_hash = projected_content_hash(text);
     if text.len() >= INLINE_BODY_BYTES {
         persist_canonical_text(conn, text).await?;
-        let placeholder = derived_text_for_index(text);
+        let placeholder = derived_text_for_snippet(text);
         return upsert_owned_raw_message(
             conn,
             message,
