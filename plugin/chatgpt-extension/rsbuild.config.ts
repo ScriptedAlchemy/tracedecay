@@ -7,6 +7,8 @@ export default defineConfig({
   html: { template: "./src/app/index.html", inject: "body" },
   output: {
     target: "web",
+    // Committed artifacts must not inherit browser targets from ancestor directories.
+    overrideBrowserslist: ["chrome >= 107", "edge >= 107", "firefox >= 104", "safari >= 16"],
     distPath: { root: "dist/app" },
     inlineScripts: true,
     inlineStyles: true,
