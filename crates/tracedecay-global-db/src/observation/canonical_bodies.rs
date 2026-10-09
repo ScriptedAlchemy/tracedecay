@@ -43,14 +43,20 @@ pub(crate) async fn compact_observation_bodies(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut rewrote = false;
+    let mut after_observation_id: Option<String> = None;
     loop {
         let mut rows = conn
             .query(
                 "SELECT observation_id, observation_json FROM observations
-                 WHERE length(observation_json) >= ?1
-                   AND instr(observation_json, ?2) = 0
+                 WHERE length(CAST(observation_json AS BLOB)) >= ?1
+                   AND (?2 IS NULL OR observation_id > ?2)
+                 ORDER BY observation_id
                  LIMIT ?3",
-                params![INLINE_BODY_BYTES_SQL, BODY_REF_KEY, COMPACT_PAGE],
+                params![
+                    INLINE_BODY_BYTES_SQL,
+                    after_observation_id.as_deref(),
+                    COMPACT_PAGE
+                ],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -78,12 +84,13 @@ pub(crate) async fn compact_observation_bodies(
             if slim != observation_json {
                 conn.execute(
                     "UPDATE observations SET observation_json = ?1 WHERE observation_id = ?2",
-                    params![slim, observation_id],
+                    params![slim, observation_id.as_str()],
                 )
                 .await
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
                 rewrote = true;
             }
+            after_observation_id = Some(observation_id);
         }
     }
     conn.execute_batch(RESTORE_OBSERVATION_IMMUTABILITY)
@@ -126,7 +133,7 @@ pub(crate) async fn compact_lcm_bodies(
         let mut rows = conn
             .query(
                 "SELECT store_id, content FROM lcm_raw_messages
-                 WHERE content IS NOT NULL AND length(content) >= ?1
+                 WHERE content IS NOT NULL AND length(CAST(content AS BLOB)) >= ?1
                  LIMIT ?2",
                 params![INLINE_BODY_BYTES_SQL, COMPACT_PAGE],
             )
@@ -298,6 +305,69 @@ mod tests {
                     .unwrap_or(0),
             )
         })
+    }
+
+    #[tokio::test]
+    async fn compaction_advances_past_unchanged_rows_and_counts_utf8_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let conn = TestConnection::open(&tmp.path().join("observations.db"));
+        conn.execute_batch(
+            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+             CREATE TABLE observations (observation_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL);",
+        ).await.unwrap();
+        let unchanged = serde_json::json!({"pieces": vec!["s".repeat(512); 9]}).to_string();
+        for index in 0..=COMPACT_PAGE {
+            conn.execute(
+                "INSERT INTO observations VALUES (?1, ?2)",
+                params![format!("a.{index:03}"), unchanged.as_str()],
+            )
+            .await
+            .unwrap();
+        }
+        let text = format!("{BODY_REF_KEY}{}", "界".repeat(INLINE_BODY_BYTES / 3 + 1));
+        let large = serde_json::json!({"text": text}).to_string();
+        assert!(large.len() >= INLINE_BODY_BYTES);
+        assert!(large.chars().count() < INLINE_BODY_BYTES);
+        conn.execute(
+            "INSERT INTO observations VALUES ('z.large', ?1)",
+            params![large],
+        )
+        .await
+        .unwrap();
+
+        assert!(compact_observation_bodies(&conn).await.unwrap());
+        assert!(!compact_observation_bodies(&conn).await.unwrap());
+        let mut rows = conn
+            .query(
+                "SELECT observation_json FROM observations ORDER BY observation_id",
+                (),
+            )
+            .await
+            .unwrap();
+        for _ in 0..=COMPACT_PAGE {
+            assert_eq!(
+                rows.next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get::<String>(0)
+                    .unwrap(),
+                unchanged
+            );
+        }
+        let compacted: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let hashes = collect_body_refs(&compacted).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(
+            load_canonical_body(&conn, &hashes[0]).await.unwrap(),
+            text.as_bytes()
+        );
+        assert!(rows.next().await.unwrap().is_none());
+        assert!(
+            conn.execute("UPDATE observations SET observation_json = '{}'", ())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
