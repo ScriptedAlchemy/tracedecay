@@ -1517,28 +1517,14 @@ mod tests {
         );
     }
 
-    /// A `home` fixture for tests that drive a real host-native plugin CLI
-    /// (`codex plugin add`/`remove` via [`run_host_cli`]) rather than only
-    /// writing files themselves.
-    ///
-    /// `run_host_cli` launches the host CLI with `HOME` set to exactly this
-    /// path, and at least one first-party `codex` build refuses to create its
-    /// PATH-alias helper binaries once its resolved `codex_home` falls under
-    /// the literal system temp directory (typically `/tmp`) -- a sandboxing
-    /// precaution against a world-writable, shared temp root. A `home` fixture
-    /// placed under the crate's own `target/` directory keeps the same
-    /// per-test isolation `tempfile::tempdir()` gives, without that host
-    /// safeguard misreading a fresh test fixture as an unsafe shared location.
+    /// Homes and lifecycle roots share Bazel's writable filesystem so receipt
+    /// rollback can rename artifacts atomically. The compiled host CLI fixture
+    /// accepts temporary homes and never touches the installed host's state.
     fn host_cli_tempdir() -> tempfile::TempDir {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("target")
-            .join("host-cli-test-homes");
-        std::fs::create_dir_all(&root)
-            .unwrap_or_else(|error| panic!("failed to create {}: {error}", root.display()));
-        // Spelled without the `..` hops: Windows private-file writes beneath a
-        // long home refuse any path that is not exactly absolute.
+        let root = std::path::PathBuf::from(
+            std::env::var_os("TEST_TMPDIR").expect("Bazel writable test directory"),
+        );
+        // Windows private-file writes require an exactly absolute path.
         let root = tracedecay_runtime_core::path_safety::canonical_root_identity(&root);
         tempfile::Builder::new()
             .prefix(".tmp")

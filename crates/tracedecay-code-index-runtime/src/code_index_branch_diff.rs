@@ -451,13 +451,7 @@ where
                     .resolved_scope_for_project(&request.project_root, &project_id)
                 {
                     Ok(scope) => scope,
-                    Err(crate::mcp_admission::CodeIndexScopeUnavailableV1) => {
-                        return unavailable(
-                            None,
-                            None,
-                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        );
-                    }
+                    Err(error) => return unavailable(None, None, error.search_reason()),
                 };
                 let admission = match admission_provider.admit_current(&scope) {
                     Ok(admission) => admission,

@@ -210,21 +210,24 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         request: FeedbackCycleRequest,
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
+        expected_generation: Option<&tracedecay_domain::CodeGenerationId>,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         let pin = self.producer.feedback_cycle.read().await.clone();
         let lsp_input = pin.runtime.lsp_input();
         let invocation = lsp_input(request).await?;
-        // Attribution needs the decoded generation, unlike feedback document
-        // identity and ordinary native-graph reads. Admit that demand only for
-        // this cycle and retain its generation while the synchronous join port
-        // reads it. A refused or expired seat remains typed unavailability.
+        if expected_generation.is_some_and(|expected| {
+            invocation.request.input.target.generation_id.as_ref() != Some(expected)
+        }) {
+            return Err(LspRuntimeFailure::new(
+                "feedback-cycle-generation-superseded",
+            ));
+        }
+        // Demand decoded attribution without joining background preparation.
+        // Retain an already seated generation for the cache-only join read.
         let _attribution_generation = self
             .producer
             .code_index_schedulers
-            .latest_complete_fresh_for_scope_awaiting_seat(
-                &self.producer.scope,
-                tokio::time::Instant::from_std(deadline.instant()),
-            )
+            .latest_complete_fresh_for_scope(&self.producer.scope)
             .await
             .filter(|latest| {
                 Some(&latest.generation().manifest().generation_id)
@@ -445,6 +448,7 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     request,
                     MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
                     false,
+                    None,
                 )
                 .await?;
             Ok(())
@@ -472,6 +476,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     },
                     monotonic_deadline,
                     false,
+                    None,
                 )
                 .await
                 .map_err(|failure| {
@@ -931,7 +936,7 @@ async fn run_production_hook_cycle(
         .registration
         .host_delivery
         .source_observations;
-    let Some((_, indexed_files)) = current_indexed_files(&producer).await else {
+    let Some((indexed_generation, indexed_files)) = current_indexed_files(&producer).await else {
         observe_hook_feedback_cycle_terminal(
             observations,
             &request,
@@ -949,6 +954,24 @@ async fn run_production_hook_cycle(
         log_scout_producer_outcome(&producer.project_root, "document_uri_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
+    // Retain this wait in the existing hook owner: cancellation, duplicate
+    // suppression, and the admitted event identity remain unchanged.
+    let attribution_state = producer
+        .code_index_schedulers
+        .await_test_attribution_for_scope(
+            &producer.project_root,
+            &producer.scope,
+            &indexed_generation.metadata().manifest().generation_id,
+            &work_cancellation,
+        )
+        .await;
+    if !matches!(
+        attribution_state,
+        tracedecay_domain::ProviderEvaluationStateV1::SupportedCompletedComplete
+            | tracedecay_domain::ProviderEvaluationStateV1::Partial
+    ) {
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+    }
     let diagnostic_trigger = match request.trigger {
         HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
         HookOrchestrationTriggerV1::Stop | HookOrchestrationTriggerV1::Explicit => {
@@ -964,17 +987,25 @@ async fn run_production_hook_cycle(
             },
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             request.trigger == HookOrchestrationTriggerV1::Stop,
+            Some(&indexed_generation.metadata().manifest().generation_id),
         )
         .await
     {
         Ok(execution) => execution,
-        Err(_) => {
+        Err(error) => {
             observe_hook_feedback_cycle_terminal(
                 observations,
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
-            log_scout_producer_outcome(&producer.project_root, "feedback_cycle_failed");
+            tracedecay_runtime_core::logging::log_daemon_event(
+                "context_scout_producer_work",
+                &[
+                    ("project", producer.project_root.display().to_string()),
+                    ("outcome", "feedback_cycle_failed".to_owned()),
+                    ("error_class", error.class().to_owned()),
+                ],
+            );
             return HookOrchestrationWorkOutcomeV1::RetryableFailure;
         }
     };

@@ -32,8 +32,13 @@ pub(super) async fn ensure_project_delivery_settlement(
             configuration_policy_digest.clone(),
         )
         .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open observability producer registration failed: {error}"),
+        .map_err(|error| match error {
+            error @ TraceDecayError::ProjectRoute { .. } => error,
+            error => TraceDecayError::Config {
+                message: format!(
+                    "project-open observability producer registration failed: {error}"
+                ),
+            },
         })?;
     Ok(configuration_policy_digest)
 }

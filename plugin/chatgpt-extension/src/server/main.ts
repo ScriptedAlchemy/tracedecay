@@ -18,8 +18,8 @@ export type ServerAssets = { readonly html: string; readonly iconSvg: string };
 
 export async function loadAssets(): Promise<ServerAssets> {
   const [html, iconSvg] = await Promise.all([
-    readFile(new URL("./app.html", import.meta.url), "utf8"),
-    readFile(new URL("../assets/icon.svg", import.meta.url), "utf8"),
+    readFile(new URL(/* rspackIgnore: true */ "./app.html", import.meta.url), "utf8"),
+    readFile(new URL(/* rspackIgnore: true */ "../assets/icon.svg", import.meta.url), "utf8"),
   ]);
   return { html, iconSvg };
 }

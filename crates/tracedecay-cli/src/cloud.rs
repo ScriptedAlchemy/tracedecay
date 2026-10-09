@@ -698,37 +698,10 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_connection_is_network_unreachable() {
-        // A connection that dies at the transport level before any HTTP
-        // answer is NetworkUnreachable. Unix refuses a SYN to a port that is
-        // bound but never listening instantly (the socket is held so the
-        // port cannot be reused, whereas a dropped listener stays
-        // connectable while a sibling test's forked child still holds the
-        // inherited descriptor). The Windows kernel retries a refused SYN
-        // for about two seconds — longer than the lookup budget — so there
-        // the same failure class is reached by accepting the connection and
-        // resetting it with a zero-linger close.
-        #[cfg(unix)]
-        let (base, _hold) = {
-            let refusing =
-                socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
-            refusing
-                .bind(
-                    &"127.0.0.1:0"
-                        .parse::<std::net::SocketAddr>()
-                        .unwrap()
-                        .into(),
-                )
-                .unwrap();
-            (
-                format!(
-                    "http://{}",
-                    refusing.local_addr().unwrap().as_socket().unwrap()
-                ),
-                refusing,
-            )
-        };
-        #[cfg(windows)]
+    fn a_reset_connection_is_network_unreachable() {
+        // Reset accepted connections before an HTTP response so this tests a
+        // transport failure without depending on OS-specific SYN refusal or
+        // retry behavior reaching the client before the lookup deadline.
         let (base, _hold) = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
@@ -755,11 +728,8 @@ mod tests {
         };
 
         let error = latest_release_version(&base, true, None).unwrap_err();
-        #[cfg(windows)]
-        {
-            _hold.0.send(()).unwrap();
-            _hold.1.join().unwrap();
-        }
+        _hold.0.send(()).unwrap();
+        _hold.1.join().unwrap();
 
         assert!(
             matches!(error, ReleaseLookupError::NetworkUnreachable { .. }),

@@ -450,7 +450,7 @@ function SessionBody({
     <div className="flex flex-col gap-4">
       <SessionCounts payload={payload} />
       <CompactionBoundaries payload={payload} />
-      <RawMessages
+      <TranscriptMessages
         payload={payload}
         pageNumber={pageNumber}
         onPreviousPage={onPreviousPage}
@@ -488,7 +488,7 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
       <div className="grid grid-cols-2 gap-2">
         <div className="td-raised border border-edge-subtle px-2.5 py-2">
           <Readout
-            label="messages"
+            label="stored messages"
             size="sm"
             value={splitCount(counts.message_count).value}
             unit={splitCount(counts.message_count).unit}
@@ -627,8 +627,8 @@ function pageProvenance(messages: readonly LcmMessageV1[]) {
   return { counted, unavailable };
 }
 
-/** The raw turns, one server page at a time. */
-function RawMessages({
+/** Hydrated canonical turns; raw storage totals are not a paging denominator. */
+function TranscriptMessages({
   payload,
   pageNumber,
   onPreviousPage,
@@ -659,17 +659,16 @@ function RawMessages({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <Legend>raw messages</Legend>
+      <Legend>transcript messages</Legend>
 
-      {/* Loaded page count, whole-session total, and whether another page
-        * exists, all three, because any one alone lets a page read as the
-        * transcript. A status region so paging announces where the reader now
-        * is; `tabIndex={-1}` so the focus repair can land here without adding
-        * a tab stop. */}
+      {/* Paging restores focus here so assistive technology announces the loaded page. */}
       <p ref={range} role="status" tabIndex={-1} className="text-xs text-text-muted tabular">
-        {messages.length} on this page · {payload.counts.message_count.toLocaleString()} in session ·
-        page {pageNumber} · page size {limit}
-        {payload.next_cursor != null ? ' · more pages follow' : ' · last page'}
+        {messages.length} on this page · page {pageNumber} · page size {limit}
+        {payload.next_cursor != null ? ' · more pages follow' : ' · last available page'}
+      </p>
+      <p className="text-xs text-text-muted">
+        Stored-message totals can differ from the available transcript. The last available page
+        does not establish that every stored message is represented or explain any difference.
       </p>
       {messages.length > 0 ? (
         <p className="text-xs text-text-muted tabular" data-page-token-provenance>
@@ -690,7 +689,7 @@ function RawMessages({
       ) : (
         <ol
           tabIndex={0}
-          aria-label="Raw messages"
+          aria-label="Transcript messages"
           className="flex max-h-96 flex-col overflow-auto border border-edge-subtle"
         >
           {messages.map((message) => (

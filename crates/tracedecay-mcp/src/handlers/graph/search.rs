@@ -366,9 +366,17 @@ where
                 status: PrimitiveUnavailableStatusV1::Unavailable,
                 reason: reason.to_owned(),
                 coverage: search_coverage(&unavailable.coverage),
-                verified_graph_evidence: SearchGraphEvidence::new(graph.as_ref())
-                    .unavailable()
-                    .cloned(),
+                verified_graph_evidence: if unavailable.reason
+                    == tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::NotApplicable
+                {
+                    Some(dependency_hints::unavailable_evidence(&TraceDecayError::project_route(
+                        reason,
+                        false,
+                        "code indexing requires a Git repository at the project root; initialize Git and initialize the project again",
+                    )))
+                } else {
+                    SearchGraphEvidence::new(graph.as_ref()).unavailable().cloned()
+                },
                 detail,
             };
             Ok(graph_tool_completion(
@@ -685,6 +693,69 @@ mod tests {
                 "- **clamp** (function, approximate), rank 2 · utility 5",
             ],
             "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_search_stays_terminal_when_graph_is_pending() {
+        let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
+            |_| {
+                Box::pin(async {
+                    tracedecay_code_index_runtime::code_index_task_support::code_index_scope_unavailable(
+                    tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1::NotApplicable,
+                )
+                })
+            },
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let admitted = crate::tool_context::tests::scope("non-git");
+        let project = crate::tool_context::tests::project_bundle(temp.path(), &admitted, None);
+        let authority = tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+            principal: tracedecay_domain::PrincipalId::new("principal.non-git").unwrap(),
+            authorization_revision: tracedecay_domain::AuthorizationRevision::new(
+                "revision.non-git",
+            )
+            .unwrap(),
+        };
+        let code_index =
+            crate::AdmittedCodeIndex::new(&authority, Some(&executor), None, None, None).unwrap();
+        let ctx = crate::McpToolContext::bind(crate::McpToolBinding {
+            project: &project,
+            request: crate::McpRequestAuthoritiesV1 {
+                code_index: Some(code_index),
+                ..crate::McpRequestAuthoritiesV1::default()
+            },
+        })
+        .unwrap();
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            compute_search(
+                &ctx,
+                std::future::pending(),
+                json!({"query": "symbol"}),
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("unsupported search cannot wait on a graph")
+        .unwrap();
+        let GraphToolResultV1::Search(result) = completion.result else {
+            panic!("search result");
+        };
+        let SearchResultV1::Unavailable(unavailable) = result.as_ref() else {
+            panic!("unavailable result");
+        };
+        assert_eq!(unavailable.reason, "code_index_not_applicable");
+        let evidence = unavailable.verified_graph_evidence.as_ref().unwrap();
+        assert_eq!(evidence.reason_code, unavailable.reason);
+        assert!(!evidence.retryable);
+        assert!(evidence.detail.contains("initialize Git"));
+        assert!(
+            render_search(None, &json!({"format": "json"}), &result)
+                .unwrap()
+                .failure_message()
+                .is_some()
         );
     }
 

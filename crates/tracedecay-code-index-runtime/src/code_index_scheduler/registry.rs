@@ -23,7 +23,8 @@ use std::sync::Condvar;
 
 use super::demand_admission::{CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1};
 use tracedecay_code_index::production::{
-    CodeIndexPublishedGenerationV1, VerifiedSealedTextGenerationMetadataV1,
+    CodeIndexExecutionControlV1, CodeIndexPublishedGenerationV1,
+    VerifiedSealedTextGenerationMetadataV1,
 };
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
@@ -1499,6 +1500,29 @@ impl MemoryRefusalRetryV1 {
     }
 }
 
+/// Optional derivation yields to source work accepted after this pass began.
+/// Neutral query wakes leave the source epoch unchanged.
+struct AttributionPreparationControlV1 {
+    generation: DaemonCodeIndexControlV1,
+    source_epoch: Arc<AtomicU64>,
+    expected_source_epoch: u64,
+}
+
+impl AttributionPreparationControlV1 {
+    fn source_changed(&self) -> bool {
+        self.source_epoch.load(Ordering::Acquire) != self.expected_source_epoch
+    }
+}
+
+impl CodeIndexExecutionControlV1 for AttributionPreparationControlV1 {
+    fn is_cancelled(&self) -> bool {
+        self.source_changed() || self.generation.is_cancelled()
+    }
+    fn is_deadline_exceeded(&self) -> bool {
+        self.generation.is_deadline_exceeded()
+    }
+}
+
 /// The single synchronization authority for one worktree's coalesced wake.
 /// The state lock makes timestamp, trigger, and claim ownership one
 /// linearizable transition: no producer can arrive between a claim's owner
@@ -2133,6 +2157,15 @@ impl CodeIndexSchedulerRegistryV1 {
             return Err(CodeIndexSchedulerErrorV1::Identity(
                 "code-index scheduler is shutting down".to_owned(),
             ));
+        }
+        // A retirement waiter may have timed out before the cold owner
+        // released its store. Completion makes only this exact reservation
+        // reusable; pending retired owners and other roots remain fenced.
+        if reservations
+            .get(project_root)
+            .is_some_and(|slot| slot.is_retired() && slot.completed.load(Ordering::Acquire))
+        {
+            reservations.remove(project_root);
         }
         if let Some(slot) = reservations.get(project_root) {
             return if slot.is_retired() {
@@ -3976,12 +4009,7 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
                 _ => None,
             }
         };
-        let Some(Ok(authority)) = seated.map(|seated| seated.test_attribution_authority()) else {
-            return unavailable();
-        };
-        crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
-            &authority, generation,
-        )
+        seated.map_or_else(unavailable, |seated| seated.test_attribution_read())
     }
 }
 

@@ -187,3 +187,199 @@ fn run_git_in(root: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generation() {
+    use super::AttributionPreparationControlV1;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracedecay_code_index::production::{CodeIndexInterruptionV1, CodeIndexProductionErrorV1};
+    use tracedecay_domain::ProviderEvaluationStateV1;
+    use tracedecay_runtime_core::cancellation::CancellationToken;
+
+    struct PausedControl {
+        inner: AttributionPreparationControlV1,
+        checks: AtomicUsize,
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl CodeIndexExecutionControlV1 for PausedControl {
+        fn is_cancelled(&self) -> bool {
+            if self.checks.fetch_add(1, Ordering::Relaxed) == 2 {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            self.inner.is_cancelled()
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            self.inner.is_deadline_exceeded()
+        }
+    }
+
+    let fixture = TempDir::new().unwrap();
+    let project = fixture.path().join("project");
+    fs::create_dir_all(project.join("tests")).unwrap();
+    fs::write(
+        project.join("tests/example.rs"),
+        "fn helper() {}\n#[test] fn first() { helper(); }\n#[test] fn second() { first(); }\n",
+    )
+    .unwrap();
+    run_git_in(&project, &["init", "-q", "-b", "main"]);
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-qm", "fixture"]);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let project_id = tracedecay_domain::ProjectId::new("project.attribution-interruption").unwrap();
+    registry
+        .mount_worktree(project_id.clone(), &project, fixture.path().join("store"))
+        .await
+        .unwrap();
+    let root = canonical_existing_identity(&project).unwrap();
+    registry.request_complete_generation(&root).await;
+    let mut activity = registry.subscribe_owner_activity(&root).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while activity.worker_phase() != super::CodeIndexWorkerPhaseV1::AwaitingAdmission {
+            activity.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // The current-thread runtime observes the phase after the worker yields
+    // on its admission future, so its semaphore request is already queued.
+    // Queue behind the source pass but ahead of its optional preparation.
+    // This holds the actual published memo cold, rather than constructing an
+    // unrelated scheduler handle which residency may replace before seating.
+    let next_admission = registry.background_reconcile_admission().acquire_owned();
+    tokio::pin!(next_admission);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(next_admission.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(admission);
+    let admission = next_admission.await.unwrap();
+    let mut signals =
+        super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let seated = {
+                let mounted = registry.mounted.lock().await;
+                mounted
+                    .get(&root)
+                    .unwrap()
+                    .serving_generation
+                    .read()
+                    .unwrap()
+                    .is_some()
+            };
+            if seated {
+                break;
+            }
+            signals.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let (generation, scope, control) = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&root).unwrap();
+        let latest = worktree.serving_generation.read().unwrap().clone().unwrap();
+        let scope = ResolvedScope::new(
+            project_id,
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            latest.generation().snapshot().reference.clone(),
+        )
+        .unwrap();
+        let control = AttributionPreparationControlV1 {
+            generation: DaemonCodeIndexControlV1::new(
+                Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.shutting_down),
+            ),
+            source_epoch: Arc::clone(&worktree.epoch),
+            expected_source_epoch: worktree.epoch.load(Ordering::Acquire),
+        };
+        (latest.generation_handle(), scope, control)
+    };
+    let generation_id = generation.manifest().generation_id.clone();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, receive) = std::sync::mpsc::channel();
+    let control = Arc::new(PausedControl {
+        inner: control,
+        checks: AtomicUsize::new(0),
+        entered: std::sync::Mutex::new(Some(entered)),
+        release: std::sync::Mutex::new(receive),
+    });
+    let preparing = Arc::clone(&generation);
+    let preparing_control = Arc::clone(&control);
+    let task = tokio::task::spawn_blocking(move || {
+        preparing.prepare_test_attribution(preparing_control.as_ref())
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    registry.request_complete_generation(&root).await;
+    assert!(
+        !control.inner.is_cancelled(),
+        "ordinary decode demand does not cancel optional work"
+    );
+    registry
+        .notify_hook_paths(&root, &["tests/example.rs".to_owned()])
+        .await;
+    assert!(
+        control.inner.is_cancelled(),
+        "real source demand interrupts the running preparation"
+    );
+    release.send(()).unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled
+        ))
+    ));
+    assert_eq!(
+        generation.test_attribution_read().provider_state,
+        ProviderEvaluationStateV1::Cancelled
+    );
+    let mut signals =
+        super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;
+    drop(admission);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while registry.retained_text_owner_for_root(&root).await.is_none() {
+            signals.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let ready = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        registry.await_test_attribution_for_scope(
+            &root,
+            &scope,
+            &generation_id,
+            &CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready, ProviderEvaluationStateV1::Partial);
+    assert!(
+        generation.test_attribution_read().evidence.is_some(),
+        "the owned no-op retries the interrupted immutable generation memo"
+    );
+    assert_eq!(
+        registry.latest_generation_id(&root).await,
+        Some(generation_id)
+    );
+    registry.shutdown().await;
+}

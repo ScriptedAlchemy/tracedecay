@@ -15,6 +15,9 @@ use tracedecay_hooks::delivery_spool::HookDeliveryReceiptOutcomeV1;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::lifecycle_lease::{
+    SharedLeaseAttempt, try_acquire_shared_for_profile,
+};
 
 mod analytics;
 mod claude;
@@ -387,10 +390,24 @@ pub(crate) async fn write_hook_output(
     event_json: &str,
     output: &str,
 ) -> bool {
-    let layout = match project_root {
-        None => None,
+    let (layout, _lease) = match project_root {
+        None => (None, None),
         Some(project_root) => {
+            if !profile.data_dir().is_dir() {
+                return false;
+            }
+            // Dispatch has already released its lease. Hold a fresh one through
+            // output delivery and receipt retention so maintenance cannot race either.
+            let lease = match try_acquire_shared_for_profile(profile.data_dir(), "hook output") {
+                Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
+                Ok(SharedLeaseAttempt::Busy) => return false,
+                Err(error) => {
+                    tracing::warn!(host = host.hook_key(), %error, "Hook output lease failed");
+                    return false;
+                }
+            };
             let Some(layout) = store_layout::enrolled_layout(profile.data_dir(), project_root)
+                .filter(|layout| layout.data_root.is_dir())
             else {
                 tracing::warn!(
                     host = host.hook_key(),
@@ -398,7 +415,7 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            Some(layout)
+            (Some(layout), Some(lease))
         }
     };
     let written = {

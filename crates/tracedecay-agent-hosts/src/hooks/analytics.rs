@@ -9,6 +9,9 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_hooks::HookTransportDispositionV1;
+use tracedecay_runtime_core::lifecycle_lease::{
+    SharedLeaseAttempt, try_acquire_shared_for_profile,
+};
 use tracedecay_sessions::admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
     HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
@@ -772,6 +775,22 @@ pub(super) fn record_hook_analytics(
     event: &str,
     mut fields: serde_json::Value,
 ) {
+    if !profile_root.is_dir() {
+        return;
+    }
+    // Hooks run outside the daemon's lifetime lease. Resolve the destination
+    // under our own lease so offline maintenance cannot race an append.
+    let _lease = match try_acquire_shared_for_profile(profile_root, "hook analytics") {
+        Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
+        Ok(SharedLeaseAttempt::Busy) => {
+            tracing::debug!(event = "hook_analytics_maintenance_busy");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(event = "hook_analytics_lease_failed", %error);
+            return;
+        }
+    };
     let Some(path) = hook_analytics_path(profile_root, root) else {
         return;
     };

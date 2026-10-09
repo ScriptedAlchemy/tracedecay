@@ -30,6 +30,9 @@ repository_root=$PWD
 # directory, so resolve from outside the checkout with the pinned toolchain.
 (cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
   -p tracedecay --precise "$release_version")
+# pnpm validates workspace crate versions even for a frozen npm installation.
+# Repair the release's Cargo lock before installing generated-build inputs.
+pnpm install --frozen-lockfile
 python3 scripts/bazel/gen_builds.py
 pnpm --dir sdks/typescript run build
 pnpm --dir plugin/chatgpt-extension run build

@@ -51,7 +51,6 @@ BUILD_OUTPUTS = (
     ("plugin/cursor-native-extension/node_modules", "pnpm-lock.yaml"),
     ("plugin/chatgpt-extension/node_modules", "pnpm-lock.yaml"),
     (".pnpm", "pnpm-lock.yaml"),
-    ("sdks/codegen/.pnpm", "pnpm-lock.yaml"),
 )
 STATUSES = ("PRIMARY", "PRUNABLE", "ACTIVE", "NESTED", "DIRTY", "LOCKED", "UNMERGED", "FRESH", "MERGED")
 

@@ -259,28 +259,54 @@ impl TraceDecay {
 mod tests {
     use super::*;
 
-    /// A durable profile root: one that is not under the OS temp directory.
-    /// Cargo's target directory qualifies, and the test binary already lives
-    /// there, so derive it from `current_exe` rather than hard-coding a path.
-    fn durable_profile_root(name: &str) -> std::path::PathBuf {
-        let exe = std::env::current_exe().expect("test binary path");
-        let base = exe
-            .parent()
-            .and_then(Path::parent)
-            .expect("test binary sits under a cargo target profile directory")
-            .join("first-touch-layout-fixtures")
-            .join(name);
-        std::fs::create_dir_all(&base).expect("create durable profile fixture");
-        base
-    }
-
     /// First touch of a root under the OS temp directory against a durable
     /// profile is refused before any layout, and therefore any shard
     /// directory, exists. A hermetic (temp) profile still admits temp roots.
     #[tokio::test]
     async fn first_touch_refuses_an_ephemeral_root_before_minting_a_layout() {
+        const PROFILE_ENV: &str = "TRACEDECAY_EPHEMERAL_ROOT_FIXTURE_PROFILE";
+        let Some(profile) = std::env::var_os(PROFILE_ENV) else {
+            let scratch = tempfile::TempDir::new_in(
+                std::env::var_os("TEST_TMPDIR").expect("Bazel writable test directory"),
+            )
+            .expect("isolated admission fixture");
+            let temporary = scratch.path().join("temporary");
+            std::fs::create_dir(&temporary).expect("fixture OS temporary directory");
+            // A child gives the OS temp classifier a private root without
+            // changing process-wide environment beneath other unit tests.
+            // Its durable profile is a sibling, even when Bazel scratch is
+            // itself inside the host's ordinary temporary directory.
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args([
+                "--exact",
+                "project::lifecycle::identity::tests::first_touch_refuses_an_ephemeral_root_before_minting_a_layout",
+            ])
+            .env(PROFILE_ENV, scratch.path().join("profile"))
+            .env("TMPDIR", &temporary)
+            .env("TMP", &temporary)
+            .env("TEMP", &temporary)
+            .output()
+            .expect("run isolated ephemeral-root admission test");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "isolated admission test must run and pass: {stdout}\n{stderr}",
+            );
+            return;
+        };
+        let durable_profile = std::path::PathBuf::from(profile);
+        std::fs::create_dir(&durable_profile).expect("create durable profile fixture");
+        assert!(
+            !tracedecay_global_db::is_ephemeral_path(&durable_profile),
+            "the profile must be outside this process's OS temporary directory",
+        );
         let ephemeral_project = tempfile::TempDir::new().expect("ephemeral project");
-        let durable_profile = durable_profile_root("refuses-ephemeral-root");
+        assert!(tracedecay_global_db::is_ephemeral_path(
+            ephemeral_project.path()
+        ));
         let options = TraceDecayOpenOptions {
             profile_root: Some(durable_profile.clone()),
             global_db_path: Some(durable_profile.join("registry.db")),

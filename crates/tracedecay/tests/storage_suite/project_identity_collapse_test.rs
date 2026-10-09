@@ -99,21 +99,6 @@ fn repo_with_worktrees() -> RepoFixture {
     }
 }
 
-/// A directory guaranteed to sit outside `std::env::temp_dir()`. Cargo never
-/// places build output inside the volatile system temp directory, so deriving
-/// the base from the running test binary is robust even when the checkout
-/// itself lives under `/tmp`.
-fn non_ephemeral_base() -> PathBuf {
-    let exe = std::env::current_exe().expect("test binary has a current_exe path");
-    let base = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test binary sits under a cargo target profile directory")
-        .join("project-identity-collapse-fixtures");
-    std::fs::create_dir_all(&base).unwrap();
-    base
-}
-
 #[test]
 fn every_linked_worktree_shares_its_repository_project_identity() {
     let fixture = repo_with_worktrees();
@@ -159,13 +144,31 @@ fn subdirectory_projects_keep_their_own_identity() {
 
 #[tokio::test]
 async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
-    let profile = tempfile::Builder::new()
-        .prefix("durable-profile-")
-        .tempdir_in(non_ephemeral_base())
+    const PROFILE_ENV: &str = "TRACEDECAY_DURABLE_REGISTRY_FIXTURE";
+    if !crate::common::in_child_test() {
+        let scratch = TempDir::new_in(
+            std::env::var_os("TEST_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
+        )
         .unwrap();
-    let db = HostAdmissionTestRuntimeV1::profile(profile.path().join("profile"))
-        .await
-        .unwrap();
+        let temporary = scratch.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let profile = scratch.path().join("profile");
+        // The durable profile is a sibling of the child's OS temporary root.
+        crate::common::rerun_test_in_child(
+            "project_identity_collapse_test::ephemeral_project_root_cannot_enter_a_durable_registry",
+            &[
+                (PROFILE_ENV, Some(profile.as_os_str())),
+                ("TMPDIR", Some(temporary.as_os_str())),
+                ("TMP", Some(temporary.as_os_str())),
+                ("TEMP", Some(temporary.as_os_str())),
+            ],
+        );
+        return;
+    }
+    let profile = PathBuf::from(std::env::var_os(PROFILE_ENV).unwrap());
+    let db = HostAdmissionTestRuntimeV1::profile(profile).await.unwrap();
     let ephemeral = TempDir::new().unwrap();
 
     let refusal = db

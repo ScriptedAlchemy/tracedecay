@@ -114,7 +114,7 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -128,7 +128,7 @@ jobs:
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -152,7 +152,7 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
       - name: Download dashboard artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -230,7 +230,7 @@ jobs:
           verify-mcpb/server/tracedecay --help >/dev/null
 
       - name: Upload MCPB artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mcpb-${{ matrix.name }}
           path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.mcpb
@@ -281,7 +281,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
 
       - name: Upload binary archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.name }}
           path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
@@ -308,7 +308,7 @@ jobs:
 
       - name: Download validated dashboard artifact
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -368,7 +368,7 @@ jobs:
 
       - name: Download newly built binary artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: binary-*
           path: new-binaries
@@ -376,7 +376,7 @@ jobs:
 
       - name: Download newly built MCPB artifacts
         if: needs.validate-release.outputs.build_required == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mcpb-*
           path: new-mcpbs
@@ -704,7 +704,7 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.3"
 
@@ -719,7 +719,6 @@ jobs:
           cache_dependency_path: |
             pnpm-lock.yaml
             Cargo.lock
-            sdks/codegen/Cargo.lock
 
       - name: Install npm packages and Cargo sources
         run: pnpm install --frozen-lockfile
@@ -762,7 +761,7 @@ jobs:
           echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
             | sha256sum -c -
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true
@@ -789,7 +788,7 @@ jobs:
             > "${{ steps.pack.outputs.filename }}.sha256"
           sha256sum -- npm-12.0.2.tgz > npm-12.0.2.tgz.sha256
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-tarball
           path: |
@@ -811,7 +810,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-tarball
           path: artifact
@@ -820,7 +819,7 @@ jobs:
         working-directory: artifact
         run: sha256sum -c -- *.sha256
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.3"
 

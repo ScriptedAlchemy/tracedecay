@@ -26,6 +26,7 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/setup-bazel
+      id: bazel
       with:
         cache-key: ${{ inputs.cache-key }}
 
@@ -54,3 +55,10 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: scripts/macos-stable-codesign.sh "${{ steps.stage.outputs.path }}"
+
+    - name: Save compiled Bazel actions
+      if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.bazel.outputs.disk-cache-path }}
+        key: ${{ steps.bazel.outputs.disk-cache-key }}

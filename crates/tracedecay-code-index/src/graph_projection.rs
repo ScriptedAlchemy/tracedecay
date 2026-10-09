@@ -88,7 +88,8 @@ const ADJACENCY_SEED_CHUNK: usize = 4_096;
 /// carries the edge record, instead of an edge entity between two relations,
 /// and stores every record as compact text (`schema::compact_record`). v11
 /// names a symbol record's occurrence once, through its metadata when present.
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v11";
+/// v12 stores oversized records as bounded DEFLATE bytes, preserving every field.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v12";
 
 /// Every semantic edge kind, at its [`relation_edge_kind_index`].
 const RELATION_EDGE_KINDS: [RelationEdgeKindV1; 9] = [

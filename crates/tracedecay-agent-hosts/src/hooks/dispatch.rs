@@ -30,6 +30,9 @@ use crate::agents::context_scout::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
 use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::lifecycle_lease::{
+    LifecycleLease, SharedLeaseAttempt, try_acquire_shared_for_profile,
+};
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 use super::daemon_ports::{
@@ -625,6 +628,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
 }
 
 struct PreparedBoundHook {
+    lease: LifecycleLease,
     host: NativeHostIdentityV1,
     layout: tracedecay_runtime_core::storage::StoreLayout,
     snapshot: HookConfigurationSnapshotV1,
@@ -641,6 +645,17 @@ fn prepare_bound_hook(
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
 ) -> Option<PreparedBoundHook> {
+    if !runtime.profile.data_dir().is_dir() {
+        return None;
+    }
+    let lease = match try_acquire_shared_for_profile(runtime.profile.data_dir(), "hook dispatch") {
+        Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
+        Ok(SharedLeaseAttempt::Busy) => return None,
+        Err(error) => {
+            tracing::warn!(event = "hook_dispatch_lease_failed", %error);
+            return None;
+        }
+    };
     let layout = super::store_layout::layout(runtime.profile.data_dir(), project_root)?;
     let worktree_id = worktree_id_for_layout(runtime, &layout).ok()?;
     let config_path =
@@ -664,6 +679,7 @@ fn prepare_bound_hook(
             PendingEnvelopeV1::Unavailable => return None,
         };
     Some(PreparedBoundHook {
+        lease,
         host,
         layout,
         snapshot,
@@ -686,6 +702,7 @@ async fn dispatch_decoded(
     >,
 ) -> HookDispatch {
     let PreparedBoundHook {
+        lease: _lease,
         host,
         layout,
         snapshot,

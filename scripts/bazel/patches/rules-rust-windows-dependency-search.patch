@@ -1,0 +1,192 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -717,6 +717,7 @@
+             - (depset[File]): All direct and transitive build flag files from the current build info
+             - (list[File]): Linkstamp outputs
+             - (dict[String, File]): Ambiguous libs, see `_disambiguate_libs`.
++            - (list[File]|None): Consolidated dependency search artifacts on Windows hosts.
+     """
+     linker_script = getattr(file, "linker_script", None)
+ 
+@@ -764,7 +765,30 @@
+     if _depend_on_metadata(crate_info, force_depend_on_objects):
+         transitive_crate_outputs = dep_info.transitive_metadata_outputs
+ 
+-    nolinkstamp_compile_direct_inputs = []
++    dependency_search_artifacts = None
++    if toolchain.exec_triple.system == "windows":
++        # Rustc adds every dependency search directory to PATH when loading
++        # proc macros. One directory avoids the Windows environment limit.
++        dependency_search_artifacts = []
++        by_basename = {}
++        for artifact in transitive_crate_outputs.to_list():
++            previous = by_basename.get(artifact.basename)
++            if previous != None:
++                if previous != artifact:
++                    fail("Conflicting Rust dependency basename {}: {} and {}".format(
++                        artifact.basename,
++                        previous.path,
++                        artifact.path,
++                    ))
++                continue
++            by_basename[artifact.basename] = artifact
++            # Share identical symlink actions across package consumers and
++            # aspects, retaining the compiler's existing hashed filenames.
++            linked_artifact = ctx.actions.declare_file("_rust_deps/" + artifact.basename)
++            ctx.actions.symlink(output = linked_artifact, target_file = artifact)
++            dependency_search_artifacts.append(linked_artifact)
++
++    nolinkstamp_compile_direct_inputs = list(dependency_search_artifacts or [])
+     if build_info:
+         if build_info.rustc_env:
+             nolinkstamp_compile_direct_inputs.append(build_info.rustc_env)
+@@ -863,7 +887,7 @@
+         build_env_files = list(build_env_files)
+         build_env_files.append(build_env_file)
+     compile_inputs = depset(build_env_files + lint_files, transitive = [build_script_compile_inputs, compile_inputs])
+-    return compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs
++    return compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs, dependency_search_artifacts
+ 
+ def _will_emit_object_file(emit):
+     for e in emit:
+@@ -984,7 +1008,8 @@
+         require_explicit_unstable_features = False,
+         error_format = None,
+         allowed_unstable_rust_features = None,
+-        link_std_dylib = False):
++        link_std_dylib = False,
++        dependency_search_artifacts = None):
+     """Builds an Args object containing common rustc flags
+ 
+     Args:
+@@ -998,6 +1023,7 @@
+         dep_info (DepInfo): The DepInfo provider of the target crate
+         linkstamp_outs (list): Linkstamp outputs of native dependencies
+         ambiguous_libs (dict): Ambiguous libs, see `_disambiguate_libs`
++        dependency_search_artifacts (list[File]|None): Consolidated dependency search artifacts.
+         output_hash (str): The hashed path of the crate root
+         rust_flags (list or Args): Additional flags to pass to rustc. Accepts
+             either a plain `list[str | (str, File)]` (folded into the main
+@@ -1397,7 +1423,7 @@
+     use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects)
+ 
+     # These always need to be added, even if not linking this crate.
+-    add_crate_link_flags(rustc_flags, dep_info, force_all_deps_direct, use_metadata)
++    add_crate_link_flags(rustc_flags, dep_info, force_all_deps_direct, use_metadata, dependency_search_artifacts)
+ 
+     needs_extern_proc_macro_flag = _is_proc_macro(crate_info) and crate_info.edition != "2015"
+     if needs_extern_proc_macro_flag:
+@@ -1766,7 +1792,7 @@
+     profiling_dir, profiling_flags = setup_zself_profile(ctx, crate_info)
+     rust_flags = rust_flags + profiling_flags
+ 
+-    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs = collect_inputs(
++    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs, dependency_search_artifacts = collect_inputs(
+         ctx = ctx,
+         file = ctx.file,
+         files = ctx.files,
+@@ -1868,6 +1894,7 @@
+         dep_info = dep_info,
+         linkstamp_outs = linkstamp_outs,
+         ambiguous_libs = ambiguous_libs,
++        dependency_search_artifacts = dependency_search_artifacts,
+         output_hash = output_hash,
+         rust_flags = rust_flags,
+         out_dir = out_dir,
+@@ -1897,6 +1924,7 @@
+             dep_info = dep_info,
+             linkstamp_outs = linkstamp_outs,
+             ambiguous_libs = ambiguous_libs,
++            dependency_search_artifacts = dependency_search_artifacts,
+             output_hash = output_hash,
+             rust_flags = rust_flags,
+             out_dir = out_dir,
+@@ -2706,7 +2734,7 @@
+         dirs[f.dirname] = None
+     return dirs.keys()
+ 
+-def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_metadata = False):
++def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_metadata = False, dependency_search_artifacts = None):
+     """Adds link flags to an Args object reference
+ 
+     Args:
+@@ -2715,6 +2743,7 @@
+         force_all_deps_direct (bool, optional): Whether to pass the transitive rlibs with --extern
+             to the commandline as opposed to -L.
+         use_metadata (bool, optional): Build command line arguments using metadata for crates that provide it.
++        dependency_search_artifacts (list[File]|None): Consolidated dependency search artifacts.
+     """
+ 
+     direct_crates = depset(
+@@ -2728,8 +2757,8 @@
+     args.add_all(direct_crates, uniquify = True, map_each = crate_to_link_flags)
+ 
+     args.add_all(
+-        dep_info.transitive_crates,
+-        map_each = _get_crate_dirname,
++        dep_info.transitive_crates if dependency_search_artifacts == None else dependency_search_artifacts,
++        map_each = _get_crate_dirname if dependency_search_artifacts == None else _get_dirname,
+         uniquify = True,
+         format_each = "-Ldependency=%s",
+     )
+diff --git a/rust/private/clippy.bzl b/rust/private/clippy.bzl
+--- a/rust/private/clippy.bzl
++++ b/rust/private/clippy.bzl
+@@ -148,7 +148,7 @@
+                      ctx.rule.attr.lint_config[LintsInfo].clippy_lint_files + \
+                      ctx.rule.attr.lint_config[LintsInfo].rustc_lint_files
+ 
+-    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs = collect_inputs(
++    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs, dependency_search_artifacts = collect_inputs(
+         ctx,
+         ctx.rule.file,
+         ctx.rule.files,
+@@ -180,6 +180,7 @@
+         dep_info = dep_info,
+         linkstamp_outs = linkstamp_outs,
+         ambiguous_libs = ambiguous_libs,
++        dependency_search_artifacts = dependency_search_artifacts,
+         output_hash = determine_output_hash(crate_info.root, ctx.label),
+         rust_flags = [],
+         out_dir = out_dir,
+diff --git a/rust/private/rustdoc.bzl b/rust/private/rustdoc.bzl
+--- a/rust/private/rustdoc.bzl
++++ b/rust/private/rustdoc.bzl
+@@ -122,7 +122,7 @@
+         aliases = crate_info.aliases,
+     )
+ 
+-    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs = collect_inputs(
++    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs, dependency_search_artifacts = collect_inputs(
+         ctx = ctx,
+         file = ctx.file,
+         files = ctx.files,
+@@ -214,6 +214,7 @@
+         dep_info = dep_info,
+         linkstamp_outs = linkstamp_outs,
+         ambiguous_libs = ambiguous_libs,
++        dependency_search_artifacts = dependency_search_artifacts,
+         output_hash = None,
+         rust_flags = rustdoc_flags,
+         out_dir = out_dir,
+diff --git a/rust/private/unpretty.bzl b/rust/private/unpretty.bzl
+--- a/rust/private/unpretty.bzl
++++ b/rust/private/unpretty.bzl
+@@ -147,7 +147,7 @@
+     )
+     lint_files = []
+ 
+-    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs = collect_inputs(
++    compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs, dependency_search_artifacts = collect_inputs(
+         ctx,
+         ctx.rule.file,
+         ctx.rule.files,
+@@ -198,6 +198,7 @@
+             dep_info = dep_info,
+             linkstamp_outs = linkstamp_outs,
+             ambiguous_libs = ambiguous_libs,
++            dependency_search_artifacts = dependency_search_artifacts,
+             output_hash = determine_output_hash(crate_info.root, ctx.label),
+             rust_flags = rust_flags,
+             out_dir = out_dir,
