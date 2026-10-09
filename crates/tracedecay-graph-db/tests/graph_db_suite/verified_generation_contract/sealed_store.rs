@@ -798,6 +798,79 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
+/// Publication page apply holds the staging snapshot gate exclusively. A
+/// sealed point read (the `source_body` path) must not wait on that gate.
+#[test]
+fn sealed_point_read_completes_while_staging_snapshot_gate_is_held() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:gate-hold", "code");
+
+    let g1 = rich_manifest(identity.clone(), "sealed-gate-g1", "held");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:sealed-gate-g1",
+        None,
+        'a',
+    );
+    let g1_commit = publish(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &g1_record.publication.key,
+    );
+    assert!(
+        g1_commit.snapshot.serves_from_sealed_store(),
+        "the fixture must serve the point read from the sealed store"
+    );
+
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holding_snapshot = g1_commit.snapshot.clone();
+    let holding = std::thread::spawn(move || {
+        holding_snapshot.hold_staging_snapshot_gate_for_test(|| {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+    });
+    held_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let reader_snapshot = g1_commit.snapshot.clone();
+    let reader_identity = identity.clone();
+    let reader = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = reader_snapshot.entity(
+            &GraphEntityRef::new(reader_identity, GraphEntityId::new("entity:a").unwrap()),
+            Arc::new(TestCancellation),
+        );
+        done_tx.send((result, started.elapsed())).unwrap();
+    });
+    let (result, elapsed) = done_rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .expect("sealed point read must finish while the staging snapshot gate is held");
+    drop(release_tx);
+    holding.join().unwrap();
+    reader.join().unwrap();
+
+    let entity = result
+        .unwrap()
+        .expect("sealed entity:a must resolve while the staging gate is held");
+    assert_eq!(
+        entity
+            .properties
+            .get(&GraphPropertyName::new("marker").unwrap()),
+        Some(&GraphProperty::String("held".to_owned())),
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "sealed point read waited on the staging snapshot gate for {elapsed:?}"
+    );
+}
+
 /// Generations carrying Bytes properties seal in compact form and read every
 /// byte back exactly: the compact dictionary carries a typed Bytes entry, so
 /// no size threshold or replay fallback stands between a Bytes row and the
