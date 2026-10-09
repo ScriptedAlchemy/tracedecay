@@ -125,6 +125,7 @@ fn fixture_observation_from_facts(
     )
     .unwrap();
     let payload = serde_json::to_value(envelope).unwrap();
+    let receipt_id = format!("receipt.projector.{}", record_id.as_str());
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         ObservationScopeV1::Profile,
@@ -136,10 +137,7 @@ fn fixture_observation_from_facts(
     .unwrap();
     let observation = DurableObservationV1::new(
         identity,
-        fixture_receipt(
-            &format!("receipt.projector.{}", record_id.as_str()),
-            &payload,
-        ),
+        fixture_receipt(&receipt_id, &payload),
         RetentionClass::new("retention.projector-test").unwrap(),
         payload,
     )
