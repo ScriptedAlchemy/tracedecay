@@ -1327,10 +1327,12 @@ enum WorkflowSchemaAdmission {
 async fn inspect_workflow_schema_for_admission(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<Result<WorkflowSchemaAdmission, RefusedAuthorityV1>> {
+    // `td_runtime_writer_*` objects are runtime internals the writer installs
+    // at connection open; they do not make the store an existing store.
     let mut rows = conn
         .query(
             "SELECT type, name, sql FROM sqlite_master
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'td_runtime_writer_%'
              ORDER BY type, name",
             (),
         )

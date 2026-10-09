@@ -398,7 +398,7 @@ async fn writer_ledger_tables_do_not_deny_fresh_store_evidence() {
     // before registered admission classifies the store.
     connection
         .execute_batch(
-            "CREATE TABLE td_runtime_writer_checkpoint_v1 (
+            "CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
                 shard_json TEXT NOT NULL,
                 incarnation INTEGER NOT NULL,
                 PRIMARY KEY (shard_json, incarnation)
