@@ -1,6 +1,16 @@
+use tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
 use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 
 use super::*;
+
+async fn seed_writer_ledger(db_path: &Path) {
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(RUNTIME_LEDGER_SCHEMA).await.unwrap();
+    drop(conn);
+    drop(raw_db);
+}
 
 async fn persisted_column_names(db_path: &Path, table: &str) -> Vec<String> {
     let raw_db = TestConnection::open(db_path);
@@ -508,6 +518,64 @@ async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     assert!(
         !table_exists(&db_path, "session_summary_nodes").await,
         "a rejected nonempty store must not gain temporal authority tables"
+    );
+}
+
+#[tokio::test]
+async fn writer_ledger_alone_does_not_refuse_a_fresh_store() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    seed_writer_ledger(&db_path).await;
+    assert!(
+        table_exists(&db_path, "td_runtime_writer_idempotency_v2").await,
+        "the seeded store must hold writer ledger tables"
+    );
+
+    let db = open_global_db(&db_path)
+        .await
+        .expect("a store that holds only the writer ledger must receive the final temporal schema");
+    drop(db);
+    assert!(
+        table_exists(&db_path, "session_temporal_schema_migrations").await,
+        "writer ledger metadata must not block the final schema marker"
+    );
+}
+
+#[tokio::test]
+async fn writer_ledger_does_not_hide_a_nonempty_unmarked_store() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    seed_writer_ledger(&db_path).await;
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch("CREATE TABLE authority_audit_checkpoints (wrong_column TEXT);")
+        .await
+        .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("an application table without a temporal marker must require reset"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("session temporal")
+    );
+    let reason = error
+        .reset_required_context()
+        .map(|(_, reason)| reason)
+        .expect("typed reset must name the unmarked nonempty store");
+    assert!(
+        reason.contains("nonempty store"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        !table_exists(&db_path, "session_temporal_schema_migrations").await,
+        "typed refusal must not install a marker over a nonempty unmarked store: {error}"
     );
 }
 
