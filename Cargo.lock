@@ -5192,8 +5192,6 @@ dependencies = [
 [[package]]
 name = "tokensave-medium-treesitters"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce5b721b1cfbe70cfc5c77ed9c909a989bed4a748f400b92f3a71a72128fa60"
 dependencies = [
  "tokensave-lite-treesitters",
  "tree-sitter",
@@ -5201,7 +5199,6 @@ dependencies = [
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
  "tree-sitter-dart-orchard",
- "tree-sitter-kotlin-sg",
  "tree-sitter-language",
  "tree-sitter-lua",
  "tree-sitter-php",
@@ -5720,6 +5717,7 @@ dependencies = [
 name = "tracedecay-code-extraction"
 version = "0.1.0"
 dependencies = [
+ "arborium-kotlin",
  "cc",
  "serde",
  "serde_json",
@@ -7029,16 +7027,6 @@ name = "tree-sitter-julia"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4144731a178812ee867619b1e98b3b91e54c1652304b26e5ebe3175b701de323"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-kotlin-sg"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c06ec43ae3c12165d4ac08afe4e1f5fc6757ffe274fa7bd5af9007ef11ba4319"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -225,6 +225,9 @@ opt-level = 3
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
+# Optional kotlin so `full` (large bundle → arborium-kotlin) does not also
+# link tree-sitter-kotlin-sg's duplicate parse table.
+tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
 
 # Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
 # not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`

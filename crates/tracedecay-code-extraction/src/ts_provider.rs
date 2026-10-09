@@ -58,8 +58,8 @@ fn build_language_table() -> HashMap<&'static str, Language> {
     {
         use tracedecay_medium_treesitters::languages::{
             tree_sitter_c, tree_sitter_c_sharp, tree_sitter_cpp, tree_sitter_go, tree_sitter_java,
-            tree_sitter_javascript, tree_sitter_kotlin_sg, tree_sitter_python, tree_sitter_scala,
-            tree_sitter_swift, tree_sitter_typescript,
+            tree_sitter_javascript, tree_sitter_python, tree_sitter_scala, tree_sitter_swift,
+            tree_sitter_typescript,
         };
 
         languages.insert("python", tree_sitter_python::LANGUAGE.into());
@@ -76,8 +76,18 @@ fn build_language_table() -> HashMap<&'static str, Language> {
         languages.insert("c_sharp", tree_sitter_c_sharp::LANGUAGE.into());
         languages.insert("swift", tree_sitter_swift::LANGUAGE.into());
         languages.insert("scala", tree_sitter_scala::LANGUAGE.into());
-        languages.insert("kotlin", tree_sitter_kotlin_sg::LANGUAGE.into());
     }
+
+    // Kotlin via arborium-kotlin only (see path-patched medium bundle). The
+    // large bundle reexports the same crate; prefer that path when linked so
+    // we do not name the dependency twice in source.
+    #[cfg(all(feature = "lang-kotlin", feature = "large-grammars"))]
+    languages.insert(
+        "kotlin",
+        tracedecay_large_treesitters::kotlin::language().into(),
+    );
+    #[cfg(all(feature = "lang-kotlin", not(feature = "large-grammars")))]
+    languages.insert("kotlin", arborium_kotlin::language().into());
 
     if has_grammar_bundle() {
         languages.insert("rust", rust_grammar::LANGUAGE.into());
@@ -424,6 +434,15 @@ mod tests {
         super::try_language("cobol")
             .map(|_| ())
             .map_err(|err| format!("cobol must stay registered in the shipping full tier: {err}"))
+    }
+
+    /// Shipping tiers keep Kotlin via arborium-kotlin (not a second sg table).
+    #[test]
+    #[cfg(feature = "lang-kotlin")]
+    fn shipping_tiers_register_kotlin() -> Result<(), String> {
+        super::try_language("kotlin")
+            .map(|_| ())
+            .map_err(|err| format!("kotlin must stay registered: {err}"))
     }
 
     /// A build without the large bundle registers none of its grammars, so a

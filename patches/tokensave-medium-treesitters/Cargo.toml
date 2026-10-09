@@ -1,0 +1,31 @@
+# Standalone patch package (not a workspace member).
+[workspace]
+
+[package]
+name = "tokensave-medium-treesitters"
+version = "0.2.0"
+authors = ["Enzo Lombardi <enzinol@gmail.com>"]
+edition = "2024"
+description = "Common tree-sitter grammars for tokensave (18 languages)"
+license = "MIT"
+repository = "https://github.com/aovestdipaperino/tokensave-medium-treesitters"
+readme = "README.md"
+publish = false
+
+# TraceDecay path-patch: drop tree-sitter-kotlin-sg. Kotlin is registered from
+# arborium-kotlin (directly for lite, or via tokensave-large-treesitters for
+# full) so the shipping binary never links two Kotlin parse tables.
+
+[dependencies]
+tokensave-lite-treesitters = "0.2.0"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-dart-orchard = "0.3"
+tree-sitter-language = "0.1"
+tree-sitter-lua = "0.5"
+tree-sitter-php = "0.24"
+tree-sitter-ruby = "0.23"
+tree-sitter-scala = "0.25"
+tree-sitter-swift = "0.7"
