@@ -25,12 +25,15 @@ test-helpers = []
 # indexing its documentation. Its grammar is the dedicated `tree-sitter-md`
 # crate (byte-identical parser/scanner sources to the copy vendored in the
 # large bundle), so `lite` never links the large bundle.
+# Kotlin is registered from arborium-kotlin (through `medium-grammars`), not from the
+# medium bundle's former tree-sitter-kotlin-sg dependency, so `full` never
+# links two Kotlin parse tables.
 lite = ["medium-grammars", "lang-markdown", "lang-json"]
 # The two grammar bundles supply native parse tables. Every `lang-*` feature
 # names the bundle that ships its grammar, and `ts_provider` registers only the
 # languages whose features are on so unused tables can be linker-GC'd when a
 # tier omits a language. The shipping `full` set matches master.
-medium-grammars = ["dep:tracedecay-medium-treesitters"]
+medium-grammars = ["dep:tracedecay-medium-treesitters", "dep:arborium-kotlin"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
@@ -85,6 +88,7 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 # unmerged upstream, #1104): the published scanner spins forever at end of
 # input when a token starts in the sequence-number area with no six-column
 # line before EOF, and no parse deadline can interrupt a scanner call.
+arborium-kotlin = { version = "2.18", optional = true }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracing = "0.1"

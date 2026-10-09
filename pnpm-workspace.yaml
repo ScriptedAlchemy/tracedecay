@@ -16,6 +16,7 @@ packages:
   - "!mockups/**"
   - "!tests/fixtures/**"
   - "!vendor/**"
+  - "!patches/**"
   - "!.worktrees/**"
   - "!.codex-worktrees/**"
   - "!.claude-worktrees/**"
