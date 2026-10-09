@@ -1012,8 +1012,8 @@ export const AdjudicateWorkLeakCommandV1Schema: z.ZodObject<{
   adjudication_id: z.string(),
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   command_id: z.lazy(() => WorkCommandIdSchema),
-  detection_horizon_micros: z.number().int().safe().min(0),
-  expected_revision: z.number().int().safe().min(0).nullable(),
+  detection_horizon_micros: z.number().int().min(0),
+  expected_revision: z.number().int().min(0).nullable(),
 }).strict();
 
 /** Execution admission together with the immutable provider snapshot licensed
@@ -1032,7 +1032,7 @@ export const AdmitWorkExecutionRequestV1Schema: z.ZodObject<{
   selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -1076,8 +1076,8 @@ export const AgentTaskRetryAttemptSchema: z.ZodObject<{
   failure_classification: z.ZodOptional<z.ZodType<AgentTaskFailureClass | null, unknown>>;
   succeeded: z.ZodType<boolean, unknown>;
 }> = z.object({
-  attempt: z.number().int().min(0),
-  backoff_millis: z.number().int().safe().min(0),
+  attempt: z.number().refine(Number.isInteger).min(0),
+  backoff_millis: z.number().int().min(0),
   failure_classification: z.union([z.lazy(() => AgentTaskFailureClassSchema), z.null()]).optional(),
   succeeded: z.boolean(),
 });
@@ -1090,12 +1090,12 @@ export const AggregatedProviderUsageCountersV1Schema: z.ZodObject<{
   reasoning_tokens: z.ZodType<number | null, unknown>;
   total_tokens: z.ZodType<number | null, unknown>;
 }> = z.object({
-  cache_read_tokens: z.number().int().safe().min(0).nullable(),
-  cache_write_tokens: z.number().int().safe().min(0).nullable(),
-  input_tokens: z.number().int().safe().min(0).nullable(),
-  output_tokens: z.number().int().safe().min(0).nullable(),
-  reasoning_tokens: z.number().int().safe().min(0).nullable(),
-  total_tokens: z.number().int().safe().min(0).nullable(),
+  cache_read_tokens: z.number().int().min(0).nullable(),
+  cache_write_tokens: z.number().int().min(0).nullable(),
+  input_tokens: z.number().int().min(0).nullable(),
+  output_tokens: z.number().int().min(0).nullable(),
+  reasoning_tokens: z.number().int().min(0).nullable(),
+  total_tokens: z.number().int().min(0).nullable(),
 });
 
 export const AnalyticsAgentsPayloadV1Schema: z.ZodObject<{
@@ -1113,7 +1113,7 @@ export const AnalyticsAgentUsageV1Schema: z.ZodObject<{
   sessions: z.ZodType<number, unknown>;
 }> = z.object({
   agent: z.string(),
-  sessions: z.number().int().safe(),
+  sessions: z.number().int(),
 });
 
 export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
@@ -1149,21 +1149,21 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   by_prompt_category: z.array(z.lazy(() => AnalyticsPromptCategoryCountV1Schema)),
   by_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
   by_tool_category: z.array(z.lazy(() => AnalyticsToolCategoryCountV1Schema)),
-  event_count: z.number().int().safe(),
+  event_count: z.number().int(),
   events_per_hour: z.number().nullable(),
   hint_efficacy: z.lazy(() => AnalyticsHintEfficacyV1Schema),
-  hook_call_count: z.number().int().safe(),
+  hook_call_count: z.number().int(),
   hook_readiness: z.unknown(),
   hook_sources: z.array(z.unknown()),
   hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
-  mcp_tool_call_count: z.number().int().safe(),
-  message_count: z.number().int().safe(),
+  mcp_tool_call_count: z.number().int(),
+  message_count: z.number().int(),
   ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
   recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
   recent_hooks: z.array(z.lazy(() => AnalyticsRecentHookV1Schema)),
   source: z.string(),
-  tool_call_count: z.number().int().safe(),
-  tracedecay_call_count: z.number().int().safe(),
+  tool_call_count: z.number().int(),
+  tracedecay_call_count: z.number().int(),
 });
 
 export const AnalyticsDiagnosticsRatiosV1Schema: z.ZodObject<{
@@ -1182,7 +1182,7 @@ export const AnalyticsEventKindCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   event_kind: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   event_kind: z.string(),
 });
 
@@ -1194,10 +1194,10 @@ export const AnalyticsHintCategoryV1Schema: z.ZodObject<{
   suppressed: z.ZodType<number, unknown>;
 }> = z.object({
   category: z.string(),
-  emitted: z.number().int().safe(),
-  followed: z.number().int().safe(),
-  ignored: z.number().int().safe(),
-  suppressed: z.number().int().safe(),
+  emitted: z.number().int(),
+  followed: z.number().int(),
+  ignored: z.number().int(),
+  suppressed: z.number().int(),
 });
 
 export const AnalyticsHintEfficacyCategoryV1Schema: z.ZodObject<{
@@ -1207,11 +1207,11 @@ export const AnalyticsHintEfficacyCategoryV1Schema: z.ZodObject<{
   ignored: z.ZodType<number, unknown>;
   unresolved: z.ZodType<number, unknown>;
 }> = z.object({
-  acted: z.number().int().safe(),
+  acted: z.number().int(),
   category: z.string(),
-  emitted: z.number().int().safe(),
-  ignored: z.number().int().safe(),
-  unresolved: z.number().int().safe(),
+  emitted: z.number().int(),
+  ignored: z.number().int(),
+  unresolved: z.number().int(),
 });
 
 export const AnalyticsHintEfficacyTotalsV1Schema: z.ZodObject<{
@@ -1220,10 +1220,10 @@ export const AnalyticsHintEfficacyTotalsV1Schema: z.ZodObject<{
   ignored: z.ZodType<number, unknown>;
   unresolved: z.ZodType<number, unknown>;
 }> = z.object({
-  acted: z.number().int().safe(),
-  emitted: z.number().int().safe(),
-  ignored: z.number().int().safe(),
-  unresolved: z.number().int().safe(),
+  acted: z.number().int(),
+  emitted: z.number().int(),
+  ignored: z.number().int(),
+  unresolved: z.number().int(),
 });
 
 export const AnalyticsHintEfficacyV1Schema: z.ZodObject<{
@@ -1254,7 +1254,7 @@ export const AnalyticsHookNameCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   hook_name: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   hook_name: z.string(),
 });
 
@@ -1267,13 +1267,13 @@ export const AnalyticsHookWindowV1Schema: z.ZodObject<{
   truncated: z.ZodType<boolean, unknown>;
   window_rows: z.ZodType<number, unknown>;
 }> = z.object({
-  newest_ts_unix_ms: z.number().int().safe().nullable(),
-  oldest_ts_unix_ms: z.number().int().safe().nullable(),
-  rows_included: z.number().int().safe(),
-  rows_scanned: z.number().int().safe(),
+  newest_ts_unix_ms: z.number().int().nullable(),
+  oldest_ts_unix_ms: z.number().int().nullable(),
+  rows_included: z.number().int(),
+  rows_scanned: z.number().int(),
   total_rows_known: z.boolean(),
   truncated: z.boolean(),
-  window_rows: z.number().int().safe(),
+  window_rows: z.number().int(),
 });
 
 export const AnalyticsModeReadModelV1Schema: z.ZodObject<{
@@ -1294,7 +1294,7 @@ export const AnalyticsOutcomeCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   outcome: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   outcome: z.string(),
 });
 
@@ -1324,7 +1324,7 @@ export const AnalyticsPromptCategoryCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   prompt_category: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   prompt_category: z.string(),
 });
 
@@ -1340,7 +1340,7 @@ export const AnalyticsRecentEventV1Schema: z.ZodObject<{
   event_kind: z.string(),
   hook_name: z.string(),
   outcome: z.string(),
-  timestamp: z.number().int().safe().nullable(),
+  timestamp: z.number().int().nullable(),
   tool_name: z.string(),
 });
 
@@ -1357,7 +1357,7 @@ export const AnalyticsRecentHookV1Schema: z.ZodObject<{
   prompt_category: z.string(),
   session_id: z.string(),
   tool_name: z.string(),
-  ts_unix_ms: z.number().int().safe().nullable(),
+  ts_unix_ms: z.number().int().nullable(),
 });
 
 /** How a session is attached to the delegation tree above it.
@@ -1386,16 +1386,16 @@ export const AnalyticsSubagentNodeV1Schema: z.ZodObject<{
   usage: z.ZodOptional<z.ZodType<ProviderUsageSessionTotalsV1 | null, unknown>>;
 }> = z.object({
   agent: z.string().nullable(),
-  depth: z.number().int().safe(),
-  descendants: z.number().int().safe(),
-  ended_at: z.number().int().safe().nullable(),
+  depth: z.number().int(),
+  descendants: z.number().int(),
+  ended_at: z.number().int().nullable(),
   is_subagent: z.boolean(),
   link: z.lazy(() => AnalyticsSubagentLinkV1Schema),
   parent_session_id: z.string().nullable(),
   parent_tool_use_id: z.string().nullable(),
   provider: z.string(),
   session_id: z.string(),
-  started_at: z.number().int().safe().nullable(),
+  started_at: z.number().int().nullable(),
   title: z.string().nullable(),
   usage: z.union([z.lazy(() => ProviderUsageSessionTotalsV1Schema), z.null()]).optional(),
 });
@@ -1420,14 +1420,14 @@ export const AnalyticsSubagentTreePayloadV1Schema: z.ZodObject<{
   usage_coverage: z.ZodOptional<z.ZodType<ProviderUsageCoverageV1 | null, unknown>>;
 }> = z.object({
   available: z.boolean(),
-  cycle_count: z.number().int().safe(),
-  edge_count: z.number().int().safe(),
+  cycle_count: z.number().int(),
+  edge_count: z.number().int(),
   error: z.string().nullable(),
-  max_depth: z.number().int().safe(),
-  missing_parent_count: z.number().int().safe(),
+  max_depth: z.number().int(),
+  missing_parent_count: z.number().int(),
   nodes: z.array(z.lazy(() => AnalyticsSubagentNodeV1Schema)),
-  root_count: z.number().int().safe(),
-  sessions_read: z.number().int().safe(),
+  root_count: z.number().int(),
+  sessions_read: z.number().int(),
   source: z.string(),
   truncated: z.boolean(),
   usage_coverage: z.union([z.lazy(() => ProviderUsageCoverageV1Schema), z.null()]).optional(),
@@ -1437,7 +1437,7 @@ export const AnalyticsToolCategoryCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   tool_category: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   tool_category: z.string(),
 });
 
@@ -1445,7 +1445,7 @@ export const AnalyticsToolCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   tool_name: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   tool_name: z.string(),
 });
 
@@ -1457,10 +1457,10 @@ export const AnalyticsUnderusedFamilyV1Schema: z.ZodObject<{
   usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   family: z.string(),
-  missed_events: z.number().int().safe(),
-  relevant_events: z.number().int().safe(),
+  missed_events: z.number().int(),
+  relevant_events: z.number().int(),
   underused: z.boolean(),
-  usage_events: z.number().int().safe(),
+  usage_events: z.number().int(),
 });
 
 export const AnalyticsUnderusedPayloadV1Schema: z.ZodObject<{
@@ -1479,7 +1479,7 @@ export const AnalyticsUsageCategoryV1Schema: z.ZodObject<{
   kind: z.ZodType<string, unknown>;
 }> = z.object({
   category: z.string(),
-  events: z.number().int().safe(),
+  events: z.number().int(),
   kind: z.string(),
 });
 
@@ -1492,8 +1492,8 @@ export const AnalyticsUsageSummaryV1Schema: z.ZodObject<{
 }> = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsUsageCategoryV1Schema)),
-  event_count: z.number().int().safe().nullable(),
-  message_count: z.number().int().safe(),
+  event_count: z.number().int().nullable(),
+  message_count: z.number().int(),
   source: z.string().nullable(),
 });
 
@@ -1504,7 +1504,7 @@ export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<{ "denied": "de
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_graph_rewarming"),
-  retry_after_millis: z.number().int().safe().min(0),
+  retry_after_millis: z.number().int().min(0),
 }).strict(), z.object({
   kind: z.literal("daemon_unreachable"),
   named_by: z.string().nullable(),
@@ -1519,7 +1519,7 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   kind: z.literal("diagnostics_unsupported"),
   searched: z.array(z.lazy(() => DiagnosticsSearchedTsconfigV1Schema)),
 }).strict(), z.object({
-  deadline_ms: z.number().int().safe().min(0),
+  deadline_ms: z.number().int().min(0),
   kind: z.literal("lock_deadline"),
   resource: z.string(),
 }).strict(), z.object({
@@ -1529,21 +1529,21 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   retries_on_wake: z.boolean(),
 }).strict(), z.object({
   authority: z.string(),
-  found_version: z.number().int().safe().nullable(),
+  found_version: z.number().int().nullable(),
   kind: z.literal("reset_required"),
   reason: z.string(),
   remedy: z.string(),
-  required_version: z.number().int().safe().nullable(),
+  required_version: z.number().int().nullable(),
 }).strict(), z.object({
-  current: z.number().int().safe().min(0),
+  current: z.number().int().min(0),
   field: z.string(),
   kind: z.literal("stale_precondition"),
-  requested: z.number().int().safe().min(0),
+  requested: z.number().int().min(0),
 }).strict(), z.object({
-  active: z.number().int().safe().min(0),
-  committed: z.number().int().safe().min(0),
+  active: z.number().int().min(0),
+  committed: z.number().int().min(0),
   kind: z.literal("stale_refresh_frontier"),
-  requested: z.number().int().safe().min(0),
+  requested: z.number().int().min(0),
 }).strict(), z.object({
   expected: z.string(),
   found: z.string(),
@@ -1604,10 +1604,10 @@ export const ApplicationProblemRecordSchema: z.ZodObject<{
   owning_layer: z.lazy(() => ProblemOwningLayerSchema),
   request_id: z.string(),
   retry: z.lazy(() => RetryDirectiveSchema),
-  retry_after_millis: z.number().int().safe().min(0).nullable(),
+  retry_after_millis: z.number().int().min(0).nullable(),
   retry_scope: z.union([z.lazy(() => RetryScopeSchema), z.null()]),
   retryable: z.boolean(),
-  revision: z.number().int().min(0),
+  revision: z.number().refine(Number.isInteger).min(0),
   terminality: z.lazy(() => ProblemTerminalitySchema),
   trace_id: z.string(),
   unavailable_classification: z.lazy(() => RequiredNullable4Schema),
@@ -1691,9 +1691,9 @@ export const AutomaticFactReceiptSchema: z.ZodObject<{
   evidence_hash: z.string().nullable().optional(),
   item: z.unknown().optional(),
   quarantine_reason: z.string().nullable().optional(),
-  recorded_at_micros: z.number().int().safe(),
+  recorded_at_micros: z.number().int(),
   run_id: z.string(),
-  schema_version: z.number().int().min(0),
+  schema_version: z.number().refine(Number.isInteger).min(0),
   state: z.lazy(() => AutomaticFactStateSchema),
   validation: z.unknown().optional(),
 }).strict();
@@ -1704,8 +1704,8 @@ export const AutomaticFactReceiptsPayloadV1Schema: z.ZodObject<{
   limit: z.ZodType<number, unknown>;
   receipts: z.ZodType<Array<AutomaticFactReceipt>, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
-  limit: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
+  limit: z.number().int().min(0),
   receipts: z.array(z.lazy(() => AutomaticFactReceiptSchema)),
 });
 
@@ -1715,8 +1715,8 @@ export const AutomaticWorktreeGcV1Schema: z.ZodType<AutomaticWorktreeGcV1, unkno
   kind: z.literal("disabled"),
 }), z.object({
   kind: z.literal("eligible_only"),
-  maximum_per_run: z.number().int().min(1).max(65535),
-  minimum_idle_seconds: z.number().int().safe().min(1),
+  maximum_per_run: z.number().refine(Number.isInteger).min(1).max(65535),
+  minimum_idle_seconds: z.number().int().min(1),
 })]);
 
 export const AutomationCommittedReceiptV1Schema: z.ZodType<AutomationCommittedReceiptV1, unknown> = z.discriminatedUnion("kind", [z.object({
@@ -1758,18 +1758,18 @@ export const AutomationJobSchema: z.ZodObject<{
   skill_ids: z.ZodOptional<z.ZodType<Array<string>, unknown>>;
   updated_at: z.ZodType<number, unknown>;
 }> = z.object({
-  cooldown_secs: z.number().int().safe().min(0).nullable().optional(),
-  created_at: z.number().int().safe(),
+  cooldown_secs: z.number().int().min(0).nullable().optional(),
+  created_at: z.number().int(),
   delivery: z.lazy(() => JobDeliverySchema),
   enabled: z.boolean(),
   id: z.string(),
-  interval_secs: z.number().int().safe().min(0).nullable().optional(),
+  interval_secs: z.number().int().min(0).nullable().optional(),
   name: z.string(),
   pre_run_command: z.string().nullable().optional(),
   prompt: z.string(),
   schedule: z.string().nullable().optional(),
   skill_ids: z.array(z.string()).optional(),
-  updated_at: z.number().int().safe(),
+  updated_at: z.number().int(),
 });
 
 /** `GET /api/automation/jobs`. */
@@ -1777,7 +1777,7 @@ export const AutomationJobsPayloadV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   jobs: z.ZodType<Array<AutomationJob>, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   jobs: z.array(z.lazy(() => AutomationJobSchema)),
 });
 
@@ -1791,7 +1791,7 @@ export const AutomationOutcomesPayloadV1Schema: z.ZodObject<{
 }> = z.object({
   error: z.string(),
   facts: z.array(z.lazy(() => FactOutcomeRecordSchema)),
-  generated_at: z.number().int().safe(),
+  generated_at: z.number().int(),
   skills: z.array(z.lazy(() => SkillOutcomeRecordSchema)),
   snapshot: z.lazy(() => AutomationOutcomesSnapshotStatusV1Schema),
 });
@@ -1805,8 +1805,8 @@ export const AutomationOutcomesSnapshotStatusV1Schema: z.ZodObject<{
   skills_refreshed_at: z.ZodType<number | null, unknown>;
 }> = z.object({
   available: z.boolean(),
-  facts_refreshed_at: z.number().int().safe().nullable(),
-  skills_refreshed_at: z.number().int().safe().nullable(),
+  facts_refreshed_at: z.number().int().nullable(),
+  skills_refreshed_at: z.number().int().nullable(),
 });
 
 export const AutomationRunArtifactSchema: z.ZodObject<{
@@ -1820,7 +1820,7 @@ export const AutomationRunArtifactSchema: z.ZodObject<{
   created_at: z.string(),
   kind: z.string(),
   path: z.string(),
-  schema_version: z.number().int().min(0),
+  schema_version: z.number().refine(Number.isInteger).min(0),
   sha256: z.string(),
   summary: z.string().nullable().optional(),
 });
@@ -1865,7 +1865,7 @@ export const AutomationRunArtifactsPayloadV1Schema: z.ZodObject<{
 }> = z.object({
   artifact_chain: z.lazy(() => AutomationRunArtifactChainV1Schema),
   artifacts: z.array(z.lazy(() => AutomationRunArtifactSchema)),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   run_id: z.string(),
 });
 
@@ -1910,15 +1910,15 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   trigger: z.ZodType<AutomationTrigger, unknown>;
   validation_report: z.ZodOptional<z.ZodType<unknown, unknown>>;
 }> = z.object({
-  accepted_count: z.number().int().safe().min(0),
+  accepted_count: z.number().int().min(0),
   applied_ops: z.unknown().optional(),
   artifacts: z.array(z.lazy(() => AutomationRunArtifactSchema)).optional(),
   backend: z.string(),
-  backend_attempt_count: z.number().int().safe().min(0),
+  backend_attempt_count: z.number().int().min(0),
   backend_attempts: z.array(z.lazy(() => AgentTaskRetryAttemptSchema)).optional(),
   backend_identity: z.string().nullable().optional(),
   completed_at: z.string(),
-  completed_at_micros: z.number().int().safe().nullable().optional(),
+  completed_at_micros: z.number().int().nullable().optional(),
   error: z.string().nullable().optional(),
   error_classification: z.union([z.lazy(() => AgentTaskFailureClassSchema), z.null()]).optional(),
   error_retryable: z.boolean().nullable().optional(),
@@ -1930,15 +1930,15 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   output_hash: z.string().nullable().optional(),
   prompt_version: z.string().nullable().optional(),
   proposed_ops: z.unknown().optional(),
-  rejected_count: z.number().int().safe().min(0),
+  rejected_count: z.number().int().min(0),
   rejected_ops: z.unknown().optional(),
   report_ref: z.unknown().optional(),
   response_schema: z.unknown().optional(),
-  reviewed_count: z.number().int().safe().min(0),
+  reviewed_count: z.number().int().min(0),
   run_id: z.string(),
-  schema_version: z.number().int().min(0),
+  schema_version: z.number().refine(Number.isInteger).min(0),
   session_evidence_budget_stage: z.union([z.lazy(() => SessionRetrievalBudgetStageV1Schema), z.null()]).optional(),
-  skipped_count: z.number().int().safe().min(0),
+  skipped_count: z.number().int().min(0),
   started_at: z.string(),
   status: z.lazy(() => AutomationRunStatusSchema),
   strict_json: z.boolean().nullable().optional(),
@@ -2013,19 +2013,19 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
   task_key: z.ZodType<string | null, unknown>;
   trigger: z.ZodType<AutomationTrigger, unknown>;
 }> = z.object({
-  accepted_count: z.number().int().safe().min(0),
+  accepted_count: z.number().int().min(0),
   artifact_kinds: z.array(z.string()),
   backend: z.string(),
-  backend_attempt_count: z.number().int().safe().min(0),
+  backend_attempt_count: z.number().int().min(0),
   completed_at: z.string(),
   error: z.string().nullable(),
   error_classification: z.union([z.lazy(() => AgentTaskFailureClassSchema), z.null()]),
   error_retryable: z.boolean().nullable(),
   model: z.string().nullable(),
-  rejected_count: z.number().int().safe().min(0),
-  reviewed_count: z.number().int().safe().min(0),
+  rejected_count: z.number().int().min(0),
+  reviewed_count: z.number().int().min(0),
   run_id: z.string(),
-  skipped_count: z.number().int().safe().min(0),
+  skipped_count: z.number().int().min(0),
   started_at: z.string(),
   status: z.lazy(() => AutomationRunStatusSchema),
   task: z.lazy(() => AgentTaskKindSchema),
@@ -2043,10 +2043,10 @@ export const AutomationRunsPayloadV1Schema: z.ZodObject<{
   runs: z.ZodType<Array<AutomationRunRowV1>, unknown>;
 }> = z.object({
   completeness: z.lazy(() => AutomationRunLedgerCompletenessV1Schema),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   has_more: z.boolean(),
-  limit: z.number().int().safe().min(0),
-  malformed_row_count: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
+  malformed_row_count: z.number().int().min(0),
   runs: z.array(z.lazy(() => AutomationRunRowV1Schema)),
 });
 
@@ -2058,10 +2058,10 @@ export const AutomationRunSummaryV1Schema: z.ZodObject<{
   reviewed_count: z.ZodType<number, unknown>;
   skipped_count: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  accepted_count: z.number().int().safe().min(0),
-  rejected_count: z.number().int().safe().min(0),
-  reviewed_count: z.number().int().safe().min(0),
-  skipped_count: z.number().int().safe().min(0),
+  accepted_count: z.number().int().min(0),
+  rejected_count: z.number().int().min(0),
+  reviewed_count: z.number().int().min(0),
+  skipped_count: z.number().int().min(0),
 }).strict();
 
 export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, unknown> = z.discriminatedUnion("status", [z.object({
@@ -2098,10 +2098,10 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
   configuration_revision_id: z.string(),
   control_path: z.string(),
   enabled: z.boolean(),
-  last_session_activity: z.number().int().safe().nullable(),
-  now: z.number().int().safe(),
+  last_session_activity: z.number().int().nullable(),
+  now: z.number().int(),
   paused: z.boolean(),
-  scheduler_tick_secs: z.number().int().safe().min(0),
+  scheduler_tick_secs: z.number().int().min(0),
   status: z.lazy(() => AutomationSchedulerAvailabilityV1Schema),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
 }).strict();
@@ -2127,7 +2127,7 @@ export const AutomationSkillsPayloadV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   skills: z.ZodType<Array<ManagedSkill>, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   skills: z.array(z.lazy(() => ManagedSkillSchema)),
 });
 
@@ -2155,7 +2155,7 @@ export const BrainIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const BranchCollisionPolicyV1Schema: z.ZodType<BranchCollisionPolicyV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("append_monotonic_ordinal"),
-  maximum_attempts: z.number().int().min(1).max(65535),
+  maximum_attempts: z.number().refine(Number.isInteger).min(1).max(65535),
 }), z.object({
   kind: z.literal("reject"),
 })]);
@@ -2165,7 +2165,7 @@ export const BranchNameComponentV1Schema: z.ZodType<BranchNameComponentV1, unkno
 }), z.object({
   kind: z.literal("repository_slug"),
 }), z.object({
-  bytes: z.number().int().min(1).max(255),
+  bytes: z.number().refine(Number.isInteger).min(1).max(255),
   kind: z.literal("task_id_digest_prefix"),
 }), z.object({
   kind: z.literal("work_class"),
@@ -2182,7 +2182,7 @@ export const BranchNamingPolicyV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   collision: z.lazy(() => BranchCollisionPolicyV1Schema),
   components: z.array(z.lazy(() => BranchNameComponentV1Schema)),
-  maximum_bytes: z.number().int().min(1).max(65535),
+  maximum_bytes: z.number().refine(Number.isInteger).min(1).max(65535),
   prefix: z.lazy(() => CanonicalGitRefPrefixSchema),
   separator: z.lazy(() => BranchNameSeparatorV1Schema),
 }).strict();
@@ -2212,8 +2212,8 @@ export const CallChainMeasurementV1Schema: z.ZodObject<{
   edge_kind: z.string(),
   found: z.boolean(),
   from_node_id: z.string(),
-  hop_count: z.number().int().safe().min(0).nullable(),
-  max_depth: z.number().int().safe().min(0),
+  hop_count: z.number().int().min(0).nullable(),
+  max_depth: z.number().int().min(0),
   selection: z.string(),
   steps: z.array(z.lazy(() => CallChainStepV1Schema)),
   to_node_id: z.string(),
@@ -2268,13 +2268,13 @@ export const CodeCloneIndexBudgetsV1Schema: z.ZodObject<{
   verification_bodies: z.ZodType<number, unknown>;
   verification_token_work: z.ZodType<number, unknown>;
 }> = z.object({
-  candidate_bodies: z.number().int().safe().min(0),
-  hot_posting_rows: z.number().int().safe().min(0),
-  minimum_body_tokens: z.number().int().safe().min(0),
-  minimum_directional_coverage_millionths: z.number().int().safe().min(0),
-  posting_rows: z.number().int().safe().min(0),
-  verification_bodies: z.number().int().safe().min(0),
-  verification_token_work: z.number().int().safe().min(0),
+  candidate_bodies: z.number().int().min(0),
+  hot_posting_rows: z.number().int().min(0),
+  minimum_body_tokens: z.number().int().min(0),
+  minimum_directional_coverage_millionths: z.number().int().min(0),
+  posting_rows: z.number().int().min(0),
+  verification_bodies: z.number().int().min(0),
+  verification_token_work: z.number().int().min(0),
 });
 
 /** Coverage retained by one clone-index artifact or in-progress successor.
@@ -2300,22 +2300,22 @@ export const CodeCloneIndexCoverageV1Schema: z.ZodObject<{
   source_bodies: z.ZodType<number | null, unknown>;
   unique_payloads: z.ZodType<number | null, unknown>;
 }> = z.object({
-  conservative_normalized_bodies: z.number().int().safe().min(0).nullable(),
-  eligible_source_bodies: z.number().int().safe().min(0).nullable(),
-  exact_postings: z.number().int().safe().min(0).nullable(),
-  excluded_incomplete_tokenization_bodies: z.number().int().safe().min(0).nullable(),
-  excluded_too_large_bodies: z.number().int().safe().min(0).nullable(),
-  excluded_too_small_bodies: z.number().int().safe().min(0).nullable(),
-  hot_posting_rows_skipped: z.number().int().safe().min(0).nullable(),
-  hot_postings_skipped: z.number().int().safe().min(0).nullable(),
-  near_fingerprint_bodies: z.number().int().safe().min(0).nullable(),
-  near_fingerprint_postings: z.number().int().safe().min(0).nullable(),
-  payloads_reused: z.number().int().safe().min(0).nullable(),
-  rename_normalized_bodies: z.number().int().safe().min(0).nullable(),
-  rename_partial_bodies: z.number().int().safe().min(0).nullable(),
-  rename_unsupported_bodies: z.number().int().safe().min(0).nullable(),
-  source_bodies: z.number().int().safe().min(0).nullable(),
-  unique_payloads: z.number().int().safe().min(0).nullable(),
+  conservative_normalized_bodies: z.number().int().min(0).nullable(),
+  eligible_source_bodies: z.number().int().min(0).nullable(),
+  exact_postings: z.number().int().min(0).nullable(),
+  excluded_incomplete_tokenization_bodies: z.number().int().min(0).nullable(),
+  excluded_too_large_bodies: z.number().int().min(0).nullable(),
+  excluded_too_small_bodies: z.number().int().min(0).nullable(),
+  hot_posting_rows_skipped: z.number().int().min(0).nullable(),
+  hot_postings_skipped: z.number().int().min(0).nullable(),
+  near_fingerprint_bodies: z.number().int().min(0).nullable(),
+  near_fingerprint_postings: z.number().int().min(0).nullable(),
+  payloads_reused: z.number().int().min(0).nullable(),
+  rename_normalized_bodies: z.number().int().min(0).nullable(),
+  rename_partial_bodies: z.number().int().min(0).nullable(),
+  rename_unsupported_bodies: z.number().int().min(0).nullable(),
+  source_bodies: z.number().int().min(0).nullable(),
+  unique_payloads: z.number().int().min(0).nullable(),
 });
 
 /** Generation-pinned clone-index evidence shared by non-error readiness states. */
@@ -2329,12 +2329,12 @@ export const CodeCloneIndexObservationV1Schema: z.ZodObject<{
   resources: z.ZodType<CodeCloneIndexResourcesV1, unknown>;
   source_revision: z.ZodType<string | null, unknown>;
 }> = z.object({
-  artifact_format_revision: z.number().int().min(0).nullable(),
+  artifact_format_revision: z.number().refine(Number.isInteger).min(0).nullable(),
   budgets: z.lazy(() => CodeCloneIndexBudgetsV1Schema),
-  conservative_normalization_revision: z.number().int().min(0).max(65535),
+  conservative_normalization_revision: z.number().refine(Number.isInteger).min(0).max(65535),
   coverage: z.lazy(() => CodeCloneIndexCoverageV1Schema),
   generation_id: z.string(),
-  rename_normalization_revision: z.number().int().min(0).max(65535),
+  rename_normalization_revision: z.number().refine(Number.isInteger).min(0).max(65535),
   resources: z.lazy(() => CodeCloneIndexResourcesV1Schema),
   source_revision: z.string().nullable(),
 });
@@ -2346,10 +2346,10 @@ export const CodeCloneIndexResourcesV1Schema: z.ZodObject<{
   peak_scratch_memory_bytes: z.ZodType<number | null, unknown>;
   stale_invalidations: z.ZodType<number | null, unknown>;
 }> = z.object({
-  bytes_on_disk: z.number().int().safe().min(0).nullable(),
-  changed_symbol_update_micros: z.number().int().safe().min(0).nullable(),
-  peak_scratch_memory_bytes: z.number().int().safe().min(0).nullable(),
-  stale_invalidations: z.number().int().safe().min(0).nullable(),
+  bytes_on_disk: z.number().int().min(0).nullable(),
+  changed_symbol_update_micros: z.number().int().min(0).nullable(),
+  peak_scratch_memory_bytes: z.number().int().min(0).nullable(),
+  stale_invalidations: z.number().int().min(0).nullable(),
 });
 
 /** Clone readiness, independent from lexical and graph serving. */
@@ -2430,28 +2430,28 @@ export const CodeIndexBuildProgressV1Schema: z.ZodObject<{
   total_lexical_units: z.ZodType<number, unknown>;
 }> = z.object({
   blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]),
-  committed_chunks: z.number().int().safe().min(0),
-  committed_imports: z.number().int().safe().min(0),
-  committed_pages: z.number().int().safe().min(0),
-  committed_payload_bytes: z.number().int().safe().min(0),
-  completed_files: z.number().int().safe().min(0),
-  completed_lexical_units: z.number().int().safe().min(0),
-  current_batch_pages: z.number().int().safe().min(0),
-  current_batch_payload_bytes: z.number().int().safe().min(0),
-  daemon_incarnation: z.number().int().safe().min(0),
-  elapsed_micros: z.number().int().safe().min(0),
-  estimated_remaining_seconds: z.number().int().safe().min(0).nullable(),
+  committed_chunks: z.number().int().min(0),
+  committed_imports: z.number().int().min(0),
+  committed_pages: z.number().int().min(0),
+  committed_payload_bytes: z.number().int().min(0),
+  completed_files: z.number().int().min(0),
+  completed_lexical_units: z.number().int().min(0),
+  current_batch_pages: z.number().int().min(0),
+  current_batch_payload_bytes: z.number().int().min(0),
+  daemon_incarnation: z.number().int().min(0),
+  elapsed_micros: z.number().int().min(0),
+  estimated_remaining_seconds: z.number().int().min(0).nullable(),
   files_per_second: z.number().nullable(),
   generation_id: z.string(),
-  last_commit_latency_micros: z.number().int().safe().min(0).nullable(),
-  last_progress_micros: z.number().int().safe(),
+  last_commit_latency_micros: z.number().int().min(0).nullable(),
+  last_progress_micros: z.number().int(),
   lexical_units_per_second: z.number().nullable(),
   phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
-  producer_incarnation: z.number().int().safe().min(0),
-  progress_epoch: z.number().int().safe().min(0),
+  producer_incarnation: z.number().int().min(0),
+  progress_epoch: z.number().int().min(0),
   sealed_source_digest: z.string(),
-  total_files: z.number().int().safe().min(0),
-  total_lexical_units: z.number().int().safe().min(0),
+  total_files: z.number().int().min(0),
+  total_lexical_units: z.number().int().min(0),
 });
 
 /** A deterministic contract violation that parked background convergence.
@@ -2470,8 +2470,8 @@ export const CodeIndexConvergenceParkedV1Schema: z.ZodObject<{
   retries_on_wake: z.ZodType<boolean, unknown>;
 }> = z.object({
   blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]).optional(),
-  observed_passes: z.number().int().safe().min(0),
-  parked_at_micros: z.number().int().safe(),
+  observed_passes: z.number().int().min(0),
+  parked_at_micros: z.number().int(),
   reason: z.string(),
   remediation: z.string(),
   retries_on_wake: z.boolean(),
@@ -2524,7 +2524,7 @@ export const CodeIndexOmittedSourcesV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   sources: z.ZodType<Array<CodeIndexOmittedSourceV1>, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   sources: z.array(z.lazy(() => CodeIndexOmittedSourceV1Schema)),
 });
 
@@ -2534,7 +2534,7 @@ export const CodeIndexOmittedSourceV1Schema: z.ZodObject<{
   reason: z.ZodType<CodeIndexSourceOmissionReasonV1, unknown>;
 }> = z.object({
   display_path: z.string(),
-  git_path_bytes: z.array(z.number().int().min(0).max(255)),
+  git_path_bytes: z.array(z.number().refine(Number.isInteger).min(0).max(255)),
   reason: z.lazy(() => CodeIndexSourceOmissionReasonV1Schema),
 });
 
@@ -2553,9 +2553,9 @@ export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
   generation_id: z.ZodType<string, unknown>;
 }> = z.object({
   artifact_digest: z.string(),
-  authenticated_completed: z.number().int().safe().min(0),
-  authenticated_remaining: z.number().int().safe().min(0),
-  authenticated_total: z.number().int().safe().min(0),
+  authenticated_completed: z.number().int().min(0),
+  authenticated_remaining: z.number().int().min(0),
+  authenticated_total: z.number().int().min(0),
   generation_id: z.string(),
 });
 
@@ -2582,7 +2582,7 @@ export const CodeIndexWorkerSelectionV1Schema: z.ZodType<CodeIndexWorkerSelectio
   mode: z.literal("automatic"),
 }).strict(), z.object({
   mode: z.literal("exact"),
-  workers: z.number().int().min(0).max(65535),
+  workers: z.number().refine(Number.isInteger).min(0).max(65535),
 }).strict()]);
 
 /** Dedicated profile-session worker patch. Its CAS token is never a project
@@ -2605,12 +2605,12 @@ export const CodeIndexWorkerStatusV1Schema: z.ZodObject<{
   limiting_reason: z.ZodType<CodeIndexWorkerLimitingReasonV1, unknown>;
   memory_safe_workers: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  available_logical_cpus: z.number().int().min(0).max(65535),
+  available_logical_cpus: z.number().refine(Number.isInteger).min(0).max(65535),
   configured: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
-  effective_workers: z.number().int().min(0).max(65535),
-  environment_override_workers: z.number().int().min(0).max(65535).nullable(),
+  effective_workers: z.number().refine(Number.isInteger).min(0).max(65535),
+  environment_override_workers: z.number().refine(Number.isInteger).min(0).max(65535).nullable(),
   limiting_reason: z.lazy(() => CodeIndexWorkerLimitingReasonV1Schema),
-  memory_safe_workers: z.number().int().min(0).max(65535),
+  memory_safe_workers: z.number().refine(Number.isInteger).min(0).max(65535),
 }).strict();
 
 /** Freshness/generation state for one mounted worktree.
@@ -2644,8 +2644,8 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
   coverage: z.lazy(() => CodeIndexFreshnessCoverageV1Schema),
   generation_recovery: z.union([z.lazy(() => CodeIndexGenerationRecoveryV1Schema), z.null()]).optional(),
-  hook_hint_count: z.number().int().safe().min(0).nullable(),
-  last_reconcile_micros: z.number().int().safe().nullable(),
+  hook_hint_count: z.number().int().min(0).nullable(),
+  last_reconcile_micros: z.number().int().nullable(),
   latest_generation_id: z.string().nullable(),
   omitted_sources: z.union([z.lazy(() => CodeIndexOmittedSourcesV1Schema), z.null()]).optional(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
@@ -2653,7 +2653,7 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   rebuild_in_flight: z.boolean(),
   repository_id: z.string().nullable(),
   restore_progress: z.union([z.lazy(() => CodeIndexRestoreProgressV1Schema), z.null()]).optional(),
-  sealed_at_micros: z.number().int().safe().nullable(),
+  sealed_at_micros: z.number().int().nullable(),
   snapshot_content_identity: z.string().nullable(),
   source_reference: z.string().nullable(),
   source_revision: z.string().nullable(),
@@ -2704,7 +2704,7 @@ export const CostsReadModelV1Schema: z.ZodObject<{
   estimated_cost: z.array(z.lazy(() => MetricValueV1Schema)),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   latency: z.array(z.lazy(() => ProviderLatencyReadModelV1Schema)),
-  observed_at_micros: z.number().int().safe(),
+  observed_at_micros: z.number().int(),
   pricing_revision: z.string().nullable(),
   usage: z.array(z.lazy(() => MetricValueV1Schema)),
   watermark: z.string(),
@@ -2734,7 +2734,7 @@ export const CoveringTestV1Schema: z.ZodObject<{
   id: z.string(),
   name: z.string(),
   qualification: z.string(),
-  start_line: z.number().int().min(0),
+  start_line: z.number().refine(Number.isInteger).min(0),
 });
 
 export const CreateWorkProductRequestV1Schema: z.ZodObject<{
@@ -2827,15 +2827,15 @@ export const DashboardCoverageV1Schema: z.ZodObject<{
   unknown: z.ZodType<number | null, unknown>;
 }> = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
-  denominator: z.number().int().safe().min(0).nullable(),
-  eligible: z.number().int().safe().min(0).nullable(),
-  examined: z.number().int().safe().min(0).nullable(),
-  excluded: z.number().int().safe().min(0).nullable(),
-  matched: z.number().int().safe().min(0).nullable(),
+  denominator: z.number().int().min(0).nullable(),
+  eligible: z.number().int().min(0).nullable(),
+  examined: z.number().int().min(0).nullable(),
+  excluded: z.number().int().min(0).nullable(),
+  matched: z.number().int().min(0).nullable(),
   omission_reasons: z.array(z.string()),
-  omitted: z.number().int().safe().min(0).nullable(),
+  omitted: z.number().int().min(0).nullable(),
   unit: z.string().nullable(),
-  unknown: z.number().int().safe().min(0).nullable(),
+  unknown: z.number().int().min(0).nullable(),
 });
 
 /** The normative dashboard domain-state union.
@@ -2878,7 +2878,7 @@ export const DashboardFreshnessV1Schema: z.ZodObject<{
   state: z.ZodType<DashboardFreshnessStateV1, unknown>;
   watermark: z.ZodType<string | null, unknown>;
 }> = z.object({
-  observed_at_micros: z.number().int().safe().nullable(),
+  observed_at_micros: z.number().int().nullable(),
   state: z.lazy(() => DashboardFreshnessStateV1Schema),
   watermark: z.string().nullable(),
 });
@@ -2919,8 +2919,8 @@ export const DashboardTimeV1Schema: z.ZodObject<{
   observation_time_micros: z.ZodType<number, unknown>;
   valid_time_micros: z.ZodType<number | null, unknown>;
 }> = z.object({
-  observation_time_micros: z.number().int().safe(),
-  valid_time_micros: z.number().int().safe().nullable(),
+  observation_time_micros: z.number().int(),
+  valid_time_micros: z.number().int().nullable(),
 });
 
 /** Entity and graph version identities pinned by the envelope. Both are
@@ -2980,9 +2980,9 @@ export const DeliveryAgentUsageRowV1Schema: z.ZodObject<{
   agent: z.string().nullable(),
   counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
   provider: z.string(),
-  sessions: z.number().int().safe().min(0),
-  sessions_with_usage: z.number().int().safe().min(0),
-  tool_calls: z.number().int().safe().min(0),
+  sessions: z.number().int().min(0),
+  sessions_with_usage: z.number().int().min(0),
+  tool_calls: z.number().int().min(0),
   usage_complete: z.boolean(),
 });
 
@@ -2996,7 +2996,7 @@ export const DeliveryAgentUsageV1Schema: z.ZodObject<{
 }> = z.object({
   agents: z.array(z.lazy(() => DeliveryAgentUsageRowV1Schema)),
   branch: z.string(),
-  sessions: z.number().int().safe().min(0),
+  sessions: z.number().int().min(0),
   truncated: z.boolean(),
   usage_coverage: z.lazy(() => ProviderUsageCoverageV1Schema),
 });
@@ -3008,7 +3008,7 @@ export const DeliveryAttentionEvidenceV1Schema: z.ZodType<DeliveryAttentionEvide
   generation: z.string(),
   kind: z.literal("indexed_generation"),
 }), z.object({
-  fetched_at_micros: z.number().int().safe(),
+  fetched_at_micros: z.number().int(),
   kind: z.literal("provider_operation"),
   operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
 }), z.object({
@@ -3034,7 +3034,7 @@ export const DeliveryAttentionItemV1Schema: z.ZodObject<{
   coverage: z.lazy(() => DeliveryInboxCoverageV1Schema),
   evidence: z.array(z.lazy(() => DeliveryAttentionEvidenceV1Schema)),
   id: z.string(),
-  observed_at_micros: z.number().int().safe().nullable(),
+  observed_at_micros: z.number().int().nullable(),
   project_id: z.string(),
   pull_request_id: z.string(),
   source: z.lazy(() => DeliveryAttentionSourceV1Schema),
@@ -3054,10 +3054,10 @@ export const DeliveryCiAnnotationV1Schema: z.ZodObject<{
   start_line: z.ZodType<number, unknown>;
   title: z.ZodType<string | null, unknown>;
 }> = z.object({
-  end_line: z.number().int().min(0),
+  end_line: z.number().refine(Number.isInteger).min(0),
   level: z.lazy(() => DeliveryCiAnnotationLevelV1Schema),
   path: z.string(),
-  start_line: z.number().int().min(0),
+  start_line: z.number().refine(Number.isInteger).min(0),
   title: z.string().nullable(),
 });
 
@@ -3080,7 +3080,7 @@ export const DeliveryCiCheckV1Schema: z.ZodObject<{
   workflow_path: z.ZodType<string, unknown>;
   workflow_status: z.ZodType<DeliveryCiStatusV1, unknown>;
 }> = z.object({
-  annotation_count: z.number().int().safe().min(0),
+  annotation_count: z.number().int().min(0),
   annotations: z.array(z.lazy(() => DeliveryCiAnnotationV1Schema)),
   check_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
   check_status: z.lazy(() => DeliveryCiStatusV1Schema),
@@ -3091,7 +3091,7 @@ export const DeliveryCiCheckV1Schema: z.ZodObject<{
   job_status: z.lazy(() => DeliveryCiStatusV1Schema),
   label: z.string(),
   observation_id: z.string(),
-  observed_at_micros: z.number().int().safe(),
+  observed_at_micros: z.number().int(),
   provider_head_commit: z.string(),
   run: z.lazy(() => DeliveryCiRunIdentityV1Schema),
   workflow_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
@@ -3131,7 +3131,7 @@ export const DeliveryCiTimelineV1Schema: z.ZodObject<{
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryCiCheckV1Schema)),
   retained_head_commit: z.string(),
-  total_retained: z.number().int().safe().min(0),
+  total_retained: z.number().int().min(0),
   truncated: z.boolean(),
 });
 
@@ -3151,11 +3151,11 @@ export const DeliveryCommitV1Schema: z.ZodObject<{
   committer_at_micros: z.ZodType<number, unknown>;
   subject: z.ZodType<string, unknown>;
 }> = z.object({
-  author_at_micros: z.number().int().safe(),
+  author_at_micros: z.number().int(),
   author_email: z.string(),
   author_name: z.string(),
   commit: z.string(),
-  committer_at_micros: z.number().int().safe(),
+  committer_at_micros: z.number().int(),
   subject: z.string(),
 });
 
@@ -3211,7 +3211,7 @@ export const DeliveryGitHubOperationSnapshotV1Schema: z.ZodObject<{
   quarantined: z.ZodType<Array<DeliveryGitHubQuarantinedCommentV1>, unknown>;
 }> = z.object({
   coverage: z.lazy(() => DeliveryGitHubCoverageV1Schema),
-  fetched_at_micros: z.number().int().safe(),
+  fetched_at_micros: z.number().int(),
   merge_base_commit_id: z.string(),
   outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
   provider_base_commit_id: z.string(),
@@ -3246,15 +3246,15 @@ export const DeliveryGitStatusV1Schema: z.ZodObject<{
   untracked: z.ZodType<number, unknown>;
 }> = z.object({
   changed_paths: z.array(z.string()),
-  conflicted: z.number().int().min(0),
+  conflicted: z.number().refine(Number.isInteger).min(0),
   head: z.lazy(() => DeliveryGitHeadV1Schema),
-  ignored: z.number().int().min(0),
+  ignored: z.number().refine(Number.isInteger).min(0),
   operation: z.string(),
   repository: z.string(),
   schema_version: z.string(),
-  staged: z.number().int().min(0),
-  unstaged: z.number().int().min(0),
-  untracked: z.number().int().min(0),
+  staged: z.number().refine(Number.isInteger).min(0),
+  unstaged: z.number().refine(Number.isInteger).min(0),
+  untracked: z.number().refine(Number.isInteger).min(0),
 });
 
 export const DeliveryInboxCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "partial": "partial"; "stale": "stale"; "unavailable": "unavailable"; "unsupported": "unsupported" }> = z.enum(["complete", "denied", "partial", "stale", "unavailable", "unsupported"]);
@@ -3319,9 +3319,9 @@ export const DeliveryInboxV1Schema: z.ZodObject<{
   pull_requests: z.ZodType<Array<DeliveryInboxPullRequestV1>, unknown>;
   registry_state: z.ZodType<DeliveryRegistryStateV1, unknown>;
 }> = z.object({
-  excluded_pull_requests: z.number().int().safe().min(0),
+  excluded_pull_requests: z.number().int().min(0),
   membership_edges: z.array(z.lazy(() => DeliveryMembershipEdgeV1Schema)),
-  omitted_projects: z.number().int().safe().min(0),
+  omitted_projects: z.number().int().min(0),
   projects: z.array(z.lazy(() => DeliveryInboxProjectV1Schema)),
   pull_requests: z.array(z.lazy(() => DeliveryInboxPullRequestV1Schema)),
   registry_state: z.lazy(() => DeliveryRegistryStateV1Schema),
@@ -3398,7 +3398,7 @@ export const DeliveryProjectionV1Schema: z.ZodType<DeliveryProjectionV1, unknown
   value: z.lazy(() => DeliveryGitStatusV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
 }), z.object({
@@ -3432,7 +3432,7 @@ export const DeliveryProjectionV12Schema: z.ZodType<DeliveryProjectionV12, unkno
   value: z.lazy(() => DeliveryCommitTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3466,7 +3466,7 @@ export const DeliveryProjectionV13Schema: z.ZodType<DeliveryProjectionV13, unkno
   value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3500,7 +3500,7 @@ export const DeliveryProjectionV14Schema: z.ZodType<DeliveryProjectionV14, unkno
   value: z.lazy(() => DeliveryReviewTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3534,7 +3534,7 @@ export const DeliveryProjectionV15Schema: z.ZodType<DeliveryProjectionV15, unkno
   value: z.lazy(() => DeliveryCiTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3568,7 +3568,7 @@ export const DeliveryProjectionV16Schema: z.ZodType<DeliveryProjectionV16, unkno
   value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3602,7 +3602,7 @@ export const DeliveryProjectionV17Schema: z.ZodType<DeliveryProjectionV17, unkno
   value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3636,7 +3636,7 @@ export const DeliveryProjectionV18Schema: z.ZodType<DeliveryProjectionV18, unkno
   value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
 }), z.object({
@@ -3670,7 +3670,7 @@ export const DeliveryProjectionV19Schema: z.ZodType<DeliveryProjectionV19, unkno
   value: z.lazy(() => DeliveryAgentUsageV1Schema),
 }), z.object({
   checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
-  retry_at_micros: z.number().int().safe().nullable(),
+  retry_at_micros: z.number().int().nullable(),
   state: z.literal("rate_limited"),
   value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
 }), z.object({
@@ -3699,11 +3699,11 @@ export const DeliveryPullRequestIdentityV1Schema: z.ZodObject<{
   state: z.ZodType<DeliveryPullRequestStateV1, unknown>;
   title: z.ZodType<string, unknown>;
 }> = z.object({
-  additions: z.number().int().safe().min(0),
-  changed_files: z.number().int().safe().min(0),
-  deletions: z.number().int().safe().min(0),
+  additions: z.number().int().min(0),
+  changed_files: z.number().int().min(0),
+  deletions: z.number().int().min(0),
   draft: z.boolean(),
-  number: z.number().int().safe().min(0),
+  number: z.number().int().min(0),
   state: z.lazy(() => DeliveryPullRequestStateV1Schema),
   title: z.string(),
 });
@@ -3730,7 +3730,7 @@ export const DeliveryPullRequestTimelineV1Schema: z.ZodObject<{
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryPullRequestV1Schema)),
   retained_head_commit: z.string(),
-  total_retained: z.number().int().safe().min(0),
+  total_retained: z.number().int().min(0),
   truncated: z.boolean(),
 });
 
@@ -3755,9 +3755,9 @@ export const DeliveryRateLimitCheckpointV1Schema: z.ZodObject<{
   remaining: z.ZodType<number, unknown>;
   reset_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
-  limit: z.number().int().min(0),
-  remaining: z.number().int().min(0),
-  reset_at_micros: z.number().int().safe(),
+  limit: z.number().refine(Number.isInteger).min(0),
+  remaining: z.number().refine(Number.isInteger).min(0),
+  reset_at_micros: z.number().int(),
 });
 
 export const DeliveryRegistryStateV1Schema: z.ZodEnum<{ "partial": "partial"; "ready": "ready"; "unavailable": "unavailable" }> = z.enum(["partial", "ready", "unavailable"]);
@@ -3774,16 +3774,16 @@ export const DeliveryReleaseAssetV1Schema: z.ZodObject<{
   size_bytes: z.ZodType<number, unknown>;
   updated_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
-  asset_id: z.number().int().safe().min(0),
+  asset_id: z.number().int().min(0),
   content_type: z.string(),
-  created_at_micros: z.number().int().safe(),
+  created_at_micros: z.number().int(),
   digest: z.string().nullable(),
-  download_count: z.number().int().safe().min(0),
+  download_count: z.number().int().min(0),
   download_url: z.string(),
   label: z.string().nullable(),
   name: z.string(),
-  size_bytes: z.number().int().safe().min(0),
-  updated_at_micros: z.number().int().safe(),
+  size_bytes: z.number().int().min(0),
+  updated_at_micros: z.number().int(),
 });
 
 export const DeliveryReleaseTimelineV1Schema: z.ZodObject<{
@@ -3808,14 +3808,14 @@ export const DeliveryReleaseV1Schema: z.ZodObject<{
   tag: z.ZodType<string, unknown>;
 }> = z.object({
   assets: z.array(z.lazy(() => DeliveryReleaseAssetV1Schema)),
-  created_at_micros: z.number().int().safe(),
+  created_at_micros: z.number().int(),
   draft: z.boolean(),
   id: z.string(),
   label: z.string(),
   name: z.string().nullable(),
   prerelease: z.boolean(),
-  published_at_micros: z.number().int().safe().nullable(),
-  release_id: z.number().int().safe().min(0),
+  published_at_micros: z.number().int().nullable(),
+  release_id: z.number().int().min(0),
   source_url: z.string(),
   tag: z.string(),
 });
@@ -3873,10 +3873,10 @@ export const DeliveryReviewObservationV1Schema: z.ZodObject<{
   body_preview: z.union([z.lazy(() => DeliveryReviewBodyPreviewV1Schema), z.null()]),
   kind: z.lazy(() => DeliveryReviewObservationKindV1Schema),
   lifecycle: z.lazy(() => DeliveryReviewLifecycleV1Schema),
-  line: z.number().int().safe().min(0).nullable(),
-  observed_at_micros: z.number().int().safe(),
+  line: z.number().int().min(0).nullable(),
+  observed_at_micros: z.number().int(),
   operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
-  original_line: z.number().int().safe().min(0).nullable(),
+  original_line: z.number().int().min(0).nullable(),
   path: z.string(),
   provider_outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
   reply_to_comment_id: z.string().nullable(),
@@ -3900,7 +3900,7 @@ export const DeliveryReviewTimelineV1Schema: z.ZodObject<{
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryReviewItemV1Schema)),
   retained_head_commit: z.string(),
-  total_retained: z.number().int().safe().min(0),
+  total_retained: z.number().int().min(0),
   truncated: z.boolean(),
 });
 
@@ -4151,10 +4151,10 @@ export const EvidenceCoverageSchema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   completeness: z.lazy(() => CoverageCompletenessSchema),
   domains: z.array(z.lazy(() => CoverageDomainStateSchema)),
-  eligible: z.number().int().safe().min(0).nullable(),
+  eligible: z.number().int().min(0).nullable(),
   requested_domains: z.array(z.lazy(() => EvidenceDomainSchema)),
-  returned: z.number().int().safe().min(0),
-  visited: z.number().int().safe().min(0).nullable(),
+  returned: z.number().int().min(0),
+  visited: z.number().int().min(0).nullable(),
 }).strict();
 
 /** Requested evidence domain for bounded coverage and omissions. */
@@ -4344,10 +4344,10 @@ export const ExecutionTopologyEmissionCoverageV1Schema: z.ZodObject<{
   emitted: z.ZodType<number | null, unknown>;
   sampled_events: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
-  delayed: z.number().int().safe().min(0).nullable(),
-  dropped: z.number().int().safe().min(0).nullable(),
-  emitted: z.number().int().safe().min(0).nullable(),
-  sampled_events: z.number().int().safe().min(0).nullable(),
+  delayed: z.number().int().min(0).nullable(),
+  dropped: z.number().int().min(0).nullable(),
+  emitted: z.number().int().min(0).nullable(),
+  sampled_events: z.number().int().min(0).nullable(),
 }).strict();
 
 /** One descriptor cell: the Plan 26 descriptor name, its grouping dimensions,
@@ -4371,7 +4371,7 @@ export const ExecutionTopologyMetricsRequestV1Schema: z.ZodObject<{
   max_events: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
-  max_events: z.number().int().min(0),
+  max_events: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 /** The canonical execution-topology read model. Observatory and Costs render
@@ -4396,7 +4396,7 @@ export const ExecutionTopologyMetricsV1Schema: z.ZodObject<{
   github_stack_capability: z.lazy(() => ExecutionGitHubStackCapabilityReadingV1Schema),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   measurements: z.array(z.lazy(() => ExecutionTopologyMeasurementV1Schema)),
-  observed_at_micros: z.number().int().safe(),
+  observed_at_micros: z.number().int(),
   watermark: z.string(),
 }).strict();
 
@@ -4425,8 +4425,8 @@ export const ExplorerQueryRequestV1Schema: z.ZodObject<{
   offset: z.ZodType<number, unknown>;
   query: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
-  limit: z.number().int().safe(),
-  offset: z.number().int().safe(),
+  limit: z.number().int(),
+  offset: z.number().int(),
   query: z.string(),
 }).strict();
 
@@ -4446,8 +4446,8 @@ export const ExplorerQueryRunV1Schema: z.ZodObject<{
   state: z.ZodType<ExplorerRunStateV1, unknown>;
   submitted_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
-  completed_at_micros: z.number().int().safe().nullable(),
-  elapsed_micros: z.number().int().safe(),
+  completed_at_micros: z.number().int().nullable(),
+  elapsed_micros: z.number().int(),
   explanation: z.string(),
   finality: z.lazy(() => ExplorerFinalityV1Schema),
   merge_revision: z.string(),
@@ -4459,7 +4459,7 @@ export const ExplorerQueryRunV1Schema: z.ZodObject<{
   run_id: z.string(),
   sources: z.array(z.lazy(() => ExplorerSourceProgressV1Schema)),
   state: z.lazy(() => ExplorerRunStateV1Schema),
-  submitted_at_micros: z.number().int().safe(),
+  submitted_at_micros: z.number().int(),
 });
 
 export const ExplorerReadContextV1Schema: z.ZodObject<{
@@ -4479,9 +4479,9 @@ export const ExplorerReadContextV1Schema: z.ZodObject<{
   has_more: z.boolean(),
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
-  offset: z.number().int().safe(),
+  offset: z.number().int(),
   order: z.string(),
   session_id: z.string(),
   storage_scope: z.string(),
@@ -4496,12 +4496,12 @@ export const ExplorerResultPageV1Schema: z.ZodObject<{
   rows: z.ZodType<Array<unknown>, unknown>;
   total: z.ZodType<number | null, unknown>;
 }> = z.object({
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   metadata: z.unknown(),
-  next_offset: z.number().int().safe().nullable(),
-  offset: z.number().int().safe(),
+  next_offset: z.number().int().nullable(),
+  offset: z.number().int(),
   rows: z.array(z.unknown()),
-  total: z.number().int().safe().min(0).nullable(),
+  total: z.number().int().min(0).nullable(),
 });
 
 export const ExplorerRunStateV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
@@ -4513,11 +4513,11 @@ export const ExplorerSessionCountsV1Schema: z.ZodObject<{
   summary_token_count: z.ZodType<number | null, unknown>;
   token_estimate_total: z.ZodType<number | null, unknown>;
 }> = z.object({
-  message_count: z.number().int().safe(),
-  source_token_count: z.number().int().safe().nullable(),
-  summary_node_count: z.number().int().safe(),
-  summary_token_count: z.number().int().safe().nullable(),
-  token_estimate_total: z.number().int().safe().nullable(),
+  message_count: z.number().int(),
+  source_token_count: z.number().int().nullable(),
+  summary_node_count: z.number().int(),
+  summary_token_count: z.number().int().nullable(),
+  token_estimate_total: z.number().int().nullable(),
 });
 
 export const ExplorerSessionSizeV1Schema: z.ZodObject<{
@@ -4557,7 +4557,7 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   total_units: z.ZodType<number | null, unknown>;
   watermark: z.ZodType<string | null, unknown>;
 }> = z.object({
-  completed_units: z.number().int().safe().min(0).nullable(),
+  completed_units: z.number().int().min(0).nullable(),
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   error_code: z.string().nullable(),
   freshness: z.string(),
@@ -4567,7 +4567,7 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
   phase: z.lazy(() => ExplorerSourcePhaseV1Schema),
   source_id: z.lazy(() => ExplorerSourceIdV1Schema),
   source_label: z.string(),
-  total_units: z.number().int().safe().min(0).nullable(),
+  total_units: z.number().int().min(0).nullable(),
   watermark: z.string().nullable(),
 });
 
@@ -4578,8 +4578,8 @@ export const FactArmCoverageV1Schema: z.ZodObject<{
   truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   completeness: z.string(),
-  limit: z.number().int().safe().min(0),
-  returned: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
+  returned: z.number().int().min(0),
   truncated: z.boolean(),
 });
 
@@ -4672,28 +4672,28 @@ export const FactOutcomeRecordSchema: z.ZodObject<{
   unhelpful_count: z.ZodOptional<z.ZodType<number | null, unknown>>;
   verdict: z.ZodType<FactOutcomeVerdict, unknown>;
 }> = z.object({
-  access_count: z.number().int().safe().min(0).nullable().optional(),
+  access_count: z.number().int().min(0).nullable().optional(),
   apply_id: z.string(),
   canonical_fact_id: z.string().nullable().optional(),
-  days_since_recorded: z.number().int().safe(),
-  helpful_count: z.number().int().safe().min(0).nullable().optional(),
-  last_recalled_at: z.number().int().safe().nullable().optional(),
-  recorded_at: z.number().int().safe(),
-  retrieval_count: z.number().int().safe().min(0).nullable().optional(),
+  days_since_recorded: z.number().int(),
+  helpful_count: z.number().int().min(0).nullable().optional(),
+  last_recalled_at: z.number().int().nullable().optional(),
+  recorded_at: z.number().int(),
+  retrieval_count: z.number().int().min(0).nullable().optional(),
   run_id: z.string().nullable().optional(),
   state: z.lazy(() => ProjectMemoryAutomaticFactStateV1Schema),
   still_exists: z.boolean(),
-  unhelpful_count: z.number().int().safe().min(0).nullable().optional(),
+  unhelpful_count: z.number().int().min(0).nullable().optional(),
   verdict: z.lazy(() => FactOutcomeVerdictSchema),
 });
 
 export const FactOutcomeVerdictSchema: z.ZodEnum<{ "deleted": "deleted"; "never_recalled": "never_recalled"; "quarantined": "quarantined"; "recalled": "recalled"; "recalled_and_helpful": "recalled_and_helpful"; "unavailable": "unavailable" }> = z.enum(["deleted", "never_recalled", "quarantined", "recalled", "recalled_and_helpful", "unavailable"]);
 
 export const FactSearchGraphCoverageV1Schema: z.ZodType<FactSearchGraphCoverageV1, unknown> = z.discriminatedUnion("kind", [z.object({
-  expanded_fact_count: z.number().int().safe().min(0),
+  expanded_fact_count: z.number().int().min(0),
   kind: z.literal("complete"),
-  relation_count: z.number().int().safe().min(0),
-  root_count: z.number().int().safe().min(0),
+  relation_count: z.number().int().min(0),
+  root_count: z.number().int().min(0),
 }).strict(), z.object({
   kind: z.literal("degraded"),
   reason: z.lazy(() => FactSearchGraphDegradationV1Schema),
@@ -4713,8 +4713,8 @@ export const FactStoreCurateRequestV1Schema: z.ZodObject<{
   fact_review_limit: z.ZodType<number, unknown>;
   min_confidence_millionths: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  fact_review_limit: z.number().int().min(1).max(1000),
-  min_confidence_millionths: z.number().int().min(0).max(1000000),
+  fact_review_limit: z.number().refine(Number.isInteger).min(1).max(1000),
+  min_confidence_millionths: z.number().refine(Number.isInteger).min(0).max(1000000),
 }).strict();
 
 /** Receipt of one admitted automatic curation.
@@ -4751,13 +4751,13 @@ export const FeedbackObservationDenominatorsV1Schema: z.ZodObject<{
   persisted: z.ZodType<number, unknown>;
   retention_dropped: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  delayed: z.number().int().safe().min(0),
-  dropped: z.number().int().safe().min(0),
-  eligible: z.number().int().safe().min(0),
-  emitted: z.number().int().safe().min(0),
-  incomplete_boots: z.number().int().safe().min(0),
-  persisted: z.number().int().safe().min(0),
-  retention_dropped: z.number().int().safe().min(0),
+  delayed: z.number().int().min(0),
+  dropped: z.number().int().min(0),
+  eligible: z.number().int().min(0),
+  emitted: z.number().int().min(0),
+  incomplete_boots: z.number().int().min(0),
+  persisted: z.number().int().min(0),
+  retention_dropped: z.number().int().min(0),
 }).strict();
 
 export const FeedbackObservationReadModelV1Schema: z.ZodObject<{
@@ -4774,13 +4774,13 @@ export const FeedbackObservationReadModelV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominators: z.lazy(() => FeedbackObservationDenominatorsV1Schema),
-  event_counts: z.record(z.string(), z.number().int().safe().min(0)),
+  event_counts: z.record(z.string(), z.number().int().min(0)),
   first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   last_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   rejected_argument_groups: z.array(z.lazy(() => FeedbackRejectedArgumentGroupV1Schema)),
-  schema_version: z.number().int().min(0).max(65535),
+  schema_version: z.number().refine(Number.isInteger).min(0).max(65535),
   system_quality: z.lazy(() => FeedbackSystemQualityReadModelV1Schema),
-  total_count: z.number().int().safe().min(0),
+  total_count: z.number().int().min(0),
   watermark: z.lazy(() => FeedbackObservationWatermarkV1Schema),
 }).strict();
 
@@ -4791,7 +4791,7 @@ export const FeedbackObservationWatermarkV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   observed_through: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   producer_boot_id: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
-  producer_sequence: z.number().int().safe().min(0).nullable(),
+  producer_sequence: z.number().int().min(0).nullable(),
 }).strict();
 
 export const FeedbackProximityAccessKindV1Schema: z.ZodEnum<{ "read": "read"; "write": "write" }> = z.enum(["read", "write"]);
@@ -4949,7 +4949,7 @@ export const FeedbackRejectedArgumentGroupV1Schema: z.ZodObject<{
   surface: z.ZodType<RejectedArgumentSurfaceV1, unknown>;
 }, z.core.$strict> = z.object({
   argument: z.lazy(() => RejectedArgumentNameV1Schema),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   error_class: z.lazy(() => RejectedArgumentErrorClassV1Schema),
   operation: z.string(),
   surface: z.lazy(() => RejectedArgumentSurfaceV1Schema),
@@ -4991,10 +4991,10 @@ export const FeedbackSystemMetricV1Schema: z.ZodObject<{
   value: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
-  denominator: z.number().int().safe().min(0).nullable(),
+  denominator: z.number().int().min(0).nullable(),
   denominator_population: z.lazy(() => FeedbackSystemMetricDenominatorV1Schema),
   metric: z.lazy(() => FeedbackSystemMetricKindV1Schema),
-  numerator: z.number().int().safe().min(0).nullable(),
+  numerator: z.number().int().min(0).nullable(),
   unavailable_reason: z.union([z.lazy(() => FeedbackSystemMetricUnavailableReasonV1Schema), z.null()]),
   unit: z.lazy(() => FeedbackSystemMetricUnitV1Schema),
   value: z.number().nullable(),
@@ -5005,7 +5005,7 @@ export const FeedbackSystemQualityReadModelV1Schema: z.ZodObject<{
   schema_version: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   metrics: z.array(z.lazy(() => FeedbackSystemMetricV1Schema)),
-  schema_version: z.number().int().min(0).max(65535),
+  schema_version: z.number().refine(Number.isInteger).min(0).max(65535),
 }).strict();
 
 /** Strongly typed canonical identity: `FileOccurrenceId`. */
@@ -5066,7 +5066,7 @@ export const GraphEdgeV1Schema: z.ZodObject<{
   target_name: z.ZodType<string | null, unknown>;
 }> = z.object({
   kind: z.string(),
-  line: z.number().int().safe().nullable(),
+  line: z.number().int().nullable(),
   source: z.string(),
   source_name: z.string().nullable(),
   target: z.string(),
@@ -5077,7 +5077,7 @@ export const GraphKindCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   kind: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   kind: z.string(),
 });
 
@@ -5085,7 +5085,7 @@ export const GraphLanguageCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   language: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   language: z.string(),
 });
 
@@ -5093,7 +5093,7 @@ export const GraphLargestFileV1Schema: z.ZodObject<{
   node_count: z.ZodType<number, unknown>;
   path: z.ZodType<string, unknown>;
 }> = z.object({
-  node_count: z.number().int().safe(),
+  node_count: z.number().int(),
   path: z.string(),
 });
 
@@ -5101,8 +5101,8 @@ export const GraphLimitsV1Schema: z.ZodObject<{
   edges: z.ZodType<number, unknown>;
   nodes: z.ZodType<number, unknown>;
 }> = z.object({
-  edges: z.number().int().safe(),
-  nodes: z.number().int().safe(),
+  edges: z.number().int(),
+  nodes: z.number().int(),
 });
 
 export const GraphNeighborsPayloadV1Schema: z.ZodObject<{
@@ -5116,10 +5116,10 @@ export const GraphNeighborsPayloadV1Schema: z.ZodObject<{
 }> = z.object({
   callees: z.array(z.lazy(() => GraphNodeV1Schema)),
   callers: z.array(z.lazy(() => GraphNodeV1Schema)),
-  depth: z.number().int().safe(),
+  depth: z.number().int(),
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
   edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   node_id: z.string(),
 });
 
@@ -5159,33 +5159,33 @@ export const GraphNodeV1Schema: z.ZodObject<{
   updated_at: z.ZodType<number | null, unknown>;
   visibility: z.ZodType<string | null, unknown>;
 }> = z.object({
-  assertions: z.number().int().safe().nullable(),
-  attrs_start_line: z.number().int().safe().nullable(),
-  branches: z.number().int().safe().nullable(),
+  assertions: z.number().int().nullable(),
+  attrs_start_line: z.number().int().nullable(),
+  branches: z.number().int().nullable(),
   complexity_analysis: z.union([z.lazy(() => ComplexityAnalysisV1Schema), z.null()]),
-  degree: z.number().int().safe().nullable(),
+  degree: z.number().int().nullable(),
   doc: z.string().nullable(),
   edge_kind: z.string().nullable(),
-  edge_line: z.number().int().safe().nullable(),
-  end_column: z.number().int().safe().nullable(),
-  end_line: z.number().int().safe().nullable(),
+  edge_line: z.number().int().nullable(),
+  end_column: z.number().int().nullable(),
+  end_line: z.number().int().nullable(),
   file_path: z.string().nullable(),
   id: z.string(),
-  is_async: z.number().int().safe().nullable(),
+  is_async: z.number().int().nullable(),
   kind: z.string(),
-  loops: z.number().int().safe().nullable(),
-  max_nesting: z.number().int().safe().nullable(),
+  loops: z.number().int().nullable(),
+  max_nesting: z.number().int().nullable(),
   name: z.string().nullable(),
   parent_id: z.string().nullable(),
   qualified_name: z.string().nullable(),
-  returns: z.number().int().safe().nullable(),
+  returns: z.number().int().nullable(),
   signature: z.string().nullable(),
   span: z.union([z.lazy(() => GraphSpanV1Schema), z.null()]),
-  start_column: z.number().int().safe().nullable(),
-  start_line: z.number().int().safe().nullable(),
-  unchecked_calls: z.number().int().safe().nullable(),
-  unsafe_blocks: z.number().int().safe().nullable(),
-  updated_at: z.number().int().safe().nullable(),
+  start_column: z.number().int().nullable(),
+  start_line: z.number().int().nullable(),
+  unchecked_calls: z.number().int().nullable(),
+  unsafe_blocks: z.number().int().nullable(),
+  updated_at: z.number().int().nullable(),
   visibility: z.string().nullable(),
 });
 
@@ -5217,7 +5217,7 @@ export const GraphPathPayloadV1Schema: z.ZodObject<{
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
   found: z.boolean(),
   from: z.string(),
-  max_depth: z.number().int().safe(),
+  max_depth: z.number().int(),
   nodes: z.array(z.lazy(() => GraphNodeV1Schema)),
   path: z.array(z.string()),
   to: z.string(),
@@ -5232,13 +5232,13 @@ export const GraphSearchPayloadV1Schema: z.ZodObject<{
   results: z.ZodType<Array<GraphNodeV1>, unknown>;
   total: z.ZodType<number | null, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   has_more: z.boolean(),
-  limit: z.number().int().safe(),
-  offset: z.number().int().safe(),
+  limit: z.number().int(),
+  offset: z.number().int(),
   query: z.string(),
   results: z.array(z.lazy(() => GraphNodeV1Schema)),
-  total: z.number().int().safe().min(0).nullable(),
+  total: z.number().int().min(0).nullable(),
 });
 
 export const GraphSpanV1Schema: z.ZodObject<{
@@ -5248,11 +5248,11 @@ export const GraphSpanV1Schema: z.ZodObject<{
   start_column: z.ZodType<number | null, unknown>;
   start_line: z.ZodType<number, unknown>;
 }> = z.object({
-  attrs_start_line: z.number().int().safe().nullable(),
-  end_column: z.number().int().safe().nullable(),
-  end_line: z.number().int().safe(),
-  start_column: z.number().int().safe().nullable(),
-  start_line: z.number().int().safe(),
+  attrs_start_line: z.number().int().nullable(),
+  end_column: z.number().int().nullable(),
+  end_line: z.number().int(),
+  start_column: z.number().int().nullable(),
+  start_line: z.number().int(),
 });
 
 export const GraphSubgraphPayloadV1Schema: z.ZodObject<{
@@ -5276,9 +5276,9 @@ export const GraphTotalsV1Schema: z.ZodObject<{
   files: z.ZodType<number, unknown>;
   nodes: z.ZodType<number, unknown>;
 }> = z.object({
-  edges: z.number().int().safe().min(0),
-  files: z.number().int().safe().min(0),
-  nodes: z.number().int().safe().min(0),
+  edges: z.number().int().min(0),
+  files: z.number().int().min(0),
+  nodes: z.number().int().min(0),
 });
 
 export const HandoffOpenKindV1Schema: z.ZodEnum<{ "investigation": "investigation"; "task": "task" }> = z.enum(["investigation", "task"]);
@@ -5291,7 +5291,7 @@ export const HandoffOpenTargetV1Schema: z.ZodType<HandoffOpenTargetV1, unknown> 
   kind: z.literal("task"),
   owner_version_digest: z.lazy(() => ManifestDigestSchema),
   task_id: z.lazy(() => TaskIdSchema),
-  version: z.number().int().safe().min(0),
+  version: z.number().int().min(0),
 })]);
 
 export const HistoryRewritePolicyV1Schema: z.ZodLiteral<"forbid_force_and_rebase"> = z.literal("forbid_force_and_rebase");
@@ -5303,7 +5303,7 @@ export const IncomingCallEdgeV1Schema: z.ZodObject<{
   target: z.ZodType<string, unknown>;
 }> = z.object({
   kind: z.string(),
-  line: z.number().int().min(0).nullable(),
+  line: z.number().refine(Number.isInteger).min(0).nullable(),
   source: z.string(),
   target: z.string(),
 });
@@ -5333,18 +5333,18 @@ export const LcmCompressionSummaryV1Schema: z.ZodObject<{
   source_token_count: z.ZodType<number | null, unknown>;
   token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
-  node_count: z.number().int().safe(),
+  node_count: z.number().int(),
   ratio: z.number().nullable(),
-  source_token_count: z.number().int().safe().nullable(),
-  token_count: z.number().int().safe().nullable(),
+  source_token_count: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
 });
 
 export const LcmDepthCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   depth: z.ZodType<number, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
-  depth: z.number().int().safe(),
+  count: z.number().int(),
+  depth: z.number().int(),
 });
 
 export const LcmLatestSessionV1Schema: z.ZodObject<{
@@ -5353,9 +5353,9 @@ export const LcmLatestSessionV1Schema: z.ZodObject<{
   message_count: z.ZodType<number, unknown>;
   session_id: z.ZodType<string, unknown>;
 }> = z.object({
-  last_store_id: z.number().int().safe().nullable(),
-  last_timestamp: z.number().int().safe().nullable(),
-  message_count: z.number().int().safe(),
+  last_store_id: z.number().int().nullable(),
+  last_timestamp: z.number().int().nullable(),
+  message_count: z.number().int(),
   session_id: z.string(),
 });
 
@@ -5389,17 +5389,17 @@ export const LcmMessageV1Schema: z.ZodObject<{
   content: z.string().nullable(),
   message_id: z.string(),
   metadata_json: z.string().nullable(),
-  ordinal: z.number().int().safe().nullable(),
-  pinned: z.number().int().safe().nullable(),
+  ordinal: z.number().int().nullable(),
+  pinned: z.number().int().nullable(),
   role: z.string().nullable(),
   session_id: z.string(),
   snippet: z.string().nullable(),
   source: z.string().nullable(),
   storage_kind: z.string().nullable(),
-  store_id: z.number().int().safe().nullable(),
+  store_id: z.number().int().nullable(),
   summary_node_ids: z.array(z.string()),
-  timestamp: z.number().int().safe().nullable(),
-  token_count: z.number().int().safe().nullable(),
+  timestamp: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
   token_count_provenance: z.union([z.lazy(() => LcmTokenCountProvenanceV1Schema), z.null()]),
   tool_name: z.string().nullable(),
   tool_use_id: z.string().nullable().optional(),
@@ -5419,7 +5419,7 @@ export const LcmOverviewPayloadV1Schema: z.ZodObject<{
   exists: z.boolean(),
   latest_sessions: z.array(z.lazy(() => LcmLatestSessionV1Schema)),
   latest_summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   matches: z.lazy(() => LcmMatchesV1Schema),
   overview: z.lazy(() => LcmOverviewStatsV1Schema),
   path: z.string(),
@@ -5440,20 +5440,20 @@ export const LcmOverviewStatsV1Schema: z.ZodObject<{
 }> = z.object({
   compression: z.lazy(() => LcmCompressionSummaryV1Schema),
   depth_counts: z.array(z.lazy(() => LcmDepthCountV1Schema)),
-  max_summary_depth: z.number().int().safe(),
-  messages_total: z.number().int().safe(),
+  max_summary_depth: z.number().int(),
+  messages_total: z.number().int(),
   role_counts: z.array(z.lazy(() => LcmRoleCountV1Schema)),
-  sessions_total: z.number().int().safe(),
+  sessions_total: z.number().int(),
   source_counts: z.array(z.lazy(() => LcmSourceCountV1Schema)),
-  summary_node_sessions_total: z.number().int().safe(),
-  summary_nodes_total: z.number().int().safe(),
+  summary_node_sessions_total: z.number().int(),
+  summary_nodes_total: z.number().int(),
 });
 
 export const LcmRoleCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   role: z.ZodType<string | null, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   role: z.string().nullable(),
 });
 
@@ -5496,7 +5496,7 @@ export const LcmSearchPayloadV1Schema: z.ZodObject<{
   engine_detail: z.lazy(() => LcmSearchEngineDetailV1Schema),
   exists: z.boolean(),
   filters: z.lazy(() => LcmSearchFiltersV1Schema),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   matches: z.lazy(() => LcmMatchesV1Schema),
   next_cursor: z.string().nullable(),
   path: z.string(),
@@ -5509,8 +5509,8 @@ export const LcmSearchTotalsV1Schema: z.ZodObject<{
   messages: z.ZodType<number, unknown>;
   summary_nodes: z.ZodType<number, unknown>;
 }> = z.object({
-  messages: z.number().int().safe(),
-  summary_nodes: z.number().int().safe(),
+  messages: z.number().int(),
+  summary_nodes: z.number().int(),
 });
 
 export const LcmSessionCountsV1Schema: z.ZodObject<{
@@ -5519,10 +5519,10 @@ export const LcmSessionCountsV1Schema: z.ZodObject<{
   summary_node_count: z.ZodType<number, unknown>;
   summary_token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
-  message_count: z.number().int().safe(),
-  source_token_count: z.number().int().safe().nullable(),
-  summary_node_count: z.number().int().safe(),
-  summary_token_count: z.number().int().safe().nullable(),
+  message_count: z.number().int(),
+  source_token_count: z.number().int().nullable(),
+  summary_node_count: z.number().int(),
+  summary_token_count: z.number().int().nullable(),
 });
 
 export const LcmSessionPayloadV1Schema: z.ZodObject<{
@@ -5544,7 +5544,7 @@ export const LcmSessionPayloadV1Schema: z.ZodObject<{
   has_more: z.boolean(),
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
   next_cursor: z.string().nullable(),
   path: z.string(),
@@ -5557,7 +5557,7 @@ export const LcmSourceCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   source: z.ZodType<string, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
+  count: z.number().int(),
   source: z.string(),
 });
 
@@ -5577,18 +5577,18 @@ export const LcmSummaryNodeV1Schema: z.ZodObject<{
   token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
   category: z.string(),
-  created_at: z.number().int().safe(),
-  depth: z.number().int().safe(),
+  created_at: z.number().int(),
+  depth: z.number().int(),
   expand_hint: z.string(),
-  latest_at: z.number().int().safe().nullable(),
+  latest_at: z.number().int().nullable(),
   node_id: z.string(),
-  recency: z.number().int().safe().nullable(),
+  recency: z.number().int().nullable(),
   session_id: z.string(),
   snippet: z.string().nullable(),
-  source_token_count: z.number().int().safe().nullable(),
+  source_token_count: z.number().int().nullable(),
   source_type: z.string(),
   summary: z.string(),
-  token_count: z.number().int().safe().nullable(),
+  token_count: z.number().int().nullable(),
 });
 
 export const LcmTimelineBucketV1Schema: z.ZodObject<{
@@ -5600,11 +5600,11 @@ export const LcmTimelineBucketV1Schema: z.ZodObject<{
   unknown_message_count: z.ZodType<number, unknown>;
 }> = z.object({
   bucket: z.string(),
-  count: z.number().int().safe(),
-  known_message_count: z.number().int().safe(),
-  token_count: z.number().int().safe().nullable(),
+  count: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
   token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
-  unknown_message_count: z.number().int().safe(),
+  unknown_message_count: z.number().int(),
 });
 
 export const LcmTimelineCoverageV1Schema: z.ZodObject<{
@@ -5615,11 +5615,11 @@ export const LcmTimelineCoverageV1Schema: z.ZodObject<{
   total_dated_buckets: z.ZodType<number, unknown>;
   truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   next_before_bucket: z.string().nullable(),
   ordering: z.string(),
-  returned_buckets: z.number().int().safe(),
-  total_dated_buckets: z.number().int().safe(),
+  returned_buckets: z.number().int(),
+  total_dated_buckets: z.number().int(),
   truncated: z.boolean(),
 });
 
@@ -5628,7 +5628,7 @@ export const LcmTimelineNodeBucketV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
 }> = z.object({
   bucket: z.string().nullable(),
-  count: z.number().int().safe(),
+  count: z.number().int(),
 });
 
 export const LcmTimelinePayloadV1Schema: z.ZodObject<{
@@ -5660,11 +5660,11 @@ export const LcmTimelineUndatedV1Schema: z.ZodObject<{
   token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1, unknown>;
   unknown_message_count: z.ZodType<number, unknown>;
 }> = z.object({
-  count: z.number().int().safe(),
-  known_message_count: z.number().int().safe(),
-  token_count: z.number().int().safe().nullable(),
+  count: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
   token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
-  unknown_message_count: z.number().int().safe(),
+  unknown_message_count: z.number().int(),
 });
 
 export const LcmTokenCountProvenanceV1Schema: z.ZodEnum<{ "o200k_approximate": "o200k_approximate"; "unavailable": "unavailable" }> = z.enum(["o200k_approximate", "unavailable"]);
@@ -5681,7 +5681,7 @@ export const LinkAcceptedWorkAttemptRequestV1Schema: z.ZodObject<{
   selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
@@ -5737,11 +5737,11 @@ export const ListTaskHandoffsResultV1Schema: z.ZodObject<{
   open_count: z.ZodType<number, unknown>;
   truncated: z.ZodType<boolean, unknown>;
 }, z.core.$strict> = z.object({
-  consumed_count: z.number().int().min(0),
-  expired_count: z.number().int().min(0),
+  consumed_count: z.number().refine(Number.isInteger).min(0),
+  expired_count: z.number().refine(Number.isInteger).min(0),
   handoffs: z.array(z.lazy(() => ListedTaskHandoffV1Schema)),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  open_count: z.number().int().min(0),
+  open_count: z.number().refine(Number.isInteger).min(0),
   truncated: z.boolean(),
 }).strict();
 
@@ -5759,9 +5759,9 @@ export const LoomBranchSpanV1Schema: z.ZodObject<{
   worktree: z.ZodType<string, unknown>;
 }> = z.object({
   branch: z.string().nullable(),
-  event_count: z.number().int().safe(),
-  first_at: z.number().int().safe(),
-  last_at: z.number().int().safe(),
+  event_count: z.number().int(),
+  first_at: z.number().int(),
+  last_at: z.number().int(),
   provider: z.string(),
   session_id: z.string(),
   source: z.string(),
@@ -5782,7 +5782,7 @@ export const LoomCommitV1Schema: z.ZodObject<{
 }> = z.object({
   branch: z.string().nullable(),
   commit_sha: z.string(),
-  committed_at: z.number().int().safe(),
+  committed_at: z.number().int(),
   confidence: z.number(),
   evidence: z.string(),
   provider: z.string(),
@@ -5801,8 +5801,8 @@ export const LoomEditedFileV1Schema: z.ZodObject<{
   session_id: z.ZodType<string, unknown>;
 }> = z.object({
   change_type: z.string().nullable(),
-  edited_at_micros: z.number().int().safe().nullable().optional(),
-  hunks: z.number().int().safe().nullable(),
+  edited_at_micros: z.number().int().nullable().optional(),
+  hunks: z.number().int().nullable(),
   path: z.string(),
   provider: z.string(),
   session_id: z.string(),
@@ -5813,25 +5813,25 @@ export const LoomEventV1Schema: z.ZodType<LoomEventV1, unknown> = z.discriminate
   kind: z.literal("pull_request"),
   label: z.string().nullable().optional(),
   message_id: z.string(),
-  ordinal: z.number().int().safe(),
+  ordinal: z.number().int(),
   provider: z.string(),
-  recorded_at: z.number().int().safe(),
+  recorded_at: z.number().int(),
   session_id: z.string(),
 }), z.object({
   kind: z.literal("test_run"),
   operation_id: z.string(),
   outcome: z.union([z.lazy(() => LoomTestRunOutcomeV1Schema), z.null()]).optional(),
   provider: z.string(),
-  recorded_at: z.number().int().safe(),
+  recorded_at: z.number().int(),
   session_id: z.string(),
-  started_at_micros: z.number().int().safe(),
+  started_at_micros: z.number().int(),
 }), z.object({
   kind: z.literal("tool_call"),
   label: z.string().nullable().optional(),
   message_id: z.string(),
-  ordinal: z.number().int().safe(),
+  ordinal: z.number().int(),
   provider: z.string(),
-  recorded_at: z.number().int().safe(),
+  recorded_at: z.number().int(),
   session_id: z.string(),
   tool_use_id: z.string().nullable().optional(),
 })]);
@@ -5845,9 +5845,9 @@ export const LoomFileSessionProjectionV1Schema: z.ZodObject<{
   sessions: z.ZodType<Array<unknown>, unknown>;
 }> = z.object({
   authority: z.string(),
-  eligible_sessions: z.number().int().safe().min(0),
+  eligible_sessions: z.number().int().min(0),
   granularity: z.string(),
-  matched_sessions: z.number().int().safe().min(0),
+  matched_sessions: z.number().int().min(0),
   providers: z.array(z.string()),
   sessions: z.array(z.unknown()),
 });
@@ -5873,16 +5873,16 @@ export const LoomSessionRowV1Schema: z.ZodObject<{
   title: z.ZodType<string | null, unknown>;
 }> = z.object({
   edited_files_recorded: z.boolean(),
-  ended_at: z.number().int().safe().nullable(),
+  ended_at: z.number().int().nullable(),
   is_subagent: z.boolean(),
-  last_message_at: z.number().int().safe().nullable(),
-  messages: z.number().int().safe(),
+  last_message_at: z.number().int().nullable(),
+  messages: z.number().int(),
   models: z.array(z.lazy(() => LoomSessionModelV1Schema)),
   parent_session_id: z.string().nullable().optional(),
   parent_tool_use_id: z.string().nullable().optional(),
   provider: z.string(),
   session_id: z.string(),
-  started_at: z.number().int().safe().nullable(),
+  started_at: z.number().int().nullable(),
   title: z.string().nullable(),
 });
 
@@ -5896,10 +5896,10 @@ export const LoomSourceCoverageV1Schema: z.ZodObject<{
   unit: z.ZodType<string | null, unknown>;
 }> = z.object({
   completeness: z.string(),
-  eligible: z.number().int().safe().min(0).nullable(),
-  examined: z.number().int().safe().min(0).nullable(),
-  matched: z.number().int().safe().min(0).nullable(),
-  omitted: z.number().int().safe().min(0).nullable(),
+  eligible: z.number().int().min(0).nullable(),
+  examined: z.number().int().min(0).nullable(),
+  matched: z.number().int().min(0).nullable(),
+  omitted: z.number().int().min(0).nullable(),
   reason: z.string(),
   unit: z.string().nullable(),
 });
@@ -5920,7 +5920,7 @@ export const LoomSourceStatusV1Schema: z.ZodObject<{
   coverage: z.lazy(() => LoomSourceCoverageV1Schema),
   granularity: z.string(),
   id: z.string(),
-  item_count: z.number().int().safe().min(0).nullable(),
+  item_count: z.number().int().min(0).nullable(),
   label: z.string(),
   providers: z.array(z.string()),
   reason: z.string().nullable(),
@@ -5947,7 +5947,7 @@ export const LoomTemporalPayloadV1Schema: z.ZodObject<{
   sessions: z.array(z.lazy(() => LoomSessionRowV1Schema)),
   source_statuses: z.array(z.lazy(() => LoomSourceStatusV1Schema)),
   temporal_refresh: z.lazy(() => LoomTemporalRefreshV1Schema),
-  total: z.number().int().safe().min(0),
+  total: z.number().int().min(0),
 });
 
 export const LoomTemporalRefreshV1Schema: z.ZodObject<{
@@ -5956,9 +5956,9 @@ export const LoomTemporalRefreshV1Schema: z.ZodObject<{
   latest_activated_at_micros: z.ZodType<number | null, unknown>;
   state: z.ZodType<DashboardDomainStateV1, unknown>;
 }> = z.object({
-  active_generations: z.number().int().safe().min(0),
+  active_generations: z.number().int().min(0),
   authority: z.string(),
-  latest_activated_at_micros: z.number().int().safe().nullable(),
+  latest_activated_at_micros: z.number().int().nullable(),
   state: z.lazy(() => DashboardDomainStateV1Schema),
 });
 
@@ -5971,11 +5971,11 @@ export const LoomTestRunOutcomeV1Schema: z.ZodObject<{
   passed: z.ZodType<number, unknown>;
   termination: z.ZodType<string, unknown>;
 }> = z.object({
-  exit_code: z.number().int().safe().nullable().optional(),
-  failed: z.number().int().safe().min(0),
-  finished_at_micros: z.number().int().safe(),
-  ignored: z.number().int().safe().min(0),
-  passed: z.number().int().safe().min(0),
+  exit_code: z.number().int().nullable().optional(),
+  failed: z.number().int().min(0),
+  finished_at_micros: z.number().int(),
+  ignored: z.number().int().min(0),
+  passed: z.number().int().min(0),
   termination: z.string(),
 });
 
@@ -6010,11 +6010,11 @@ export const ManagedSkillMetadataSchema: z.ZodObject<{
   updated_at: z.ZodType<number, unknown>;
 }> = z.object({
   absorbed_into: z.string().nullable().optional(),
-  activated_at: z.number().int().safe().nullable().optional(),
+  activated_at: z.number().int().nullable().optional(),
   archived_reason: z.string().nullable().optional(),
   category: z.string(),
   checksum: z.string(),
-  created_at: z.number().int().safe(),
+  created_at: z.number().int(),
   id: z.string(),
   materialization_scope: z.lazy(() => ManagedSkillMaterializationScopeSchema).optional(),
   pinned: z.boolean(),
@@ -6024,7 +6024,7 @@ export const ManagedSkillMetadataSchema: z.ZodObject<{
   summary: z.string(),
   targets: z.array(z.lazy(() => SkillInstallTargetSchema)),
   title: z.string(),
-  updated_at: z.number().int().safe(),
+  updated_at: z.number().int(),
 });
 
 export const ManagedSkillProvenanceSchema: z.ZodObject<{
@@ -6045,7 +6045,7 @@ export const ManagedSupportFileSchema: z.ZodObject<{
   bytes: z.ZodType<Array<number>, unknown>;
   path: z.ZodType<string, unknown>;
 }> = z.object({
-  bytes: z.array(z.number().int().min(0).max(255)),
+  bytes: z.array(z.number().refine(Number.isInteger).min(0).max(255)),
   path: z.string(),
 });
 
@@ -6057,8 +6057,8 @@ export const MemoryAlgebraStatusV1Schema: z.ZodObject<{
   hrr_dim: z.ZodType<number, unknown>;
   name: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
-  estimated_capacity: z.number().int().safe().min(0),
-  hrr_dim: z.number().int().safe().min(0),
+  estimated_capacity: z.number().int().min(0),
+  hrr_dim: z.number().int().min(0),
   name: z.string(),
 }).strict();
 
@@ -6088,7 +6088,7 @@ export const MemoryAutomationCurationOperationEffectV1Schema: z.ZodType<MemoryAu
   disposition: z.lazy(() => MemoryAutomationCurationAddDispositionV1Schema),
   fact_id: z.lazy(() => FactIdSchema),
   kind: z.literal("add"),
-  similarity_millionths: z.number().int().min(0).nullable(),
+  similarity_millionths: z.number().refine(Number.isInteger).min(0).nullable(),
 }).strict(), z.object({
   commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
   disposition: z.lazy(() => MemoryAutomationCurationLinkDispositionV1Schema),
@@ -6107,13 +6107,13 @@ export const MemoryAutomationCurationOperationEffectV1Schema: z.ZodType<MemoryAu
   commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
   disposition: z.lazy(() => MemoryAutomationCurationRemoveDispositionV1Schema),
   kind: z.literal("remove"),
-  remaining_fact_count: z.number().int().safe().min(0),
+  remaining_fact_count: z.number().int().min(0),
   target_fact_id: z.lazy(() => FactIdSchema),
 }).strict(), z.object({
   commit: z.lazy(() => FactCommitReceiptV1Schema),
   fact_id: z.lazy(() => FactIdSchema),
   kind: z.literal("update"),
-  trust_delta_millionths: z.number().int(),
+  trust_delta_millionths: z.number().refine(Number.isInteger),
 }).strict()]);
 
 export const MemoryAutomationCurationReceiptV1Schema: z.ZodObject<{
@@ -6140,7 +6140,7 @@ export const MemoryAutomationCurationRelationV1Schema: z.ZodObject<{
   kind: z.ZodType<MemoryAutomationCurationRelationKindV1, unknown>;
   provenance: z.ZodType<MemoryAutomationCurationRelationProvenanceV1, unknown>;
 }, z.core.$strict> = z.object({
-  confidence_millionths: z.number().int().min(0),
+  confidence_millionths: z.number().refine(Number.isInteger).min(0),
   evidence_fact_ids: z.array(z.lazy(() => FactIdSchema)),
   kind: z.lazy(() => MemoryAutomationCurationRelationKindV1Schema),
   provenance: z.lazy(() => MemoryAutomationCurationRelationProvenanceV1Schema),
@@ -6165,16 +6165,16 @@ export const MemoryAutomationCurationResultV1Schema: z.ZodObject<{
   replay_event_id: z.ZodType<FactEventId | null, unknown>;
   replay_fact_id: z.ZodType<FactId | null, unknown>;
 }, z.core.$strict> = z.object({
-  accepted_operations: z.number().int().safe().min(0),
+  accepted_operations: z.number().int().min(0),
   automation_run_id: z.lazy(() => RunIdSchema),
   changed_fact_ids: z.array(z.lazy(() => FactIdSchema)),
-  facts_added: z.number().int().safe().min(0),
-  facts_linked: z.number().int().safe().min(0),
-  facts_merged: z.number().int().safe().min(0),
-  facts_removed: z.number().int().safe().min(0),
-  facts_updated: z.number().int().safe().min(0),
+  facts_added: z.number().int().min(0),
+  facts_linked: z.number().int().min(0),
+  facts_merged: z.number().int().min(0),
+  facts_removed: z.number().int().min(0),
+  facts_updated: z.number().int().min(0),
   input_digest: z.string(),
-  normalized_tags: z.number().int().safe().min(0),
+  normalized_tags: z.number().int().min(0),
   operation_effects: z.array(z.lazy(() => MemoryAutomationCurationOperationEffectV1Schema)),
   operation_id: z.lazy(() => ProvenanceIdSchema),
   owner: z.lazy(() => FactCommitOwnerV1Schema),
@@ -6240,7 +6240,7 @@ export const MemoryAutomationFactEvidenceSourceSpanV1Schema: z.ZodObject<{
   message_id: z.string().nullable().optional(),
   node_id: z.string().nullable().optional(),
   session_id: z.string().nullable().optional(),
-  store_id: z.number().int().safe().nullable().optional(),
+  store_id: z.number().int().nullable().optional(),
 }).strict();
 
 export const MemoryAutomationFactEvidenceTrustBucketV1Schema: z.ZodEnum<{ "high": "high"; "low": "low"; "medium": "medium" }> = z.enum(["high", "low", "medium"]);
@@ -6312,7 +6312,7 @@ export const MemoryAutomationFactRequestV1Schema: z.ZodObject<{
   actor: z.union([z.lazy(() => ActorIdSchema), z.null()]),
   category: z.lazy(() => FactCategoryV1Schema),
   content: z.string(),
-  default_trust_millionths: z.number().int().min(0),
+  default_trust_millionths: z.number().refine(Number.isInteger).min(0),
   entities: z.array(z.string()),
   input_digest: z.lazy(() => MemoryAutomationFactInputDigestV1Schema),
   metadata: z.record(z.string(), z.unknown()),
@@ -6349,7 +6349,7 @@ export const MemoryCategoryCountV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   category: z.string(),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
 }).strict();
 
 /** Cache provenance of one derived (projection or similarity) read. */
@@ -6360,7 +6360,7 @@ export const MemoryDerivedScanV1Schema: z.ZodObject<{
 }> = z.object({
   cache_scope: z.string(),
   cache_state: z.string(),
-  vector_rows_read: z.number().int().safe().min(0),
+  vector_rows_read: z.number().int().min(0),
 });
 
 export const MemoryEntityRowV1Schema: z.ZodObject<{
@@ -6369,7 +6369,7 @@ export const MemoryEntityRowV1Schema: z.ZodObject<{
   name: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   entity_id: z.string(),
-  fact_count: z.number().int().safe().min(0),
+  fact_count: z.number().int().min(0),
   name: z.string(),
 }).strict();
 
@@ -6404,26 +6404,26 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
   updated_at: z.ZodType<number | null, unknown>;
   why: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }, z.core.$strict> = z.object({
-  access_count: z.number().int().safe().min(0).nullable(),
+  access_count: z.number().int().min(0).nullable(),
   category: z.string().nullable(),
   content: z.string().nullable(),
-  created_at: z.number().int().safe().nullable(),
+  created_at: z.number().int().nullable(),
   entities: z.array(z.string()).nullable(),
   fact_id: z.lazy(() => FactIdSchema),
-  helpful_count: z.number().int().safe().min(0).nullable(),
-  last_recalled_at: z.number().int().safe().nullable(),
+  helpful_count: z.number().int().min(0).nullable(),
+  last_recalled_at: z.number().int().nullable(),
   linked_entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)).nullable(),
   metadata: z.unknown(),
   payload_access: z.lazy(() => PayloadAccessStateSchema),
-  projected_as_of: z.number().int().safe(),
-  retrieval_count: z.number().int().safe().min(0).nullable(),
-  score_millionths: z.number().int().min(0).nullable().optional(),
+  projected_as_of: z.number().int(),
+  retrieval_count: z.number().int().min(0).nullable(),
+  score_millionths: z.number().refine(Number.isInteger).min(0).nullable().optional(),
   source_label: z.string().nullable(),
   superseded_by: z.union([z.lazy(() => FactIdSchema), z.null()]).optional(),
   tags: z.array(z.string()).nullable(),
   trust_score: z.number().nullable(),
-  unhelpful_count: z.number().int().safe().min(0).nullable(),
-  updated_at: z.number().int().safe().nullable(),
+  unhelpful_count: z.number().int().min(0).nullable(),
+  updated_at: z.number().int().nullable(),
   why: z.string().nullable().optional(),
 }).strict();
 
@@ -6435,10 +6435,10 @@ export const MemoryFactsCoverageV1Schema: z.ZodObject<{
   limit: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
-  eligible: z.number().int().safe().min(0).nullable().optional(),
-  examined: z.number().int().safe().min(0).nullable().optional(),
+  eligible: z.number().int().min(0).nullable().optional(),
+  examined: z.number().int().min(0).nullable().optional(),
   graph: z.union([z.lazy(() => FactSearchGraphCoverageV1Schema), z.null()]).optional(),
-  limit: z.number().int().safe().min(1).max(100),
+  limit: z.number().int().min(1).max(100),
 }).strict();
 
 export const MemoryFeedbackActionV1Schema: z.ZodEnum<{ "helpful": "helpful"; "unhelpful": "unhelpful" }> = z.enum(["helpful", "unhelpful"]);
@@ -6455,12 +6455,12 @@ export const MemoryFeedbackFunnelV1Schema: z.ZodObject<{
   retrieved_fact_count: z.ZodType<number, unknown>;
   seen_to_feedback_ratio: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
-  access_count_total: z.number().int().safe().min(0),
-  feedback_total: z.number().int().safe().min(0),
-  rated_fact_count: z.number().int().safe().min(0),
-  retrieval_count_total: z.number().int().safe().min(0),
-  retrieved_fact_count: z.number().int().safe().min(0),
-  seen_to_feedback_ratio: z.number().int().safe().min(0).nullable(),
+  access_count_total: z.number().int().min(0),
+  feedback_total: z.number().int().min(0),
+  rated_fact_count: z.number().int().min(0),
+  retrieval_count_total: z.number().int().min(0),
+  retrieved_fact_count: z.number().int().min(0),
+  seen_to_feedback_ratio: z.number().int().min(0).nullable(),
 }).strict();
 
 export const MemoryGraphEdgeV1Schema: z.ZodObject<{
@@ -6488,13 +6488,13 @@ export const MemoryGraphNodeV1Schema: z.ZodType<MemoryGraphNodeV1, unknown> = z.
   category: z.string().nullable(),
   content: z.string().nullable(),
   fact_id: z.lazy(() => FactIdSchema),
-  helpful_count: z.number().int().safe().min(0).nullable(),
+  helpful_count: z.number().int().min(0).nullable(),
   id: z.string(),
   kind: z.literal("fact"),
   label: z.string(),
   payload_access: z.lazy(() => PayloadAccessStateSchema),
-  projected_as_of: z.number().int().safe(),
-  retrieval_count: z.number().int().safe().min(0).nullable(),
+  projected_as_of: z.number().int(),
+  retrieval_count: z.number().int().min(0).nullable(),
   trust_score: z.number().nullable(),
 }).strict(), z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
@@ -6516,13 +6516,13 @@ export const MemoryGraphPayloadV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   edges: z.array(z.lazy(() => MemoryGraphEdgeV1Schema)),
-  fact_candidates_examined: z.number().int().safe().min(0),
-  fact_universe_count: z.number().int().safe().min(0),
+  fact_candidates_examined: z.number().int().min(0),
+  fact_universe_count: z.number().int().min(0),
   nodes: z.array(z.lazy(() => MemoryGraphNodeV1Schema)),
-  relation_count: z.number().int().safe().min(0),
-  relation_limit: z.number().int().safe().min(0),
-  root_count: z.number().int().safe().min(0),
-  unavailable_fact_candidates: z.number().int().safe().min(0),
+  relation_count: z.number().int().min(0),
+  relation_limit: z.number().int().min(0),
+  root_count: z.number().int().min(0),
+  unavailable_fact_candidates: z.number().int().min(0),
 }).strict();
 
 export const MemoryGrowthPointV1Schema: z.ZodObject<{
@@ -6530,9 +6530,9 @@ export const MemoryGrowthPointV1Schema: z.ZodObject<{
   date: z.ZodType<string, unknown>;
   facts: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  cumulative_facts: z.number().int().safe().min(0),
+  cumulative_facts: z.number().int().min(0),
   date: z.string(),
-  facts: z.number().int().safe().min(0),
+  facts: z.number().int().min(0),
 }).strict();
 
 export const MemoryHolographicPayloadV1Schema: z.ZodObject<{
@@ -6566,9 +6566,9 @@ export const MemoryOplogEventV1Schema: z.ZodObject<{
   ts: z.ZodType<number, unknown>;
 }> = z.object({
   fact_id: z.string().nullable(),
-  id: z.number().int().safe(),
+  id: z.number().int(),
   op: z.string(),
-  ts: z.number().int().safe(),
+  ts: z.number().int(),
 });
 
 /** `GET /api/plugins/holographic/oplog`, newest first. */
@@ -6581,10 +6581,10 @@ export const MemoryOplogPayloadV1Schema: z.ZodObject<{
   state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, unknown>>;
 }> = z.object({
   code: z.string().nullable().optional(),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   error: z.string(),
   events: z.array(z.lazy(() => MemoryOplogEventV1Schema)),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   state: z.union([z.lazy(() => DashboardDomainStateV1Schema), z.null()]).optional(),
 });
 
@@ -6595,7 +6595,7 @@ export const MemoryOverviewPayloadV1Schema: z.ZodObject<{
   query: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   holographic: z.lazy(() => MemoryHolographicPayloadV1Schema),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   providers: z.record(z.string(), z.unknown()),
   query: z.string(),
 }).strict();
@@ -6608,8 +6608,8 @@ export const MemoryOverviewSummaryV1Schema: z.ZodObject<{
   trust_histogram: z.ZodType<Array<MemoryTrustBucketV1>, unknown>;
 }, z.core.$strict> = z.object({
   categories: z.array(z.lazy(() => MemoryCategoryCountV1Schema)),
-  entities: z.number().int().safe().min(0),
-  facts: z.number().int().safe().min(0),
+  entities: z.number().int().min(0),
+  facts: z.number().int().min(0),
   growth: z.array(z.lazy(() => MemoryGrowthPointV1Schema)),
   trust_histogram: z.array(z.lazy(() => MemoryTrustBucketV1Schema)),
 }).strict();
@@ -6623,8 +6623,8 @@ export const MemoryProjectionCoverageV1Schema: z.ZodObject<{
   omission_reasons: z.ZodType<Array<string>, unknown>;
 }> = z.object({
   completeness: z.lazy(() => MemoryProjectionCompletenessV1Schema),
-  examined: z.number().int().safe().min(0),
-  limit: z.number().int().safe(),
+  examined: z.number().int().min(0),
+  limit: z.number().int(),
   omission_reasons: z.array(z.string()),
 });
 
@@ -6647,10 +6647,10 @@ export const MemoryProjectionPayloadV1Schema: z.ZodObject<{
 }> = z.object({
   code: z.string().nullable().optional(),
   coverage: z.lazy(() => MemoryProjectionCoverageV1Schema),
-  dim: z.number().int().safe().min(0),
+  dim: z.number().int().min(0),
   error: z.string(),
   exists: z.boolean(),
-  limit: z.number().int().safe(),
+  limit: z.number().int(),
   method: z.lazy(() => MemoryProjectionMethodV1Schema),
   points: z.array(z.lazy(() => MemoryProjectionPointV1Schema)),
   scan: z.union([z.lazy(() => MemoryDerivedScanV1Schema), z.null()]).optional(),
@@ -6680,24 +6680,24 @@ export const MemoryProjectionPointV1Schema: z.ZodObject<{
   x: z.ZodType<number, unknown>;
   y: z.ZodType<number, unknown>;
 }> = z.object({
-  access_count: z.number().int().safe().min(0),
+  access_count: z.number().int().min(0),
   category: z.string(),
   content: z.string(),
-  created_at: z.number().int().safe(),
+  created_at: z.number().int(),
   entities: z.array(z.string()),
-  entity_count: z.number().int().safe().min(0),
+  entity_count: z.number().int().min(0),
   fact_id: z.lazy(() => FactIdSchema),
-  helpful_count: z.number().int().safe().min(0),
-  last_recalled_at: z.number().int().safe().nullable(),
+  helpful_count: z.number().int().min(0),
+  last_recalled_at: z.number().int().nullable(),
   metadata: z.unknown(),
   payload_access: z.lazy(() => PayloadAccessStateSchema),
-  projected_as_of: z.number().int().safe(),
-  retrieval_count: z.number().int().safe().min(0),
+  projected_as_of: z.number().int(),
+  retrieval_count: z.number().int().min(0),
   source_label: z.string().nullable().optional(),
   tags: z.array(z.string()),
   trust_score: z.number(),
-  unhelpful_count: z.number().int().safe().min(0),
-  updated_at: z.number().int().safe(),
+  unhelpful_count: z.number().int().min(0),
+  updated_at: z.number().int(),
   x: z.number(),
   y: z.number(),
 });
@@ -6718,7 +6718,7 @@ export const MemoryScoreBinV1Schema: z.ZodObject<{
   end: z.ZodType<number, unknown>;
   start: z.ZodType<number, unknown>;
 }> = z.object({
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   end: z.number(),
   start: z.number(),
 });
@@ -6734,11 +6734,11 @@ export const MemoryScoreDistributionV1Schema: z.ZodObject<{
   total_pairs: z.ZodType<number, unknown>;
 }> = z.object({
   average_score: z.number().nullable(),
-  bin_count: z.number().int().safe().min(0),
+  bin_count: z.number().int().min(0),
   bins: z.array(z.lazy(() => MemoryScoreBinV1Schema)),
   max_score: z.number().nullable(),
   min_score: z.number().nullable(),
-  total_pairs: z.number().int().safe().min(0),
+  total_pairs: z.number().int().min(0),
 });
 
 /** One scored fact pair above the requested similarity floor. */
@@ -6781,17 +6781,17 @@ export const MemorySimilarityPayloadV1Schema: z.ZodObject<{
   total_pairs: z.ZodType<number, unknown>;
 }> = z.object({
   code: z.string().nullable().optional(),
-  count: z.number().int().safe().min(0),
-  dim: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
+  dim: z.number().int().min(0),
   error: z.string(),
   exists: z.boolean(),
-  limit: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
   min_similarity: z.number(),
   pairs: z.array(z.lazy(() => MemorySimilarityPairV1Schema)),
   scan: z.union([z.lazy(() => MemoryDerivedScanV1Schema), z.null()]).optional(),
   score_distribution: z.lazy(() => MemoryScoreDistributionV1Schema),
   state: z.union([z.lazy(() => DashboardDomainStateV1Schema), z.null()]).optional(),
-  total_pairs: z.number().int().safe(),
+  total_pairs: z.number().int(),
 });
 
 export const MemoryStatusPayloadV1Schema: z.ZodObject<{
@@ -6820,16 +6820,16 @@ export const MemoryStatusV1Schema: z.ZodObject<{
   unhelpful_count: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   algebra: z.lazy(() => MemoryAlgebraStatusV1Schema),
-  below_default_recall_threshold_count: z.number().int().safe().min(0),
-  entity_count: z.number().int().safe().min(0),
-  fact_count: z.number().int().safe().min(0),
+  below_default_recall_threshold_count: z.number().int().min(0),
+  entity_count: z.number().int().min(0),
+  fact_count: z.number().int().min(0),
   feedback_funnel: z.lazy(() => MemoryFeedbackFunnelV1Schema),
-  helpful_count: z.number().int().safe().min(0),
-  trust_025_050_count: z.number().int().safe().min(0),
-  trust_050_075_count: z.number().int().safe().min(0),
-  trust_075_100_count: z.number().int().safe().min(0),
-  trust_0_025_count: z.number().int().safe().min(0),
-  unhelpful_count: z.number().int().safe().min(0),
+  helpful_count: z.number().int().min(0),
+  trust_025_050_count: z.number().int().min(0),
+  trust_050_075_count: z.number().int().min(0),
+  trust_075_100_count: z.number().int().min(0),
+  trust_0_025_count: z.number().int().min(0),
+  unhelpful_count: z.number().int().min(0),
 }).strict();
 
 export const MemoryTrustBucketV1Schema: z.ZodObject<{
@@ -6837,8 +6837,8 @@ export const MemoryTrustBucketV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   label: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
-  bucket: z.number().int().safe().min(0),
-  count: z.number().int().safe().min(0),
+  bucket: z.number().int().min(0),
+  count: z.number().int().min(0),
   label: z.string(),
 }).strict();
 
@@ -6849,7 +6849,7 @@ export const MemoryTrustHistoryCursorV1Schema: z.ZodObject<{
   occurred_at: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   event_id: z.string(),
-  occurred_at: z.number().int().safe(),
+  occurred_at: z.number().int(),
 }).strict();
 
 /** One append-only feedback event. `source` and `note` are absent when the
@@ -6873,7 +6873,7 @@ export const MemoryTrustHistoryEventV1Schema: z.ZodObject<{
   note: z.string().nullable().optional(),
   old_trust: z.number(),
   source: z.string().nullable().optional(),
-  timestamp: z.number().int().safe(),
+  timestamp: z.number().int(),
 });
 
 /** `GET /api/plugins/holographic/fact/{fact_id}/trust-history`. `partial`
@@ -6889,7 +6889,7 @@ export const MemoryTrustHistoryPayloadV1Schema: z.ZodObject<{
   completeness: z.lazy(() => MemoryTrustHistoryCompletenessV1Schema),
   error: z.string(),
   fact_id: z.string(),
-  limit: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
   next_after: z.union([z.lazy(() => MemoryTrustHistoryCursorV1Schema), z.null()]),
   trust_history: z.array(z.lazy(() => MemoryTrustHistoryEventV1Schema)),
 });
@@ -6905,7 +6905,7 @@ export const MetricCalibrationV1Schema: z.ZodObject<{
   cohort_revision: z.string(),
   drift_valid: z.boolean(),
   estimator_revision: z.string(),
-  support: z.number().int().safe().min(0),
+  support: z.number().int().min(0),
 });
 
 export const MetricCohortV1Schema: z.ZodObject<{
@@ -6925,13 +6925,13 @@ export const MetricCoverageV1Schema: z.ZodObject<{
   state: z.ZodType<CoverageStateV1, unknown>;
   unknown: z.ZodType<number, unknown>;
 }> = z.object({
-  censored: z.number().int().safe().min(0),
-  completed: z.number().int().safe().min(0),
-  eligible: z.number().int().safe().min(0).nullable(),
-  excluded: z.number().int().safe().min(0),
-  observed: z.number().int().safe().min(0),
+  censored: z.number().int().min(0),
+  completed: z.number().int().min(0),
+  eligible: z.number().int().min(0).nullable(),
+  excluded: z.number().int().min(0),
+  observed: z.number().int().min(0),
   state: z.lazy(() => CoverageStateV1Schema),
-  unknown: z.number().int().safe().min(0),
+  unknown: z.number().int().min(0),
 });
 
 export const MetricEvidenceClassV1Schema: z.ZodEnum<{ "association": "association"; "calibrated_prediction": "calibrated_prediction"; "measurement": "measurement" }> = z.enum(["association", "calibrated_prediction", "measurement"]);
@@ -6990,7 +6990,7 @@ export const MetricValueV1Schema: z.ZodObject<{
   cohort: z.lazy(() => MetricCohortV1Schema),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   denominator: z.string(),
-  denominator_value: z.number().int().safe().min(0).nullable(),
+  denominator_value: z.number().int().min(0).nullable(),
   descriptor_revision: z.string(),
   evidence_class: z.lazy(() => MetricEvidenceClassV1Schema),
   metric: z.string(),
@@ -7005,7 +7005,7 @@ export const MetricValueV1Schema: z.ZodObject<{
 /** Capability discovery never infers multi-root support from filesystem paths. */
 export const MultiRootCapabilityV1Schema: z.ZodType<MultiRootCapabilityV1, unknown> = z.discriminatedUnion("status", [z.object({
   revision: z.lazy(() => ScopeSetRevisionSchema),
-  root_count: z.number().int().min(0),
+  root_count: z.number().refine(Number.isInteger).min(0),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
   status: z.literal("mounted"),
@@ -7025,7 +7025,7 @@ export const MultiRootContinuationV1Schema: z.ZodObject<{
   scope_set_digest: z.ZodType<ManifestDigest, unknown>;
 }, z.core.$strict> = z.object({
   digest: z.lazy(() => ManifestDigestSchema),
-  next_page: z.number().int().safe().min(1),
+  next_page: z.number().int().min(1),
   order_digest: z.lazy(() => ManifestDigestSchema),
   query_digest: z.lazy(() => ManifestDigestSchema),
   root_cursors: z.array(z.lazy(() => RootScopeOutcomeV1_for_Nullable_stringSchema)),
@@ -7045,7 +7045,7 @@ export const MultiRootExecuteRequestV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
   operation: z.lazy(() => MultiRootOperationV1Schema),
-  page: z.number().int().safe().min(0),
+  page: z.number().int().min(0),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
   scope_set_revision: z.lazy(() => ScopeSetRevisionSchema),
@@ -7135,7 +7135,7 @@ export const NodeRefV1Schema: z.ZodObject<{
   kind: z.string(),
   name: z.string(),
   qualified_name: z.string(),
-  start_line: z.number().int().min(0),
+  start_line: z.number().refine(Number.isInteger).min(0),
 });
 
 export const NodeSessionsMeasurementV1Schema: z.ZodObject<{
@@ -7156,8 +7156,8 @@ export const ObservabilityHorizonV1Schema: z.ZodObject<{
   since_micros: z.ZodType<number, unknown>;
   until_micros: z.ZodType<number, unknown>;
 }> = z.object({
-  since_micros: z.number().int().safe(),
-  until_micros: z.number().int().safe(),
+  since_micros: z.number().int(),
+  until_micros: z.number().int(),
 });
 
 /** Stable logical identity of one provider observation source.
@@ -7191,7 +7191,7 @@ export const ObservatoryReadModelV1Schema: z.ZodObject<{
   current: z.boolean(),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   metrics: z.array(z.lazy(() => MetricValueV1Schema)),
-  observed_at_micros: z.number().int().safe(),
+  observed_at_micros: z.number().int(),
   rejected_arguments: z.lazy(() => RejectedArgumentAnalyticsV1Schema),
   watermark: z.string(),
 });
@@ -7203,7 +7203,7 @@ export const PauseWorkRunCommandSchema: z.ZodObject<{
   run_id: z.ZodType<RunId, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  expected_authority_version: z.number().int().safe().min(0).nullable(),
+  expected_authority_version: z.number().int().min(0).nullable(),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
   run_id: z.lazy(() => RunIdSchema),
@@ -7219,7 +7219,7 @@ export const PayloadReferenceV1Schema: z.ZodObject<{
   byte_len: z.ZodType<number, unknown>;
   digest: z.ZodType<PayloadDigestV1, unknown>;
 }, z.core.$strict> = z.object({
-  byte_len: z.number().int().safe().min(0),
+  byte_len: z.number().int().min(0),
   digest: z.lazy(() => PayloadDigestV1Schema),
 }).strict();
 
@@ -7246,10 +7246,10 @@ export const PerformanceComparisonReadModelV1Schema: z.ZodObject<{
   corpus: z.string().nullable(),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   disposition: z.lazy(() => ComparisonDispositionV1Schema),
-  eligible_outcomes: z.number().int().safe().min(0).nullable(),
+  eligible_outcomes: z.number().int().min(0).nullable(),
   environment: z.string().nullable(),
   oracle: z.string().nullable(),
-  paired_outcomes: z.number().int().safe().min(0).nullable(),
+  paired_outcomes: z.number().int().min(0).nullable(),
   platform: z.string().nullable(),
   regression_observed: z.boolean().nullable(),
   rollback_profile: z.string().nullable(),
@@ -7270,7 +7270,7 @@ export const PrAutoTrackEntryV1Schema: z.ZodObject<{
 }> = z.object({
   branch: z.string(),
   head_branch: z.string(),
-  pr: z.number().int().safe().min(0),
+  pr: z.number().int().min(0),
 });
 
 export const PrAutoTrackPayloadV1Schema: z.ZodObject<{
@@ -7358,7 +7358,7 @@ export const ProjectAliasRecordSchema: z.ZodObject<{
   project_id: z.ZodType<string, unknown>;
 }> = z.object({
   alias_path: z.string(),
-  last_seen_at: z.number().int().safe(),
+  last_seen_at: z.number().int(),
   project_id: z.string(),
 });
 
@@ -7390,7 +7390,7 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   exclude: z.array(z.string()),
   extract_docstrings: z.boolean(),
   include: z.array(z.string()),
-  max_file_size: z.number().int().safe().min(0),
+  max_file_size: z.number().int().min(0),
   sync: z.lazy(() => SyncSettingsV1Schema),
   telemetry: z.lazy(() => TelemetrySettingsV1Schema),
   track_call_sites: z.boolean(),
@@ -7448,8 +7448,8 @@ export const ProjectRegistryEntrySchema: z.ZodObject<{
   project_root: z.ZodType<string, unknown>;
   store_count: z.ZodType<number, unknown>;
 }> = z.object({
-  alias_count: z.number().int().safe().min(0),
-  artifact_count: z.number().int().safe().min(0),
+  alias_count: z.number().int().min(0),
+  artifact_count: z.number().int().min(0),
   branches: z.array(z.string()),
   canonical_root: z.string(),
   default_branch: z.string().nullable(),
@@ -7457,10 +7457,10 @@ export const ProjectRegistryEntrySchema: z.ZodObject<{
   is_active: z.boolean().nullable().optional(),
   kind: z.string(),
   label: z.string(),
-  last_seen_at: z.number().int().safe(),
+  last_seen_at: z.number().int(),
   project_id: z.string(),
   project_root: z.string(),
-  store_count: z.number().int().safe().min(0),
+  store_count: z.number().int().min(0),
 });
 
 export const ProjectRegistrySummarySchema: z.ZodObject<{
@@ -7468,8 +7468,8 @@ export const ProjectRegistrySummarySchema: z.ZodObject<{
   repo_count: z.ZodType<number, unknown>;
   truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
-  project_count: z.number().int().safe().min(0),
-  repo_count: z.number().int().safe().min(0),
+  project_count: z.number().int().min(0),
+  repo_count: z.number().int().min(0),
   truncated: z.boolean(),
 });
 
@@ -7483,7 +7483,7 @@ export const ProjectRepoGroupSchema: z.ZodObject<{
   branches: z.array(z.string()),
   git_common_dir: z.string().nullable(),
   label: z.string(),
-  project_count: z.number().int().safe().min(0),
+  project_count: z.number().int().min(0),
   projects: z.array(z.lazy(() => ProjectRegistryEntrySchema)),
 });
 
@@ -7506,7 +7506,7 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   extract_docstrings: z.boolean().nullable().optional(),
   idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
-  max_file_size: z.number().int().safe().min(0).nullable().optional(),
+  max_file_size: z.number().int().min(0).nullable().optional(),
   sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]).optional(),
   telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]).optional(),
   track_call_sites: z.boolean().nullable().optional(),
@@ -7538,7 +7538,7 @@ export const ProjectsPayloadV1Schema: z.ZodObject<{
   active_project_id: z.string().nullable(),
   active_project_root: z.string(),
   error: z.string().nullable().optional(),
-  limit: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
   project_tree: z.array(z.lazy(() => ProjectRepoGroupSchema)).nullable(),
   projects: z.array(z.lazy(() => PublicCodeProjectSchema)).nullable(),
   status: z.string(),
@@ -7615,7 +7615,7 @@ export const ProviderUsageSessionTotalsV1Schema: z.ZodObject<{
 }> = z.object({
   complete: z.boolean(),
   counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
-  usage_events: z.number().int().safe().min(0),
+  usage_events: z.number().int().min(0),
 });
 
 export const ProviderUsageSummaryV1Schema: z.ZodObject<{
@@ -7632,8 +7632,8 @@ export const ProviderUsageSummaryV1Schema: z.ZodObject<{
   error: z.string().nullable(),
   status: z.string().nullable(),
   total_cost_usd: z.number().nullable(),
-  total_tokens: z.number().int().safe().nullable(),
-  usage_event_count: z.number().int().safe().nullable(),
+  total_tokens: z.number().int().nullable(),
+  usage_event_count: z.number().int().nullable(),
 });
 
 /** A privacy-scoped code address. It identifies the coarse changed-code shape
@@ -7668,14 +7668,14 @@ export const PublicCodeProjectSchema: z.ZodObject<{
   project_root: z.ZodType<string, unknown>;
 }> = z.object({
   canonical_root: z.string(),
-  created_at: z.number().int().safe(),
+  created_at: z.number().int(),
   default_branch: z.string().nullable(),
   display_root: z.string(),
   git_common_dir: z.string().nullable(),
   head_branch: z.string().nullable(),
   is_active: z.boolean().nullable().optional(),
   label: z.string(),
-  last_seen_at: z.number().int().safe(),
+  last_seen_at: z.number().int(),
   project_id: z.string(),
   project_root: z.string(),
 });
@@ -7734,11 +7734,11 @@ export const RejectedArgumentAnalyticsV1Schema: z.ZodObject<{
   watermark: z.ZodType<string, unknown>;
 }> = z.object({
   coverage: z.lazy(() => MetricCoverageV1Schema),
-  eligible_attempts: z.number().int().safe().min(0).nullable(),
+  eligible_attempts: z.number().int().min(0).nullable(),
   groups: z.array(z.lazy(() => RejectedArgumentGroupV1Schema)),
   projector_revision: z.string(),
-  redacted_name_count: z.number().int().safe().min(0),
-  rejected_total: z.number().int().safe().min(0).nullable(),
+  redacted_name_count: z.number().int().min(0),
+  rejected_total: z.number().int().min(0).nullable(),
   rejection_rate: z.number().nullable(),
   unavailable_reason: z.string().nullable(),
   watermark: z.string(),
@@ -7757,7 +7757,7 @@ export const RejectedArgumentGroupV1Schema: z.ZodObject<{
   surface: z.ZodType<RejectedArgumentSurfaceV1, unknown>;
 }> = z.object({
   argument: z.lazy(() => RejectedArgumentNameV1Schema),
-  count: z.number().int().safe().min(0),
+  count: z.number().int().min(0),
   error_class: z.lazy(() => RejectedArgumentErrorClassV1Schema),
   operation: z.string(),
   rate: z.number().nullable(),
@@ -7778,7 +7778,7 @@ export const ReleaseWorkPlacementCommandSchema: z.ZodObject<{
   run_id: z.ZodType<RunId, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  expected_authority_version: z.number().int().safe().min(0),
+  expected_authority_version: z.number().int().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -7806,11 +7806,11 @@ export const RemoteFenceSummaryV1Schema: z.ZodObject<{
   placement_revision: z.ZodType<number, unknown>;
   shard_id: z.ZodType<string, unknown>;
 }> = z.object({
-  authority_epoch: z.number().int().safe().min(0),
+  authority_epoch: z.number().int().min(0),
   authority_node_id: z.string(),
   brain_id: z.string(),
   generation_id: z.string(),
-  placement_revision: z.number().int().safe().min(0),
+  placement_revision: z.number().int().min(0),
   shard_id: z.string(),
 });
 
@@ -7844,8 +7844,8 @@ export const RemoteSpoolSummaryV1Schema: z.ZodObject<{
   quarantined_count: z.ZodType<number, unknown>;
 }> = z.object({
   has_sequence_gap: z.boolean(),
-  pending_count: z.number().int().safe().min(0),
-  quarantined_count: z.number().int().safe().min(0),
+  pending_count: z.number().int().min(0),
+  quarantined_count: z.number().int().min(0),
 });
 
 /** Strongly typed canonical identity: `RepositoryId`. */
@@ -7868,12 +7868,12 @@ export const RequestCostReceiptV1Schema: z.ZodObject<{
   point_reads: z.ZodType<StorePointReadsV1, unknown>;
   wall_micros: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  adjacency_queries: z.number().int().safe().min(0),
-  adjacency_rows: z.number().int().safe().min(0),
-  bytes_hydrated: z.number().int().safe().min(0),
-  catalog_symbols: z.number().int().safe().min(0),
+  adjacency_queries: z.number().int().min(0),
+  adjacency_rows: z.number().int().min(0),
+  bytes_hydrated: z.number().int().min(0),
+  catalog_symbols: z.number().int().min(0),
   point_reads: z.lazy(() => StorePointReadsV1Schema),
-  wall_micros: z.number().int().safe().min(0),
+  wall_micros: z.number().int().min(0),
 }).strict();
 
 export const RequiredCheckExpectationV1Schema: z.ZodLiteral<"successful_terminal"> = z.literal("successful_terminal");
@@ -7885,7 +7885,7 @@ export const RequiredCheckV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   capability_id: z.lazy(() => CapabilityIdSchema),
   expectation: z.lazy(() => RequiredCheckExpectationV1Schema),
-  maximum_age_seconds: z.number().int().min(1),
+  maximum_age_seconds: z.number().refine(Number.isInteger).min(1),
 }).strict();
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
@@ -7936,7 +7936,7 @@ export const ResultContractRefSchema: z.ZodObject<{
   schema_revision: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   schema_id: z.lazy(() => SchemaIdSchema),
-  schema_revision: z.number().int().min(0),
+  schema_revision: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const ResumeWorkAttemptsCommandSchema: z.ZodObject<{
@@ -7952,7 +7952,7 @@ export const ResumeWorkRunCommandSchema: z.ZodObject<{
   run_id: z.ZodType<RunId, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  expected_authority_version: z.number().int().safe().min(0),
+  expected_authority_version: z.number().int().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
   run_id: z.lazy(() => RunIdSchema),
@@ -7983,7 +7983,7 @@ export const RetryWorkAttemptCommandV1Schema: z.ZodObject<{
 export const ReviewRequirementV1Schema: z.ZodType<ReviewRequirementV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_owner_and_independent_review"),
 }), z.object({
-  count: z.number().int().min(1).max(65535),
+  count: z.number().refine(Number.isInteger).min(1).max(65535),
   kind: z.literal("independent_review_count"),
 }), z.object({
   kind: z.literal("none"),
@@ -8224,15 +8224,15 @@ export const SavingsModelDayRowV1Schema: z.ZodObject<{
   tokenized_messages: z.ZodType<number, unknown>;
 }> = z.object({
   cost_basis: z.string(),
-  day: z.number().int().safe(),
+  day: z.number().int(),
   estimated: z.lazy(() => TokenPairV1Schema),
-  estimated_messages: z.number().int().safe(),
-  messages: z.number().int().safe(),
+  estimated_messages: z.number().int(),
+  messages: z.number().int(),
   model: z.string().nullable(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  provider_usage_events: z.number().int().safe(),
+  provider_usage_events: z.number().int(),
   tokenized: z.lazy(() => TokenPairV1Schema),
-  tokenized_messages: z.number().int().safe(),
+  tokenized_messages: z.number().int(),
 });
 
 /** One model-keyed content aggregate from the session store, joined to the
@@ -8254,14 +8254,14 @@ export const SavingsModelRowV1Schema: z.ZodObject<{
 }> = z.object({
   cost_basis: z.string(),
   estimated: z.lazy(() => TokenPairV1Schema),
-  estimated_messages: z.number().int().safe(),
-  messages: z.number().int().safe(),
+  estimated_messages: z.number().int(),
+  messages: z.number().int(),
   model: z.string().nullable(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  provider_usage_events: z.number().int().safe(),
-  sessions: z.number().int().safe(),
+  provider_usage_events: z.number().int(),
+  sessions: z.number().int(),
   tokenized: z.lazy(() => TokenPairV1Schema),
-  tokenized_messages: z.number().int().safe(),
+  tokenized_messages: z.number().int(),
   tokenizer: z.unknown(),
 });
 
@@ -8284,7 +8284,7 @@ export const SavingsModelsPayloadV1Schema: z.ZodObject<{
   provider_usage: z.lazy(() => SavingsProviderUsageAttributionV1Schema),
   provider_usage_coverage: z.string().nullable(),
   range: z.string(),
-  since: z.number().int().safe().nullable(),
+  since: z.number().int().nullable(),
   status: z.string().nullable(),
 });
 
@@ -8332,14 +8332,14 @@ export const SavingsProviderDayPointV1Schema: z.ZodObject<{
   unpriced_events: z.ZodType<number, unknown>;
   usage_events: z.ZodType<number, unknown>;
 }> = z.object({
-  day: z.number().int().safe(),
+  day: z.number().int(),
   priced_cost_usd: z.number().nullable(),
-  priced_events: z.number().int().safe(),
+  priced_events: z.number().int(),
   provider: z.string(),
   total_cost_usd: z.number().nullable(),
-  total_tokens: z.number().int().safe().nullable(),
-  unpriced_events: z.number().int().safe(),
-  usage_events: z.number().int().safe(),
+  total_tokens: z.number().int().nullable(),
+  unpriced_events: z.number().int(),
+  usage_events: z.number().int(),
 });
 
 /** Canonical priced usage for one UTC day across every provider. */
@@ -8351,10 +8351,10 @@ export const SavingsProviderDaySpendV1Schema: z.ZodObject<{
   usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   cost_usd: z.number().nullable(),
-  day: z.number().int().safe(),
+  day: z.number().int(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  total_tokens: z.number().int().safe().nullable(),
-  usage_events: z.number().int().safe(),
+  total_tokens: z.number().int().nullable(),
+  usage_events: z.number().int(),
 });
 
 /** Canonical priced usage for one exact provider/model pair. `cost_usd` is
@@ -8374,8 +8374,8 @@ export const SavingsProviderModelSpendV1Schema: z.ZodObject<{
   model: z.string().nullable(),
   provider: z.string(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  total_tokens: z.number().int().safe().nullable(),
-  usage_events: z.number().int().safe(),
+  total_tokens: z.number().int().nullable(),
+  usage_events: z.number().int(),
 });
 
 /** Provider-level spend attribution over exact provider usage observations.
@@ -8401,21 +8401,21 @@ export const SavingsProviderSpendV1Schema: z.ZodObject<{
   unpriced_models: z.ZodType<number, unknown>;
   usage_events: z.ZodType<number, unknown>;
 }> = z.object({
-  models: z.number().int().safe(),
+  models: z.number().int(),
   priced_cost_usd: z.number().nullable(),
-  priced_events: z.number().int().safe(),
-  priced_models: z.number().int().safe(),
+  priced_events: z.number().int(),
+  priced_models: z.number().int(),
   pricing: z.lazy(() => SavingsPricingClassV1Schema),
   provider: z.string(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  sessions: z.number().int().safe(),
+  sessions: z.number().int(),
   total_cost_usd: z.number().nullable(),
-  total_tokens: z.number().int().safe().nullable(),
-  undated_events: z.number().int().safe(),
-  unknown_model_events: z.number().int().safe(),
-  unpriced_events: z.number().int().safe(),
-  unpriced_models: z.number().int().safe(),
-  usage_events: z.number().int().safe(),
+  total_tokens: z.number().int().nullable(),
+  undated_events: z.number().int(),
+  unknown_model_events: z.number().int(),
+  unpriced_events: z.number().int(),
+  unpriced_models: z.number().int(),
+  usage_events: z.number().int(),
 });
 
 export const SavingsProviderUsageAttributionV1Schema: z.ZodObject<{
@@ -8433,7 +8433,7 @@ export const SavingsProviderUsageAttributionV1Schema: z.ZodObject<{
   by_provider: z.array(z.lazy(() => SavingsProviderSpendV1Schema)),
   by_provider_day: z.array(z.lazy(() => SavingsProviderDayPointV1Schema)),
   pricing_revision: z.string().nullable(),
-  undated_events: z.number().int().safe().nullable(),
+  undated_events: z.number().int().nullable(),
 });
 
 export const SavingsSessionSummaryV1Schema: z.ZodObject<{
@@ -8460,26 +8460,26 @@ export const SavingsSessionSummaryV1Schema: z.ZodObject<{
   db: z.string(),
   error: z.string().nullable(),
   estimated: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
-  estimated_messages: z.number().int().safe().nullable(),
-  messages: z.number().int().safe().nullable(),
-  model_count: z.number().int().safe().nullable(),
+  estimated_messages: z.number().int().nullable(),
+  messages: z.number().int().nullable(),
+  model_count: z.number().int().nullable(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  provider_usage_events: z.number().int().safe().nullable(),
+  provider_usage_events: z.number().int().nullable(),
   scope: z.string().nullable(),
-  session_count: z.number().int().safe().nullable(),
+  session_count: z.number().int().nullable(),
   status: z.string().nullable(),
   token_counting: z.boolean().nullable(),
   tokenized: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
-  tokenized_messages: z.number().int().safe().nullable(),
-  unknown_model_messages: z.number().int().safe().nullable(),
+  tokenized_messages: z.number().int().nullable(),
+  unknown_model_messages: z.number().int().nullable(),
 });
 
 export const SavingsSumV1Schema: z.ZodObject<{
   calls: z.ZodType<number, unknown>;
   saved_tokens: z.ZodType<number, unknown>;
 }> = z.object({
-  calls: z.number().int().safe(),
-  saved_tokens: z.number().int().safe(),
+  calls: z.number().int(),
+  saved_tokens: z.number().int(),
 });
 
 export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
@@ -8493,18 +8493,18 @@ export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
   degraded_row: z.string().nullable(),
   progress: z.union([z.lazy(() => SchemaConvergenceProgressV1Schema), z.null()]),
   stage: z.lazy(() => SchemaConvergenceStageV1Schema),
-  started_at_micros: z.number().int().safe(),
+  started_at_micros: z.number().int(),
   state: z.lazy(() => SchemaConvergenceStateV1Schema),
   store: z.string(),
 }).strict();
 
 export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgressV1, unknown> = z.discriminatedUnion("unit", [z.object({
-  done: z.number().int().safe().min(0),
-  remaining: z.number().int().safe().min(0),
+  done: z.number().int().min(0),
+  remaining: z.number().int().min(0),
   unit: z.literal("pages"),
 }).strict(), z.object({
-  done: z.number().int().safe().min(0),
-  remaining: z.number().int().safe().min(0),
+  done: z.number().int().min(0),
+  remaining: z.number().int().min(0),
   unit: z.literal("rows"),
 }).strict()]);
 
@@ -8588,7 +8588,7 @@ export const ScopePartialReasonV1Schema: z.ZodEnum<{ "budget_exceeded": "budget_
 export const ScopeSetIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Monotonic optimistic-concurrency revision of one scope set. */
-export const ScopeSetRevisionSchema: z.ZodType<number, unknown> = z.number().int().safe().min(1);
+export const ScopeSetRevisionSchema: z.ZodType<number, unknown> = z.number().int().min(1);
 
 /** Typed explanation for a root that could not return usable data. */
 export const ScopeUnavailableReasonV1Schema: z.ZodEnum<{ "authority_unavailable": "authority_unavailable"; "root_missing": "root_missing"; "store_unavailable": "store_unavailable" }> = z.enum(["authority_unavailable", "root_missing", "store_unavailable"]);
@@ -8621,7 +8621,7 @@ export const SessionRetrievalBudgetAccountingV1Schema: z.ZodObject<{
   limit: z.ZodType<number, unknown>;
   observed: z.ZodType<SessionRetrievalBudgetObservationV1, unknown>;
 }, z.core.$strict> = z.object({
-  limit: z.number().int().safe().min(0),
+  limit: z.number().int().min(0),
   observed: z.lazy(() => SessionRetrievalBudgetObservationV1Schema),
 }).strict();
 
@@ -8632,10 +8632,10 @@ read, so an exhausted read reports what it consumed and that storage held
 more, never a total it would have to run the refused scan to learn. */
 export const SessionRetrievalBudgetObservationV1Schema: z.ZodType<SessionRetrievalBudgetObservationV1, unknown> = z.discriminatedUnion("observation", [z.object({
   observation: z.literal("consumed_with_more_available"),
-  units: z.number().int().safe().min(0),
+  units: z.number().int().min(0),
 }).strict(), z.object({
   observation: z.literal("requested"),
-  units: z.number().int().safe().min(0),
+  units: z.number().int().min(0),
 }).strict()]);
 
 /** Structural budget boundary that rejected a session retrieval request.
@@ -8649,8 +8649,8 @@ export const SessionRetrievalStructuralRefusalV1Schema: z.ZodType<SessionRetriev
   stage: z.lazy(() => SessionRetrievalBudgetStageV1Schema),
 }).strict(), z.object({
   kind: z.string(),
-  maximum: z.number().int().safe().min(0),
-  observed: z.number().int().safe().min(0),
+  maximum: z.number().int().min(0),
+  observed: z.number().int().min(0),
   refusal: z.literal("cursor_manifest_limit_exceeded"),
 }).strict()]);
 
@@ -8707,11 +8707,11 @@ export const SignificantTableGrowthSampleV1Schema: z.ZodObject<{
   previous_observed_at: z.ZodType<number, unknown>;
   table: z.ZodType<string, unknown>;
 }> = z.object({
-  current_bytes: z.number().int().safe().min(0),
-  current_observed_at: z.number().int().safe(),
-  growth_bytes: z.number().int().safe().min(0),
-  previous_bytes: z.number().int().safe().min(0),
-  previous_observed_at: z.number().int().safe(),
+  current_bytes: z.number().int().min(0),
+  current_observed_at: z.number().int(),
+  growth_bytes: z.number().int().min(0),
+  previous_bytes: z.number().int().min(0),
+  previous_observed_at: z.number().int(),
   table: z.string(),
 });
 
@@ -8720,11 +8720,11 @@ export const SimilarCoverageV1Schema: z.ZodType<SimilarCoverageV1, unknown> = z.
 }).strict(), z.object({
   status: z.literal("excluded_incomplete_tokenization"),
 }).strict(), z.object({
-  maximum_bytes: z.number().int().safe().min(0),
-  maximum_tokens: z.number().int().min(0),
+  maximum_bytes: z.number().int().min(0),
+  maximum_tokens: z.number().refine(Number.isInteger).min(0),
   status: z.literal("excluded_too_large"),
 }).strict(), z.object({
-  minimum_tokens: z.number().int().min(0),
+  minimum_tokens: z.number().refine(Number.isInteger).min(0),
   status: z.literal("excluded_too_small"),
 }).strict(), z.object({
   status: z.literal("partial"),
@@ -8743,10 +8743,10 @@ export const SimilarFamilyV1Schema: z.ZodObject<{
   complete: z.boolean(),
   family_digest: z.lazy(() => ManifestDigestSchema),
   match_class: z.lazy(() => SimilarMatchClassV1Schema),
-  member_count: z.number().int().safe().min(0),
+  member_count: z.number().int().min(0),
   members: z.array(z.lazy(() => SimilarOccurrenceV1Schema)),
   next_cursor: z.string().nullable(),
-  normalization_revision: z.number().int().min(0).max(65535),
+  normalization_revision: z.number().refine(Number.isInteger).min(0).max(65535),
   representative_payload_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
@@ -8797,13 +8797,13 @@ export const SkillOutcomeRecordSchema: z.ZodObject<{
   verdict: z.ZodType<SkillOutcomeVerdict, unknown>;
   views_since_activation: z.ZodType<number, unknown>;
 }> = z.object({
-  activated_at: z.number().int().safe(),
-  days_since_activation: z.number().int().safe(),
+  activated_at: z.number().int(),
+  days_since_activation: z.number().int(),
   skill_id: z.string(),
   title: z.string().nullable().optional(),
-  uses_since_activation: z.number().int().safe().min(0),
+  uses_since_activation: z.number().int().min(0),
   verdict: z.lazy(() => SkillOutcomeVerdictSchema),
-  views_since_activation: z.number().int().safe().min(0),
+  views_since_activation: z.number().int().min(0),
 });
 
 export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "ignored": "ignored"; "too_early": "too_early" }> = z.enum(["adopted", "ignored", "too_early"]);
@@ -8814,8 +8814,8 @@ export const SourceSpanSchema: z.ZodObject<{
   end_byte: z.ZodType<number, unknown>;
   start_byte: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  end_byte: z.number().int().safe().min(0),
-  start_byte: z.number().int().safe().min(0),
+  end_byte: z.number().int().min(0),
+  start_byte: z.number().int().min(0),
 }).strict();
 
 /** Strongly typed canonical identity: `SourceStoreId`. */
@@ -8853,7 +8853,7 @@ export const StartWorkAttemptCommandSchema: z.ZodObject<{
 
 /** A byte size measurement. A newtype keeps sizes from being confused with
 counts, ratios, or timestamps in the read models and producers. */
-export const StorageByteSizeV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
+export const StorageByteSizeV1Schema: z.ZodType<number, unknown> = z.number().int().min(0);
 
 /** Source-coverage status for one typed storage finding producer. */
 export const StorageFindingKindStatusV1Schema: z.ZodObject<{
@@ -8863,7 +8863,7 @@ export const StorageFindingKindStatusV1Schema: z.ZodObject<{
   state: z.ZodType<StorageFindingSourceStateV1, unknown>;
 }> = z.object({
   kind: z.lazy(() => DoctorStorageFindingKindV1Schema),
-  observed_entries: z.number().int().safe().min(0),
+  observed_entries: z.number().int().min(0),
   reason: z.string(),
   state: z.lazy(() => StorageFindingSourceStateV1Schema),
 });
@@ -8981,8 +8981,8 @@ export const StorePointReadsV1Schema: z.ZodObject<{
   graph_sealed: z.ZodType<number, unknown>;
   graph_staging: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  graph_sealed: z.number().int().safe().min(0),
-  graph_staging: z.number().int().safe().min(0),
+  graph_sealed: z.number().int().min(0),
+  graph_staging: z.number().int().min(0),
 }).strict();
 
 /** One cheap size sample for a single store, derived from page-count pragmas.
@@ -8998,10 +8998,10 @@ export const StoreSizeSampleV1Schema: z.ZodObject<{
   page_size_bytes: z.ZodType<number, unknown>;
   store: z.ZodType<StoreKeyV1, unknown>;
 }, z.core.$strict> = z.object({
-  freelist_pages: z.number().int().safe().min(0),
+  freelist_pages: z.number().int().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  page_count: z.number().int().safe().min(0),
-  page_size_bytes: z.number().int().min(0),
+  page_count: z.number().int().min(0),
+  page_size_bytes: z.number().refine(Number.isInteger).min(0),
   store: z.lazy(() => StoreKeyV1Schema),
 }).strict();
 
@@ -9020,7 +9020,7 @@ export const StoreTelemetryEntryV1Schema: z.ZodObject<{
   total_bytes: z.ZodType<number | null, unknown>;
 }> = z.object({
   budget: z.lazy(() => StoreBudgetDimensionV1Schema),
-  free_bytes: z.number().int().safe().min(0).nullable(),
+  free_bytes: z.number().int().min(0).nullable(),
   free_page_ratio: z.number().nullable(),
   growth: z.lazy(() => StoreGrowthDimensionV1Schema),
   path: z.string(),
@@ -9028,7 +9028,7 @@ export const StoreTelemetryEntryV1Schema: z.ZodObject<{
   roles: z.array(z.string()),
   store: z.string(),
   table_growth: z.lazy(() => TableGrowthDimensionV1Schema),
-  total_bytes: z.number().int().safe().min(0).nullable(),
+  total_bytes: z.number().int().min(0).nullable(),
 });
 
 export const StrataClusterV1Schema: z.ZodObject<{
@@ -9040,13 +9040,13 @@ export const StrataClusterV1Schema: z.ZodObject<{
   order: z.ZodType<number, unknown>;
   outgoing_edges: z.ZodType<number, unknown>;
 }> = z.object({
-  boundary_edges: z.number().int().safe().min(0),
+  boundary_edges: z.number().int().min(0),
   directory: z.string(),
-  file_count: z.number().int().safe().min(0),
-  incoming_edges: z.number().int().safe().min(0),
-  internal_edges: z.number().int().safe().min(0),
-  order: z.number().int().safe().min(0),
-  outgoing_edges: z.number().int().safe().min(0),
+  file_count: z.number().int().min(0),
+  incoming_edges: z.number().int().min(0),
+  internal_edges: z.number().int().min(0),
+  order: z.number().int().min(0),
+  outgoing_edges: z.number().int().min(0),
 });
 
 export const StrataFileV1Schema: z.ZodObject<{
@@ -9056,9 +9056,9 @@ export const StrataFileV1Schema: z.ZodObject<{
   scc_size: z.ZodType<number, unknown>;
 }> = z.object({
   chain: z.array(z.string()),
-  depth: z.number().int().safe().min(0),
+  depth: z.number().int().min(0),
   path: z.string(),
-  scc_size: z.number().int().safe().min(0),
+  scc_size: z.number().int().min(0),
 });
 
 export const StrataMeasurementV1Schema: z.ZodObject<{
@@ -9080,8 +9080,8 @@ export const StrataMeasurementV1Schema: z.ZodObject<{
   files: z.array(z.lazy(() => StrataFileV1Schema)),
   granularity: z.string(),
   graph_generation: z.string(),
-  ideal_depth: z.number().int().safe().min(0),
-  max_depth: z.number().int().safe().min(0),
+  ideal_depth: z.number().int().min(0),
+  max_depth: z.number().int().min(0),
   scan: z.lazy(() => StrataScanV1Schema),
 });
 
@@ -9093,8 +9093,8 @@ export const StrataScanV1Schema: z.ZodObject<{
 }> = z.object({
   cache_scope: z.string(),
   cache_state: z.string(),
-  dependency_edges_examined: z.number().int().safe().min(0),
-  files_examined: z.number().int().safe().min(0),
+  dependency_edges_examined: z.number().int().min(0),
+  files_examined: z.number().int().min(0),
 });
 
 export const StructureReadV1Schema: z.ZodType<StructureReadV1, unknown> = z.discriminatedUnion("status", [z.object({
@@ -9176,7 +9176,7 @@ export const SyncSettingsPatchSchema: z.ZodObject<{
   auto_track_pr_poll_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
 }, z.core.$strict> = z.object({
   auto_track_pr_branches: z.boolean().nullable().optional(),
-  auto_track_pr_poll_secs: z.number().int().safe().min(0).nullable().optional(),
+  auto_track_pr_poll_secs: z.number().int().min(0).nullable().optional(),
 }).strict();
 
 export const SyncSettingsV1Schema: z.ZodObject<{
@@ -9184,17 +9184,17 @@ export const SyncSettingsV1Schema: z.ZodObject<{
   auto_track_pr_poll_secs: z.ZodType<number, unknown>;
 }> = z.object({
   auto_track_pr_branches: z.boolean(),
-  auto_track_pr_poll_secs: z.number().int().safe().min(0),
+  auto_track_pr_poll_secs: z.number().int().min(0),
 });
 
 /** Per-store typed table-growth state. Unavailable reads carry no byte values;
 each state includes source coverage and explicit omissions. */
 export const TableGrowthDimensionV1Schema: z.ZodType<TableGrowthDimensionV1, unknown> = z.discriminatedUnion("state", [z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
-  observed_at: z.number().int().safe(),
+  observed_at: z.number().int(),
   omission_reasons: z.array(z.string()),
   state: z.literal("baseline_established"),
-  tables_observed: z.number().int().safe().min(0),
+  tables_observed: z.number().int().min(0),
 }), z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   omission_reasons: z.array(z.string()),
@@ -9218,18 +9218,18 @@ export const TableGrowthDimensionV1Schema: z.ZodType<TableGrowthDimensionV1, unk
 /** One current table omitted from the significant-sample list. Numeric evidence
 remains structured so clients can format units consistently. */
 export const TableGrowthOmissionV1Schema: z.ZodType<TableGrowthOmissionV1, unknown> = z.discriminatedUnion("kind", [z.object({
-  current_bytes: z.number().int().safe().min(0),
+  current_bytes: z.number().int().min(0),
   kind: z.literal("baseline_pending"),
-  observed_at: z.number().int().safe(),
+  observed_at: z.number().int(),
   reason: z.string(),
   table: z.string(),
 }), z.object({
-  current_bytes: z.number().int().safe().min(0),
-  current_observed_at: z.number().int().safe(),
-  growth_bytes: z.number().int().safe().min(0),
+  current_bytes: z.number().int().min(0),
+  current_observed_at: z.number().int(),
+  growth_bytes: z.number().int().min(0),
   kind: z.literal("below_threshold"),
-  previous_bytes: z.number().int().safe().min(0),
-  previous_observed_at: z.number().int().safe(),
+  previous_bytes: z.number().int().min(0),
+  previous_observed_at: z.number().int(),
   reason: z.string(),
   table: z.string(),
 })]);
@@ -9240,9 +9240,9 @@ export const TableGrowthThresholdV1Schema: z.ZodObject<{
   relative_floor_bytes: z.ZodType<number, unknown>;
   relative_percent: z.ZodType<number, unknown>;
 }> = z.object({
-  absolute_bytes: z.number().int().safe().min(0),
-  relative_floor_bytes: z.number().int().safe().min(0),
-  relative_percent: z.number().int().safe().min(0),
+  absolute_bytes: z.number().int().min(0),
+  relative_floor_bytes: z.number().int().min(0),
+  relative_percent: z.number().int().min(0),
 });
 
 export const TaskEvidenceLinkV1Schema: z.ZodObject<{
@@ -9257,7 +9257,7 @@ export const TaskEvidenceLinkV1Schema: z.ZodObject<{
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   link_id: z.string(),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  revision: z.number().int().safe().min(0),
+  revision: z.number().int().min(0),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
@@ -9304,7 +9304,7 @@ export const TestMapMeasurementV1Schema: z.ZodObject<{
 }> = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
-  caller_depth: z.number().int().safe().min(0),
+  caller_depth: z.number().int().min(0),
   granularity: z.string(),
   node: z.lazy(() => NodeRefV1Schema),
   reason: z.string().nullable(),
@@ -9318,18 +9318,18 @@ export const TokenActualV1Schema: z.ZodObject<{
   input_tokens: z.ZodType<number | null, unknown>;
   output_tokens: z.ZodType<number | null, unknown>;
 }> = z.object({
-  cache_read_tokens: z.number().int().safe().nullable(),
-  cache_write_tokens: z.number().int().safe().nullable(),
-  input_tokens: z.number().int().safe().nullable(),
-  output_tokens: z.number().int().safe().nullable(),
+  cache_read_tokens: z.number().int().nullable(),
+  cache_write_tokens: z.number().int().nullable(),
+  input_tokens: z.number().int().nullable(),
+  output_tokens: z.number().int().nullable(),
 });
 
 export const TokenPairV1Schema: z.ZodObject<{
   input_tokens: z.ZodType<number, unknown>;
   output_tokens: z.ZodType<number, unknown>;
 }> = z.object({
-  input_tokens: z.number().int().safe(),
-  output_tokens: z.number().int().safe(),
+  input_tokens: z.number().int(),
+  output_tokens: z.number().int(),
 });
 
 export const TopologyConcurrencyPolicyV1Schema: z.ZodObject<{
@@ -9338,10 +9338,10 @@ export const TopologyConcurrencyPolicyV1Schema: z.ZodObject<{
   maximum_parallel_per_task: z.ZodType<number, unknown>;
   maximum_stack_depth: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  maximum_active_per_repository: z.number().int().min(1).max(65535),
-  maximum_global_active: z.number().int().min(1).max(65535),
-  maximum_parallel_per_task: z.number().int().min(1).max(65535),
-  maximum_stack_depth: z.number().int().min(1).max(65535),
+  maximum_active_per_repository: z.number().refine(Number.isInteger).min(1).max(65535),
+  maximum_global_active: z.number().refine(Number.isInteger).min(1).max(65535),
+  maximum_parallel_per_task: z.number().refine(Number.isInteger).min(1).max(65535),
+  maximum_stack_depth: z.number().refine(Number.isInteger).min(1).max(65535),
 }).strict();
 
 export const TopologyEscalationPolicyV1Schema: z.ZodEnum<{ "reject": "reject"; "require_explicit_human_approval": "require_explicit_human_approval"; "require_human_approval_and_independent_review": "require_human_approval_and_independent_review" }> = z.enum(["reject", "require_explicit_human_approval", "require_human_approval_and_independent_review"]);
@@ -9354,7 +9354,7 @@ export const TopologyGatePolicyV1Schema: z.ZodObject<{
   tests: z.ZodType<Array<RequiredCheckV1>, unknown>;
 }, z.core.$strict> = z.object({
   cleanliness: z.lazy(() => WorktreeCleanlinessRequirementV1Schema),
-  maximum_preflight_age_seconds: z.number().int().min(1),
+  maximum_preflight_age_seconds: z.number().refine(Number.isInteger).min(1),
   require_fresh_preflight: z.boolean(),
   review: z.lazy(() => ReviewRequirementV1Schema),
   tests: z.array(z.lazy(() => RequiredCheckV1Schema)),
@@ -9377,7 +9377,7 @@ export const UserSettingsPatchSchema: z.ZodObject<{
   watcher_debounce: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }, z.core.$strict> = z.object({
   expected_revision_id: z.string(),
-  extraction_timeout_secs: z.number().int().safe().min(0).nullable().optional(),
+  extraction_timeout_secs: z.number().int().min(0).nullable().optional(),
   idempotency_key: z.string(),
   upload_enabled: z.boolean().nullable().optional(),
   watcher_debounce: z.string().nullable().optional(),
@@ -9401,14 +9401,14 @@ export const UserSettingsPayloadV1Schema: z.ZodObject<{
   code_index_workers: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
   configuration_revision_id: z.string(),
   configuration_snapshot_id: z.string(),
-  extraction_timeout_secs: z.number().int().safe().min(0),
+  extraction_timeout_secs: z.number().int().min(0),
   installed_agents: z.array(z.string()),
   upload_enabled: z.boolean(),
   watcher_debounce: z.string(),
 });
 
 /** UTC timestamp represented as microseconds from the Unix epoch. */
-export const UtcMicrosSchema: z.ZodType<number, unknown> = z.number().int().safe();
+export const UtcMicrosSchema: z.ZodType<number, unknown> = z.number().int();
 
 export const VerifiedWorkEvidenceRootV1Schema: z.ZodObject<{
   item: z.ZodType<WorkItemV1, unknown>;
@@ -9433,10 +9433,10 @@ export const VerifiedWorkGraphVersionV1Schema: z.ZodObject<{
   recovered_graph_digest: z.ZodType<ManifestDigest, unknown>;
   source_watermark: z.ZodType<Record<string, number>, unknown>;
 }, z.core.$strict> = z.object({
-  event_sequence: z.number().int().safe().min(0),
-  graph_version: z.number().int().safe().min(0),
+  event_sequence: z.number().int().min(0),
+  graph_version: z.number().int().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
+  source_watermark: z.record(z.string(), z.number().int().min(0)),
 }).strict();
 
 /** Exact result of one scan by the canonical lease/process/effect/placement/
@@ -9455,7 +9455,7 @@ export const VerifiedWorkLeakEvidenceV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   coverage: z.lazy(() => CoverageStateV1Schema),
-  detection_horizon_micros: z.number().int().safe().min(0),
+  detection_horizon_micros: z.number().int().min(0),
   evidence_refs: z.array(z.string()),
   kind: z.lazy(() => WorkExecutionLeakKindV1Schema),
   owner_class: z.lazy(() => LeakOwnerClassV1Schema),
@@ -9522,7 +9522,7 @@ export const WorkArtifactHydrationRequestV1Schema: z.ZodObject<{
   page_size: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int().min(0),
+  page_size: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 /** One authority-scoped artifact hydration read. Absence of any Work in
@@ -9545,7 +9545,7 @@ export const WorkArtifactRefV1Schema: z.ZodObject<{
   digest: z.ZodType<ManifestDigest, unknown>;
 }, z.core.$strict> = z.object({
   artifact_id: z.lazy(() => WorkArtifactIdSchema),
-  byte_length: z.number().int().safe().min(0),
+  byte_length: z.number().int().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
@@ -9608,12 +9608,12 @@ export const WorkAttemptIdentityV1Schema: z.ZodObject<{
 /** How much of the authorized attempt set one page covers. */
 export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("capped"),
-  remaining: z.number().int().min(0),
+  remaining: z.number().refine(Number.isInteger).min(0),
   resume: z.lazy(() => WorkAttemptListCursorV1Schema),
-  returned: z.number().int().min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
 }).strict(), z.object({
   coverage: z.literal("complete"),
-  returned: z.number().int().min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
 }).strict()]);
 
 /** Opaque resume point for the next page of one attempt-list-family read,
@@ -9626,7 +9626,7 @@ export const WorkAttemptListRequestV1Schema: z.ZodObject<{
   page_size: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int().min(0),
+  page_size: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 /** One authority-scoped attempt-list read. Absence of any Work in scope is a
@@ -9644,8 +9644,8 @@ export const WorkAttemptProgressV1Schema: z.ZodObject<{
   completed: z.ZodType<number, unknown>;
   total: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  completed: z.number().int().safe().min(0),
-  total: z.number().int().safe().min(0),
+  completed: z.number().int().min(0),
+  total: z.number().int().min(0),
 }).strict();
 
 export const WorkAttemptProjectionBindingV1Schema: z.ZodObject<{
@@ -9656,17 +9656,17 @@ export const WorkAttemptProjectionBindingV1Schema: z.ZodObject<{
   source_watermark: z.ZodType<Record<string, number>, unknown>;
 }, z.core.$strict> = z.object({
   accepted_proposal: z.lazy(() => ProposalIdSchema),
-  event_sequence: z.number().int().safe().min(0),
-  graph_version: z.number().int().safe().min(0),
+  event_sequence: z.number().int().min(0),
+  graph_version: z.number().int().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
+  source_watermark: z.record(z.string(), z.number().int().min(0)),
 }).strict();
 
 /** How one provider attempt ended, as observed by the daemon runtime. */
 export const WorkAttemptProviderOutcomeV1Schema: z.ZodType<WorkAttemptProviderOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("cancelled"),
 }), z.object({
-  code: z.number().int(),
+  code: z.number().refine(Number.isInteger),
   outcome: z.literal("exited"),
 }), z.object({
   outcome: z.literal("launch_failed"),
@@ -9677,7 +9677,7 @@ export const WorkAttemptProviderOutcomeV1Schema: z.ZodType<WorkAttemptProviderOu
   state: z.lazy(() => WorkProviderAvailabilityV1Schema),
 }), z.object({
   outcome: z.literal("signalled"),
-  signal: z.number().int(),
+  signal: z.number().refine(Number.isInteger),
 }), z.object({
   channel: z.lazy(() => WorkAttemptStreamChannelV1Schema),
   outcome: z.literal("stream_overflow"),
@@ -9730,7 +9730,7 @@ export const WorkAttemptStreamSummaryV1Schema: z.ZodObject<{
   digest: z.ZodType<ManifestDigest, unknown>;
   truncated: z.ZodType<boolean, unknown>;
 }, z.core.$strict> = z.object({
-  byte_length: z.number().int().safe().min(0),
+  byte_length: z.number().int().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
   truncated: z.boolean(),
 }).strict();
@@ -9741,7 +9741,7 @@ export const WorkAttemptTopologyBindingV1Schema: z.ZodObject<{
   task_count: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   generation: z.string(),
-  task_count: z.number().int().min(0),
+  task_count: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const WorkAttemptV1Schema: z.ZodObject<{
@@ -9803,8 +9803,8 @@ export const WorkCalibratedSizingV1Schema: z.ZodObject<{
   drift_valid: z.boolean(),
   error: z.lazy(() => WorkOrdinalBandV1Schema),
   horizon: z.lazy(() => UtcMicrosSchema),
-  support: z.number().int().min(0),
-  support_floor: z.number().int().min(0),
+  support: z.number().refine(Number.isInteger).min(0),
+  support_floor: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 /** Raw calibration values and their exact decision provenance.
@@ -9823,12 +9823,12 @@ export const WorkCalibrationEvidenceV1Schema: z.ZodObject<{
   uncertainty: z.ZodType<WorkCalibrationUncertaintyV1, unknown>;
 }, z.core.$strict> = z.object({
   cohort_route: z.string().nullable(),
-  comparable_outcomes: z.number().int().min(0),
-  eligible_route_count: z.number().int().min(0),
-  incomparable_outcomes: z.number().int().min(0),
+  comparable_outcomes: z.number().refine(Number.isInteger).min(0),
+  eligible_route_count: z.number().refine(Number.isInteger).min(0),
+  incomparable_outcomes: z.number().refine(Number.isInteger).min(0),
   provenance: z.lazy(() => WorkCalibrationProvenanceV1Schema),
   raw_outcomes: z.array(z.lazy(() => WorkPriorOutcomeV1Schema)),
-  routes_with_outcomes: z.number().int().min(0),
+  routes_with_outcomes: z.number().refine(Number.isInteger).min(0),
   uncertainty: z.lazy(() => WorkCalibrationUncertaintyV1Schema),
 }).strict();
 
@@ -9845,7 +9845,7 @@ export const WorkCalibrationProvenanceV1Schema: z.ZodObject<{
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   evaluated_at: z.lazy(() => UtcMicrosSchema),
   evaluator_id: z.string(),
-  evaluator_revision: z.number().int().safe().min(0),
+  evaluator_revision: z.number().int().min(0),
   input_digest: z.lazy(() => ManifestDigestSchema),
   local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
 }).strict();
@@ -9897,7 +9897,7 @@ export const WorkCausalProjectionV1Schema: z.ZodObject<{
   graph_version: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   candidate_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkCommandId`. */
@@ -9908,9 +9908,9 @@ export const WorkCriticalPathProjectionV1Schema: z.ZodObject<{
   task_ids: z.ZodType<Array<TaskId>, unknown>;
   total_effort: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
-  total_effort: z.number().int().min(0),
+  total_effort: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const WorkDagEdgeV1Schema: z.ZodObject<{
@@ -9927,7 +9927,7 @@ export const WorkDagProjectionV1Schema: z.ZodObject<{
   task_ids: z.ZodType<Array<TaskId>, unknown>;
 }, z.core.$strict> = z.object({
   gating_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
 }).strict();
 
@@ -9962,7 +9962,7 @@ export const WorkDuplicateAdjudicationCommandV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   evidence: z.lazy(() => WorkDuplicateAdjudicationEvidenceV1Schema),
-  expected_revision: z.number().int().safe().min(0).nullable(),
+  expected_revision: z.number().int().min(0).nullable(),
   first_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   quantities: z.lazy(() => WorkDuplicateAdjudicationQuantitiesV1Schema),
@@ -9989,14 +9989,14 @@ export const WorkDuplicateAdjudicationQuantitiesV1Schema: z.ZodObject<{
   token_count: z.ZodType<number | null, unknown>;
   wall_micros: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
-  cost_micros: z.number().int().safe().min(0).nullable(),
+  cost_micros: z.number().int().min(0).nullable(),
   coverage: z.lazy(() => CoverageStateV1Schema),
-  effect_count: z.number().int().safe().min(0).nullable(),
+  effect_count: z.number().int().min(0).nullable(),
   effect_outcome: z.lazy(() => DuplicateEffectOutcomeV1Schema),
   evidence: z.lazy(() => QuantityEvidenceClassV1Schema),
-  test_count: z.number().int().safe().min(0).nullable(),
-  token_count: z.number().int().safe().min(0).nullable(),
-  wall_micros: z.number().int().safe().min(0).nullable(),
+  test_count: z.number().int().min(0).nullable(),
+  token_count: z.number().int().min(0).nullable(),
+  wall_micros: z.number().int().min(0).nullable(),
 }).strict();
 
 export const WorkDuplicateAdjudicationReceiptV1Schema: z.ZodObject<{
@@ -10010,7 +10010,7 @@ export const WorkDuplicateAdjudicationReceiptV1Schema: z.ZodObject<{
   adjudication_ref: z.lazy(() => ManifestDigestSchema),
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => WorkDuplicateAdjudicationCommandV1Schema),
-  revision: z.number().int().safe().min(0),
+  revision: z.number().int().min(0),
 }).strict();
 
 /** Effect semantics admitted for one provider attempt. */
@@ -10035,9 +10035,9 @@ export const WorkEvidenceCoverageV1Schema: z.ZodObject<{
   selected: z.ZodType<number, unknown>;
   state: z.ZodType<WorkEvidenceCoverageStateV1, unknown>;
 }, z.core.$strict> = z.object({
-  hydrated: z.number().int().min(0),
-  omitted: z.number().int().min(0),
-  selected: z.number().int().min(0),
+  hydrated: z.number().refine(Number.isInteger).min(0),
+  omitted: z.number().refine(Number.isInteger).min(0),
+  selected: z.number().refine(Number.isInteger).min(0),
   state: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
 }).strict();
 
@@ -10120,7 +10120,7 @@ export const WorkEvidenceRetrieveRequestV1Schema: z.ZodObject<{
   continuation: z.union([z.lazy(() => WorkEvidenceContinuationV1Schema), z.null()]),
   expansion: z.union([z.lazy(() => WorkEvidenceExpansionSelectorV1Schema), z.null()]),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  page_size: z.number().int().min(0),
+  page_size: z.number().refine(Number.isInteger).min(0),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
   temporal: z.lazy(() => TemporalModeV1Schema),
@@ -10169,7 +10169,7 @@ export const WorkExecutionEnvelopeV1Schema: z.ZodObject<{
   worktree_root: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
-  cancellation_generation: z.number().int().safe().min(0),
+  cancellation_generation: z.number().int().min(0),
   commit: z.lazy(() => CommitIdSchema),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
@@ -10206,12 +10206,12 @@ export const WorkExecutionLimitsSchema: z.ZodObject<{
   max_stderr_bytes: z.ZodType<number, unknown>;
   max_stdout_bytes: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  max_concurrency: z.number().int().min(0),
-  max_input_tokens: z.number().int().safe().min(0),
-  max_output_tokens: z.number().int().safe().min(0),
-  max_protocol_bytes: z.number().int().safe().min(0),
-  max_stderr_bytes: z.number().int().safe().min(0),
-  max_stdout_bytes: z.number().int().safe().min(0),
+  max_concurrency: z.number().refine(Number.isInteger).min(0),
+  max_input_tokens: z.number().int().min(0),
+  max_output_tokens: z.number().int().min(0),
+  max_protocol_bytes: z.number().int().min(0),
+  max_stderr_bytes: z.number().int().min(0),
+  max_stdout_bytes: z.number().int().min(0),
 }).strict();
 
 /** Immutable provider and topology authority pinned for exactly one Work
@@ -10270,14 +10270,14 @@ export const WorkExecutionSpanV1Schema: z.ZodObject<{
   terminal_evidence_digest: z.ZodType<ManifestDigest | null, unknown>;
   wall_micros: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
-  admitted_projection_sequence: z.number().int().safe().min(0),
+  admitted_projection_sequence: z.number().int().min(0),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   ended_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   started_at: z.lazy(() => UtcMicrosSchema),
   state: z.lazy(() => WorkAttemptStateV1Schema),
   terminal_evidence_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
-  wall_micros: z.number().int().safe().min(0).nullable(),
+  wall_micros: z.number().int().min(0).nullable(),
 }).strict();
 
 export const WorkExecutionTimingCoverageV1Schema: z.ZodType<WorkExecutionTimingCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
@@ -10303,16 +10303,16 @@ export const WorkExperienceCandidateV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkExperienceCoverageV1Schema: z.ZodType<WorkExperienceCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
-  applicable: z.number().int().min(0),
+  applicable: z.number().refine(Number.isInteger).min(0),
   coverage: z.literal("complete"),
-  returned: z.number().int().min(0),
-  stale_excluded: z.number().int().min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
+  stale_excluded: z.number().refine(Number.isInteger).min(0),
 }).strict(), z.object({
-  applicable: z.number().int().min(0),
+  applicable: z.number().refine(Number.isInteger).min(0),
   coverage: z.literal("partial"),
-  omitted_by_limit: z.number().int().min(0),
-  returned: z.number().int().min(0),
-  stale_excluded: z.number().int().min(0),
+  omitted_by_limit: z.number().refine(Number.isInteger).min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
+  stale_excluded: z.number().refine(Number.isInteger).min(0),
 }).strict(), z.object({
   coverage: z.literal("unavailable"),
 }).strict()]);
@@ -10328,7 +10328,7 @@ export const WorkExperienceRequestV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   evidence_not_before: z.lazy(() => UtcMicrosSchema),
   expertise_categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
-  limit: z.number().int().min(0),
+  limit: z.number().refine(Number.isInteger).min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -10394,7 +10394,7 @@ export const WorkFallbackTopologySchema: z.ZodType<WorkFallbackTopology, unknown
   kind: z.literal("disabled"),
 }).strict()]);
 
-export const WorkFenceEpochV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
+export const WorkFenceEpochV1Schema: z.ZodType<number, unknown> = z.number().int().min(0);
 
 export const WorkFilesystemPolicySchema: z.ZodEnum<{ "read_only": "read_only"; "workspace_write": "workspace_write" }> = z.enum(["read_only", "workspace_write"]);
 
@@ -10408,7 +10408,7 @@ export const WorkflowDefinitionSchema: z.ZodObject<{
   steps: z.ZodType<Array<WorkflowStep>, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(0),
+  definition_version: z.number().int().min(0),
   pinned_catalog_digest: z.lazy(() => ManifestDigestSchema),
   pinned_configuration_digest: z.lazy(() => ManifestDigestSchema),
   pinned_policy_digest: z.lazy(() => ManifestDigestSchema),
@@ -10423,8 +10423,8 @@ export const WorkflowDefinitionActivateRequestSchema: z.ZodObject<{
   expected_revision: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(1),
-  expected_revision: z.number().int().safe().min(1),
+  definition_version: z.number().int().min(1),
+  expected_revision: z.number().int().min(1),
 }).strict();
 
 /** Revisioned lifecycle disposition of one definition version. */
@@ -10436,8 +10436,8 @@ export const WorkflowDefinitionDispositionSchema: z.ZodObject<{
   transitioned_at: z.ZodType<UtcMicros, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(1),
-  revision: z.number().int().safe().min(1),
+  definition_version: z.number().int().min(1),
+  revision: z.number().int().min(1),
   state: z.lazy(() => WorkflowDefinitionLifecycleStateSchema),
   transitioned_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
@@ -10448,7 +10448,7 @@ export const WorkflowDefinitionGetRequestSchema: z.ZodObject<{
   definition_version: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(1),
+  definition_version: z.number().int().min(1),
 }).strict();
 
 /** Wire request for [`WorkflowDefinitionService::history`]. */
@@ -10481,8 +10481,8 @@ export const WorkflowDefinitionRejectRequestSchema: z.ZodObject<{
   expected_revision: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(1),
-  expected_revision: z.number().int().safe().min(1),
+  definition_version: z.number().int().min(1),
+  expected_revision: z.number().int().min(1),
 }).strict();
 
 /** Wire request for [`WorkflowDefinitionService::retire`]. */
@@ -10492,14 +10492,14 @@ export const WorkflowDefinitionRetireRequestSchema: z.ZodObject<{
   expected_revision: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
-  definition_version: z.number().int().safe().min(1),
-  expected_revision: z.number().int().safe().min(1),
+  definition_version: z.number().int().min(1),
+  expected_revision: z.number().int().min(1),
 }).strict();
 
 export const WorkflowFanOutSchema: z.ZodObject<{
   max_width: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  max_width: z.number().int().min(0),
+  max_width: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const WorkflowFanOutChildPlanV1Schema: z.ZodObject<{
@@ -10534,7 +10534,7 @@ export const WorkflowFanOutFailurePolicyV1Schema: z.ZodType<WorkflowFanOutFailur
   policy: z.literal("fail_fast"),
 }), z.object({
   policy: z.literal("require_at_least"),
-  successes: z.number().int().min(1).max(65535),
+  successes: z.number().refine(Number.isInteger).min(1).max(65535),
 })]);
 
 export const WorkflowFanOutPlanV1Schema: z.ZodObject<{
@@ -10558,7 +10558,7 @@ export const WorkflowFanOutPlanV1Schema: z.ZodObject<{
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
   failure_policy: z.lazy(() => WorkflowFanOutFailurePolicyV1Schema),
-  maximum_parallel: z.number().int().min(1).max(65535),
+  maximum_parallel: z.number().refine(Number.isInteger).min(1).max(65535),
   operation: z.lazy(() => WorkflowOperationRefSchema),
   plan_digest: z.lazy(() => ManifestDigestSchema),
   reference: z.union([z.lazy(() => RefIdSchema), z.null()]),
@@ -10624,7 +10624,7 @@ export const WorkflowRunEventSchema: z.ZodObject<{
   input_digest: z.lazy(() => ManifestDigestSchema),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   run_id: z.lazy(() => RunIdSchema),
-  sequence: z.number().int().safe().min(0),
+  sequence: z.number().int().min(0),
 }).strict();
 
 export const WorkflowRunEventKindSchema: z.ZodType<WorkflowRunEventKind, unknown> = z.discriminatedUnion("type", [z.object({
@@ -10698,7 +10698,7 @@ export const WorkflowRunProjectionSchema: z.ZodObject<{
   pinned_topology_digest: z.lazy(() => ManifestDigestSchema),
   released_fan_out_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   run_id: z.lazy(() => RunIdSchema),
-  sequence: z.number().int().safe().min(0),
+  sequence: z.number().int().min(0),
   settled_fan_out_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   status: z.lazy(() => WorkflowRunStatusSchema),
   steps: z.record(z.string(), z.lazy(() => WorkflowStepRunProjectionSchema)),
@@ -10784,7 +10784,7 @@ at least one side was absent; it is not collapsed into agreement. */
 export const WorkFrontierComparisonV1Schema: z.ZodEnum<{ "agree": "agree"; "disagree": "disagree"; "incomparable": "incomparable" }> = z.enum(["agree", "disagree", "incomparable"]);
 
 export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, unknown> = z.discriminatedUnion("kind", [z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   kind: z.literal("accepted_attempt_linked"),
   linked_at: z.lazy(() => UtcMicrosSchema),
@@ -10795,7 +10795,7 @@ export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, unknown> = z.
   task_id: z.lazy(() => TaskIdSchema),
 }).strict(), z.object({
   admitted_at: z.lazy(() => UtcMicrosSchema),
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   kind: z.literal("execution_admitted"),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict(), z.object({
@@ -10910,21 +10910,21 @@ own event named, would have to be folded across that event to exist at all.
 onward. */
 export const WorkGraphSelectionCoverageV1Schema: z.ZodType<WorkGraphSelectionCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
-  covered_events: z.number().int().min(0),
+  covered_events: z.number().refine(Number.isInteger).min(0),
 }), z.object({
   coverage: z.literal("partial"),
-  covered_events: z.number().int().min(0),
-  excluded_events: z.number().int().min(0),
-  first_excluded_sequence: z.number().int().safe().min(0),
+  covered_events: z.number().refine(Number.isInteger).min(0),
+  excluded_events: z.number().refine(Number.isInteger).min(0),
+  first_excluded_sequence: z.number().int().min(0),
 })]);
 
 export const WorkGraphTimelineCoverageV1Schema: z.ZodType<WorkGraphTimelineCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
-  returned: z.number().int().min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
 }), z.object({
   continuation: z.string(),
   coverage: z.literal("partial"),
-  returned: z.number().int().min(0),
+  returned: z.number().refine(Number.isInteger).min(0),
 })]);
 
 export const WorkGraphTimelineV1Schema: z.ZodObject<{
@@ -11012,7 +11012,7 @@ export const WorkItemInputV1Schema: z.ZodObject<{
   created_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  effort: z.number().int().min(0),
+  effort: z.number().refine(Number.isInteger).min(0),
   hierarchy: z.lazy(() => WorkHierarchyV1Schema),
   informational_relations: z.array(z.lazy(() => TaskIdSchema)),
   scheduled_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -11051,7 +11051,7 @@ export const WorkKanbanCardV1Schema: z.ZodObject<{
   legal_actions: z.ZodType<Array<WorkLegalActionV1>, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  effort: z.number().int().min(0),
+  effort: z.number().refine(Number.isInteger).min(0),
   lane: z.lazy(() => WorkTimelineLaneV1Schema),
   legal_actions: z.array(z.lazy(() => WorkLegalActionV1Schema)),
   task_id: z.lazy(() => TaskIdSchema),
@@ -11062,7 +11062,7 @@ export const WorkKanbanProjectionV1Schema: z.ZodObject<{
   graph_version: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   cards: z.array(z.lazy(() => WorkKanbanCardV1Schema)),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
 }).strict();
 
 export const WorkLeakAdjudicationOutcomeV1Schema: z.ZodType<WorkLeakAdjudicationOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
@@ -11083,7 +11083,7 @@ export const WorkLeakAdjudicationReceiptV1Schema: z.ZodObject<{
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => AdjudicateWorkLeakCommandV1Schema),
   evidence: z.lazy(() => VerifiedWorkLeakEvidenceV1Schema),
-  revision: z.number().int().safe().min(0),
+  revision: z.number().int().min(0),
   scan_deadline: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
@@ -11122,11 +11122,11 @@ export const WorkObservedExecutionV1Schema: z.ZodObject<{
   ordinal: z.ZodType<number, unknown>;
   state: z.ZodType<WorkAttemptStateV1, unknown>;
 }, z.core.$strict> = z.object({
-  admitted_projection_sequence: z.number().int().safe().min(0),
+  admitted_projection_sequence: z.number().int().min(0),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  ordinal: z.number().int().min(0),
+  ordinal: z.number().refine(Number.isInteger).min(0),
   state: z.lazy(() => WorkAttemptStateV1Schema),
 }).strict();
 
@@ -11167,12 +11167,12 @@ export const WorkPlacementObservationV1Schema: z.ZodObject<{
   untracked_paths: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   active_holder: z.boolean(),
-  dirty_tracked_paths: z.number().int().min(0),
+  dirty_tracked_paths: z.number().refine(Number.isInteger).min(0),
   network_required: z.boolean(),
   observed_at: z.lazy(() => UtcMicrosSchema),
   readable: z.boolean(),
-  unique_commits: z.number().int().min(0).nullable(),
-  untracked_paths: z.number().int().min(0),
+  unique_commits: z.number().refine(Number.isInteger).min(0).nullable(),
+  untracked_paths: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const WorkPlacementPreflightRequestV1Schema: z.ZodObject<{
@@ -11243,7 +11243,7 @@ export const WorkPlacementV1Schema: z.ZodObject<{
   target: z.ZodType<WorkPlacementTargetV1, unknown>;
   transitioned_at: z.ZodType<UtcMicros, unknown>;
 }, z.core.$strict> = z.object({
-  authority_version: z.number().int().safe().min(0),
+  authority_version: z.number().int().min(0),
   blockers: z.array(z.lazy(() => WorkPlacementBlockerV1Schema)),
   identity: z.lazy(() => WorkPlacementIdentityV1Schema),
   retention_eligible_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -11380,14 +11380,14 @@ export const WorkProductEventV1Schema: z.ZodObject<{
   configuration_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
   event_id: z.string(),
   evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
-  expected_graph_version: z.number().int().safe().min(0).nullable(),
+  expected_graph_version: z.number().int().min(0).nullable(),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   owner_scope: z.lazy(() => WorkProductProfileScopeV1Schema),
   payload: z.lazy(() => WorkProductEventPayloadV1Schema),
   policy_revision_id: z.string(),
-  result_graph_version: z.number().int().safe().min(0),
-  sequence: z.number().int().safe().min(0),
-  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
+  result_graph_version: z.number().int().min(0),
+  sequence: z.number().int().min(0),
+  source_watermark: z.record(z.string(), z.number().int().min(0)),
 }).strict();
 
 export const WorkProductExpectedAuthorityV1Schema: z.ZodType<WorkProductExpectedAuthorityV1, unknown> = z.discriminatedUnion("authority", [z.object({
@@ -11414,7 +11414,7 @@ export const WorkProductGraphV1Schema: z.ZodObject<{
   plans: z.array(z.lazy(() => WorkPlanV1Schema)),
   proposal_decisions: z.array(z.lazy(() => WorkProposalDecisionV12Schema)),
   relation_replan_decisions: z.array(z.lazy(() => WorkRelationReplanDecisionV1Schema)),
-  version: z.number().int().safe().min(0),
+  version: z.number().int().min(0),
 }).strict();
 
 export const WorkProductMutationIdentityV1Schema: z.ZodObject<{
@@ -11497,7 +11497,7 @@ export const WorkProductProjectionBundleV1Schema: z.ZodObject<{
   causal: z.lazy(() => WorkCausalProjectionV1Schema),
   critical_path: z.lazy(() => WorkCriticalPathProjectionV1Schema),
   dag: z.lazy(() => WorkDagProjectionV1Schema),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
   kanban: z.lazy(() => WorkKanbanProjectionV1Schema),
   runtime: z.lazy(() => WorkRuntimeProjectionV1Schema),
   timeline: z.lazy(() => WorkTimelineProjectionV1Schema),
@@ -11569,7 +11569,7 @@ export const WorkProductSelectionScopeV1Schema: z.ZodType<WorkProductSelectionSc
   selection: z.literal("relations"),
 })]);
 
-export const WorkProjectionSequenceV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
+export const WorkProjectionSequenceV1Schema: z.ZodType<number, unknown> = z.number().int().min(0);
 
 /** The explicit command the decision recommends next. A recommendation never
 executes; each action names a separate version-checked application command. */
@@ -11636,21 +11636,21 @@ export const WorkProposalDecisionV1Schema: z.ZodObject<{
   sizing: z.ZodOptional<z.ZodType<WorkCalibratedSizingV1 | null, unknown>>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   decomposition: z.union([z.lazy(() => WorkDecompositionProposalV1Schema), z.null()]).optional(),
   deterministic_fallback: z.boolean(),
   disposition: z.lazy(() => WorkProposalDispositionV1Schema),
   evaluator_id: z.lazy(() => PolicyIdentifierV1Schema),
-  evaluator_revision: z.number().int().safe().min(0),
+  evaluator_revision: z.number().int().min(0),
   frontier_comparison: z.lazy(() => WorkFrontierComparisonV1Schema),
   input_digest: z.lazy(() => ManifestDigestSchema),
   live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   ordered_reason_codes: z.array(z.lazy(() => WorkProposalReasonV1Schema)),
   policy_digest: z.lazy(() => ManifestDigestSchema),
-  policy_revision: z.number().int().safe().min(0),
+  policy_revision: z.number().int().min(0),
   recommended_action: z.union([z.lazy(() => WorkProposalActionV1Schema), z.null()]),
   route_plan: z.union([z.lazy(() => WorkRoutePlanV1Schema), z.null()]).optional(),
   shape: z.union([z.lazy(() => WorkTaskShapeV1Schema), z.null()]).optional(),
@@ -11687,7 +11687,7 @@ export const WorkProposalV1Schema: z.ZodObject<{
   sizing: z.ZodType<WorkSizingV1, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   children: z.array(z.lazy(() => WorkProposedChildV1Schema)),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
@@ -11706,7 +11706,7 @@ export const WorkProposedChildV1Schema: z.ZodObject<{
   title: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  effort: z.number().int().min(0),
+  effort: z.number().refine(Number.isInteger).min(0),
   task_id: z.lazy(() => TaskIdSchema),
   title: z.string(),
 }).strict();
@@ -11778,7 +11778,7 @@ export const WorkRankedRouteV1Schema: z.ZodObject<{
   cost: z.lazy(() => WorkOrdinalBandV1Schema),
   evidence_quality: z.lazy(() => WorkOrdinalBandV1Schema),
   latency: z.lazy(() => WorkOrdinalBandV1Schema),
-  rank: z.number().int().min(0),
+  rank: z.number().refine(Number.isInteger).min(0),
   route_id: z.string(),
   sensitive_data_fitness: z.lazy(() => WorkOrdinalBandV1Schema),
 }).strict();
@@ -11819,7 +11819,7 @@ export const WorkRelationReplanProposalV1Schema: z.ZodObject<{
   proposal_id: z.ZodType<ProposalId, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  based_on_version: z.number().int().safe().min(0),
+  based_on_version: z.number().int().min(0),
   causal_candidates: z.array(z.lazy(() => TaskIdSchema)),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
   informational_relations: z.array(z.lazy(() => TaskIdSchema)),
@@ -11916,7 +11916,7 @@ export const WorkRoutePlanV1Schema: z.ZodObject<{
 }).strict();
 
 /** A monotonically versioned control authority. */
-export const WorkRunControlAuthorityV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
+export const WorkRunControlAuthorityV1Schema: z.ZodType<number, unknown> = z.number().int().min(0);
 
 /** One run's control reading.
 
@@ -11928,12 +11928,12 @@ export const WorkRunControlReadingV1Schema: z.ZodType<WorkRunControlReadingV1, u
   control: z.lazy(() => WorkRunControlV1Schema),
   live_attempts: z.array(z.lazy(() => AttemptIdSchema)),
   state: z.literal("controlled"),
-  total_attempts: z.number().int().min(0),
+  total_attempts: z.number().refine(Number.isInteger).min(0),
 }).strict(), z.object({
   deadline: z.lazy(() => UtcMicrosSchema),
   live_attempts: z.array(z.lazy(() => AttemptIdSchema)),
   state: z.literal("uncontrolled"),
-  total_attempts: z.number().int().min(0),
+  total_attempts: z.number().refine(Number.isInteger).min(0),
 }).strict()]);
 
 /** Why a run was paused or resumed. A closed vocabulary keeps the reason out
@@ -11988,7 +11988,7 @@ export const WorkRunDeadlineCheckpointV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   checkpoint_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.lazy(() => UtcMicrosSchema),
-  remaining_micros: z.number().int().safe(),
+  remaining_micros: z.number().int(),
 }).strict();
 
 export const WorkRuntimeAttemptProjectionV1Schema: z.ZodObject<{
@@ -12019,7 +12019,7 @@ export const WorkRuntimeProjectionV1Schema: z.ZodObject<{
   attempts: z.array(z.lazy(() => WorkRuntimeAttemptProjectionV1Schema)),
   coverage: z.lazy(() => WorkRuntimeProjectionCoverageV1Schema),
   generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
   sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
 }).strict();
@@ -12035,10 +12035,10 @@ export const WorkShapeAssessmentV1Schema: z.ZodObject<{
   integration_overhead: z.ZodType<number, unknown>;
   score_kind: z.ZodType<WorkScoreKindV1, unknown>;
 }, z.core.$strict> = z.object({
-  ambiguity: z.number().int().min(0).max(255),
-  blast_radius: z.number().int().min(0).max(255),
-  complexity: z.number().int().min(0).max(255),
-  integration_overhead: z.number().int().min(0).max(255),
+  ambiguity: z.number().refine(Number.isInteger).min(0).max(255),
+  blast_radius: z.number().refine(Number.isInteger).min(0).max(255),
+  complexity: z.number().refine(Number.isInteger).min(0).max(255),
+  integration_overhead: z.number().refine(Number.isInteger).min(0).max(255),
   score_kind: z.lazy(() => WorkScoreKindV1Schema),
 }).strict();
 
@@ -12050,9 +12050,9 @@ export const WorkSizingV1Schema: z.ZodObject<{
   score_kind: z.ZodType<WorkScoreKindV1, unknown>;
 }, z.core.$strict> = z.object({
   coverage: z.string(),
-  high: z.number().int().min(0),
-  likely: z.number().int().min(0),
-  low: z.number().int().min(0),
+  high: z.number().refine(Number.isInteger).min(0),
+  likely: z.number().refine(Number.isInteger).min(0),
+  low: z.number().refine(Number.isInteger).min(0),
   score_kind: z.lazy(() => WorkScoreKindV1Schema),
 }).strict();
 
@@ -12062,7 +12062,7 @@ export const WorkSubtaskSketchV1Schema: z.ZodObject<{
   shape: z.ZodType<WorkTaskShapeKindV1, unknown>;
   summary: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
-  ordinal: z.number().int().min(0),
+  ordinal: z.number().refine(Number.isInteger).min(0),
   shape: z.lazy(() => WorkTaskShapeKindV1Schema),
   summary: z.string(),
 }).strict();
@@ -12162,10 +12162,10 @@ export const WorkTaskSessionCoverageV1Schema: z.ZodObject<{
   unknown: z.ZodType<number, unknown>;
   visible: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  hidden: z.number().int().safe().min(0),
-  redacted: z.number().int().safe().min(0),
-  unknown: z.number().int().safe().min(0),
-  visible: z.number().int().safe().min(0),
+  hidden: z.number().int().min(0),
+  redacted: z.number().int().min(0),
+  unknown: z.number().int().min(0),
+  visible: z.number().int().min(0),
 }).strict();
 
 export const WorkTaskSessionEvidenceV1Schema: z.ZodObject<{
@@ -12205,8 +12205,8 @@ export const WorkTaskSessionHydrationV1Schema: z.ZodObject<{
   state: z.ZodType<WorkTaskSessionHydrationStateV1, unknown>;
 }, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
-  content: z.array(z.number().int().min(0).max(255)).nullable(),
-  rank: z.number().int().min(0),
+  content: z.array(z.number().refine(Number.isInteger).min(0).max(255)).nullable(),
+  rank: z.number().refine(Number.isInteger).min(0),
   state: z.lazy(() => WorkTaskSessionHydrationStateV1Schema),
 }).strict();
 
@@ -12222,16 +12222,16 @@ export const WorkTaskSessionRankContributionV1Schema: z.ZodObject<{
   weight_micros: z.ZodType<number, unknown>;
   weighted_contribution_micros: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  calibrated_feature_micros: z.number().int().min(0),
+  calibrated_feature_micros: z.number().refine(Number.isInteger).min(0),
   calibration_profile: z.string(),
-  ordinal_rank: z.number().int().min(0),
-  raw_score_micros: z.number().int().safe(),
+  ordinal_rank: z.number().refine(Number.isInteger).min(0),
+  raw_score_micros: z.number().int(),
   retriever: z.string(),
   retriever_revision: z.string(),
   score_domain: z.string(),
   source_occurrence: z.string(),
-  weight_micros: z.number().int().min(0),
-  weighted_contribution_micros: z.number().int().safe().min(0),
+  weight_micros: z.number().refine(Number.isInteger).min(0),
+  weighted_contribution_micros: z.number().int().min(0),
 }).strict();
 
 export const WorkTaskSessionRankedAnchorV1Schema: z.ZodObject<{
@@ -12242,8 +12242,8 @@ export const WorkTaskSessionRankedAnchorV1Schema: z.ZodObject<{
 }, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   contributions: z.array(z.lazy(() => WorkTaskSessionRankContributionV1Schema)),
-  final_ordinal: z.number().int().min(0),
-  utility_micros: z.number().int().safe().min(0),
+  final_ordinal: z.number().refine(Number.isInteger).min(0),
+  utility_micros: z.number().int().min(0),
 }).strict();
 
 /** Kind of work the snapshot facts describe. Derived only from facts already in
@@ -12299,7 +12299,7 @@ export const WorkTimelineProjectionV1Schema: z.ZodObject<{
   graph_version: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   entries: z.array(z.lazy(() => WorkTimelineEntryV1Schema)),
-  graph_version: z.number().int().safe().min(0),
+  graph_version: z.number().int().min(0),
 }).strict();
 
 /** The execution-placement dimension: the policy's placement mode plus one
@@ -12336,7 +12336,7 @@ export const WorkTopologyPlacementLaneV1Schema: z.ZodObject<{
   run_id: z.ZodType<RunId, unknown>;
   task_id: z.ZodType<TaskId, unknown>;
 }, z.core.$strict> = z.object({
-  attempt_count: z.number().int().min(0),
+  attempt_count: z.number().refine(Number.isInteger).min(0),
   placement: z.lazy(() => WorkPlacementReadingV1Schema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -12373,7 +12373,7 @@ export const WorkTopologyPolicyV1Schema: z.ZodObject<{
   retention: z.lazy(() => WorktreeRetentionPolicyV1Schema),
   review_topology: z.lazy(() => ReviewTopologyPolicyV1Schema),
   roots: z.array(z.lazy(() => WorktreeRootPolicyV1Schema)),
-  schema_version: z.number().int().min(0).max(65535),
+  schema_version: z.number().refine(Number.isInteger).min(0).max(65535),
 }).strict();
 
 /** One page-bounded topology view read. The cursor vocabulary is the attempt
@@ -12384,7 +12384,7 @@ export const WorkTopologyViewRequestV1Schema: z.ZodObject<{
   page_size: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int().min(0),
+  page_size: z.number().refine(Number.isInteger).min(0),
 }).strict();
 
 export const WorktreeCleanlinessRequirementV1Schema: z.ZodEnum<{ "allow_untracked_only_for_preflight": "allow_untracked_only_for_preflight"; "read_only_preflight_only": "read_only_preflight_only"; "require_clean": "require_clean" }> = z.enum(["allow_untracked_only_for_preflight", "read_only_preflight_only", "require_clean"]);
@@ -12409,10 +12409,10 @@ export const WorktreeRetentionPolicyV1Schema: z.ZodObject<{
   maximum_retained_per_repository: z.ZodType<number | null, unknown>;
   terminal_retention_seconds: z.ZodType<number | null, unknown>;
 }, z.core.$strict> = z.object({
-  abandoned_retention_seconds: z.number().int().safe().min(1).nullable(),
+  abandoned_retention_seconds: z.number().int().min(1).nullable(),
   automatic_gc: z.lazy(() => AutomaticWorktreeGcV1Schema),
-  maximum_retained_per_repository: z.number().int().min(1).max(65535).nullable(),
-  terminal_retention_seconds: z.number().int().safe().min(1).nullable(),
+  maximum_retained_per_repository: z.number().refine(Number.isInteger).min(1).max(65535).nullable(),
+  terminal_retention_seconds: z.number().int().min(1).nullable(),
 }).strict();
 
 export const WorktreeRootPolicyV1Schema: z.ZodObject<{
@@ -12422,7 +12422,7 @@ export const WorktreeRootPolicyV1Schema: z.ZodObject<{
   root_id: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   locator: z.lazy(() => SensitiveFilesystemLocatorV1Schema),
-  maximum_active_worktrees: z.number().int().min(1).max(65535),
+  maximum_active_worktrees: z.number().refine(Number.isInteger).min(1).max(65535),
   repository_scope: z.lazy(() => RepositoryPlacementScopeV1Schema),
   root_id: z.string(),
 }).strict();
@@ -12436,11 +12436,11 @@ export const WorkWorkloadProjectionV1Schema: z.ZodObject<{
   running_effort: z.ZodType<number | null, unknown>;
   total_effort: z.ZodType<number, unknown>;
 }, z.core.$strict> = z.object({
-  actual_concurrency: z.number().int().min(0).nullable(),
-  blocked_effort: z.number().int().min(0).nullable(),
-  graph_version: z.number().int().safe().min(0),
-  ready_effort: z.number().int().min(0).nullable(),
-  requested_concurrency: z.number().int().min(0).nullable(),
-  running_effort: z.number().int().min(0).nullable(),
-  total_effort: z.number().int().min(0),
+  actual_concurrency: z.number().refine(Number.isInteger).min(0).nullable(),
+  blocked_effort: z.number().refine(Number.isInteger).min(0).nullable(),
+  graph_version: z.number().int().min(0),
+  ready_effort: z.number().refine(Number.isInteger).min(0).nullable(),
+  requested_concurrency: z.number().refine(Number.isInteger).min(0).nullable(),
+  running_effort: z.number().refine(Number.isInteger).min(0).nullable(),
+  total_effort: z.number().refine(Number.isInteger).min(0),
 }).strict();
