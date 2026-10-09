@@ -107,6 +107,48 @@ pub async fn set_parse_offset(
     .map_err(|error| TranscriptPersistenceError::storage("write transcript parse offset", error))
 }
 
+/// Writes one session row with its path column in the canonical form that
+/// project-scoped reads query. `project_key` is an opaque authority and
+/// remains byte-exact; `transcript_path` remains the real display path.
+pub async fn upsert_session_on(conn: &impl Executor, session: &SessionRecord) -> bool {
+    conn.execute(
+        "INSERT INTO sessions
+             (provider, session_id, project_key, project_path, title, started_at, ended_at,
+              transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+              parent_tool_use_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(provider, session_id) DO UPDATE SET
+            project_key = excluded.project_key,
+            project_path = excluded.project_path,
+            title = excluded.title,
+            started_at = excluded.started_at,
+            ended_at = excluded.ended_at,
+            transcript_path = excluded.transcript_path,
+            metadata_json = excluded.metadata_json,
+            parent_session_id = excluded.parent_session_id,
+            is_subagent = excluded.is_subagent,
+            agent_id = excluded.agent_id,
+            parent_tool_use_id = excluded.parent_tool_use_id",
+        params![
+            session.provider.clone(),
+            session.session_id.clone(),
+            session.project_key.clone(),
+            durable_project_path_key(&session.project_path),
+            session.title.clone(),
+            session.started_at,
+            session.ended_at,
+            session.transcript_path.clone(),
+            session.metadata_json.clone(),
+            session.parent_session_id.clone(),
+            i64::from(session.is_subagent),
+            session.agent_id.clone(),
+            session.parent_tool_use_id.clone(),
+        ],
+    )
+    .await
+    .is_ok()
+}
+
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     pub(super) async fn begin_transcript_transaction(
         &self,
@@ -117,55 +159,22 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.upsert_sessions(std::slice::from_ref(session)).await
+    }
+
+    pub async fn upsert_sessions(&self, sessions: &[SessionRecord]) -> bool {
+        if sessions.is_empty() {
+            return true;
+        }
         let Ok(transaction) = self.begin_transcript_transaction().await else {
             return false;
         };
-        if !Self::upsert_session_in_existing_tx(&transaction, session).await {
-            return false;
+        for session in sessions {
+            if !upsert_session_on(&transaction, session).await {
+                return false;
+            }
         }
         transaction.commit().await.is_ok()
-    }
-
-    /// Writes one session row with its path column in the canonical form that
-    /// project-scoped reads query. `project_key` is an opaque authority and
-    /// remains byte-exact; `transcript_path` remains the real display path.
-    async fn upsert_session_in_existing_tx(conn: &impl Executor, session: &SessionRecord) -> bool {
-        conn.execute(
-            "INSERT INTO sessions
-                 (provider, session_id, project_key, project_path, title, started_at, ended_at,
-                  transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
-                  parent_tool_use_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(provider, session_id) DO UPDATE SET
-                project_key = excluded.project_key,
-                project_path = excluded.project_path,
-                title = excluded.title,
-                started_at = excluded.started_at,
-                ended_at = excluded.ended_at,
-                transcript_path = excluded.transcript_path,
-                metadata_json = excluded.metadata_json,
-                parent_session_id = excluded.parent_session_id,
-                is_subagent = excluded.is_subagent,
-                agent_id = excluded.agent_id,
-                parent_tool_use_id = excluded.parent_tool_use_id",
-            params![
-                session.provider.clone(),
-                session.session_id.clone(),
-                session.project_key.clone(),
-                durable_project_path_key(&session.project_path),
-                session.title.clone(),
-                session.started_at,
-                session.ended_at,
-                session.transcript_path.clone(),
-                session.metadata_json.clone(),
-                session.parent_session_id.clone(),
-                i64::from(session.is_subagent),
-                session.agent_id.clone(),
-                session.parent_tool_use_id.clone(),
-            ],
-        )
-        .await
-        .is_ok()
     }
 
     pub async fn get_session(

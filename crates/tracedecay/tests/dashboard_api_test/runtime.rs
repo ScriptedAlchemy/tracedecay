@@ -27,9 +27,10 @@ use tracedecay_lcm::raw::{commit_staged_raw_message, stage_raw_message_with_payl
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord, upsert_session_on};
 
 #[derive(Clone)]
 struct DashboardTestCodeGraphProjectionV1 {
@@ -345,6 +346,17 @@ impl DashboardTestRuntimeV1 {
         .await
     }
 
+    pub(crate) async fn seed_session_message_observations_for_test(
+        &self,
+        seeds: &[dashboard::observation_seed::DashboardSessionMessageSeedV1<'_>],
+    ) -> Result<()> {
+        dashboard::observation_seed::seed_session_message_observations_for_test(
+            self.project_database.as_ref(),
+            seeds,
+        )
+        .await
+    }
+
     /// Runs one host provider's transcripts under the fixture `HOME` through
     /// the production project ingest into this project's session store.
     pub(crate) async fn ingest_project_provider_for_test(
@@ -483,6 +495,14 @@ impl DashboardTestRuntimeV1 {
         Ok(self.database(scope)?.upsert_session(session).await)
     }
 
+    pub(crate) async fn upsert_sessions_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        sessions: &[SessionRecord],
+    ) -> Result<bool> {
+        Ok(self.database(scope)?.upsert_sessions(sessions).await)
+    }
+
     /// Seeds one raw LCM message into its already-registered session.
     pub(crate) async fn upsert_session_message_for_test(
         &self,
@@ -517,13 +537,25 @@ impl DashboardTestRuntimeV1 {
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
     ) -> Result<Vec<i64>> {
+        self.seed_session_histories_for_test(
+            scope,
+            std::slice::from_ref(&(session.clone(), messages.to_vec())),
+        )
+        .await?;
+        self.raw_message_store_ids_for_test(scope, messages).await
+    }
+
+    /// Seeds many session rows and their raw LCM messages in the same
+    /// 32-item write windows the host projection drain uses. Large-history
+    /// callers skip per-message store-id snapshots so fixture setup does not
+    /// pin a reader lease for every row.
+    pub(crate) async fn seed_session_histories_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        histories: &[(SessionRecord, Vec<SessionMessageRecord>)],
+    ) -> Result<()> {
+        const BATCH_ITEMS: usize = 32;
         let database = self.database(scope)?;
-        if !database.upsert_session(session).await {
-            return Err(TraceDecayError::Database {
-                operation: "seed dashboard test session".to_owned(),
-                message: "registered session write failed".to_owned(),
-            });
-        }
         let storage_root =
             database
                 .db_path()
@@ -532,27 +564,40 @@ impl DashboardTestRuntimeV1 {
                     operation: "seed dashboard test session message".to_owned(),
                     message: "registered session database has no storage root".to_owned(),
                 })?;
-        // Keep fixture write leases bounded like the host projection drain.
-        for chunk in messages.chunks(32) {
+        for window in histories.chunks(BATCH_ITEMS) {
             let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
-            let staged = chunk
-                .iter()
-                .map(|message| {
-                    stage_raw_message_with_payload_tracked(storage_root, message, &mut rollback)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| TraceDecayError::Database {
-                    operation: "seed dashboard test session message".to_owned(),
-                    message: error.to_string(),
-                })?;
-            let transaction = database.begin_write_transaction().await?;
-            for (message, staged) in chunk.iter().zip(staged) {
-                commit_staged_raw_message(&transaction, message, staged)
-                    .await
+            let mut staged_window = Vec::with_capacity(window.len());
+            for (_, messages) in window {
+                let staged = messages
+                    .iter()
+                    .map(|message| {
+                        stage_raw_message_with_payload_tracked(storage_root, message, &mut rollback)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|error| TraceDecayError::Database {
                         operation: "seed dashboard test session message".to_owned(),
                         message: error.to_string(),
                     })?;
+                staged_window.push(staged);
+            }
+            let transaction = database.begin_write_transaction().await?;
+            for (session, _) in window {
+                if !upsert_session_on(&transaction, session).await {
+                    return Err(TraceDecayError::Database {
+                        operation: "seed dashboard test session".to_owned(),
+                        message: "registered session write failed".to_owned(),
+                    });
+                }
+            }
+            for ((_, messages), staged) in window.iter().zip(staged_window) {
+                for (message, staged) in messages.iter().zip(staged) {
+                    commit_staged_raw_message(&transaction, message, staged)
+                        .await
+                        .map_err(|error| TraceDecayError::Database {
+                            operation: "seed dashboard test session message".to_owned(),
+                            message: error.to_string(),
+                        })?;
+                }
             }
             transaction
                 .commit()
@@ -563,10 +608,34 @@ impl DashboardTestRuntimeV1 {
                 })?;
             rollback.disarm();
         }
+        Ok(())
+    }
+
+    async fn raw_message_store_ids_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        messages: &[SessionMessageRecord],
+    ) -> Result<Vec<i64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let snapshot = self.database(scope)?.read_snapshot().await?;
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let store_id = database
-                .lcm_raw_message_store_id(&message.provider, &message.message_id)
+            let mut rows = snapshot
+                .query(
+                    "SELECT store_id
+                     FROM lcm_raw_messages
+                     WHERE provider = ?1 AND message_id = ?2",
+                    params![message.provider.clone(), message.message_id.clone()],
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
+                })?;
+            let store_id = rows
+                .next()
                 .await
                 .map_err(|error| TraceDecayError::Database {
                     operation: "read dashboard test transcript store id".to_owned(),
@@ -578,6 +647,11 @@ impl DashboardTestRuntimeV1 {
                         "LCM raw message {}/{} is unavailable after insert",
                         message.provider, message.message_id
                     ),
+                })?
+                .get(0)
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
                 })?;
             store_ids.push(store_id);
         }
