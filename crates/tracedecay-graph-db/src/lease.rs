@@ -370,6 +370,16 @@ impl VerifiedGraphSnapshot {
             served
         } else {
             self.with_operation(|| {
+                // Publication installs the sealed store before it releases
+                // the staging rows, and the release itself commits under
+                // this gate. Either may have landed while this read waited,
+                // so the sealed probe repeats under the gate before the
+                // staging answer is trusted as absent.
+                if let Some(served) =
+                    self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
+                {
+                    return Ok(served);
+                }
                 let lease = self.lease_for_projection(&reference.projection)?;
                 let namespace = lease.locator.physical_namespace()?;
                 Ok((
@@ -401,6 +411,14 @@ impl VerifiedGraphSnapshot {
             served
         } else {
             self.with_operation(|| {
+                // Same mid-wait transition as `entity`: a sealed store
+                // installed while this read queued on the gate is
+                // authoritative over staging rows that may already be gone.
+                if let Some(served) =
+                    self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
+                {
+                    return Ok(served);
+                }
                 Ok((
                     GraphReadStore::Staging,
                     self.database
