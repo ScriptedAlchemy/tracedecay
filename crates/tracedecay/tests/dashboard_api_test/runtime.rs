@@ -563,23 +563,63 @@ impl DashboardTestRuntimeV1 {
                 })?;
             rollback.disarm();
         }
-        let mut store_ids = Vec::with_capacity(messages.len());
-        for message in messages {
-            let store_id = database
-                .lcm_raw_message_store_id(&message.provider, &message.message_id)
-                .await
+        // One batched snapshot per session instead of one per message: large
+        // histories otherwise serialize thousands of reader-pool acquisitions
+        // behind the writes, and their read marks pin WAL checkpoint backfill
+        // under load (issue #3204).
+        let provider = messages
+            .first()
+            .map(|message| message.provider.clone())
+            .unwrap_or_default();
+        let snapshot = database.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id, message_id FROM lcm_raw_messages
+                 WHERE provider = ?1 AND session_id = ?2",
+                tracedecay_runtime_core::db::engine::params![provider, session.session_id.clone()],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read dashboard test transcript store ids".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut by_message_id = std::collections::HashMap::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read dashboard test transcript store id rows".to_owned(),
+                message: error.to_string(),
+            })?
+        {
+            let store_id = row
+                .get::<i64>(0)
                 .map_err(|error| TraceDecayError::Database {
                     operation: "read dashboard test transcript store id".to_owned(),
                     message: error.to_string(),
-                })?
-                .ok_or_else(|| TraceDecayError::Database {
-                    operation: "read dashboard test transcript store id".to_owned(),
-                    message: format!(
-                        "LCM raw message {}/{} is unavailable after insert",
-                        message.provider, message.message_id
-                    ),
                 })?;
-            store_ids.push(store_id);
+            let message_id = row
+                .get::<String>(1)
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
+                })?;
+            by_message_id.insert(message_id, store_id);
+        }
+        let mut store_ids = Vec::with_capacity(messages.len());
+        for message in messages {
+            store_ids.push(
+                by_message_id
+                    .get(&message.message_id)
+                    .copied()
+                    .ok_or_else(|| TraceDecayError::Database {
+                        operation: "read dashboard test transcript store id".to_owned(),
+                        message: format!(
+                            "LCM raw message {}/{} is unavailable after insert",
+                            message.provider, message.message_id
+                        ),
+                    })?,
+            );
         }
         Ok(store_ids)
     }
