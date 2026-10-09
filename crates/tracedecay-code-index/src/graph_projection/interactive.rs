@@ -1331,6 +1331,9 @@ impl CodeGraphInteractiveReader {
                 break;
             }
         }
+        if has_more && cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
         if !has_more {
             for (index, &symbol_index) in catalog.source_order.iter().enumerate() {
                 if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {

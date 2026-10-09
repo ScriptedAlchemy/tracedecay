@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_contracts::CancellationSignal;
@@ -1022,85 +1022,6 @@ fn file_dependencies_are_served_from_the_catalog_without_store_reads() {
     );
 }
 
-fn median_micros(samples: &mut [u128]) -> u128 {
-    samples.sort_unstable();
-    samples[samples.len() / 2]
-}
-
-fn time_search(
-    reader: &super::CodeGraphInteractiveReader,
-    query: &str,
-    offset: usize,
-    limit: usize,
-    rounds: usize,
-) -> (u128, usize, bool, Option<u64>) {
-    let mut samples = Vec::with_capacity(rounds);
-    let mut last = None;
-    for _ in 0..rounds {
-        let started = Instant::now();
-        let page = reader
-            .search_symbols(query, None, offset, limit, request())
-            .expect("timed search");
-        samples.push(started.elapsed().as_micros());
-        last = Some(page);
-    }
-    let page = last.expect("at least one sample");
-    (
-        median_micros(&mut samples),
-        page.symbols.len(),
-        page.has_more,
-        page.total,
-    )
-}
-
-/// Observation-only: writes large-catalog search timings for the PR table.
-/// Not a duration gate; correctness stays in the tests below.
-#[test]
-fn symbol_search_large_catalog_timings() {
-    let reader = reader(&store_for(large_production_manifest(20_000)));
-    reader
-        .search_symbols("warm", None, 0, 1, request())
-        .expect("warm catalog");
-
-    let containment = time_search(&reader, "Needle", 0, 20, 7);
-    let exactish = time_search(&reader, "Needle0", 0, 20, 7);
-    let browse = time_search(&reader, "", 0, 20, 7);
-    let miss = time_search(&reader, "zzzxq", 0, 20, 7);
-
-    let report = format!(
-        "catalog_search_timings symbols=20000\n\
-         containment_Needle p50_us={} hits={} has_more={} total={:?}\n\
-         exactish_Needle0 p50_us={} hits={} has_more={} total={:?}\n\
-         browse_empty p50_us={} hits={} has_more={} total={:?}\n\
-         miss_zzzxq p50_us={} hits={} has_more={} total={:?}\n",
-        containment.0,
-        containment.1,
-        containment.2,
-        containment.3,
-        exactish.0,
-        exactish.1,
-        exactish.2,
-        exactish.3,
-        browse.0,
-        browse.1,
-        browse.2,
-        browse.3,
-        miss.0,
-        miss.1,
-        miss.2,
-        miss.3,
-    );
-    eprintln!("{report}");
-    if let Some(dir) = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR") {
-        std::fs::write(
-            std::path::Path::new(&dir).join("catalog-search-timings.txt"),
-            &report,
-        )
-        .expect("write undeclared timings");
-    }
-    assert!(containment.1 > 0, "Needle should hit even-indexed symbols");
-}
-
 #[test]
 fn symbol_search_first_page_stops_before_a_full_catalog_scan() {
     let reader = reader(&store_for(large_production_manifest(5_000)));
@@ -1193,6 +1114,32 @@ fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
         (browse.has_more, browse.total),
         (true, Some(4)),
         "an unfiltered browse knows the census total"
+    );
+}
+
+#[test]
+fn exact_search_page_observes_cancellation_during_admission() {
+    struct AdmissionCancellation(AtomicBool);
+
+    impl GraphCancellation for AdmissionCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cancellation = Arc::new(AdmissionCancellation(AtomicBool::new(false)));
+    let admit = |_: &SymbolOccurrenceId,
+                 _: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                 _: Option<&LineageSymbolRecordV1>| {
+        cancellation.0.store(true, Ordering::Relaxed);
+        true
+    };
+    let request_cancellation: Arc<dyn GraphCancellation> = cancellation.clone();
+    assert_eq!(
+        reader.search_symbols("run", Some(&admit), 0, 1, request_cancellation),
+        Err(CodeGraphProjectionError::Cancelled)
     );
 }
 
