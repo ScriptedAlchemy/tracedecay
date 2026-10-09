@@ -10,7 +10,7 @@ use tracedecay_store::{
     SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
-use tracedecay_lcm::raw::stored_message_record_select_columns;
+use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_select_columns};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
 use tracedecay_runtime_core::db::Database;
@@ -423,9 +423,11 @@ pub(super) async fn read_message(
     else {
         return Ok(None);
     };
-    message_record_from_row(&row, 0)
-        .map(Some)
-        .map_err(|error| storage("decode projected message", error.source))
+    let mut message = message_record_from_row(&row, 0)
+        .map_err(|error| storage("decode projected message", error.source))?;
+    message.text = message_body_from_record_row(&row, 0)
+        .map_err(|error| storage("hydrate projected message", error))?;
+    Ok(Some(message))
 }
 
 fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
@@ -1025,19 +1027,25 @@ pub(in super::super) async fn read_projection_rows_batch(
             .await
             .map_err(|error| storage("read projected messages", error))?
         {
-            let message = message_record_from_row(&row, 0)
+            let mut message = message_record_from_row(&row, 0)
                 .map_err(|error| storage("decode projected messages", error.source))?;
+            message.text = message_body_from_record_row(&row, 0)
+                .map_err(|error| storage("hydrate projected message", error))?;
             let decode = |index: i32| {
                 row.get::<String>(index)
                     .map_err(|error| storage("decode projected message storage", error))
             };
             let columns = ProjectionStorageColumns {
                 session_id: message.session_id.clone(),
-                storage_kind: decode(13)?,
-                content: decode(14)?,
-                content_hash: decode(15)?,
-                snippet_text: decode(16)?,
-                index_text: decode(17)?,
+                storage_kind: decode(18)?,
+                content: if decode(18)? == "inline" {
+                    message.text.clone()
+                } else {
+                    decode(19)?
+                },
+                content_hash: decode(20)?,
+                snippet_text: decode(21)?,
+                index_text: decode(22)?,
             };
             let key = (message.provider.clone(), message.message_id.clone());
             storage_columns.insert(key.clone(), columns);

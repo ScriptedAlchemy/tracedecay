@@ -3377,7 +3377,7 @@ async fn insert_summary_evidence(
             "INSERT INTO lcm_raw_messages (
                      provider, message_id, session_id, role, ordinal, content, content_hash,
                      storage_kind, kind, metadata_json
-                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?2, 'inline', ?6, ?7)",
+                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?8, 'inline', ?6, ?7)",
             tracedecay_runtime_core::db::engine::params![
                 provider,
                 message_id,
@@ -3386,6 +3386,7 @@ async fn insert_summary_evidence(
                 text,
                 kind,
                 metadata.to_string(),
+                tracedecay_lcm::retrieval_content::projected_content_hash(text),
             ],
         )
         .await

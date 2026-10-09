@@ -67,23 +67,51 @@ pub fn message_record_select_columns(alias: &str) -> String {
 /// Reads one message row as a [`SessionMessageRecord`] carrying its whole
 /// stored body, or the placeholder of a body stored outside the row.
 pub fn message_body_record_select_columns(alias: &str) -> String {
-    record_select_columns(
+    body_record_select_columns(alias, &served_metadata(alias))
+}
+
+/// Stored metadata retains the protection receipts for verification and re-ingestion.
+pub fn stored_message_record_select_columns(alias: &str) -> String {
+    body_record_select_columns(alias, &format!("{alias}.metadata_json"))
+}
+
+fn body_record_select_columns(alias: &str, metadata: &str) -> String {
+    let record = record_select_columns(
         alias,
         &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
-        &served_metadata(alias),
+        metadata,
+    );
+    format!(
+        "{record}, {alias}.content, {alias}.storage_kind, {alias}.content_hash,
+        (SELECT encoding FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash),
+        (SELECT body FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash)"
     )
 }
 
-/// Reads a message row as the [`SessionMessageRecord`] its writer stored: the
-/// whole stored body (or the placeholder of a body stored outside the row)
-/// and the protected metadata with its receipts. Writers and verifiers compare
-/// and re-ingest through this form.
-pub fn stored_message_record_select_columns(alias: &str) -> String {
-    record_select_columns(
-        alias,
-        &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
-        &format!("{alias}.metadata_json"),
-    )
+/// Decodes the whole text carried by a body-record column list. External
+/// payloads keep their placeholder; missing or corrupt inline bodies fail closed.
+pub fn message_body_from_record_row(row: &Row, offset: i32) -> Result<String, LcmError> {
+    let kind: String = row.get(offset + 14)?;
+    match LcmStorageKind::from_db(&kind)
+        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {kind}")))?
+    {
+        LcmStorageKind::External => Ok(row.get(offset + 6)?),
+        LcmStorageKind::Inline => {
+            if let Some(content) = row.get::<Option<String>>(offset + 13)? {
+                return Ok(content);
+            }
+            let hash: String = row.get(offset + 15)?;
+            let encoding = row
+                .get::<Option<String>>(offset + 16)?
+                .ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let body = row
+                .get::<Option<Vec<u8>>>(offset + 17)?
+                .ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let bytes = unpack_body(&hash, &encoding, &body)
+                .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+            String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
+        }
+    }
 }
 
 pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =

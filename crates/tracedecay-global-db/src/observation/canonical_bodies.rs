@@ -553,7 +553,7 @@ mod tests {
             .query(
                 "SELECT COUNT(*) FROM lcm_raw_messages
                  WHERE content IS NOT NULL AND length(content) >= ?1",
-                params![INLINE_BODY_BYTES_SQL],
+                params![i64::try_from(INLINE_BODY_BYTES).unwrap()],
             )
             .await
             .unwrap()
