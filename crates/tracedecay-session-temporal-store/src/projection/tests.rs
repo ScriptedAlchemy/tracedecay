@@ -2689,19 +2689,19 @@ async fn readers_see_whole_generations_while_an_append_builds_and_after_it_is_ca
 
 fn fixture_observation_with_text(
     session_id: &SessionId,
-    ordinal: u64,
+    unique: u64,
     text: String,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     fixture_observation_from_facts(
         session_id,
-        ordinal,
-        ProviderId::new(format!("projector-test-{ordinal}")).unwrap(),
-        ObservationId::new(format!("record.projector.{ordinal}")).unwrap(),
+        0,
+        ProviderId::new(format!("projector-test-{unique}")).unwrap(),
+        ObservationId::new(format!("record.projector.{unique}")).unwrap(),
         CanonicalObservationRelationsV1::new(session_id.clone())
-            .with_thread_id(ObservationId::new(format!("thread.projector.{ordinal}")).unwrap())
-            .with_turn_id(ObservationId::new(format!("turn.projector.{ordinal}")).unwrap())
-            .with_message_id(ObservationId::new(format!("message.projector.{ordinal}")).unwrap())
-            .with_agent_id(ObservationId::new(format!("agent.projector.{ordinal}")).unwrap()),
+            .with_thread_id(ObservationId::new(format!("thread.projector.{unique}")).unwrap())
+            .with_turn_id(ObservationId::new(format!("turn.projector.{unique}")).unwrap())
+            .with_message_id(ObservationId::new(format!("message.projector.{unique}")).unwrap())
+            .with_agent_id(ObservationId::new(format!("agent.projector.{unique}")).unwrap()),
         vec![CanonicalObservationFactV1::Message {
             role: CanonicalMessageRoleV1::Assistant,
             content: json!({"text": text}),
