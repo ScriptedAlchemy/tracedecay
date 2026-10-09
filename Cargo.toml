@@ -97,6 +97,13 @@ debug-assertions = false
 overflow-checks = false
 incremental = false
 
+# panic stays unwind. Production catch_unwind recovers poisoned work.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 # Workspace crates retain line tables and incremental state; dependencies omit
 # debuginfo to reduce compile, cache, and link costs. CI explicitly disables
 # incremental compilation through CARGO_INCREMENTAL.

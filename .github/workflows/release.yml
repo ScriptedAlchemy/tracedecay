@@ -165,7 +165,7 @@ jobs:
       - name: Build release binary for packaging
         uses: ./.github/actions/build-cli
         with:
-          config: release
+          config: dist
           dest: target/${{ matrix.target }}/release
           cache-key: release-${{ matrix.target }}
 
@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           validated="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          embedded="$(python3 scripts/check-dashboard-bundle.py "$(bazel info --config=release bazel-bin)/dashboard/app-dist" --print-digest)"
+          embedded="$(python3 scripts/check-dashboard-bundle.py "$(bazel info --config=dist bazel-bin)/dashboard/app-dist" --print-digest)"
           if [[ "$validated" != "$embedded" ]]; then
             echo "Bazel embedded dashboard ${embedded}, the validated artifact is ${validated}" >&2
             exit 1
