@@ -309,8 +309,7 @@ mod tests {
         let path = tmp.path().join("user-sessions.db");
         let conn = TestConnection::open(&path);
         conn.execute_batch(&format!(
-            "PRAGMA auto_vacuum = INCREMENTAL;
-             CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
              CREATE TABLE observations (
                  observation_id TEXT PRIMARY KEY,
                  observation_json TEXT NOT NULL
@@ -347,16 +346,10 @@ mod tests {
             .await
             .unwrap();
         }
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .await
-            .unwrap();
         let before_bytes = family_bytes(&path);
         let started = std::time::Instant::now();
         assert!(compact_observation_bodies(&conn).await.unwrap());
         assert!(compact_lcm_bodies(&conn).await.unwrap());
-        conn.execute_batch("PRAGMA incremental_vacuum(4096); PRAGMA wal_checkpoint(TRUNCATE);")
-            .await
-            .unwrap();
         let elapsed = started.elapsed();
         let after_bytes = family_bytes(&path);
 
@@ -443,7 +436,7 @@ mod tests {
             expected.as_bytes()
         );
         println!(
-            "session-canonical-bodies migration N={N} before_bytes={before_bytes} after_bytes={after_bytes} unique_payload_bytes={unique_payload_bytes} stored_body_bytes={stored_body_bytes} elapsed_ms={}",
+            "session-canonical-bodies migration N={N} before_family_bytes={before_bytes} after_family_bytes={after_bytes} before_payload_bytes={before_logical} after_payload_bytes={after_logical} unique_payload_bytes={unique_payload_bytes} stored_body_bytes={stored_body_bytes} elapsed_ms={}",
             elapsed.as_millis()
         );
     }
