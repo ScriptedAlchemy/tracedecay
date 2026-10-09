@@ -27,8 +27,12 @@ impl<E> RuntimeWriterPersistence<E> {
 
     /// The first request may create the ledger inside its outer transaction.
     /// A rollback must invalidate that observation before another request.
-    pub(crate) fn transaction_rolled_back(&mut self) {
-        self.ledger_schema_ready = false;
+    pub(crate) fn transaction_rolled_back(&mut self, schema_was_ready: bool) {
+        self.ledger_schema_ready = schema_was_ready;
+    }
+
+    pub(crate) fn ledger_schema_ready(&self) -> bool {
+        self.ledger_schema_ready
     }
 
     fn ensure_ledger_schema(

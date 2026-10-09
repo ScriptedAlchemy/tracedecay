@@ -118,6 +118,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
             return;
         }
     };
+    let schema_was_ready = persistence.ledger_schema_ready();
     let lock_held_from = Instant::now();
     let mut prepared = Vec::new();
     let mut items = batch.items.into_iter();
@@ -145,7 +146,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
             })),
         }));
         drop(transaction);
-        persistence.transaction_rolled_back();
+        persistence.transaction_rolled_back(schema_was_ready);
         let lock_held = lock_held_from.elapsed();
         record_transaction(
             telemetry,
@@ -182,7 +183,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         .collect::<Vec<_>>();
     if authority_denied.iter().any(|denied| *denied) {
         drop(transaction);
-        persistence.transaction_rolled_back();
+        persistence.transaction_rolled_back(schema_was_ready);
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -208,7 +209,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         .collect::<Vec<_>>();
     if commit_denied.iter().any(|denied| *denied) {
         drop(transaction);
-        persistence.transaction_rolled_back();
+        persistence.transaction_rolled_back(schema_was_ready);
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -223,14 +224,28 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         return;
     }
 
-    let match_result = {
+    let has_pending_writes = prepared
+        .iter()
+        .any(|request| matches!(request.result, PreparedResult::AwaitingTransactionCommit(_)));
+    let match_result = if has_pending_writes {
         let _span = tracing::trace_span!("rusqlite.commit").entered();
         transaction.commit()
+    } else {
+        let result = transaction.rollback();
+        persistence.transaction_rolled_back(schema_was_ready);
+        result
     };
     let commit_failure = match match_result {
         Err(error) => {
-            persistence.transaction_rolled_back();
-            Some(driver_failure(error, "commit writer transaction"))
+            persistence.transaction_rolled_back(schema_was_ready);
+            Some(driver_failure(
+                error,
+                if has_pending_writes {
+                    "commit writer transaction"
+                } else {
+                    "roll back writer transaction without pending writes"
+                },
+            ))
         }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
@@ -248,7 +263,11 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         commit_failure
             .as_ref()
             .map(transaction_outcome)
-            .unwrap_or(WriterTransactionOutcome::Committed),
+            .unwrap_or(if has_pending_writes {
+                WriterTransactionOutcome::Committed
+            } else {
+                WriterTransactionOutcome::RolledBack
+            }),
         command_count,
         connection.total_changes().saturating_sub(rows_before),
         started,
