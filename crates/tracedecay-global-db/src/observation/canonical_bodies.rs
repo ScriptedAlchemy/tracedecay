@@ -44,14 +44,26 @@ pub(crate) async fn compact_observation_bodies(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut rewrote = false;
+    // The rowid cursor advances past every visited row, including one whose
+    // JSON is large without holding a single large string: rescanning it
+    // forever would stall admission. An interrupted pass still resumes safely
+    // because slimmed rows carry the body-ref marker this filter skips.
+    let mut after_rowid = 0i64;
     loop {
         let mut rows = conn
             .query(
-                "SELECT observation_id, observation_json FROM observations
-                 WHERE length(observation_json) >= ?1
-                   AND instr(observation_json, ?2) = 0
-                 LIMIT ?3",
-                params![INLINE_BODY_BYTES_SQL, BODY_REF_KEY, COMPACT_PAGE],
+                "SELECT observation_id, observation_json, rowid FROM observations
+                 WHERE rowid > ?1
+                   AND length(observation_json) >= ?2
+                   AND instr(observation_json, ?3) = 0
+                 ORDER BY rowid
+                 LIMIT ?4",
+                params![
+                    after_rowid,
+                    INLINE_BODY_BYTES_SQL,
+                    BODY_REF_KEY,
+                    COMPACT_PAGE
+                ],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -66,13 +78,16 @@ pub(crate) async fn compact_observation_bodies(
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 row.get::<String>(1)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<i64>(2)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
             ));
         }
         drop(rows);
         if page.is_empty() {
             break;
         }
-        for (observation_id, observation_json) in page {
+        for (observation_id, observation_json, rowid) in page {
+            after_rowid = rowid;
             let (slim, bodies) = slim_stored_json(&observation_json)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             persist_bodies(conn, &bodies).await?;
@@ -279,7 +294,10 @@ pub(crate) async fn load_canonical_body(
     let blob: Vec<u8> = row.get(1).map_err(|_| CanonicalBodyError::Missing {
         content_hash: content_hash.to_owned(),
     })?;
-    unpack_body(content_hash, &encoding, &blob)
+    let uncompressed: i64 = row.get(2).map_err(|_| CanonicalBodyError::Missing {
+        content_hash: content_hash.to_owned(),
+    })?;
+    unpack_body(content_hash, &encoding, &blob, uncompressed)
 }
 
 async fn persist_bodies(
@@ -358,6 +376,49 @@ mod tests {
                     .unwrap_or(0),
             )
         })
+    }
+
+    #[tokio::test]
+    async fn compaction_advances_past_large_json_without_a_body() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("user-sessions.db");
+        let conn = TestConnection::open(&path);
+        conn.execute_batch(&format!(
+            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+             CREATE TABLE observations (
+                 observation_id TEXT PRIMARY KEY,
+                 observation_json TEXT NOT NULL
+             );
+             {CANONICAL_BODIES_TABLE_SQL}"
+        ))
+        .await
+        .unwrap();
+        // JSON above the inline threshold whose strings are all small: nothing
+        // to slim, yet a cursor-less scan would revisit it forever.
+        let bulky = serde_json::json!({
+            "items": (0..40).map(|i| format!("small-{i:03}-{}", "x".repeat(200))).collect::<Vec<_>>()
+        })
+        .to_string();
+        assert!(bulky.len() >= INLINE_BODY_BYTES);
+        conn.execute(
+            "INSERT INTO observations(observation_id, observation_json) VALUES ('obs.bulk', ?1)",
+            params![bulky.as_str()],
+        )
+        .await
+        .unwrap();
+        // Termination is the assertion: before the rowid cursor this pass
+        // re-selected the same first page indefinitely.
+        assert!(compact_observation_bodies(&conn).await.is_ok());
+        let mut rows = conn
+            .query(
+                "SELECT observation_json FROM observations WHERE observation_id = 'obs.bulk'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let stored: String = row.get(0).unwrap();
+        assert_eq!(stored, bulky);
     }
 
     #[tokio::test]
@@ -509,8 +570,9 @@ mod tests {
         let body_row = body_rows.next().await.unwrap().unwrap();
         let encoding: String = body_row.get(0).unwrap();
         let blob: Vec<u8> = body_row.get(1).unwrap();
+        let uncompressed: i64 = body_row.get(2).unwrap();
         assert_eq!(
-            unpack_body(&hash, &encoding, &blob).unwrap(),
+            unpack_body(&hash, &encoding, &blob, uncompressed).unwrap(),
             expected.as_bytes()
         );
         println!(

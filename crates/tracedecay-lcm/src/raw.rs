@@ -31,6 +31,8 @@ pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
                     (SELECT encoding FROM session_canonical_bodies
                       WHERE content_hash = lcm_raw_messages.content_hash),
                     (SELECT body FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash),
+                    (SELECT uncompressed_bytes FROM session_canonical_bodies
                       WHERE content_hash = lcm_raw_messages.content_hash)";
 fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
     format!(
@@ -77,12 +79,24 @@ pub fn message_body_record_select_columns(alias: &str) -> String {
 /// Reads a message row as the [`SessionMessageRecord`] its writer stored: the
 /// whole stored body (or the placeholder of a body stored outside the row)
 /// and the protected metadata with its receipts. Writers and verifiers compare
-/// and re-ingest through this form.
+/// and re-ingest through this form. The trailing content-hash and canonical
+/// body columns let [`stored_message_record_from_row`] restore the whole body
+/// of a row that stored it outside itself; parse rows of this select with
+/// that function, not `message_record_from_row`.
 pub fn stored_message_record_select_columns(alias: &str) -> String {
-    record_select_columns(
-        alias,
-        &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
-        &format!("{alias}.metadata_json"),
+    format!(
+        "{}, {alias}.content_hash,
+         (SELECT encoding FROM session_canonical_bodies
+           WHERE content_hash = {alias}.content_hash),
+         (SELECT body FROM session_canonical_bodies
+           WHERE content_hash = {alias}.content_hash),
+         (SELECT uncompressed_bytes FROM session_canonical_bodies
+           WHERE content_hash = {alias}.content_hash)",
+        record_select_columns(
+            alias,
+            &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
+            &format!("{alias}.metadata_json"),
+        )
     )
 }
 
@@ -195,7 +209,12 @@ fn inline_content_from_canonical_body(row: &Row, content_hash: &str) -> Result<S
         .ok()
         .flatten()
         .ok_or(LcmError::PayloadIntegrityMismatch)?;
-    let bytes = unpack_body(content_hash, &encoding, &blob)
+    let uncompressed = row
+        .get::<Option<i64>>(15)
+        .ok()
+        .flatten()
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let bytes = unpack_body(content_hash, &encoding, &blob, uncompressed)
         .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
 }

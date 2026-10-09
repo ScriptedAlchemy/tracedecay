@@ -118,6 +118,60 @@ pub(super) fn decode_authority_json<T: DeserializeOwned>(
         .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))
 }
 
+/// `observations.observation_json` carries `tracedecay.body_ref` objects in
+/// place of strings stored in `session_canonical_bodies`. Decoding it as a
+/// whole observation therefore requires hydrating those references first;
+/// missing or corrupt bodies are data verdicts, while read failures stay
+/// retryable through [`audit_read_error`].
+pub(super) async fn decode_authority_observation(
+    conn: &impl QueryExecutor,
+    json: &str,
+    authority: &str,
+) -> tracedecay_domain::errors::Result<DurableObservationV1> {
+    if !tracedecay_store::stored_json_needs_hydrate(json) {
+        return decode_authority_json(json, authority);
+    }
+    let hashes = tracedecay_store::collect_body_refs(json)
+        .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))?;
+    let mut bodies = std::collections::HashMap::new();
+    for hash in hashes {
+        if bodies.contains_key(&hash) {
+            continue;
+        }
+        let mut rows = conn
+            .query(
+                tracedecay_store::LOAD_CANONICAL_BODY_SQL,
+                params![hash.as_str()],
+            )
+            .await
+            .map_err(audit_read_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(audit_read_error)?
+            .ok_or_else(|| {
+                authority_violation(format!(
+                    "invalid {authority}: canonical body {hash} is missing"
+                ))
+            })?;
+        let encoding: String = row.get(0).map_err(audit_read_error)?;
+        let blob: Vec<u8> = row.get(1).map_err(audit_read_error)?;
+        let uncompressed: i64 = row.get(2).map_err(audit_read_error)?;
+        let bytes = tracedecay_store::unpack_body(&hash, &encoding, &blob, uncompressed)
+            .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))?;
+        bodies.insert(hash, bytes);
+    }
+    tracedecay_store::parse_stored_observation(json, |hash| {
+        bodies
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| tracedecay_store::CanonicalBodyError::Missing {
+                content_hash: hash.to_owned(),
+            })
+    })
+    .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))
+}
+
 pub(super) fn encode_authority_json<T: Serialize>(
     value: &T,
     authority: &str,
@@ -270,8 +324,12 @@ pub(super) async fn validate_observation_authority_page(
             ));
         };
 
-        let observation: DurableObservationV1 =
-            decode_authority_json(&observation_json, "committed observation authority JSON")?;
+        let observation: DurableObservationV1 = decode_authority_observation(
+            conn,
+            &observation_json,
+            "committed observation authority JSON",
+        )
+        .await?;
         let cursor: ObservationSourceCursorV1 =
             decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
         if sequence <= 0

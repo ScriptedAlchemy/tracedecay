@@ -288,9 +288,11 @@ pub(super) async fn decode_stored_observation(
             })?;
         let encoding: String = row.get(0).map_err(|error| storage(operation, error))?;
         let blob: Vec<u8> = row.get(1).map_err(|error| storage(operation, error))?;
+        let uncompressed: i64 = row.get(2).map_err(|error| storage(operation, error))?;
         bodies.insert(
             hash.clone(),
-            unpack_body(&hash, &encoding, &blob).map_err(|error| storage(operation, error))?,
+            unpack_body(&hash, &encoding, &blob, uncompressed)
+                .map_err(|error| storage(operation, error))?,
         );
     }
     parse_stored_observation(encoded, |hash| {
