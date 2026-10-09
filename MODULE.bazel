@@ -19,6 +19,7 @@ rust.toolchain(
         "opt": "3",
     },
     versions = ["1.99.0"],
+    rustfmt_version = "1.99.0",
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
