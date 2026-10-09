@@ -24,7 +24,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
-    "@rsbuild/core": "^1.7.6",
+    "@rsbuild/core": "^2.2.12",
     "@rslib/core": "^0.23.2",
     "@types/node": "^22.20.1",
     "tsx": "^4.19.2",
