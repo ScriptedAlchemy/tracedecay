@@ -816,10 +816,9 @@ async fn stage_projection_rebuild_batch_transaction(
         .await
         .map_err(|error| storage("read projection rebuild batch", error))?
     {
-        page.push(decode_observation_row(
-            &row,
-            "read projection rebuild batch",
-        )?);
+        page.push(
+            decode_observation_row(transaction, &row, "read projection rebuild batch").await?,
+        );
     }
     drop(rows);
 
@@ -2513,7 +2512,11 @@ async fn activate_rebuild_messages(
     )
     .await
     .map(|_| ())
-    .map_err(|error| storage("activate rebuilt projection messages", error))
+    .map_err(|error| storage("activate rebuilt projection messages", error))?;
+    crate::observation::compact_lcm_bodies(conn)
+        .await
+        .map(|_| ())
+        .map_err(|error| storage("compact rebuilt projection message bodies", error))
 }
 
 async fn activate_rebuild_provenance(

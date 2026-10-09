@@ -4,6 +4,7 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+pub mod canonical_body;
 mod canonical_projection;
 mod codex_goal_context;
 pub mod configuration;
@@ -30,6 +31,12 @@ pub mod schema;
 pub mod session;
 pub mod transcript;
 
+pub use canonical_body::{
+    BODY_REF_KEY, CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, ENCODING_DEFLATE,
+    ENCODING_IDENTITY, INLINE_BODY_BYTES, LOAD_CANONICAL_BODY_SQL, StoredCanonicalBody,
+    UPSERT_CANONICAL_BODY_SQL, collect_body_refs, hydrate_json_value, parse_stored_observation,
+    slim_json_value, slim_stored_json, stored_json_needs_hydrate, unpack_body,
+};
 pub use canonical_projection::{
     EDITED_FILES_KEY, SPAWNED_SESSIONS_KEY, TOOL_USE_ID_KEY, canonical_fact_text,
     derive_canonical_projection, message_metadata_with_envelope, session_project_fields,

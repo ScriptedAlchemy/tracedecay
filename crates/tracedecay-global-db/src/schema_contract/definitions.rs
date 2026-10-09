@@ -412,6 +412,16 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
+        "session_canonical_bodies",
+        [
+            column("content_hash", "TEXT", false, None, 1),
+            column("encoding", "TEXT", true, None, 0),
+            column("body", "BLOB", true, None, 0),
+            column("uncompressed_bytes", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "retrieval_anchor_aliases",
         [
             column("owner_json", "TEXT", true, None, 1),

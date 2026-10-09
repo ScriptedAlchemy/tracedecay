@@ -3,6 +3,7 @@ use crate::retrieval_content::projected_content_hash;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_store::CANONICAL_BODIES_TABLE_SQL;
 
 use super::{LcmError, LcmRawMessage, raw};
 
@@ -369,6 +370,7 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
+            conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
             ensure_raw_identity_schema(conn).await?;
             ensure_payload_gc_candidates(conn).await?;
             super::summary_convergence::ensure_schema(conn).await?;
@@ -382,6 +384,12 @@ pub async fn ensure_lcm_schema_in_transaction(
             name TEXT PRIMARY KEY,
             version INTEGER NOT NULL,
             applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE TABLE IF NOT EXISTS session_canonical_bodies (
+            content_hash TEXT PRIMARY KEY,
+            encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
+            body BLOB NOT NULL,
+            uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes >= 0)
         );
         CREATE TABLE IF NOT EXISTS lcm_raw_messages (
             provider TEXT NOT NULL,
@@ -679,8 +687,9 @@ mod tests {
     async fn lcm_reader_test_connection() -> Result<(tempfile::TempDir, TestConnection), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
-        conn.execute_batch(
-            "CREATE TABLE lcm_raw_messages (
+        conn.execute_batch(&format!(
+            "{CANONICAL_BODIES_TABLE_SQL}
+            CREATE TABLE lcm_raw_messages (
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -696,8 +705,8 @@ mod tests {
                 index_text TEXT NOT NULL,
                 metadata_json TEXT,
                 UNIQUE(provider, message_id)
-            );",
-        )
+            );"
+        ))
         .await
         .map_err(|error| error.to_string())?;
         Ok((temp, conn))
