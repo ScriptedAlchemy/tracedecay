@@ -65,6 +65,11 @@ include = [
     "/dashboard/hermes-wrapper/src/**",
 ]
 
+# Measured aggregate suites exceed the native five-minute medium limit.
+[package.metadata.bazel.test_sizes]
+mcp_suite = "large"
+unit_test = "large"
+
 [features]
 # Default and explicitly selected production artifacts resolve through the
 # same feature. Release packaging selects exactly `production`.

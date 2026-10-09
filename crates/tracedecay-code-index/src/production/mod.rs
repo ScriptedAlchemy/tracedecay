@@ -51,8 +51,8 @@ use super::{
     },
     retained_parse::{RetainedParsePoolStats, SharedRetainedParsePool},
     test_attribution::{
-        GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
-        TestAttributionWatermarkV1,
+        GenerationTestJoinErrorV1, GenerationTestJoinV1, TestAttributionJoinInputCoverageV1,
+        TestAttributionOccurrenceV1,
     },
 };
 
@@ -936,11 +936,12 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// exact and lexical query owners have consumed the staging corpus, the
     /// weak memo lets its duplicate chunk allocation be reclaimed.
     admitted: OnceLock<Arc<Mutex<Weak<Vec<ExtractionAdmittedCodeSearchChunkV1>>>>>,
-    /// Amortized test-attribution join. Query admission rebuilds this authority
-    /// per call even when the generation is unchanged; the traversal and its
-    /// evidence digest are a pure function of the immutable generation. Only
-    /// success is cached.
-    attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
+    /// Amortized test-attribution join. The traversal and its evidence digest
+    /// are a pure function of the immutable generation. Only success is cached.
+    attribution: Arc<OnceLock<PublishedGenerationTestAttributionAuthorityV1>>,
+    /// Serialize fallible cold construction without blocking cached reads or
+    /// resident accounting behind it. Failures leave the memo uninitialized.
+    attribution_build: Arc<Mutex<ProviderEvaluationStateV1>>,
     /// Amortized chunk policy-revision census. Owner-compatibility dispatch
     /// needs the one policy revision the chunks were sealed under; scanning
     /// every chunk on each `active_generation` call re-derived a value that is
@@ -1200,27 +1201,71 @@ impl CodeIndexPublishedGenerationV1 {
         self.content.as_ref()
     }
 
-    /// Build the production generation-bound affected-test authority.
-    ///
-    /// Test candidates are deliberately conservative: each callable symbol in
-    /// a test-path file covers itself and every canonical graph occurrence
-    /// reachable from it. Missing graph edges remain partial coverage rather
-    /// than being upgraded into complete evidence.
-    pub fn test_attribution_authority(
+    /// Read the immutable authority without joining cold construction. The
+    /// mounted worker owns preparation; a warming or failed generation never
+    /// masquerades as a completed empty join.
+    pub fn test_attribution_read(&self) -> Arc<GenerationProviderReadV1<GenerationTestJoinV1>> {
+        if let Some(attribution) = self.attribution.get() {
+            return Arc::clone(&attribution.read);
+        }
+        let provider_state = match self.attribution_build.try_lock() {
+            Ok(state) => *state,
+            Err(std::sync::TryLockError::WouldBlock) => ProviderEvaluationStateV1::Indexing,
+            Err(std::sync::TryLockError::Poisoned(_)) => ProviderEvaluationStateV1::Failed,
+        };
+        Arc::new(GenerationProviderReadV1 {
+            provider_state,
+            coverage: GenerationProviderCoverageV1::Unavailable,
+            evidence: None,
+        })
+    }
+
+    /// Prepare once under the generation owner, retaining failures as typed
+    /// read states. An explicit subsequent preparation may retry a failure.
+    pub fn prepare_test_attribution(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
         if let Some(attribution) = self.attribution.get() {
             return Ok(attribution.clone());
         }
-        let authority = self.build_test_attribution_authority()?;
-        let _ = self.attribution.set(authority.clone());
-        Ok(authority)
+        let mut state = self.attribution_build.lock().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "test attribution construction lock is poisoned: {error}"
+            ))
+        })?;
+        if let Some(attribution) = self.attribution.get() {
+            return Ok(attribution.clone());
+        }
+        *state = ProviderEvaluationStateV1::Indexing;
+        match self.build_test_attribution_authority(control) {
+            Ok(authority) => {
+                let _ = self.attribution.set(authority.clone());
+                Ok(authority)
+            }
+            Err(error) => {
+                *state = match &error {
+                    CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
+                        ProviderEvaluationStateV1::Cancelled
+                    }
+                    CodeIndexProductionErrorV1::Interrupted(
+                        CodeIndexInterruptionV1::DeadlineExceeded,
+                    ) => ProviderEvaluationStateV1::TimedOut,
+                    _ => ProviderEvaluationStateV1::Failed,
+                };
+                Err(error)
+            }
+        }
     }
 
+    #[tracing::instrument(name = "code_index.test_attribution.build", level = "trace", skip_all)]
     fn build_test_attribution_authority(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
-        let mut file_by_occurrence = BTreeMap::new();
+        lexical_page_source::checkpoint(control)?;
+        let indexing = tracing::trace_span!("code_index.test_attribution.index").entered();
+        let mut file_by_occurrence = HashMap::new();
         for file in &self.snapshot.files {
             file_by_occurrence.insert(
                 file.file_occurrence_id.clone(),
@@ -1228,11 +1273,12 @@ impl CodeIndexPublishedGenerationV1 {
             );
         }
 
-        let mut occurrence_files: BTreeMap<
+        let mut occurrence_files: HashMap<
             SymbolOccurrenceId,
             (FileOccurrenceId, tracedecay_domain::ContentDigest),
-        > = BTreeMap::new();
+        > = HashMap::new();
         for chunk in self.chunks.chunks() {
+            lexical_page_source::checkpoint(control)?;
             let Some(occurrence) = &chunk.anchor.symbol_occurrence_id else {
                 continue;
             };
@@ -1244,22 +1290,25 @@ impl CodeIndexPublishedGenerationV1 {
                 ));
             };
             match occurrence_files.entry(occurrence.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
+                std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert((
                         chunk.anchor.file_occurrence_id.clone(),
                         content_digest.clone(),
                     ));
                 }
-                std::collections::btree_map::Entry::Occupied(entry)
+                std::collections::hash_map::Entry::Occupied(entry)
                     if entry.get().0 != chunk.anchor.file_occurrence_id =>
                 {
                     return Err(CodeIndexProductionErrorV1::Contract(
                         "test attribution occurrence crosses snapshot files".to_owned(),
                     ));
                 }
-                std::collections::btree_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Occupied(_) => {}
             }
         }
+
+        let mut occurrence_files = occurrence_files.into_iter().collect::<Vec<_>>();
+        occurrence_files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
         let callable_occurrences = self
             .symbols
@@ -1277,15 +1326,15 @@ impl CodeIndexPublishedGenerationV1 {
                         | "procedure"
                 )
             })
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|symbol| &symbol.occurrence)
+            .collect::<HashSet<_>>();
         let test_markers = self
             .symbols
             .symbols
             .iter()
             .filter(|symbol| crate::is_test_marker(symbol))
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|symbol| &symbol.occurrence)
+            .collect::<HashSet<_>>();
         let annotated_test_occurrences = self
             .edges
             .iter()
@@ -1293,59 +1342,85 @@ impl CodeIndexPublishedGenerationV1 {
                 edge.kind == RelationEdgeKindV1::Annotates
                     && test_markers.contains(&edge.from_occurrence)
             })
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|edge| &edge.to_occurrence)
+            .collect::<HashSet<_>>();
         let test_occurrences = occurrence_files
             .iter()
-            .filter_map(|(occurrence, (file, _))| {
+            .enumerate()
+            .filter_map(|(index, (occurrence, (file, _)))| {
                 callable_occurrences.contains(occurrence).then_some(())?;
                 (annotated_test_occurrences.contains(occurrence)
                     || file_by_occurrence
                         .get(file)
                         .is_some_and(|(path, _)| crate::is_test_file(path)))
-                .then(|| occurrence.clone())
+                .then(|| (occurrence.clone(), index))
             })
             .collect::<Vec<_>>();
-        let mut outgoing: BTreeMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>> = BTreeMap::new();
+        // Canonical indices preserve occurrence ordering while keeping string
+        // cloning and tree lookups out of each test's transitive traversal.
+        let occurrences_by_index = occurrence_files
+            .iter()
+            .map(|(occurrence, _)| occurrence)
+            .collect::<Vec<_>>();
+        let occurrence_indices = occurrences_by_index
+            .iter()
+            .enumerate()
+            .map(|(index, occurrence)| (*occurrence, index))
+            .collect::<HashMap<_, _>>();
+        let mut outgoing = vec![Vec::new(); occurrences_by_index.len()];
         for edge in &self.edges {
-            if occurrence_files.contains_key(&edge.from_occurrence)
-                && occurrence_files.contains_key(&edge.to_occurrence)
-            {
-                outgoing
-                    .entry(edge.from_occurrence.clone())
-                    .or_default()
-                    .push(edge.to_occurrence.clone());
+            lexical_page_source::checkpoint(control)?;
+            if let (Some(&from), Some(&to)) = (
+                occurrence_indices.get(&edge.from_occurrence),
+                occurrence_indices.get(&edge.to_occurrence),
+            ) {
+                outgoing[from].push(to);
             }
         }
-        for destinations in outgoing.values_mut() {
-            destinations.sort();
+        for destinations in &mut outgoing {
+            destinations.sort_unstable();
             destinations.dedup();
         }
 
         let attribution_revision =
             ComponentVersion::new("code-index.test-attribution.conservative.v1")
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        drop(indexing);
+        let traversal = tracing::trace_span!("code_index.test_attribution.traverse").entered();
         let mut attributions = Vec::with_capacity(test_occurrences.len());
-        for test_occurrence in test_occurrences {
-            let mut covered = BTreeSet::from([test_occurrence.clone()]);
-            let mut pending = VecDeque::from([test_occurrence.clone()]);
-            while let Some(occurrence) = pending.pop_front() {
-                for destination in outgoing.get(&occurrence).into_iter().flatten() {
-                    if covered.insert(destination.clone()) {
-                        pending.push_back(destination.clone());
+        let mut visited = vec![usize::MAX; occurrences_by_index.len()];
+        let mut covered = Vec::new();
+        for (visit, (test_occurrence, test_index)) in test_occurrences.into_iter().enumerate() {
+            lexical_page_source::checkpoint(control)?;
+            covered.clear();
+            covered.push(test_index);
+            visited[test_index] = visit;
+            let mut cursor = 0;
+            while cursor < covered.len() {
+                lexical_page_source::checkpoint(control)?;
+                for &destination in &outgoing[covered[cursor]] {
+                    if visited[destination] != visit {
+                        visited[destination] = visit;
+                        covered.push(destination);
                     }
                 }
+                cursor += 1;
             }
+            covered.sort_unstable();
             attributions.push(GenerationTestAttributionV1 {
                 generation_id: self.manifest.generation_id.clone(),
                 source_revision: self.snapshot.source_revision.clone(),
                 test_occurrence,
-                covered_occurrences: covered.into_iter().collect(),
+                covered_occurrences: covered
+                    .iter()
+                    .map(|&index| occurrences_by_index[index].clone())
+                    .collect(),
                 evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
                 attribution_revision: attribution_revision.clone(),
             });
         }
 
+        drop(traversal);
         let occurrences = occurrence_files
             .into_iter()
             .map(|(occurrence_id, (file_occurrence_id, content_digest))| {
@@ -1367,33 +1442,29 @@ impl CodeIndexPublishedGenerationV1 {
                 reason: "canonical graph or source coverage is incomplete".to_owned(),
             }
         };
-        let mut watermark = TestAttributionWatermarkV1 {
-            generation_id: self.manifest.generation_id.clone(),
-            snapshot_digest: self.manifest.snapshot_digest.clone(),
-            content_identity: self.snapshot.content_identity.clone(),
-            source_revision: self.snapshot.source_revision.clone(),
-            attribution_revision,
-            evidence_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
-            coverage: input_coverage,
-        };
-        watermark.evidence_digest = watermark
-            .recompute_evidence_digest(&attributions, &occurrences)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let eligible = attributions.len() as u64;
+        lexical_page_source::checkpoint(control)?;
+        let joining = tracing::trace_span!("code_index.test_attribution.join").entered();
         let snapshot = ValidatedCodeSnapshotV1 {
             snapshot: self.snapshot.clone(),
             intake_digest: self.manifest.snapshot_digest.clone(),
             validated_at: self.manifest.seal.sealed_at,
         };
-        let join = GenerationTestJoinV1::join(
+        let join = GenerationTestJoinV1::produce(
             &self.manifest,
             &snapshot,
-            &attributions,
+            attributions,
             &occurrences,
-            &watermark,
+            attribution_revision,
+            input_coverage,
+            &|| control.is_cancelled() || control.is_deadline_exceeded(),
         )
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        let eligible = attributions.len() as u64;
+        .map_err(|error| match error {
+            GenerationTestJoinErrorV1::Interrupted => interruption_error(control),
+            other => CodeIndexProductionErrorV1::Contract(other.to_string()),
+        })?;
+        drop(joining);
+        lexical_page_source::checkpoint(control)?;
         let (provider_state, coverage) = if unknown == 0 {
             (
                 ProviderEvaluationStateV1::SupportedCompletedComplete,
@@ -1417,10 +1488,14 @@ impl CodeIndexPublishedGenerationV1 {
         };
         let read = GenerationProviderReadV1::new(provider_state, coverage, Some(join))
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let measuring =
+            tracing::trace_span!("code_index.test_attribution.retained_bytes").entered();
         let retained_bytes = read
             .evidence
             .as_ref()
             .map_or(0, GenerationTestJoinV1::retained_bytes);
+        drop(measuring);
+        lexical_page_source::checkpoint(control)?;
         Ok(PublishedGenerationTestAttributionAuthorityV1 {
             generation_id: self.manifest.generation_id.clone(),
             read: Arc::new(read),
@@ -2202,7 +2277,8 @@ where
                     projection,
                     validated: OnceLock::new(),
                     admitted: OnceLock::new(),
-                    attribution: OnceLock::new(),
+                    attribution: Arc::new(OnceLock::new()),
+                    attribution_build: Arc::new(Mutex::new(ProviderEvaluationStateV1::Indexing)),
                     chunk_policy: OnceLock::new(),
                     retained_bytes: OnceLock::new(),
                     decode_peak_growth_bytes: None,

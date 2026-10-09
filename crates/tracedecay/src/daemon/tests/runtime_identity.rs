@@ -865,3 +865,124 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
         .await
         .expect("shutdown after scope retention must remain bounded");
 }
+
+#[tokio::test]
+async fn retiring_observability_owner_reopens_same_route_without_cached_degradation() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let profile = root.join("profile");
+    let identity = test_client_identity_for(profile.clone());
+    initialize_test_project(&project, &identity).await;
+    let _scope = enter_test_daemon_database_scope(&profile, "retiring observability route");
+    let engine = test_daemon_engine_for_profile(&profile);
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: identity,
+        ..test_handshake_defaults()
+    };
+    let server = engine.project_server(&handshake).await.unwrap();
+    let graph = server.cg().await;
+    let key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
+    let db = engine
+        .store_administration
+        .registered_project_session_database(&project, graph.store_layout())
+        .await
+        .unwrap();
+    let producer = engine
+        .invocation
+        .service
+        .observability_producer(Some(&project))
+        .await
+        .unwrap();
+    let blocker = db.begin_write_transaction().await.unwrap();
+    assert!(
+        producer.cancel().await.is_err(),
+        "held writer prevents settlement"
+    );
+    assert!(
+        producer.shutdown_joined(),
+        "the real producer worker must have joined"
+    );
+    assert!(!producer.shutdown_settled());
+    let roots = std::collections::BTreeSet::from([project.clone()]);
+    assert!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .quiesce_roots(&roots)
+            .await
+            .is_none()
+    );
+    // Remove the initial published route to model a capacity reopen. From the
+    // first refusal onward, only production open/retry logic may change it.
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .remove(&key)
+            .is_some()
+    );
+    drop(graph);
+    drop(server);
+    // Releasing the unrelated writer does not autonomously retry settlement;
+    // the first real mount must trigger it and still report Retiring.
+    blocker.rollback().await.unwrap();
+    let error = match engine.project_server(&handshake).await {
+        Ok(_) => panic!("retiring owner must refuse the full project open"),
+        Err(error) => error,
+    };
+    assert!(
+        super::super::project_open_admission::is_observability_retiring(&error),
+        "{error}"
+    );
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+    );
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .get_ready(&key)
+            .is_none(),
+        "a transient owner refusal must not cache a permanently degraded core"
+    );
+    let reopened = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match engine.project_server(&handshake).await {
+                Ok(server) => break server,
+                Err(error)
+                    if super::super::project_open_admission::is_observability_retiring(&error) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("reopen lost its typed recovery state: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("same route must recover after the writer releases");
+    let graph = reopened.cg().await;
+    let reopened_key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
+    assert_eq!(
+        key, reopened_key,
+        "recovery preserves the canonical store identity"
+    );
+    assert_reopened_linked_route_is_not_degraded(
+        &*engine.store_administration.project_servers().lock().await,
+        &key,
+    );
+    drop(graph);
+    drop(reopened);
+    drop(producer);
+    drop(db);
+    engine.shutdown_all().await;
+}

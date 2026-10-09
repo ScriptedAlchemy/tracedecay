@@ -12,8 +12,8 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 #[cfg(unix)]
 use super::install_kimi_cli;
 use super::{
-    IsolatedCli, VERIFY_FAILURE_ENV, assert_receipt_digests, assert_seeded_bytes, assert_success,
-    host_case, latest_receipt, seed_host,
+    IsolatedCli, ROO_SETTINGS_RELATIVE, VERIFY_FAILURE_ENV, assert_receipt_digests,
+    assert_seeded_bytes, assert_success, host_case, latest_receipt, seed_host,
 };
 
 /// `EX_TEMPFAIL`: nothing failed, but a host needs an operator step.
@@ -194,10 +194,7 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
     let hosts = [
         (HostKindV1::Cline, ".cline/mcp.json"),
         (HostKindV1::Devin, ".config/devin/mcp_config.json"),
-        (
-            HostKindV1::RooCode,
-            ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
-        ),
+        (HostKindV1::RooCode, ROO_SETTINGS_RELATIVE),
         (HostKindV1::Kilo, ".config/kilo/kilo.jsonc"),
         (HostKindV1::OpenCode, ".config/opencode/opencode.json"),
     ];

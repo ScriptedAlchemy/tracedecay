@@ -237,24 +237,32 @@ pub async fn seed_sessions(
     scope: &ObservationScopeV1,
     sessions: std::ops::Range<u64>,
 ) -> SessionCursor {
+    // Fixture population is a bounded admission batch; only the probes below
+    // model individually streamed messages. Keep every session's full history.
+    const SEED_SESSIONS_PER_BATCH: usize = 32;
+    let batch_messages = SEED_SESSIONS_PER_BATCH * usize::try_from(MESSAGES_PER_SESSION).unwrap();
+    let mut requests = Vec::with_capacity(batch_messages);
     let mut first = None;
     for index in sessions {
         let mut cursor = session_cursor(index);
         let timestamp = SEED_TIMESTAMP + i64::try_from(index * MESSAGES_PER_SESSION).unwrap();
-        capture(
-            facade,
-            message_requests(
-                project,
-                scope,
-                &mut cursor,
-                MESSAGES_PER_SESSION,
-                timestamp,
-                PROMPT_TITLE_WORDS,
-            ),
-        )
-        .await;
-        drain(facade, scope).await;
+        requests.extend(message_requests(
+            project,
+            scope,
+            &mut cursor,
+            MESSAGES_PER_SESSION,
+            timestamp,
+            PROMPT_TITLE_WORDS,
+        ));
         first.get_or_insert(cursor);
+        if requests.len() == batch_messages {
+            capture(facade, std::mem::take(&mut requests)).await;
+            drain(facade, scope).await;
+        }
+    }
+    if !requests.is_empty() {
+        capture(facade, requests).await;
+        drain(facade, scope).await;
     }
     first.unwrap()
 }

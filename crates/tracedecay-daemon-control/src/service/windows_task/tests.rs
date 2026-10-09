@@ -9,15 +9,12 @@ const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
 #[test]
 fn task_names_and_ownership_are_isolated_between_profiles_of_one_user() {
-    let root = tempfile::tempdir().unwrap();
-    let first = spec(
-        root.path().join("tracedecay.exe"),
-        root.path().join("first"),
-    );
-    let second = spec(
-        root.path().join("tracedecay.exe"),
-        root.path().join("second"),
-    );
+    let directory = tempfile::tempdir().unwrap();
+    // macOS temporary paths may enter through /var's /private/var alias.
+    // Use the profile authority's spelling for both identity and task XML.
+    let root = tracedecay_runtime_core::path_safety::canonical_root_identity(directory.path());
+    let first = spec(root.join("tracedecay.exe"), root.join("first"));
+    let second = spec(root.join("tracedecay.exe"), root.join("second"));
     let first_id = TaskIdentity::for_user_sid(TEST_SID)
         .unwrap()
         .for_profile(&first.profile)

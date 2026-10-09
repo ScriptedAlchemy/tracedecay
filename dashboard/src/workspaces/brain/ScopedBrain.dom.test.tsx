@@ -170,7 +170,7 @@ describe('ScopedBrain', () => {
     // Real readouts, from the project's scoped daemon APIs.
     expect(screen.getByText('12.9')).toBeTruthy();
     expect(screen.getByText('173')).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'registered paths' })).toBeTruthy();
   });
 
   it('shows every schema convergence state for the selected project', async () => {
@@ -238,7 +238,7 @@ describe('ScopedBrain', () => {
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
     expect(screen.queryByTestId('scoped-field')).toBeNull();
     // The independently successful registry backbone remains available.
-    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'registered paths' })).toBeTruthy();
   });
 
   /**
