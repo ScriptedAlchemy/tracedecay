@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_contracts::CancellationSignal;
@@ -1023,6 +1023,33 @@ fn file_dependencies_are_served_from_the_catalog_without_store_reads() {
 }
 
 #[test]
+fn symbol_search_first_page_stops_before_a_full_catalog_scan() {
+    let reader = reader(&store_for(large_production_manifest(5_000)));
+    reader
+        .search_symbols("warm", None, 0, 1, request())
+        .expect("warm catalog");
+
+    let page = reader
+        .search_symbols(
+            "Needle",
+            None,
+            0,
+            20,
+            Arc::new(CancelAfter {
+                observations: AtomicU64::new(0),
+                allowed: 4,
+            }),
+        )
+        .expect("a first page must finish before the 4096-symbol cancellation checkpoint");
+    assert_eq!(page.symbols.len(), 20);
+    assert_eq!(
+        (page.has_more, page.total),
+        (true, None),
+        "stopping one match past the window does not claim a total"
+    );
+}
+
+#[test]
 fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
     let reader = reader(&store_for(production_manifest()));
 
@@ -1087,6 +1114,32 @@ fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
         (browse.has_more, browse.total),
         (true, Some(4)),
         "an unfiltered browse knows the census total"
+    );
+}
+
+#[test]
+fn exact_search_page_observes_cancellation_during_admission() {
+    struct AdmissionCancellation(AtomicBool);
+
+    impl GraphCancellation for AdmissionCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cancellation = Arc::new(AdmissionCancellation(AtomicBool::new(false)));
+    let admit = |_: &SymbolOccurrenceId,
+                 _: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                 _: Option<&LineageSymbolRecordV1>| {
+        cancellation.0.store(true, Ordering::Relaxed);
+        true
+    };
+    let request_cancellation: Arc<dyn GraphCancellation> = cancellation.clone();
+    assert_eq!(
+        reader.search_symbols("run", Some(&admit), 0, 1, request_cancellation),
+        Err(CodeGraphProjectionError::Cancelled)
     );
 }
 
