@@ -112,6 +112,13 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
             self.write_repository(root, workflow, ("macos-14",))
             self.policy.validate_repository(root)
 
+    def test_accepts_ubuntu_ci_with_older_release_runner(self) -> None:
+        for runner in ("ubuntu-26.04", "ubuntu-26.04-arm"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_repository(root, f"jobs:\n  test:\n    runs-on: {runner}\n")
+                self.policy.validate_repository(root)
+
     def test_rejects_custom_runner_in_either_literal_choice(self) -> None:
         for first, second in (
             ("self-hosted", "ubuntu-24.04-arm"),

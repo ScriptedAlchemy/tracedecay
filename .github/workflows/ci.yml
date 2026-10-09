@@ -81,7 +81,7 @@ jobs:
     name: Build debug CLI
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -392,7 +392,7 @@ jobs:
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -420,7 +420,7 @@ jobs:
     name: Feature gates
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -522,7 +522,7 @@ jobs:
     name: Hermes integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
       # Stock (upstream) Hermes pin. The generated plugin must keep working
@@ -576,7 +576,7 @@ jobs:
     name: Claude Code + OpenCode integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
       # Stock host pins. The installed bundle must keep working against these
