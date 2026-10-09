@@ -827,7 +827,7 @@ mod tests {
         drop(activity);
         let receipt = shutdown.await.expect("terminal shutdown receipt");
         assert!(terminal_cancelled.load(Ordering::Acquire));
-        assert!(receipt.background.unfinished().is_empty());
+        assert_eq!(receipt.background.unfinished().len(), 0);
     }
 
     #[tokio::test]
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(duplicate_prepares.load(Ordering::Acquire), 0);
         assert_eq!(receipt.in_flight, ShutdownStatus::Clean);
         assert_eq!(receipt.clients, ShutdownStatus::Clean);
-        assert!(receipt.background.unfinished().is_empty());
+        assert_eq!(receipt.background.unfinished().len(), 0);
         assert!(receipt.project_servers.is_clean());
     }
 
@@ -984,7 +984,7 @@ mod tests {
                 matches!(status, ShutdownStatus::Failed(error) if error.contains("server shutdown panic"))
             );
         }
-        assert!(!receipt.background.unfinished().is_empty());
+        assert_ne!(receipt.background.unfinished().len(), 0);
         assert!(!receipt.project_servers.is_clean());
     }
 
@@ -1050,7 +1050,7 @@ mod tests {
         assert!(Arc::ptr_eq(&retry, &duplicate));
         assert_eq!(attempts.load(Ordering::Acquire), 2);
         assert_eq!(cancellations.load(Ordering::Acquire), 2);
-        assert!(retry.background.unfinished().is_empty());
+        assert_eq!(retry.background.unfinished().len(), 0);
         assert!(retry.project_servers.is_clean());
     }
 

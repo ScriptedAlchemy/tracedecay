@@ -307,7 +307,7 @@ fn exit_releases_session_local_overlays_and_queued_frames() {
 
     assert_eq!(session.lifecycle(), SessionLifecycle::Exited);
     assert!(session.overlays().snapshot("file:///root/a.rs").is_none());
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 }
 
 #[test]
@@ -404,7 +404,7 @@ fn server_refresh_responses_do_not_create_json_rpc_response_loops() {
         "result": null,
     });
     session.handle_payload(&serde_json::to_vec(&response).unwrap(), 61);
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 }
 
 #[test]

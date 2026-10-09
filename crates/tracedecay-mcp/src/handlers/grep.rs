@@ -657,7 +657,7 @@ mod tests {
 
         let (scan, output) = scan_output(project.path(), "OVERSIZED_ONLY_TOKEN");
 
-        assert!(scan.hits.is_empty());
+        assert_eq!(scan.hits.len(), 0);
         assert_eq!(scan.omissions.oversized_files, 1);
         assert!(!scan.truncated);
         assert_partial_output(&output, 0, 0, &one_budget_omission());

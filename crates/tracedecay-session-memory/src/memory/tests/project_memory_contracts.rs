@@ -250,7 +250,7 @@ async fn automatic_fact_receipt_binds_the_exact_submitted_request_and_evidence()
         else {
             panic!("wrong automatic fact receipt must retain the authority result");
         };
-        assert_eq!(authority_result, expected);
+        assert_eq!(*authority_result, expected);
     }
 }
 
@@ -314,7 +314,7 @@ async fn merge_rejects_a_mismatched_authority_digest_without_losing_the_outcome(
     else {
         panic!("merge digest mismatch must retain the committed authority outcome");
     };
-    assert_eq!(authority_result, outcome);
+    assert_eq!(*authority_result, outcome);
 }
 
 #[test]
@@ -415,5 +415,5 @@ async fn curation_rejects_a_mismatched_authority_digest_without_losing_the_recei
     else {
         panic!("wrong curation digest must retain the authority receipt");
     };
-    assert_eq!(authority_result, authority_receipt);
+    assert_eq!(*authority_result, authority_receipt);
 }

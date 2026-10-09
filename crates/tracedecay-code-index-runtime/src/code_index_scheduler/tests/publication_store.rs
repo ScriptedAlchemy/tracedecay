@@ -1381,7 +1381,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         Some(&graph_replay_pool),
     )
     .expect("maintenance sweeps committed-pack crash debris");
-    assert!(report.deleted_generations.is_empty());
+    assert_eq!(report.deleted_generations.len(), 0);
     assert!(
         !colliding_pack.exists(),
         "canonical locked maintenance must remove a final pack with no durable manifest"
@@ -1877,9 +1877,9 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
     )
     .expect("reconcile code-index scope roots");
 
-    assert!(report.collected_scopes.is_empty());
+    assert_eq!(report.collected_scopes.len(), 0);
     assert!(report.receipt.is_none());
-    assert!(report.plan.collectable_scopes.is_empty());
+    assert_eq!(report.plan.collectable_scopes.len(), 0);
     assert_eq!(report.plan.refused_scopes.len(), 1);
     assert_eq!(
         report.plan.refused_scopes[0].refusal,
@@ -1922,7 +1922,7 @@ fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
     )
     .expect("reconcile code-index scope roots");
 
-    assert!(report.collected_scopes.is_empty());
+    assert_eq!(report.collected_scopes.len(), 0);
     assert_eq!(report.plan.retained_immature_scopes.len(), 1);
     assert!(
         stranded_scope.exists(),
@@ -3394,7 +3394,7 @@ fn linked_worktrees_that_index_identical_trees_share_one_text_artifact() {
         "a worktree sealing content a sibling already published adopts it without building"
     );
     assert_eq!(first.content_key, linked.content_key);
-    assert!(!first_hits.is_empty());
+    assert_ne!(first_hits.len(), 0);
     assert_eq!(
         first_hits, linked_hits,
         "the adopted artifact serves identical results"

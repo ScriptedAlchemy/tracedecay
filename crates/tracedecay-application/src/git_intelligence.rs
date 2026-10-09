@@ -1324,7 +1324,7 @@ impl NativeGitIntelligence {
         // it cannot be inlined, and `or_default` below needs it to infer `Vec`.
         type AttributeTriples<'a> = BTreeMap<String, Vec<(&'a [u8], &'a [u8], &'a [u8])>>;
         let mut triples_by_path: AttributeTriples<'_> = BTreeMap::new();
-        for triple in records.chunks_exact(3) {
+        for triple in records.as_chunks::<3>().0 {
             triples_by_path
                 .entry(String::from_utf8_lossy(triple[0]).into_owned())
                 .or_default()

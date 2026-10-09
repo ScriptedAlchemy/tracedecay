@@ -441,13 +441,11 @@ pub fn handle_tool_call_with_registry_options<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     let dispatch = async move {
         tracing::trace!(name: "mcp.tool.name", value = ?mcp_tool_bounded_identity(tool_name));
-        for removed in ["hermes_home"] {
-            if args.get(removed).is_some() {
-                return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
-                    "unknown parameter `{removed}` for `{tool_name}`"
-                ))
-                .into_trace_decay_error());
-            }
+        if args.get("hermes_home").is_some() {
+            return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+                "unknown parameter `hermes_home` for `{tool_name}`"
+            ))
+            .into_trace_decay_error());
         }
         if let Some(retained) = RetainedSurfaceOperation::from_tool_name(tool_name) {
             // A profile-targeted call names no project, so it skips project

@@ -231,7 +231,7 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
         .expect("nested settlement releases the project lease")
         .expect("quiescence task")
         .expect("quiescence drains the runtime");
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
     drop(guard);
     drop(lease);
 }

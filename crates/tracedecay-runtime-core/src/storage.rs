@@ -328,8 +328,7 @@ pub fn classify_registry_storage_fields(
             |relpath| {
                 [&profile_root, &data_root].iter().any(|root| {
                     StoreArtifactPath::resolve(root, relpath)
-                        .ok()
-                        .is_some_and(|path| path.absolute_path().is_file())
+                        .is_ok_and(|path| path.absolute_path().is_file())
                 })
             },
         );

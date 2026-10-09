@@ -235,14 +235,18 @@ impl McpTransport for ChannelTransport {
         }
     }
 
-    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.tx
-            .send(line.to_string())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
+    fn write_line(&mut self, line: &str) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(
+                self.tx.send(line.to_string()).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                }),
+            )
+        })
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 
@@ -266,13 +270,18 @@ impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
 
 #[cfg(any(test, feature = "test-transport"))]
 impl McpTransportWriter for &mut tokio::sync::mpsc::UnboundedSender<String> {
-    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.send(line.to_string())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
+    fn write_line(&mut self, line: &str) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(
+                self.send(line.to_string()).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                }),
+            )
+        })
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 
@@ -397,6 +406,33 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn channel_writes_remain_lazy_and_report_closed_receivers() {
+        let (mut transport, _input, mut output) = ChannelTransport::new();
+        drop(transport.write_line("cancelled"));
+        assert_eq!(
+            output.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        transport.write_line("complete").await.unwrap();
+        assert_eq!(output.recv().await.as_deref(), Some("complete"));
+        {
+            let (_reader, mut writer) = transport.split();
+            drop(writer.write_line("cancelled split"));
+            assert_eq!(
+                output.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            );
+            writer.write_line("complete split").await.unwrap();
+            assert_eq!(output.recv().await.as_deref(), Some("complete split"));
+        }
+        drop(output);
+        assert_eq!(
+            transport.write_line("closed").await.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
 
     #[tokio::test]
     async fn channel_transport_rejects_oversized_line_without_returning_payload() {

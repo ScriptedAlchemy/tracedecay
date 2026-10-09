@@ -1894,7 +1894,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     fn mint_progress_producer_incarnation(&self) -> Result<u64, CodeIndexSchedulerErrorV1> {
         self.next_progress_producer_incarnation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| {
@@ -1992,7 +1992,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_cold_mount_before_final_commit(
+    pub fn pause_next_cold_mount_before_final_commit(
         project_root: PathBuf,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,
@@ -2034,7 +2034,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// successor has not started its partition decode.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_retained_graph_recovery(
+    pub fn pause_next_retained_graph_recovery(
         &self,
         project_root: PathBuf,
         at: RetainedGraphRecoveryPauseV1,
@@ -2081,7 +2081,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// projection's finalization index build takes minutes on a large corpus.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_retained_text_projection(
+    pub fn pause_next_retained_text_projection(
         &self,
         project_root: PathBuf,
     ) -> (
@@ -2311,7 +2311,7 @@ impl CodeIndexSchedulerRegistryV1 {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         }
         let serving_epoch = serving_epoch.load(Ordering::Acquire);
-        let token = match self.serving_generation_installation_tokens.fetch_update(
+        let token = match self.serving_generation_installation_tokens.try_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |current| current.checked_add(1),

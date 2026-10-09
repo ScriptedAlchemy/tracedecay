@@ -47,7 +47,7 @@ pub enum MemoryMutationError<T: Debug> {
     InvalidAuthorityResult {
         #[source]
         error: MemoryApplicationError,
-        authority_result: T,
+        authority_result: Box<T>,
     },
 }
 
@@ -63,7 +63,7 @@ impl<T: Debug> MemoryMutationError<T> {
                 authority_result,
             } => MemoryMutationError::InvalidAuthorityResult {
                 error,
-                authority_result: map(authority_result),
+                authority_result: Box::new(map(*authority_result)),
             },
         }
     }
@@ -105,7 +105,7 @@ pub(super) fn settle_authority_result<T: Debug>(
         Ok(()) => Ok(authority_result),
         Err(error) => Err(MemoryMutationError::InvalidAuthorityResult {
             error,
-            authority_result,
+            authority_result: Box::new(authority_result),
         }),
     }
 }

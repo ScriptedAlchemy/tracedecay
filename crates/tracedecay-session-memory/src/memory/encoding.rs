@@ -125,7 +125,7 @@ fn deterministic_coefficients(label: &str) -> Vec<f64> {
         hasher.update(counter.to_le_bytes());
         let digest = hasher.finalize();
 
-        for chunk in digest.chunks_exact(8) {
+        for chunk in digest.as_chunks::<8>().0 {
             if coefficients.len() == HolographicEncoder::DIMENSIONS {
                 break;
             }

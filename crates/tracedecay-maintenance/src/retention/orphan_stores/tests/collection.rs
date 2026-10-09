@@ -56,7 +56,7 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
         .unwrap();
 
     assert_eq!(retired, 0);
-    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
     assert_eq!(
         outcome.errors,
         vec![CollectionFailure {
@@ -116,7 +116,7 @@ async fn registered_collection_rejects_profile_contained_data_root_symlink() {
         .unwrap();
 
     assert_eq!(retired, 0);
-    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
     assert_eq!(
         outcome.errors,
         vec![CollectionFailure {
@@ -194,11 +194,12 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
         .unwrap();
     assert_eq!(prior.len(), 1);
     assert_eq!(prior[0].store_id, "store_moved");
-    assert!(
+    assert_eq!(
         db.try_list_store_instances_for_project("proj_live")
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     let restored_manifest = tracedecay_runtime_core::storage::read_store_manifest(
         &store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
@@ -300,7 +301,7 @@ async fn memory_v2_rows_block_orphan_store_collection() {
         .await
         .unwrap();
 
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert_eq!(
         report.outcome.errors[0].kind,
         CollectionFailureKind::DurableDataProtected
@@ -388,7 +389,7 @@ async fn unregistered_collection_refuses_same_second_directory_replacement() {
         .await
         .unwrap();
 
-    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
     assert_eq!(
         outcome.errors,
         vec![CollectionFailure {
@@ -433,7 +434,7 @@ async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
         .await
         .unwrap();
 
-    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
     assert_eq!(
         outcome.errors,
         vec![CollectionFailure {
@@ -613,7 +614,7 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
         .await
         .unwrap();
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert_eq!(
         report.outcome.errors[0].kind,
         CollectionFailureKind::DurableDataProtected
@@ -1041,9 +1042,9 @@ async fn symlink_manifest_is_unverifiable_and_never_collected() {
         .await
         .unwrap();
 
-    assert!(report.plan.collect.is_empty());
+    assert_eq!(report.plan.collect.len(), 0);
     assert_eq!(report.plan.unverifiable.len(), 1);
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(data_root.exists());
 }
 
@@ -1075,7 +1076,7 @@ async fn symlink_graph_database_is_durable_data_protected() {
         .unwrap();
 
     assert_eq!(report.plan.collect.len(), 1);
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert_eq!(report.outcome.errors.len(), 1);
     assert_eq!(
         report.outcome.errors[0].kind,

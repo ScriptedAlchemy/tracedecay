@@ -756,7 +756,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             database
                 .resolve_retrieval_anchor_derivatives(
                     &FactOwnerV1::Profile,
@@ -764,7 +764,8 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         database
             .append_retrieval_anchor_disposition(&disposition(
@@ -785,7 +786,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             database
                 .resolve_retrieval_anchor_derivatives(
                     &FactOwnerV1::Profile,
@@ -793,7 +794,8 @@ mod tests {
                 )
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         assert!(
             database

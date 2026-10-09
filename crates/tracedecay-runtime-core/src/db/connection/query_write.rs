@@ -174,10 +174,7 @@ impl Database {
             .require_active_write_scope(operation)
     }
 
-    pub(super) async fn open_writer_connection_unguarded(
-        &self,
-        operation: &str,
-    ) -> Result<Connection> {
+    pub(super) fn open_writer_connection_unguarded(&self, operation: &str) -> Result<Connection> {
         self.require_active_write_scope(operation)?;
         self.inner.write_conn.clone().ok_or_else(|| {
             integrity::read_only_upgrade_error(self.canonical_database_path(), operation)
@@ -189,7 +186,7 @@ impl Database {
     /// serialization or joining a transaction on the retained reader.
     pub async fn writer_connection(&self, operation: &str) -> Result<DatabaseWriterConnection<'_>> {
         let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
@@ -253,7 +250,7 @@ impl Database {
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
         let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
@@ -280,7 +277,7 @@ impl Database {
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
         let guard = self.writer().await;
-        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .authorized_long_lease_transaction()
             .await

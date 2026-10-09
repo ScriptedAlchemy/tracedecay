@@ -248,7 +248,7 @@ async fn curation_add_rejects_a_committed_same_owner_fact_from_another_child_ide
     else {
         panic!("wrong committed add identity must retain its authority receipt");
     };
-    assert_eq!(authority_result, receipt);
+    assert_eq!(*authority_result, receipt);
 }
 
 #[test]
@@ -650,5 +650,5 @@ async fn remove_receipt_target_mismatch_retains_the_settled_authority_receipt() 
     else {
         panic!("mismatched destructive receipt must retain its authority result");
     };
-    assert_eq!(authority_result, receipt);
+    assert_eq!(*authority_result, receipt);
 }

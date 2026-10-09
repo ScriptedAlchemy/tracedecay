@@ -937,7 +937,7 @@ mod tests {
             &owner,
         );
 
-        assert!(owners.release_idle(start).is_empty());
+        assert_eq!(owners.release_idle(start).len(), 0);
         assert!(
             !headroom.has_changed().unwrap(),
             "a sweep that frees nothing"

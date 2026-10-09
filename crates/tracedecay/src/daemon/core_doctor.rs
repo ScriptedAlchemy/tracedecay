@@ -727,8 +727,10 @@ mod doctor_runtime_route_tests {
     }
 
     impl McpTransport for DoctorRouteTransport {
-        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-            Ok(None)
+        fn read_line(
+            &mut self,
+        ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> {
+            std::future::ready(Ok(None))
         }
 
         async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -742,8 +744,8 @@ mod doctor_runtime_route_tests {
             Ok(())
         }
 
-        async fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+        fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+            std::future::ready(Ok(()))
         }
     }
 
@@ -1089,7 +1091,7 @@ mod doctor_runtime_route_tests {
 
         assert!(outcome.is_none());
         assert!(transport.idle_before_write);
-        assert!(!transport.output.is_empty());
+        assert_ne!(transport.output, "");
         assert!(transport.output.contains(r#""kind":"unknown""#));
         assert!(
             transport
@@ -1313,7 +1315,7 @@ mod doctor_runtime_route_tests {
         .expect("fall through to ready owner");
 
         assert!(outcome.is_some());
-        assert!(transport.output.is_empty());
+        assert_eq!(transport.output, "");
         drop(outcome);
         lifecycle.begin_draining();
         tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.wait_for_idle())

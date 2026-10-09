@@ -925,14 +925,10 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let retained_recovery_gate = if !corrupt_graph {
-        Some(
-            registry
-                .pause_next_retained_graph_recovery(
-                    canonical_existing_identity(fixture.path()).expect("canonical fixture"),
-                    RetainedGraphRecoveryPauseV1::BeforeSuccessor,
-                )
-                .await,
-        )
+        Some(registry.pause_next_retained_graph_recovery(
+            canonical_existing_identity(fixture.path()).expect("canonical fixture"),
+            RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+        ))
     } else {
         None
     };
@@ -1301,15 +1297,12 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
     } = restart_with_published_graph_head(TextArtifact::ProjectedOnRestart).await;
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
-    let (projecting, release_projection) = registry
-        .pause_next_retained_text_projection(canonical_fixture.clone())
-        .await;
-    let (recovered, release_successor) = registry
-        .pause_next_retained_graph_recovery(
-            canonical_fixture.clone(),
-            RetainedGraphRecoveryPauseV1::BeforeSuccessor,
-        )
-        .await;
+    let (projecting, release_projection) =
+        registry.pause_next_retained_text_projection(canonical_fixture.clone());
+    let (recovered, release_successor) = registry.pause_next_retained_graph_recovery(
+        canonical_fixture.clone(),
+        RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+    );
     registry
         .mount_worktree_with_graph_runtime(
             test_project_id(),
@@ -1709,15 +1702,12 @@ async fn first_search_after_restart_serves_text_while_the_graph_head_recovers() 
     // freshly restarted daemon, and the graph-head recovery, which a large
     // store holds open by itself for tens of seconds.
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
-    let (projecting, release_projection) = registry
-        .pause_next_retained_text_projection(canonical_fixture.clone())
-        .await;
-    let (recovering, release_recovery) = registry
-        .pause_next_retained_graph_recovery(
-            canonical_fixture.clone(),
-            RetainedGraphRecoveryPauseV1::BeforeHeadRecovery,
-        )
-        .await;
+    let (projecting, release_projection) =
+        registry.pause_next_retained_text_projection(canonical_fixture.clone());
+    let (recovering, release_recovery) = registry.pause_next_retained_graph_recovery(
+        canonical_fixture.clone(),
+        RetainedGraphRecoveryPauseV1::BeforeHeadRecovery,
+    );
     registry
         .mount_worktree_with_graph_runtime(
             test_project_id(),

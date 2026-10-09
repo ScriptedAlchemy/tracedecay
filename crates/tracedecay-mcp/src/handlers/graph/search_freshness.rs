@@ -426,7 +426,7 @@ mod tests {
             "state=indexing rebuild_in_flight=true served_generation=none pending_hook_hints=3 progress=bulk_commit 250/500 files unavailable=generation_unavailable"
         );
         assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
-        assert!(indexing.stale_lanes.is_empty());
+        assert_eq!(indexing.stale_lanes.len(), 0);
     }
 
     #[test]

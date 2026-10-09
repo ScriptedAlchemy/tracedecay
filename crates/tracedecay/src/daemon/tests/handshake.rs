@@ -124,10 +124,10 @@ fn handshake_defaults_optional_metadata_when_fields_are_absent() {
         DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
 
     assert!(!decoded.allow_initialize_root_routing);
-    assert!(decoded.client_version.is_empty());
-    assert!(decoded.client_instance_id.is_empty());
+    assert_eq!(decoded.client_version, "");
+    assert_eq!(decoded.client_instance_id, "");
     assert!(!decoded.tool_list_changed_capable);
-    assert!(decoded.catalog_version.is_empty());
+    assert_eq!(decoded.catalog_version, "");
 }
 
 #[tokio::test]
@@ -910,7 +910,7 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
     let mut legacy = test_handshake_defaults();
     super::super::apply_proxy_initialize_metadata(&mut legacy, metadata);
     assert!(!legacy.tool_list_changed_capable);
-    assert!(legacy.catalog_version.is_empty());
+    assert_eq!(legacy.catalog_version, "");
 }
 
 /// A saturated daemon must still name wire skew.

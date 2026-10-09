@@ -423,7 +423,7 @@ mod background_task_owner_tests {
         }));
         tokio::task::yield_now().await;
 
-        assert!(owner.shutdown().await.is_empty());
+        assert_eq!(owner.shutdown().await.len(), 0);
         assert!(dropped.load(Ordering::Acquire));
         assert!(!owner.spawn(async {}));
     }
@@ -445,7 +445,7 @@ mod background_task_owner_tests {
             !dropped.load(Ordering::Acquire),
             "close_admission must not join or abort live tasks"
         );
-        assert!(owner.shutdown().await.is_empty());
+        assert_eq!(owner.shutdown().await.len(), 0);
         assert!(dropped.load(Ordering::Acquire));
     }
 
@@ -493,9 +493,9 @@ mod background_task_owner_tests {
             2,
             "after reaping, the owner retains only the live task and the task just admitted"
         );
-        assert!(owner.reaped_failures().is_empty());
+        assert_eq!(owner.reaped_failures().len(), 0);
         wait_until_set(&admitted).await;
-        assert!(owner.shutdown().await.is_empty());
+        assert_eq!(owner.shutdown().await.len(), 0);
     }
 
     /// A panicked task is observed by the next admission, once, and shutdown

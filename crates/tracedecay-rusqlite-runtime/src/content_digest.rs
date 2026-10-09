@@ -283,7 +283,7 @@ fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-    use sha2::{Digest as _, Sha256};
+    use sha2::Sha256;
 
     use super::*;
     use crate::telemetry::take_observed_vm;

@@ -520,7 +520,7 @@ mod tests {
             vec![invalid_range],
         );
 
-        assert!(merged.items.is_empty());
+        assert_eq!(merged.items.len(), 0);
         assert_eq!(merged.omitted_count, 2);
     }
 

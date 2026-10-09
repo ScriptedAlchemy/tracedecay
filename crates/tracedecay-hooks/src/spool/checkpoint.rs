@@ -357,7 +357,11 @@ pub(super) fn read_checkpoint(
     }
     let mut records = Vec::with_capacity(record_count);
     let mut file_offset = 0u64;
-    for entry_bytes in body[header_end..].chunks_exact(CHECKPOINT_ENTRY_BYTES) {
+    for entry_bytes in body[header_end..]
+        .as_chunks::<CHECKPOINT_ENTRY_BYTES>()
+        .0
+        .iter()
+    {
         let Some(record) = decode_checkpoint_entry(entry_bytes, file_offset) else {
             return Ok(None);
         };

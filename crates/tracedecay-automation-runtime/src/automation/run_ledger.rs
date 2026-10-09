@@ -2482,7 +2482,7 @@ mod tests {
 
         let page = read_run_records_tail_page_with_window(&path, 0, 8).unwrap();
 
-        assert!(page.records.is_empty());
+        assert_eq!(page.records.len(), 0);
         assert_eq!(page.malformed_row_count, 0);
         assert!(page.has_more);
         assert!(!page.is_complete());
@@ -2509,17 +2509,19 @@ mod tests {
     fn tail_read_handles_missing_and_empty_ledger() {
         let temp = tempfile::TempDir::new().unwrap();
         let missing = temp.path().join(RUN_LEDGER_FILENAME);
-        assert!(
+        assert_eq!(
             read_run_records_tail_with_window(&missing, 10, 64)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
 
         std::fs::write(&missing, b"").unwrap();
-        assert!(
+        assert_eq!(
             read_run_records_tail_with_window(&missing, 10, 64)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
 
         std::fs::write(&missing, format!("{}\n", ledger_line("present", 100))).unwrap();
@@ -2740,7 +2742,7 @@ mod tests {
         })
         .await;
 
-        assert!(records.unwrap().is_empty());
+        assert_eq!(records.unwrap().len(), 0);
 
         assert_eq!(
             exact_publication::publish_staged_run_record_exact(&root, run_id, &publication)
@@ -2772,7 +2774,7 @@ mod tests {
         .await;
 
         let summary = summary.unwrap();
-        assert!(summary.records().is_empty());
+        assert_eq!(summary.records().len(), 0);
         assert!(summary.latest_scheduler_effectful().is_none());
         assert!(summary.latest_logical_activity().is_none());
 
@@ -2808,19 +2810,21 @@ mod tests {
             load_run_records_page(&root, 25).await.unwrap(),
             AutomationRunLedgerPageV1::empty()
         );
-        assert!(load_run_records(&root, 25).await.unwrap().is_empty());
-        assert!(
+        assert_eq!(load_run_records(&root, 25).await.unwrap().len(), 0);
+        assert_eq!(
             load_run_records_for_task_key(&root, "memory_curator", 25)
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
-        assert!(
+        assert_eq!(
             load_run_ledger_task_summary(&root, AgentTaskKind::MemoryCurator, "memory_curator")
                 .await
                 .unwrap()
                 .records()
-                .is_empty()
+                .len(),
+            0
         );
         assert_eq!(
             load_latest_task_validation_pointer(

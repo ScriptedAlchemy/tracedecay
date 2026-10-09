@@ -946,7 +946,7 @@ mod tests {
                 .expect("a non-proxy command launches directly");
 
             assert_eq!(launch.program, real);
-            assert!(invocations(dir.path()).is_empty());
+            assert_eq!(invocations(dir.path()), "");
         }
 
         #[test]

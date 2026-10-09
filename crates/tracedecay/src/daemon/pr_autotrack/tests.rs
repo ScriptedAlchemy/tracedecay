@@ -69,8 +69,8 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     .await
     .expect("load managed PR state");
 
-    assert!(report.untracked.is_empty());
-    assert!(report.tracked.is_empty());
+    assert_eq!(report.untracked.len(), 0);
+    assert_eq!(report.tracked.len(), 0);
     assert_eq!(report.failures.len(), 1);
     assert!(
         report.failures[0]
@@ -153,7 +153,7 @@ async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
     .await
     .expect("cancelled reconciliation returns a report");
 
-    assert!(report.untracked.is_empty());
+    assert_eq!(report.untracked.len(), 0);
     assert_eq!(report.failures.len(), 1);
     assert!(
         load_state(data_root.path())
@@ -183,7 +183,7 @@ async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
     .expect("retry reconciliation returns a report");
 
     assert_eq!(report.untracked, vec![label.clone()]);
-    assert!(report.failures.is_empty());
+    assert_eq!(report.failures.len(), 0);
     assert!(
         load_state(data_root.path())
             .expect("reload cleaned state")
@@ -315,7 +315,7 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
     .await
     .expect("load managed PR state");
 
-    assert!(report.tracked.is_empty());
+    assert_eq!(report.tracked.len(), 0);
     assert_eq!(report.failures.len(), 1);
     assert!(
         report.failures[0]
@@ -480,8 +480,8 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
     .expect("load managed PR state");
 
     // Already managed and still open: nothing changes.
-    assert!(report.tracked.is_empty());
-    assert!(report.untracked.is_empty());
+    assert_eq!(report.tracked.len(), 0);
+    assert_eq!(report.untracked.len(), 0);
     assert!(
         load_state(data_root.path())
             .expect("load managed PR state")
@@ -1161,7 +1161,7 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
     ));
     assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
     assert!(!data_root.join("branch-worktrees").exists());
-    assert!(
+    assert_eq!(
         git_output(
             repo.path(),
             &[
@@ -1171,7 +1171,8 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
             ]
         )
         .trim()
-        .is_empty()
+        .len(),
+        0
     );
 }
 
@@ -1211,7 +1212,7 @@ async fn manual_branch_missing_ref_is_typed_failure() {
         "a permanently missing branch identity must not become retryable"
     );
     assert!(!data_root.join("branch-worktrees").exists());
-    assert!(
+    assert_eq!(
         git_output(
             repo.path(),
             &[
@@ -1221,7 +1222,8 @@ async fn manual_branch_missing_ref_is_typed_failure() {
             ]
         )
         .trim()
-        .is_empty()
+        .len(),
+        0
     );
     schedulers.shutdown().await;
 }
@@ -1490,9 +1492,10 @@ fn dashboard_managed_summary_reader_is_empty_without_state() {
                     .collect()
             })
         });
-    assert!(
+    assert_eq!(
         reader(data_root.path().to_path_buf())
             .expect("read empty managed summary")
-            .is_empty()
+            .len(),
+        0
     );
 }

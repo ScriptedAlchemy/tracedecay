@@ -299,7 +299,7 @@ where
         }
         let grant = match authorize(&self.authorizer, context, binding, &target) {
             Ok(grant) => grant,
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         };
         let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let Ok(source_id) = SessionSourceIdV1::new(format!(
@@ -364,7 +364,7 @@ where
                     &error,
                 ));
             }
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         };
         // The store begins the window at the committed projection frontier,
         // which may have advanced past the caller's view but never past the
@@ -418,7 +418,7 @@ where
             return outcome;
         }
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
-            return outcome;
+            return *outcome;
         }
         let progress = match await_with_request_controls(
             context,
@@ -437,7 +437,7 @@ where
                     &error,
                 ));
             }
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         }
         .map(|progress| {
             let source_coverage = progress.source_coverage().and_then(|coverage| {
@@ -451,7 +451,7 @@ where
         match self.read_receipt(context, binding, handle).await {
             Ok(Some(receipt)) => return terminal_outcome(receipt),
             Ok(None) => {}
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         }
         SessionRefreshOutcome::Running(progress)
     }
@@ -467,7 +467,7 @@ where
             return outcome;
         }
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
-            return outcome;
+            return *outcome;
         }
         // The receipt read and the cancel write are separate store calls. The
         // worker can commit a terminal receipt, or a newer progress row, in
@@ -496,12 +496,12 @@ where
                         &error,
                     ));
                 }
-                Err(outcome) => return outcome,
+                Err(outcome) => return *outcome,
             };
             match self.read_receipt(context, binding, handle).await {
                 Ok(Some(receipt)) => return terminal_outcome(receipt),
                 Ok(None) => {}
-                Err(outcome) => return outcome,
+                Err(outcome) => return *outcome,
             }
             if attempted_progress.as_ref() == Some(&progress) {
                 return self.status(context, binding, handle).await;
@@ -528,20 +528,17 @@ where
                         &error,
                     ));
                 }
-                Err(outcome) => return outcome,
+                Err(outcome) => return *outcome,
             }
         }
     }
 
-    // The outcome enum carries receipts/handles by value; boxing its variants
-    // for this private Result would churn the public refresh API.
-    #[allow(clippy::result_large_err)]
     fn authorize_handle(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
-    ) -> Result<(), SessionRefreshOutcome> {
+    ) -> Result<(), Box<SessionRefreshOutcome>> {
         let grant = authorize(&self.authorizer, context, binding, &handle.target)?;
         let digests = refresh_digests(
             context,
@@ -552,7 +549,7 @@ where
         );
         if digests.join != handle.join_digest || digests.caller != handle.caller_idempotency_digest
         {
-            return Err(SessionRefreshOutcome::WrongScope);
+            return Err(Box::new(SessionRefreshOutcome::WrongScope));
         }
         Ok(())
     }
@@ -562,7 +559,7 @@ where
         context: &RequestContext,
         binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
-    ) -> Result<Option<SessionRefreshReceiptV1>, SessionRefreshOutcome> {
+    ) -> Result<Option<SessionRefreshReceiptV1>, Box<SessionRefreshOutcome>> {
         match await_with_request_controls(
             context,
             binding,
@@ -583,9 +580,9 @@ where
                     None => receipt,
                 }
             })),
-            Ok(Err(error)) => Err(SessionRefreshOutcome::Unavailable(
+            Ok(Err(error)) => Err(Box::new(SessionRefreshOutcome::Unavailable(
                 SessionRefreshUnavailable::store(&error),
-            )),
+            ))),
             Err(outcome) => Err(outcome),
         }
     }
@@ -598,15 +595,12 @@ struct RefreshDigests {
     projection: SessionRefreshDigest,
 }
 
-// The outcome enum carries receipts/handles by value; boxing its variants
-// for this private Result would churn the public refresh API.
-#[allow(clippy::result_large_err)]
 fn authorize<A>(
     authorizer: &A,
     context: &RequestContext,
     binding: &SessionRequestBinding,
     target: &SessionRefreshTarget,
-) -> Result<SessionAuthorizationGrant, SessionRefreshOutcome>
+) -> Result<SessionAuthorizationGrant, Box<SessionRefreshOutcome>>
 where
     A: SessionScopeAuthorizer,
 {
@@ -620,14 +614,16 @@ where
         SessionAccess::Hydrate,
     )
     .map_err(|error| {
-        SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::Authorization(error))
+        Box::new(SessionRefreshOutcome::Unavailable(
+            SessionRefreshUnavailable::Authorization(error),
+        ))
     })?;
     let grant = authorizer
         .authorize(context, binding, &request)
-        .map_err(map_authorization_error)?;
+        .map_err(|error| Box::new(map_authorization_error(error)))?;
     grant
         .validate(context, binding, &request)
-        .map_err(map_authorization_error)?;
+        .map_err(|error| Box::new(map_authorization_error(error)))?;
     Ok(grant)
 }
 
@@ -677,15 +673,17 @@ async fn await_with_request_controls<T>(
     context: &RequestContext,
     binding: &SessionRequestBinding,
     future: impl std::future::Future<Output = T>,
-) -> Result<T, SessionRefreshOutcome> {
+) -> Result<T, Box<SessionRefreshOutcome>> {
     if let Some(outcome) = request_interruption(context, binding) {
-        return Err(outcome);
+        return Err(Box::new(outcome));
     }
     run_application_request_interruptible(context, binding.cancellation(), future, || {})
         .await
-        .map_err(|interruption| match interruption {
-            RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
-            RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+        .map_err(|interruption| {
+            Box::new(match interruption {
+                RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
+                RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+            })
         })
 }
 

@@ -1337,7 +1337,7 @@ async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_rep
         ]
     );
     assert!(receipt.tombstone_recorded);
-    assert!(receipt.pending_project_ids.is_empty());
+    assert_eq!(receipt.pending_project_ids.len(), 0);
     assert!(!first_layout.data_root.exists());
     assert!(!second_layout.data_root.exists());
     assert!(first_project.exists());

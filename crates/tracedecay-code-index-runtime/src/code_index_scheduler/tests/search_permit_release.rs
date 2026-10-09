@@ -411,7 +411,7 @@ async fn independent_search_completes_while_another_scan_is_in_progress() {
         let CodeIndexSearchOutcomeV1::Complete(result) = outcome else {
             panic!("other worktree or repository failed: {outcome:?}");
         };
-        assert!(!result.ordered_candidates.is_empty());
+        assert_ne!(result.ordered_candidates.len(), 0);
         assert!(!result.display_by_anchor.is_empty());
         assert!(
             result

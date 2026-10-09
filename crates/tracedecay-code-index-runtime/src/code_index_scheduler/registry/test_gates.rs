@@ -26,7 +26,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
-    pub async fn pause_next_published_text_projection(
+    pub fn pause_next_published_text_projection(
         &self,
         project_root: PathBuf,
     ) -> (
@@ -54,7 +54,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Hold the next publication's text projection once its first advance
     /// opened the build, so the publishing pass waits in its join.
     #[cfg(test)]
-    pub async fn pause_next_opened_published_text_projection(
+    pub fn pause_next_opened_published_text_projection(
         &self,
         project_root: PathBuf,
     ) -> (

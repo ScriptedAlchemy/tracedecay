@@ -236,7 +236,9 @@ fn decode_lowercase_hex(encoded: &str) -> Option<Vec<u8>> {
         return None;
     }
     encoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect()
 }

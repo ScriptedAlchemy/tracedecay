@@ -202,7 +202,7 @@ fn increment_counter(
     counter_name: &'static str,
 ) -> Result<(), &'static str> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             current.checked_add(increment)
         })
         .map(|_| ())
@@ -211,7 +211,7 @@ fn increment_counter(
 
 fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<(), &'static str> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             current.checked_sub(1)
         })
         .map(|_| ())

@@ -272,7 +272,7 @@ mod message_search_definition_tests {
         let definition = def_message_search();
         let schema = &definition.input_schema;
 
-        assert!(schema["required"].as_array().unwrap().is_empty());
+        assert_eq!(schema["required"].as_array().unwrap().len(), 0);
         assert_eq!(schema["anyOf"][0]["required"], json!(["query"]));
         assert_eq!(schema["anyOf"][1]["required"], json!(["goals"]));
         assert_eq!(schema["anyOf"][1]["properties"]["goals"]["const"], true);

@@ -782,7 +782,7 @@ impl<'a> ProjectProviderRun<'a> {
                     .await
                 {
                     Ok(outcome) => (outcome, None),
-                    Err(failure) => (failure.outcome, Some(failure.error)),
+                    Err(failure) => (*failure.outcome, Some(failure.error)),
                 }
             } else {
                 (cursor_composer::CursorComposerSweepOutcome::default(), None)

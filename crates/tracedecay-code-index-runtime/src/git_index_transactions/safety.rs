@@ -241,7 +241,7 @@ impl FixedGitIndexRunner {
         // `-z` emits `path NUL attribute NUL value NUL` triples.
         let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
         let mut bound = BTreeSet::new();
-        for triple in fields.chunks_exact(3) {
+        for triple in fields.as_chunks::<3>().0 {
             let Ok(value) = std::str::from_utf8(triple[2]) else {
                 continue;
             };

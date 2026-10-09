@@ -177,11 +177,19 @@ impl DatabaseEngineReadSnapshot {
         self.snapshot.query(sql, params).await
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Releasing the snapshot must remain deferred until polling or dropping its future."
+    )]
     pub async fn commit(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Releasing the snapshot must remain deferred until polling or dropping its future."
+    )]
     pub async fn rollback(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())

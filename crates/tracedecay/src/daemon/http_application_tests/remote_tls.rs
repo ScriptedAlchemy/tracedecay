@@ -994,7 +994,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     )
     .await
     .expect("the incomplete-header connection must be torn down");
-    assert!(response.is_empty());
+    assert_eq!(response.len(), 0);
 
     let mut partial_body = remote_tls_connect(endpoint, &certificate).await;
     let partial_body_headers = format!(
@@ -1023,7 +1023,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     )
     .await
     .expect("the incomplete-body connection must be torn down");
-    assert!(partial_body_response.is_empty());
+    assert_eq!(partial_body_response.len(), 0);
 
     // From here the paused clock cannot auto-advance while the test waits on
     // the listener's ingress observer, so product deadlines age only through

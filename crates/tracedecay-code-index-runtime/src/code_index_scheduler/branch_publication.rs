@@ -194,8 +194,7 @@ impl BranchPublicationContextV1 {
         };
         if cancellation.is_cancelled() {
             let error = branch_publication_cancelled_error(branch);
-            self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
-                .await?;
+            self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)?;
             return Err(error);
         }
         let expected_source = tracedecay_runtime_core::branch_meta::load_branch_meta(
@@ -217,8 +216,7 @@ impl BranchPublicationContextV1 {
         {
             Ok(installation) => installation,
             Err(error) => {
-                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
-                    .await?;
+                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)?;
                 return Err(error);
             }
         };
@@ -254,8 +252,7 @@ impl BranchPublicationContextV1 {
                             prepared.as_deref(),
                             Some(&publication),
                             &error,
-                        )
-                        .await?;
+                        )?;
                         Err(error)
                     }
                 }
@@ -311,16 +308,14 @@ impl BranchPublicationContextV1 {
                 let _ = schedulers
                     .commit_serving_generation_installation(&canonical_worktree_root, installation)
                     .await;
-                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
-                    .await?;
+                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)?;
                 Err(error)
             }
             Err(error) => {
                 let _ = schedulers
                     .commit_serving_generation_installation(&canonical_worktree_root, installation)
                     .await;
-                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)
-                    .await?;
+                self.rollback_failed_branch_tracking(prepared.as_deref(), None, &error)?;
                 Err(error)
             }
         }
@@ -583,7 +578,7 @@ impl BranchPublicationContextV1 {
         }
     }
 
-    async fn rollback_failed_branch_tracking(
+    fn rollback_failed_branch_tracking(
         &self,
         prepared: Option<&tracedecay_runtime_core::branch::PreparedBranchTracking>,
         publication: Option<&BranchGraphSourcePublicationV1>,

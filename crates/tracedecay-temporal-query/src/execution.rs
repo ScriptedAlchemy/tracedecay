@@ -298,7 +298,7 @@ impl ExecutionControl {
         self.check_cancellation_and_deadline()?;
         if self.remaining_work.as_ref().is_some_and(|remaining| {
             remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                     value.checked_sub(1)
                 })
                 .is_err()

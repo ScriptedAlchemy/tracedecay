@@ -11,7 +11,9 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
     // UTF-16 LE BOM: FF FE
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         return String::from_utf16(&u16s)
@@ -21,7 +23,9 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
     // UTF-16 BE BOM: FE FF
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .collect();
         return String::from_utf16(&u16s)

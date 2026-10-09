@@ -492,13 +492,14 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
             .expect("cancel current work"),
         ContextScoutDurableStoreOutcomeV1::Stored
     );
-    assert!(
+    assert_eq!(
         owner
             .recent_exact(cancelled_input.address, 8)
             .await
             .expect("recent state after cancellation")
             .pending
-            .is_empty()
+            .len(),
+        0
     );
 }
 

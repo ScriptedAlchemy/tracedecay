@@ -628,27 +628,29 @@ async fn caller_hints(
     for edge in callers {
         let caller = edit_symbol_from_summary(&edge.neighbor)?;
         let same_module = caller.file_path == source_rel;
-        let detail;
-        let suggestion;
-        if same_module {
-            detail = format!(
-                "`{}` called `{}` unqualified from the same module; it now lives in {dest_rel}",
-                caller.name, target.name
-            );
-            suggestion = Some(format!(
-                "add `use {dest_mod}::{};` to {}",
-                target.name, caller.file_path
-            ));
+        let (detail, suggestion) = if same_module {
+            (
+                format!(
+                    "`{}` called `{}` unqualified from the same module; it now lives in {dest_rel}",
+                    caller.name, target.name
+                ),
+                Some(format!(
+                    "add `use {dest_mod}::{};` to {}",
+                    target.name, caller.file_path
+                )),
+            )
         } else {
-            detail = format!(
-                "`{}` in {} references `{}` via `{src_mod}`; the path is now `{dest_mod}`",
-                caller.name, caller.file_path, target.name
-            );
-            suggestion = Some(format!(
-                "retarget the reference from `{src_mod}::{}` to `{dest_mod}::{}`",
-                target.name, target.name
-            ));
-        }
+            (
+                format!(
+                    "`{}` in {} references `{}` via `{src_mod}`; the path is now `{dest_mod}`",
+                    caller.name, caller.file_path, target.name
+                ),
+                Some(format!(
+                    "retarget the reference from `{src_mod}::{}` to `{dest_mod}::{}`",
+                    target.name, target.name
+                )),
+            )
+        };
         hints.push(MoveHint {
             kind: "caller_reference".to_string(),
             file: caller.file_path.clone(),

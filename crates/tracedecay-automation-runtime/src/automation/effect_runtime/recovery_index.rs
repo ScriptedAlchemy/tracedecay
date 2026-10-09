@@ -1311,11 +1311,12 @@ mod tests {
         )
         .expect_err("visible removal uncertainty must surface");
         assert!(remove_error.to_string().contains("visible pending-index"));
-        assert!(
+        assert_eq!(
             read_index(&index_path(temp.path()))
                 .expect("visible removal")
                 .entries
-                .is_empty()
+                .len(),
+            0
         );
 
         mutate_index(temp.path(), |index| {
@@ -1323,11 +1324,12 @@ mod tests {
             Ok(())
         })
         .expect("idempotent removal retry");
-        assert!(
+        assert_eq!(
             read_index(&index_path(temp.path()))
                 .expect("durable removal")
                 .entries
-                .is_empty()
+                .len(),
+            0
         );
     }
 }

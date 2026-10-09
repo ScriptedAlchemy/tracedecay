@@ -135,7 +135,7 @@ impl Drop for ForegroundProjectOpenAdmission {
 impl ForegroundProjectOpenState {
     fn admit(self: &Arc<Self>) -> Result<ForegroundProjectOpenAdmission> {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .map_err(|_| {
