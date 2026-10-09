@@ -86,7 +86,7 @@ cargo_build_script(
     pkg_name = "tracedecay-agent-hosts",
     version = "0.1.0",
     crate_features = ["default"],
-    data = ["//plugin:sources", "//:version.txt", "//:Cargo.toml"],
+    data = ["//plugin:sources", "//plugin/chatgpt-extension:sources", "//plugin/cursor-native-extension:sources", "//:version.txt", "//:Cargo.toml"],
 )
 
 rust_test(

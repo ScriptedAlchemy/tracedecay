@@ -1957,12 +1957,9 @@ fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    let Ok(files) = codex_embedded_plugin_files() else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = files
+    let mut paths: Vec<PathBuf> = super::plugin_bundle::codex_relative_paths()
         .into_iter()
-        .map(|(relative, _)| install_dir.join(relative))
+        .map(|relative| install_dir.join(relative))
         .collect();
     paths.push(install_dir.join("skills/agent-managed-memory/SKILL.md"));
     paths

@@ -283,23 +283,36 @@ fn gzip_utf8(bytes: &'static [u8], relative: &'static str) -> Result<String> {
     Ok(out)
 }
 
+const EXPLORER_COMPILED_FILES: &[(&str, &[u8])] = &[
+    (
+        "chatgpt-extension/embedded/server.mjs",
+        plugin_bundle_generated::gzip_assets::CHATGPT_SERVER_MJS,
+    ),
+    (
+        "chatgpt-extension/embedded/app.html",
+        plugin_bundle_generated::gzip_assets::CHATGPT_APP_HTML,
+    ),
+];
+
 fn explorer_compiled_files() -> Result<Vec<(&'static str, String)>> {
-    Ok(vec![
-        (
-            "chatgpt-extension/embedded/server.mjs",
-            gzip_utf8(
-                plugin_bundle_generated::gzip_assets::CHATGPT_SERVER_MJS,
-                "chatgpt-extension/embedded/server.mjs",
-            )?,
-        ),
-        (
-            "chatgpt-extension/embedded/app.html",
-            gzip_utf8(
-                plugin_bundle_generated::gzip_assets::CHATGPT_APP_HTML,
-                "chatgpt-extension/embedded/app.html",
-            )?,
-        ),
-    ])
+    EXPLORER_COMPILED_FILES
+        .iter()
+        .map(|&(relative, bytes)| gzip_utf8(bytes, relative).map(|body| (relative, body)))
+        .collect()
+}
+
+pub fn codex_relative_paths() -> Vec<&'static str> {
+    CODEX_MANIFEST_FILES
+        .iter()
+        .chain(EXPLORER_ICON_FILES)
+        .chain(all_skill_files())
+        .map(|file| file.relative)
+        .chain(
+            EXPLORER_COMPILED_FILES
+                .iter()
+                .map(|(relative, _)| *relative),
+        )
+        .collect()
 }
 
 fn owned_plugin_files(files: &'static [PluginFile]) -> Vec<(&'static str, String)> {
@@ -500,7 +513,15 @@ mod tests {
     fn each_host_deploys_unique_relative_paths() {
         assert_unique_relatives(&claude_files(), "claude");
         assert_unique_relatives(&cursor_files(), "cursor");
-        assert_unique_relatives(&codex_files().unwrap(), "codex");
+        let codex = codex_files().unwrap();
+        assert_unique_relatives(&codex, "codex");
+        assert_eq!(
+            codex_relative_paths(),
+            codex
+                .iter()
+                .map(|(relative, _)| *relative)
+                .collect::<Vec<_>>()
+        );
         assert_unique_relatives(&kimi_files(), "kimi");
         assert_unique_relatives(&chatgpt_files().unwrap(), "chatgpt");
     }
@@ -592,33 +613,41 @@ mod tests {
 
     #[test]
     fn gzip_explorer_and_cursor_extension_roundtrip_source_files() {
-        let plugin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
         let chatgpt = chatgpt_files().unwrap();
         let cursor = cursor_native_extension_files().unwrap();
-        for (relative, source) in [
+        for (relative, expected) in [
             (
                 "chatgpt-extension/embedded/server.mjs",
-                "chatgpt-extension/embedded/server.mjs",
+                plugin_file!(
+                    "chatgpt-extension/embedded/server.mjs",
+                    "chatgpt-extension/embedded/server.mjs"
+                )
+                .contents,
             ),
             (
                 "chatgpt-extension/embedded/app.html",
-                "chatgpt-extension/embedded/app.html",
+                plugin_file!(
+                    "chatgpt-extension/embedded/app.html",
+                    "chatgpt-extension/embedded/app.html"
+                )
+                .contents,
             ),
         ] {
             let deployed = chatgpt
                 .iter()
                 .find(|(path, _)| *path == relative)
                 .unwrap_or_else(|| panic!("chatgpt bundle missing {relative}"));
-            let expected = std::fs::read_to_string(plugin.join(source)).unwrap();
             assert_eq!(deployed.1, expected);
         }
         let extension = cursor
             .iter()
             .find(|(path, _)| *path == "dist/extension.js")
             .expect("cursor native bundle missing dist/extension.js");
-        let expected =
-            std::fs::read_to_string(plugin.join("cursor-native-extension/embedded/extension.js"))
-                .unwrap();
+        let expected = plugin_file!(
+            "dist/extension.js",
+            "cursor-native-extension/embedded/extension.js"
+        )
+        .contents;
         assert_eq!(extension.1, expected);
     }
 }
