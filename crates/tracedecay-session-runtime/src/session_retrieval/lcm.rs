@@ -387,7 +387,7 @@ impl DaemonSessionRetrievalService {
                     .map(|result| result.snapshot.request().execution_control()),
             )
             .await;
-        let description = match rendered {
+        let mut description = match rendered {
             Ok(description) => description,
             Err(error) => {
                 return describe_execution_error(
@@ -396,6 +396,43 @@ impl DaemonSessionRetrievalService {
                     self.root.store_scope,
                 );
             }
+        };
+        let description_omitted = if description.raw_messages.is_empty() {
+            0
+        } else if let Some(result) = result.as_ref() {
+            match executor
+                .hydrate_lcm_description(
+                    &result.snapshot,
+                    command.provider(),
+                    command.session_id(),
+                    &mut description,
+                )
+                .await
+            {
+                Ok(omitted) => omitted,
+                Err(error) => {
+                    return describe_execution_error(
+                        error,
+                        self.empty_temporal(),
+                        self.root.store_scope,
+                    );
+                }
+            }
+        } else {
+            return LcmDescribeServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::HydrationUnavailable,
+                ),
+            );
+        };
+        let retrieval = match retrieval {
+            LcmRetrievalOutcome::Complete { freshness } if description_omitted > 0 => {
+                LcmRetrievalOutcome::partial(freshness, description_omitted)
+            }
+            LcmRetrievalOutcome::Partial { freshness, omitted } => {
+                LcmRetrievalOutcome::partial(freshness, omitted.saturating_add(description_omitted))
+            }
+            retrieval => retrieval,
         };
         let temporal = result.as_ref().map_or_else(
             || self.empty_temporal(),

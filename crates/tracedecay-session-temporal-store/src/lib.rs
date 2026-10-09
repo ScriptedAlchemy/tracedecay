@@ -66,7 +66,10 @@ use self::execution::{
     TaskSessionSelectionCallbackErrorV1, TaskSessionTemporalExecutionOutcomeV1,
     TaskSessionTemporalExecutionReportV1,
 };
-use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
+use self::render::{
+    CanonicalLcmSourceHydration, apply_canonical_description_content,
+    apply_canonical_summary_source_content,
+};
 use tracedecay_lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
@@ -722,15 +725,65 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         slice: LcmContentSlice,
         expansion: &mut LcmExpandResponse,
     ) -> Result<(), SessionTemporalExecutionError> {
-        if expansion.summary_sources.is_empty() {
-            return Ok(());
+        let sources = expansion
+            .summary_sources
+            .iter()
+            .map(|source| source.source_ref.clone())
+            .collect::<Vec<_>>();
+        let hydration = self
+            .hydrate_lcm_sources(snapshot, provider, session_id, &sources)
+            .await?;
+        apply_canonical_summary_source_content(expansion, slice, &hydration).map_err(|error| {
+            SessionTemporalExecutionError::storage(
+                "apply summary source content",
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    pub async fn hydrate_lcm_description(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        provider: &str,
+        session_id: &SessionId,
+        description: &mut LcmDescribeResponse,
+    ) -> Result<u64, SessionTemporalExecutionError> {
+        let sources = description
+            .raw_messages
+            .iter()
+            .map(|message| LcmSourceRef::RawMessage {
+                store_id: message.store_id,
+            })
+            .collect::<Vec<_>>();
+        let hydration = self
+            .hydrate_lcm_sources(snapshot, provider, session_id, &sources)
+            .await?;
+        apply_canonical_description_content(&mut description.raw_messages, &hydration).map_err(
+            |error| {
+                SessionTemporalExecutionError::storage(
+                    "apply description content",
+                    format!("{error:?}"),
+                )
+            },
+        )
+    }
+
+    async fn hydrate_lcm_sources(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        provider: &str,
+        session_id: &SessionId,
+        sources: &[LcmSourceRef],
+    ) -> Result<Vec<CanonicalLcmSourceHydration>, SessionTemporalExecutionError> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
         }
         let read_snapshot = self.open_read_snapshot().await?;
         let read = TemporalSqlRead::registered(&read_snapshot);
-        let mut resolutions = Vec::with_capacity(expansion.summary_sources.len());
-        let mut anchors = Vec::with_capacity(expansion.summary_sources.len());
-        for source in &expansion.summary_sources {
-            let target = match &source.source_ref {
+        let mut resolutions = Vec::with_capacity(sources.len());
+        let mut anchors = Vec::with_capacity(sources.len());
+        for source in sources {
+            let target = match source {
                 LcmSourceRef::RawMessage { store_id } => LcmExpandTarget::RawMessage {
                     store_id: *store_id,
                 },
@@ -801,8 +854,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
             .iter()
             .map(|denial| (denial.anchor_id().clone(), denial.state()))
             .collect::<BTreeMap<_, _>>();
-        let hydration = expansion
-            .summary_sources
+        let hydration = sources
             .iter()
             .zip(resolutions)
             .map(|(source, resolution)| {
@@ -823,18 +875,13 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                     Err(state) => (state, None),
                 };
                 CanonicalLcmSourceHydration {
-                    source_ref: source.source_ref.clone(),
+                    source_ref: source.clone(),
                     state,
                     content,
                 }
             })
             .collect::<Vec<_>>();
-        apply_canonical_summary_source_content(expansion, slice, &hydration).map_err(|error| {
-            SessionTemporalExecutionError::storage(
-                "apply summary source content",
-                format!("{error:?}"),
-            )
-        })
+        Ok(hydration)
     }
 
     pub async fn encode_lcm_source_cursor(
