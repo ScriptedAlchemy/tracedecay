@@ -203,19 +203,31 @@ pub async fn materialize_session_temporal_refresh_for_test(
     project_database: &RegisteredGlobalDb,
     session_id: &str,
 ) -> Result<()> {
-    let session_id =
-        SessionId::new(session_id).map_err(|error| fixture_error("session id", error))?;
+    materialize_session_temporal_refreshes_for_test(project_database, &[session_id]).await
+}
+
+/// Retains one discovery cursor while materializing a fixture corpus.
+pub async fn materialize_session_temporal_refreshes_for_test(
+    project_database: &RegisteredGlobalDb,
+    session_ids: &[&str],
+) -> Result<()> {
+    let session_ids = session_ids
+        .iter()
+        .map(|id| SessionId::new(*id).map_err(|error| fixture_error("session id", error)))
+        .collect::<Result<Vec<_>>>()?;
     tracedecay_session_temporal_store::SessionTemporalStore::new(project_database)
-        .materialize_pending_session_refresh_for_test(&session_id)
+        .materialize_pending_session_refreshes_for_test(&session_ids)
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;
-    SessionTemporalAccess::new(project_database)
-        .apply_active_session_relation_projection(
-            &session_id,
-            std::sync::Arc::new(DashboardFixtureGraphCancellation),
-        )
-        .await
-        .map_err(|error| fixture_error("apply session relation projection", error))?;
+    for session_id in session_ids {
+        SessionTemporalAccess::new(project_database)
+            .apply_active_session_relation_projection(
+                &session_id,
+                std::sync::Arc::new(DashboardFixtureGraphCancellation),
+            )
+            .await
+            .map_err(|error| fixture_error("apply session relation projection", error))?;
+    }
     Ok(())
 }
 

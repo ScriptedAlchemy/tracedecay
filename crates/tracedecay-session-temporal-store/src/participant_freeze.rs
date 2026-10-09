@@ -206,6 +206,8 @@ pub(super) async fn freeze_prepared_candidate_participants(
                 .collect::<Vec<_>>(),
         )
         .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        // Keep the bounded requested keys outermost; reordering this join can
+        // scan the entire project population for each participant.
         row_batches.push(
             read.query(
                 "WITH requested AS (
@@ -218,15 +220,15 @@ pub(super) async fn freeze_prepared_candidate_participants(
                     generation.frozen_watermarks_json, source.project_key,
                     source.metadata_json, unixepoch(), relation.generation
              FROM requested
-             JOIN sessions AS source
+             CROSS JOIN sessions AS source
                ON source.session_id = requested.session_id
               AND source.provider = requested.provider
               AND source.project_key = ?2
-             JOIN session_temporal_generations AS generation
+             CROSS JOIN session_temporal_generations AS generation
                ON generation.session_id = requested.session_id
               AND generation.generation = requested.generation
               AND generation.state = 'active'
-             JOIN session_relation_receipts AS relation
+             CROSS JOIN session_relation_receipts AS relation
                ON relation.session_id = generation.session_id
               AND relation.generation = generation.generation
               AND relation.state = 'applied'

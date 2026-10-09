@@ -597,6 +597,82 @@ fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
 const LARGE_HISTORY_SESSIONS: usize = 2_000;
 const LARGE_HISTORY_MESSAGES: usize = 12;
 
+#[test]
+fn default_message_timeline_reports_bounded_counts_for_large_history() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let session_count = 3_000_u64;
+        let mut session_ids = Vec::new();
+        for index in 0..session_count {
+            let session =
+                large_history_session(&fixture.host_runtime, &fixture.project_root, index as usize);
+            assert!(
+                fixture
+                    .host_runtime
+                    .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                    .await
+                    .unwrap()
+            );
+            fixture
+                .host_runtime
+                .seed_session_message_observation_for_test(
+                    tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                        project_id: fixture.host_runtime.project_id().as_str(),
+                        provider: "cursor",
+                        session_id: &session.session_id,
+                        message_id: &format!("{}-message", session.session_id),
+                        role: "user",
+                        content: "A canonical timeline message.",
+                        model: None,
+                        timestamp: session.started_at.unwrap(),
+                        ordinal: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            session_ids.push(session.session_id);
+        }
+
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refreshes_for_test(
+                &session_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+        let (status, timeline) = get_json(
+            &http_agent(),
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&limit=400",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{timeline}");
+        let buckets = timeline["payload"]["buckets"]
+            .as_array()
+            .unwrap_or_else(|| panic!("large timeline must return bounded data: {timeline}"));
+        let counted: u64 = buckets
+            .iter()
+            .map(|bucket| bucket["count"].as_u64().unwrap())
+            .sum();
+        assert!(counted > 0 && counted <= session_count, "{timeline}");
+        assert_eq!(timeline["coverage"]["examined"], counted, "{timeline}");
+        if counted < session_count {
+            assert_eq!(timeline["domain_state"], "partial", "{timeline}");
+            assert_eq!(
+                timeline["coverage"]["completeness"], "partial",
+                "{timeline}"
+            );
+        } else {
+            assert_eq!(
+                timeline["coverage"]["completeness"], "complete",
+                "{timeline}"
+            );
+        }
+    });
+}
+
 fn large_history_session(
     project: &DashboardTestRuntimeV1,
     root: &Path,

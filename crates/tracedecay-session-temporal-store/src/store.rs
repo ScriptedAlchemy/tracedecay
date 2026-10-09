@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-helpers"))]
+use std::collections::BTreeSet;
 use std::{
     future::Future,
     sync::{Arc, LazyLock},
@@ -160,23 +162,38 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
         &self,
         session_id: &tracedecay_domain::SessionId,
     ) -> SessionStoreResult<()> {
-        let request = SessionTemporalAccess::new(self.db)
-            .pending_session_temporal_refresh_page_result(
-                128,
-                0,
-                &crate::SessionTemporalRefreshDiscoveryCursor::default(),
-            )
-            .await?
-            .into_parts()
-            .0
-            .into_iter()
-            .find(|request| request.session_id() == session_id)
-            .ok_or(SessionStoreError::InvalidStateTransition {
-                context: "test temporal fixture pending refresh",
-            })?;
-        self.begin_or_join_session_refresh(request).await?;
-        self.complete_running_session_refresh_for_test(session_id)
+        self.materialize_pending_session_refreshes_for_test(std::slice::from_ref(session_id))
             .await
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn materialize_pending_session_refreshes_for_test(
+        &self,
+        session_ids: &[tracedecay_domain::SessionId],
+    ) -> SessionStoreResult<()> {
+        let mut pending: BTreeSet<_> = session_ids.iter().cloned().collect();
+        let mut cursor = crate::SessionTemporalRefreshDiscoveryCursor::default();
+        while !pending.is_empty() {
+            let (requests, next_cursor, has_more) = SessionTemporalAccess::new(self.db)
+                .pending_session_temporal_refresh_page_result(128, 0, &cursor)
+                .await?
+                .into_parts();
+            for request in requests {
+                let session_id = request.session_id().clone();
+                if pending.remove(&session_id) {
+                    self.begin_or_join_session_refresh(request).await?;
+                    self.complete_running_session_refresh_for_test(&session_id)
+                        .await?;
+                }
+            }
+            if !has_more && !pending.is_empty() {
+                return Err(SessionStoreError::InvalidStateTransition {
+                    context: "test temporal fixture pending refresh",
+                });
+            }
+            cursor = next_cursor;
+        }
+        Ok(())
     }
 
     /// Projects and completes the refresh already running for `session_id`.
