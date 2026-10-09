@@ -64,6 +64,11 @@ name = "work_loop_journey"
 path = "tests/work_loop_journey.rs"
 required-features = ["test-transport"]
 
+# Timed out at 300.1s running alone on ubuntu-latest (run 37978596669, all
+# compilation already complete); the native medium limit is 300s.
+[package.metadata.bazel.test_sizes]
+refresh_memory_journey = "large"
+
 [features]
 default = ["production"]
 production = ["tracedecay/production", "alloc-mimalloc"]
