@@ -471,6 +471,93 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
 }
 
 #[tokio::test]
+async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::TempDir::new().expect("temp directory");
+    let mut encoded = serde_json::to_vec(&json!({
+        "payload": "x".repeat(64 * 1024),
+    }))
+    .expect("JSONL payload");
+    encoded.push(b'\n');
+
+    let unpinned_path = temp.path().join("unpinned.jsonl");
+    std::fs::write(&unpinned_path, &encoded).expect("unpinned JSONL");
+    let (unpinned, _) = super::shared_jsonl_page(
+        &unpinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("unpinned page");
+    assert!(
+        unpinned.retained_bytes > 0,
+        "a prepared page retains its payload bytes"
+    );
+
+    let pinned_path = temp.path().join("pinned.jsonl");
+    std::fs::write(&pinned_path, &encoded).expect("pinned JSONL");
+    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
+    let (pinned, _) = super::shared_jsonl_page(
+        &pinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("pinned page");
+
+    let before = {
+        let cache = super::SHARED_JSONL_PAGE_CACHE
+            .get()
+            .expect("shared page cache")
+            .lock()
+            .await;
+        cache.retained_bytes
+    };
+    assert!(
+        before >= unpinned.retained_bytes.saturating_add(pinned.retained_bytes),
+        "ingest left prepared pages in the cache: {before}"
+    );
+
+    let released = super::release_unpinned_shared_jsonl_pages();
+    eprintln!(
+        "JSONL_HEAP_PROOF before={before} released_pages={} released_bytes={} unpinned={}",
+        released.pages, released.bytes, unpinned.retained_bytes
+    );
+    assert!(
+        released.pages >= 1 && released.bytes >= unpinned.retained_bytes,
+        "idle release must drop the unpinned prepared page: {released:?}"
+    );
+
+    let after = {
+        let cache = super::SHARED_JSONL_PAGE_CACHE
+            .get()
+            .expect("shared page cache")
+            .lock()
+            .await;
+        (
+            cache.retained_bytes,
+            cache
+                .pages
+                .iter()
+                .any(|page| page.key.path == std::fs::canonicalize(&pinned_path).unwrap()),
+        )
+    };
+    assert!(
+        after.1,
+        "a pinned in-flight page must survive idle release"
+    );
+    assert!(
+        after.0 < before,
+        "idle release must shrink retained cache bytes from {before} to {}",
+        after.0
+    );
+}
+
+#[tokio::test]
 async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().expect("temp directory");

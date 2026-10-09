@@ -6,7 +6,7 @@
 #[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
 pub(crate) mod mimalloc_v3 {
     use std::cell::Cell;
-    use std::ffi::{c_int, c_void};
+    use std::ffi::{c_int, c_long, c_void};
     use std::num::NonZeroUsize;
     use std::sync::{Mutex, PoisonError};
 
@@ -82,6 +82,40 @@ pub(crate) mod mimalloc_v3 {
             visitor: BlockVisitor,
             arg: *mut c_void,
         ) -> bool;
+        fn mi_option_get(option: c_int) -> c_long;
+        fn mi_option_set(option: c_int, value: c_long);
+    }
+
+    /// `mi_option_purge_decommits` in vendored mimalloc 3.3.2.
+    const OPTION_PURGE_DECOMMITS: c_int = 5;
+    /// `mi_option_purge_delay` in vendored mimalloc 3.3.2.
+    const OPTION_PURGE_DELAY: c_int = 15;
+
+    /// Immediate purge so a long-lived daemon's RSS follows live data.
+    ///
+    /// The shipped default is a 10 ms delay, and arenas multiply that by 10.
+    /// An idle ingest loop that frees a page then waits for the next sample
+    /// therefore keeps the page resident. `0` purges on collect; decommit
+    /// stays on so macOS uses `MADV_FREE_REUSABLE` and drops phys_footprint.
+    pub(crate) fn configure_purge() {
+        // SAFETY: option ids are the vendored 3.3.2 enum; both may be set
+        // after the first allocation and only change later purge behavior.
+        unsafe {
+            mi_option_set(OPTION_PURGE_DELAY, 0);
+            mi_option_set(OPTION_PURGE_DECOMMITS, 1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn purge_delay_ms() -> i64 {
+        // SAFETY: a pure option read.
+        unsafe { mi_option_get(OPTION_PURGE_DELAY) as i64 }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn purge_decommits() -> bool {
+        // SAFETY: a pure option read.
+        unsafe { mi_option_get(OPTION_PURGE_DECOMMITS) != 0 }
     }
 
     /// Point SQLite and tree-sitter at mimalloc, so the process has one heap:
@@ -448,6 +482,7 @@ pub(crate) fn configure_process_allocator() {
     #[cfg(all(feature = "alloc-mimalloc", not(feature = "alloc-jemalloc")))]
     {
         mimalloc_v3::route_c_libraries();
+        mimalloc_v3::configure_purge();
         mimalloc_v3::install();
     }
 }

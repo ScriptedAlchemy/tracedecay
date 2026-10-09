@@ -39,6 +39,7 @@ use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureRegistrationFailureV1, ResidentMemoryPressureRegistrationV1,
 };
 
 #[derive(Clone, Copy)]
@@ -314,6 +315,13 @@ struct SharedJsonlPreparationAuthority {
 
 static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthority> =
     OnceLock::new();
+static SHARED_JSONL_PAGE_PRESSURE_REGISTRATION: OnceLock<
+    Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1>,
+> = OnceLock::new();
+
+/// Prepared JSONL pages are rebuildable ingest cache, so they shed after
+/// retained owners and before the allocator trim returns the pages.
+const SHARED_JSONL_PAGE_PRESSURE_PRIORITY_V1: u32 = 1;
 
 /// Mount the process-wide JSONL page-preparation authority.
 ///
@@ -329,13 +337,57 @@ pub(crate) fn install_shared_jsonl_preparation_authority(
     background_cpu: Arc<ProcessBackgroundCpuV1>,
 ) -> TranscriptIngestResult<()> {
     let authority = SharedJsonlPreparationAuthority {
-        memory,
+        memory: Arc::clone(&memory),
         component: ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages")
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?,
         background_cpu,
     };
     let _ = SHARED_JSONL_PREPARATION_AUTHORITY.set(authority);
+    let _ = SHARED_JSONL_PAGE_PRESSURE_REGISTRATION.get_or_init(|| {
+        memory.pressure().register_pressure_reclaimer(
+            SHARED_JSONL_PAGE_PRESSURE_PRIORITY_V1,
+            Arc::new(|_| release_unpinned_shared_jsonl_pages().bytes),
+        )
+    });
     Ok(())
+}
+
+/// What one idle or pressure release dropped from the shared JSONL page cache.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SharedJsonlPageReleaseV1 {
+    pub pages: u64,
+    pub bytes: u64,
+}
+
+/// Drop prepared pages whose source is no longer pinned by an in-flight
+/// ingest pass. Pinned pages stay so overlapping consumers still share them.
+///
+/// The cache is a `tokio` mutex; a contended tick skips rather than blocking
+/// the resident-memory sampler on an active ingest.
+#[must_use]
+pub fn release_unpinned_shared_jsonl_pages() -> SharedJsonlPageReleaseV1 {
+    let Some(cache) = SHARED_JSONL_PAGE_CACHE.get() else {
+        return SharedJsonlPageReleaseV1::default();
+    };
+    let Ok(mut cache) = cache.try_lock() else {
+        return SharedJsonlPageReleaseV1::default();
+    };
+    let mut pages = 0_u64;
+    let mut bytes = 0_u64;
+    let mut index = 0;
+    while index < cache.pages.len() {
+        if shared_jsonl_path_is_pinned(&cache.pages[index].key.path) {
+            index += 1;
+            continue;
+        }
+        let evicted = cache.pages.remove(index);
+        cache.retained_bytes = cache
+            .retained_bytes
+            .saturating_sub(evicted.page.retained_bytes);
+        pages = pages.saturating_add(1);
+        bytes = bytes.saturating_add(evicted.page.retained_bytes);
+    }
+    SharedJsonlPageReleaseV1 { pages, bytes }
 }
 
 pub(crate) fn shared_jsonl_preparation_workers() -> usize {
