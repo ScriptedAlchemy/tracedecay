@@ -16,7 +16,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use super::released_rendering::{
     ReleasedRenderingLedger, StoredProvenanceRendering, admit_provenance_row,
 };
-use super::rows::{audit_read_error, authority_violation, decode_authority_json};
+use super::rows::{audit_read_error, authority_violation, decode_authority_observation};
 use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
@@ -897,14 +897,26 @@ fn owned_storage_columns_need_rewrite(
     // The derived columns are pure functions of the same sanitized body, so a
     // twin whose content matches can still carry a hash that fails hydration
     // with `PayloadIntegrityMismatch` or retrieval text the projector never
-    // wrote. Compare what a fresh write stores, not content alone.
+    // wrote. Compare what a fresh write stores, not content alone. A body
+    // large enough for `session_canonical_bodies` stores NULL content plus the
+    // bounded snippet placeholder that drives both derived columns.
+    let (expected_snippet, expected_index) = if expected.len()
+        >= tracedecay_store::INLINE_BODY_BYTES
+    {
+        let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected);
+        (placeholder.clone(), placeholder)
+    } else {
+        (
+            tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected),
+            tracedecay_lcm::retrieval_content::derived_text_for_index(&expected),
+        )
+    };
     Ok(raw.storage_kind != "inline"
         || raw.session_id != message.session_id
         || raw.content != expected
         || raw.content_hash != tracedecay_lcm::retrieval_content::projected_content_hash(&expected)
-        || raw.snippet_text
-            != tracedecay_lcm::retrieval_content::derived_text_for_snippet(&expected)
-        || raw.index_text != tracedecay_lcm::retrieval_content::derived_text_for_index(&expected))
+        || raw.snippet_text != expected_snippet
+        || raw.index_text != expected_index)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1256,7 +1268,7 @@ async fn observation_by_id(
         })?
         .get::<String>(0)
         .map_err(audit_read_error)?;
-    decode_authority_json(&json, "projected observation authority JSON")
+    decode_authority_observation(conn, &json).await
 }
 
 async fn count_suffix_rows(
@@ -1466,10 +1478,11 @@ async fn validate_projection_authority_suffix_pages(
                 }
                 continue;
             }
-            let observation = decode_authority_json::<DurableObservationV1>(
+            let observation = decode_authority_observation(
+                conn,
                 &row.get::<String>(1).map_err(audit_read_error)?,
-                "projected observation authority JSON",
-            )?;
+            )
+            .await?;
             if disposition.as_ref().is_some_and(|value| {
                 value.reason == ProjectionSkipReason::NativeSourceSuperseded.as_str()
             }) {

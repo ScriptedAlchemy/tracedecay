@@ -12,6 +12,8 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
+use crate::observation::decode_observation_json;
+
 use super::apply::{
     derive_projection_with_alias, verify_effect, verify_observation_provider_usage,
     verify_provenance, verify_workflow_effects,
@@ -543,13 +545,9 @@ pub(super) async fn activate_native_source_transitions(
                 .get(1)
                 .map_err(|error| storage("read staged native source transitions", error))?;
             predecessors.push(
-                crate::observation::decode_observation_json(
-                    conn,
-                    &json,
-                    "decode staged native source transition",
-                )
-                .await
-                .map_err(|error| storage("decode staged native source transition", error))?,
+                decode_observation_json(conn, &json, "decode staged native source transition")
+                    .await
+                    .map_err(|error| storage("decode staged native source transition", error))?,
             );
         }
         drop(rows);

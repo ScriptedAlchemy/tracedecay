@@ -9,7 +9,12 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
-use super::observation_matches_filter;
+use super::{TemporalSqlRead, observation_matches_filter};
+use crate::query::decode_stored_observation;
+use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
+use tracedecay_store::canonical_body::{
+    CANONICAL_BODIES_TABLE_SQL, INLINE_BODY_BYTES, UPSERT_CANONICAL_BODY_SQL, slim_json_value,
+};
 use tracedecay_temporal_query::snapshot::{TemporalCandidateFilterV1, TemporalMessageTypeFilterV1};
 
 fn receipt(payload: &Value) -> SanitizationReceiptV1 {
@@ -26,11 +31,11 @@ fn receipt(payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
-fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> DurableObservationV1 {
-    encoded_observation_at(facts, None)
+fn canonical_observation(facts: Vec<CanonicalObservationFactV1>) -> DurableObservationV1 {
+    observation_at(facts, None)
 }
 
-fn encoded_observation_at(
+fn observation_at(
     facts: Vec<CanonicalObservationFactV1>,
     native_timestamp: Option<i64>,
 ) -> DurableObservationV1 {
@@ -89,7 +94,7 @@ fn goal_only_time_filter_uses_canonical_observation_timestamp() {
         event_sequence: None,
         content: Some(json!({"objective": "finish temporal retrieval"})),
     };
-    let encoded = encoded_observation_at(vec![goal.clone()], Some(42));
+    let observation = observation_at(vec![goal.clone()], Some(42));
     let filter = TemporalCandidateFilterV1 {
         start_time: Some(40),
         end_time: Some(50),
@@ -97,10 +102,10 @@ fn goal_only_time_filter_uses_canonical_observation_timestamp() {
         ..TemporalCandidateFilterV1::default()
     };
 
-    assert!(observation_matches_filter(&encoded, "user", &filter).unwrap());
+    assert!(observation_matches_filter(&observation, "user", &filter).unwrap());
     assert!(
         !observation_matches_filter(
-            &encoded,
+            &observation,
             "user",
             &TemporalCandidateFilterV1 {
                 start_time: Some(43),
@@ -110,14 +115,14 @@ fn goal_only_time_filter_uses_canonical_observation_timestamp() {
         .unwrap()
     );
     assert!(
-        !observation_matches_filter(&encoded_observation(vec![goal]), "user", &filter,).unwrap(),
+        !observation_matches_filter(&canonical_observation(vec![goal]), "user", &filter,).unwrap(),
         "a Goal without Message.timestamp or canonical observation time stays ineligible"
     );
 }
 
 #[test]
 fn goal_role_and_time_eligibility_are_conjunctive_before_ranking() {
-    let encoded = encoded_observation(vec![
+    let observation = canonical_observation(vec![
         CanonicalObservationFactV1::Message {
             role: CanonicalMessageRoleV1::User,
             content: json!({"text": "ship temporal retrieval"}),
@@ -147,18 +152,18 @@ fn goal_role_and_time_eligibility_are_conjunctive_before_ranking() {
         ..TemporalCandidateFilterV1::default()
     };
 
-    assert!(observation_matches_filter(&encoded, "user", &filter).unwrap());
+    assert!(observation_matches_filter(&observation, "user", &filter).unwrap());
 
     let too_late = TemporalCandidateFilterV1 {
         start_time: Some(43),
         ..filter
     };
-    assert!(!observation_matches_filter(&encoded, "user", &too_late).unwrap());
+    assert!(!observation_matches_filter(&observation, "user", &too_late).unwrap());
 }
 
 #[test]
 fn tool_results_do_not_leak_into_direct_user_filter() {
-    let encoded = encoded_observation(vec![
+    let observation = canonical_observation(vec![
         CanonicalObservationFactV1::Message {
             role: CanonicalMessageRoleV1::User,
             content: json!({"text": "tool payload"}),
@@ -180,13 +185,13 @@ fn tool_results_do_not_leak_into_direct_user_filter() {
         ..TemporalCandidateFilterV1::default()
     };
 
-    assert!(!observation_matches_filter(&encoded, "user", &direct).unwrap());
-    assert!(observation_matches_filter(&encoded, "user", &tool).unwrap());
+    assert!(!observation_matches_filter(&observation, "user", &direct).unwrap());
+    assert!(observation_matches_filter(&observation, "user", &tool).unwrap());
 }
 
 #[test]
 fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() {
-    let encoded = encoded_observation(vec![CanonicalObservationFactV1::Message {
+    let observation = canonical_observation(vec![CanonicalObservationFactV1::Message {
         role: CanonicalMessageRoleV1::User,
         content: json!({"text": "source-bound evidence"}),
         model: None,
@@ -196,7 +201,7 @@ fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() 
     for source in ["codex", "session-semantic-filter"] {
         assert!(
             observation_matches_filter(
-                &encoded,
+                &observation,
                 "user",
                 &TemporalCandidateFilterV1 {
                     source: Some(source.to_string()),
@@ -208,7 +213,7 @@ fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() 
     }
     assert!(
         !observation_matches_filter(
-            &encoded,
+            &observation,
             "user",
             &TemporalCandidateFilterV1 {
                 source: Some("claude".to_string()),
@@ -216,5 +221,65 @@ fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() 
             },
         )
         .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn semantic_filter_hydrates_compacted_content_and_rejects_missing_bodies() {
+    let observation = canonical_observation(vec![CanonicalObservationFactV1::Message {
+        role: CanonicalMessageRoleV1::User,
+        content: json!({"text": "canonical content".repeat(INLINE_BODY_BYTES)}),
+        model: None,
+        timestamp: Some(42),
+    }]);
+    let mut stored = serde_json::to_value(&observation).unwrap();
+    let bodies = slim_json_value(&mut stored).unwrap();
+    assert!(!bodies.is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&dir.path().join("semantic-body.db"));
+    conn.execute_batch(CANONICAL_BODIES_TABLE_SQL)
+        .await
+        .unwrap();
+    for body in &bodies {
+        conn.execute(
+            UPSERT_CANONICAL_BODY_SQL,
+            params![
+                body.content_hash.as_str(),
+                body.encoding,
+                body.blob.as_slice(),
+                body.uncompressed_bytes
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    let read = TemporalSqlRead::engine_connection(&conn);
+    let encoded = stored.to_string();
+    let hydrated = decode_stored_observation(&read, &encoded, "semantic filter test")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&hydrated).unwrap(),
+        serde_json::to_value(&observation).unwrap()
+    );
+    assert!(
+        observation_matches_filter(
+            &hydrated,
+            "user",
+            &TemporalCandidateFilterV1 {
+                source: Some("codex".to_owned()),
+                message_type: TemporalMessageTypeFilterV1::DirectUser,
+                ..TemporalCandidateFilterV1::default()
+            }
+        )
+        .unwrap()
+    );
+    conn.execute("DELETE FROM session_canonical_bodies", ())
+        .await
+        .unwrap();
+    assert!(
+        decode_stored_observation(&read, &encoded, "semantic filter test")
+            .await
+            .is_err()
     );
 }

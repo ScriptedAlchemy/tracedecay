@@ -1019,7 +1019,6 @@ async fn install_registered_schema_stage_sequence(
                 },
                 error => global_db_operation_error("initialize LCM schema", error),
             })?;
-        observation::compact_attached_lcm_bodies(transaction).await?;
     }
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
@@ -1073,6 +1072,7 @@ pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    observation::converge_canonical_bodies(database).await?;
     if convergence.lcm_status_performance_indexes {
         converge_migration_batches(
             database,

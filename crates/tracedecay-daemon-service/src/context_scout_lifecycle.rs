@@ -1,19 +1,16 @@
 //! Exact Context Scout lifecycle lookup from canonical durable observations.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
 use tracedecay_domain::{
-    AgentInstanceId, CanonicalObservationEnvelopeV1, DurableObservationV1, MessageId,
-    ObservationScopeV1, ProjectId, SessionId, ThreadId, TurnId, UserProfileId, WorktreeId,
+    AgentInstanceId, CanonicalObservationEnvelopeV1, MessageId, ObservationScopeV1, ProjectId,
+    SessionId, ThreadId, TurnId, UserProfileId, WorktreeId,
 };
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
-use tracedecay_store::{
-    CanonicalBodyError, LOAD_CANONICAL_BODY_SQL, StoreShardScopeV1, collect_body_refs,
-    parse_stored_observation, unpack_body,
-};
+use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
+use tracedecay_global_db::observation::decode_observation_json;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
@@ -412,47 +409,6 @@ async fn lookup_context_scout_lifecycle(
     }
 }
 
-async fn decode_lifecycle_observation(
-    snapshot: &impl QueryExecutor,
-    observation_json: &str,
-) -> std::result::Result<DurableObservationV1, ContextScoutLifecycleLookupFailureV1> {
-    use ContextScoutLifecycleLookupFailureV1 as Failure;
-    let hashes =
-        collect_body_refs(observation_json).map_err(|_| Failure::MalformedDurableObservation)?;
-    let mut bodies = HashMap::new();
-    for hash in hashes {
-        let mut rows = snapshot
-            .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
-            .await
-            .map_err(|_| Failure::ObservationQueryFailed)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| Failure::ObservationRowUnreadable)?
-            .ok_or(Failure::MalformedDurableObservation)?;
-        let encoding = row
-            .get::<String>(0)
-            .map_err(|_| Failure::ObservationRowUnreadable)?;
-        let blob = row
-            .get::<Vec<u8>>(1)
-            .map_err(|_| Failure::ObservationRowUnreadable)?;
-        bodies.insert(
-            hash.clone(),
-            unpack_body(&hash, &encoding, &blob)
-                .map_err(|_| Failure::MalformedDurableObservation)?,
-        );
-    }
-    parse_stored_observation(observation_json, |hash| {
-        bodies
-            .get(hash)
-            .cloned()
-            .ok_or_else(|| CanonicalBodyError::Missing {
-                content_hash: hash.to_owned(),
-            })
-    })
-    .map_err(|_| Failure::MalformedDurableObservation)
-}
-
 /// Fail-closed body of [`lookup_context_scout_lifecycle`].
 ///
 /// Every early return names the evidence that failed instead of collapsing
@@ -523,7 +479,6 @@ async fn lookup_context_scout_lifecycle_inner(
         project_id: project_id.clone(),
     };
     let mut count = 0usize;
-    let mut encoded = Vec::new();
     while let Some(row) = {
         use tracing::Instrument as _;
         rows.next()
@@ -540,14 +495,18 @@ async fn lookup_context_scout_lifecycle_inner(
         if count > MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 {
             return Err(Failure::ObservationBudgetExceeded);
         }
-        encoded.push(
-            row.get::<String>(0)
-                .map_err(|_| Failure::ObservationRowUnreadable)?,
-        );
-    }
-    drop(rows);
-    for observation_json in encoded {
-        let durable = decode_lifecycle_observation(&snapshot, &observation_json).await?;
+        let observation_json = row
+            .get::<String>(0)
+            .map_err(|_| Failure::ObservationRowUnreadable)?;
+        let durable = {
+            use tracing::Instrument as _;
+            decode_observation_json(&snapshot, &observation_json, "read Context Scout lifecycle")
+                .instrument(tracing::trace_span!(
+                    "daemon.context_scout.lifecycle_lookup.decode"
+                ))
+                .await
+        }
+        .map_err(|_| Failure::MalformedDurableObservation)?;
         if durable.scope() != &project_scope || durable.source().session_id() != session_id {
             return Err(Failure::DurableScopeMismatch);
         }

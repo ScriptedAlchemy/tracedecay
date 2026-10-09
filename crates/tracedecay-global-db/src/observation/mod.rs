@@ -5,9 +5,8 @@ mod refusal_census;
 pub mod retention;
 mod schema;
 
-pub(crate) use canonical_bodies::{
-    compact_attached_lcm_bodies, compact_lcm_bodies, decode_observation_json,
-};
+pub use canonical_bodies::decode_observation_json;
+pub(crate) use canonical_bodies::{compact_lcm_bodies, converge_canonical_bodies};
 pub use refusal_census::ingest_refusal_read_from_censuses;
 pub(super) use schema::{OBSERVATION_ADMISSION_MARKERS, ensure_observation_schema};
 
