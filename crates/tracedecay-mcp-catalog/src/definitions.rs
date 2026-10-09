@@ -277,9 +277,63 @@ pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 /// filtered out so the model never sees a tool that will immediately
 /// fail when called. The host `ast-grep` CLI gates rewrite support.
 pub fn get_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    let mut definitions = get_maximal_tool_definitions()?;
-    retain_host_available_tool_definitions(&mut definitions);
-    Ok(definitions)
+    Ok(get_tool_definitions_ref()?.to_vec())
+}
+
+/// Borrow the host-filtered catalog without cloning every schema body.
+pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
+    static DEFINITIONS: LazyLock<Result<Vec<ToolDefinition>, String>> = LazyLock::new(|| {
+        let mut definitions = match maximal_tool_definitions() {
+            Ok(definitions) => definitions.to_vec(),
+            Err(error) => return Err(error.to_string()),
+        };
+        retain_host_available_tool_definitions(&mut definitions);
+        Ok(definitions)
+    });
+    match &*DEFINITIONS {
+        Ok(definitions) => Ok(definitions.as_slice()),
+        Err(message) => Err(McpCatalogError::Initialization(message.clone())),
+    }
+}
+
+/// One advertised tool used to parse a CLI invocation.
+///
+/// `tracedecay tool search` is a one-shot process. Assembling the maximal MCP
+/// catalog just to read the search schema clones every other tool's JSON body.
+/// Search's request schema is `SearchSurfaceRequestV1`; build that one
+/// definition and leave the maximal registry for `tools/list`.
+pub fn cli_tool_definition(name: &str) -> Result<ToolDefinition, McpCatalogError> {
+    if ApplicationSurfaceOperation::from_tool_name(name)
+        == Some(ApplicationSurfaceOperation::Search)
+    {
+        return Ok(search_cli_definition()?.clone());
+    }
+    get_tool_definitions_ref()?
+        .iter()
+        .find(|definition| definition.name == name)
+        .cloned()
+        .ok_or_else(|| McpCatalogError::Initialization(format!("unknown tool: {name}")))
+}
+
+fn search_cli_definition() -> Result<&'static ToolDefinition, McpCatalogError> {
+    static DEFINITION: LazyLock<Result<ToolDefinition, String>> =
+        LazyLock::new(|| build_search_cli_definition().map_err(|error| error.to_string()));
+    match &*DEFINITION {
+        Ok(definition) => Ok(definition),
+        Err(message) => Err(McpCatalogError::Initialization(message.clone())),
+    }
+}
+
+fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
+    let canonical = serde_json::to_value(schemars::schema_for!(
+        tracedecay_contracts::retrieval::SearchSurfaceRequestV1
+    ))
+    .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
+    let mut definition = def_search(canonical);
+    project_input_schema(&mut definition.input_schema);
+    let mut definitions = vec![definition];
+    add_format_property(&mut definitions)?;
+    Ok(definitions.remove(0))
 }
 
 /// Counts how many times the maximal registry was actually assembled.
@@ -300,13 +354,17 @@ pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
 /// this returns, after the cache.
 pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
+    Ok(maximal_tool_definitions()?.to_vec())
+}
+
+fn maximal_tool_definitions() -> Result<&'static [ToolDefinition], McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache
     // retains the rendered message and replays it.
     static MAXIMAL_DEFINITIONS: LazyLock<std::result::Result<Vec<ToolDefinition>, String>> =
         LazyLock::new(|| build_maximal_tool_definitions().map_err(|error| error.to_string()));
     match &*MAXIMAL_DEFINITIONS {
-        Ok(definitions) => Ok(definitions.clone()),
+        Ok(definitions) => Ok(definitions.as_slice()),
         Err(message) => Err(McpCatalogError::Initialization(message.clone())),
     }
 }

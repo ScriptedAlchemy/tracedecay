@@ -140,20 +140,24 @@ pub async fn run_doctor(
     }
 
     check_binary(&mut dc, build_version);
-    check_daemon_service(&mut dc, profile, build_version);
+
+    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
-    let mut pending_reset = check_reset_required_stores(&mut dc, profile, build_version);
+    let mut independent = launch_independent_doctor_checks(
+        profile,
+        build_version,
+        &project_path,
+        daemon_listening,
+        network,
+    );
+
+    dc.replay_from(join_doctor_check(independent.daemon_service).await?);
+    let (reset_counters, mut pending_reset) = join_doctor_check(independent.reset_stores).await?;
+    dc.replay_from(reset_counters);
 
     dc.section("Current project");
-    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    check_inert_project_config(&mut dc, &project_path);
-    check_pr_autotrack_state(&mut dc, profile.data_dir(), &project_path);
-    check_automation_effect_resets(&mut dc, profile.data_dir(), &project_path);
-    let daemon_status = if daemon_listening {
-        Some(daemon_project_status(profile, &project_path).await)
-    } else {
-        None
-    };
+    dc.replay_from(join_doctor_check(independent.project_files).await?);
+    let daemon_status = join_doctor_check(independent.daemon_status).await?;
     let daemon_findings = render_current_project_daemon_status(
         &mut dc,
         profile.data_dir(),
@@ -161,20 +165,16 @@ pub async fn run_doctor(
         daemon_status.as_ref(),
         &mut pending_reset,
     )?;
-    check_watcher(&mut dc, profile);
-    let upload_enabled = if daemon_listening {
-        configured_upload_enabled(profile)
-            .await
-            .map(UploadSetting::Resolved)
-    } else {
-        Ok(UploadSetting::DaemonUnavailable)
-    };
+    dc.replay_from(join_doctor_check(independent.watcher).await?);
+    let upload_enabled = join_doctor_check(independent.upload).await?;
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
-    check_external_tools(&mut dc);
-
-    check_host_integrations(&mut dc, profile, &project_path);
-
-    check_network(&mut dc, upload_enabled.as_ref(), network);
+    independent.network.admit_worldwide(upload_enabled.as_ref());
+    dc.replay_from(join_doctor_check(independent.external_tools).await?);
+    dc.replay_from(join_doctor_check(independent.hosts).await?);
+    independent
+        .network
+        .report(&mut dc, upload_enabled.as_ref())
+        .await?;
     print_summary(&dc);
 
     let completion = doctor_result(&dc, pending_reset);
@@ -182,6 +182,108 @@ pub async fn run_doctor(
         print_doctor_json(build_version, completion, &dc, daemon_findings)?;
     }
     Ok(completion)
+}
+
+struct IndependentDoctorChecks {
+    daemon_service: tokio::task::JoinHandle<DoctorCounters>,
+    reset_stores: tokio::task::JoinHandle<(DoctorCounters, bool)>,
+    project_files: tokio::task::JoinHandle<DoctorCounters>,
+    daemon_status: tokio::task::JoinHandle<
+        Option<tracedecay_domain::errors::Result<Option<serde_json::Value>>>,
+    >,
+    watcher: tokio::task::JoinHandle<DoctorCounters>,
+    upload: tokio::task::JoinHandle<tracedecay_domain::errors::Result<UploadSetting>>,
+    external_tools: tokio::task::JoinHandle<DoctorCounters>,
+    hosts: tokio::task::JoinHandle<DoctorCounters>,
+    network: DoctorNetworkChecks,
+}
+
+fn launch_independent_doctor_checks(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    build_version: &str,
+    project_path: &Path,
+    daemon_listening: bool,
+    network: AdmittedDoctorNetworkProbes,
+) -> IndependentDoctorChecks {
+    let profile_for_service = profile.clone();
+    let version_for_service = build_version.to_owned();
+    let profile_for_reset = profile.clone();
+    let version_for_reset = build_version.to_owned();
+    let project_for_files = project_path.to_path_buf();
+    let profile_root_for_files = profile.data_dir().to_path_buf();
+    let profile_for_watcher = profile.clone();
+    let profile_for_hosts = profile.clone();
+    let project_for_hosts = project_path.to_path_buf();
+    let profile_for_status = profile.clone();
+    let project_for_status = project_path.to_path_buf();
+    let profile_for_upload = profile.clone();
+
+    IndependentDoctorChecks {
+        daemon_service: spawn_doctor_check(move || {
+            collect_quiet(|dc| check_daemon_service(dc, &profile_for_service, &version_for_service))
+        }),
+        reset_stores: spawn_doctor_check(move || {
+            let mut counters = DoctorCounters::quiet();
+            let pending =
+                check_reset_required_stores(&mut counters, &profile_for_reset, &version_for_reset);
+            (counters, pending)
+        }),
+        project_files: spawn_doctor_check(move || {
+            collect_quiet(|dc| {
+                check_inert_project_config(dc, &project_for_files);
+                check_pr_autotrack_state(dc, &profile_root_for_files, &project_for_files);
+                check_automation_effect_resets(dc, &profile_root_for_files, &project_for_files);
+            })
+        }),
+        daemon_status: tokio::spawn(async move {
+            if daemon_listening {
+                Some(daemon_project_status(&profile_for_status, &project_for_status).await)
+            } else {
+                None
+            }
+        }),
+        watcher: spawn_doctor_check(move || {
+            collect_quiet(|dc| check_watcher(dc, &profile_for_watcher))
+        }),
+        upload: tokio::spawn(async move {
+            if daemon_listening {
+                configured_upload_enabled(&profile_for_upload)
+                    .await
+                    .map(UploadSetting::Resolved)
+            } else {
+                Ok(UploadSetting::DaemonUnavailable)
+            }
+        }),
+        external_tools: spawn_doctor_check(|| collect_quiet(check_external_tools)),
+        hosts: spawn_doctor_check(move || {
+            collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
+        }),
+        network: DoctorNetworkChecks::start(network),
+    }
+}
+
+fn collect_quiet(check: impl FnOnce(&mut DoctorCounters)) -> DoctorCounters {
+    let mut counters = DoctorCounters::quiet();
+    check(&mut counters);
+    counters
+}
+
+fn spawn_doctor_check<T, F>(check: F) -> tokio::task::JoinHandle<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(check)
+}
+
+async fn join_doctor_check<T>(
+    handle: tokio::task::JoinHandle<T>,
+) -> tracedecay_domain::errors::Result<T> {
+    handle
+        .await
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("doctor check task failed: {error}"),
+        })
 }
 
 /// The current project's section as the daemon answered it; `None` is the
@@ -1331,17 +1433,58 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check network connectivity.
-#[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
-fn check_network(
+struct DoctorNetworkChecks {
+    latest: tokio::task::JoinHandle<
+        Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
+    >,
+    worldwide: Option<tokio::task::JoinHandle<Option<u64>>>,
+    fetch_worldwide_total: fn() -> Option<u64>,
+}
+
+impl DoctorNetworkChecks {
+    fn start(network: AdmittedDoctorNetworkProbes) -> Self {
+        Self {
+            latest: spawn_doctor_check(move || (network.fetch_latest_version)()),
+            worldwide: None,
+            fetch_worldwide_total: network.fetch_worldwide_total,
+        }
+    }
+
+    fn admit_worldwide(
+        &mut self,
+        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
+    ) {
+        if matches!(upload_enabled, Ok(UploadSetting::Resolved(true))) {
+            self.worldwide = Some(spawn_doctor_check(self.fetch_worldwide_total));
+        }
+    }
+
+    #[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
+    async fn report(
+        self,
+        dc: &mut DoctorCounters,
+        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
+    ) -> tracedecay_domain::errors::Result<()> {
+        let latest = join_doctor_check(self.latest).await?;
+        let worldwide = match self.worldwide {
+            Some(handle) => Some(join_doctor_check(handle).await?),
+            None => None,
+        };
+        render_network(dc, upload_enabled, worldwide, latest);
+        Ok(())
+    }
+}
+
+fn render_network(
     dc: &mut DoctorCounters,
     upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-    network: AdmittedDoctorNetworkProbes,
+    worldwide: Option<Option<u64>>,
+    latest: Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 ) {
     dc.section("Network");
     match upload_enabled {
         Ok(UploadSetting::Resolved(true)) => {
-            if let Some(total) = (network.fetch_worldwide_total)() {
+            if let Some(total) = worldwide.flatten() {
                 dc.pass(&format!(
                     "Worldwide counter reachable (total: {})",
                     format_token_count(total)
@@ -1360,7 +1503,7 @@ fn check_network(
             "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
         )),
     }
-    match (network.fetch_latest_version)() {
+    match latest {
         Ok(latest) => dc.pass(&format!("GitHub releases API reachable (latest v{latest})")),
         Err(error) => dc.warn(&format!("GitHub release lookup failed, {error}")),
     }

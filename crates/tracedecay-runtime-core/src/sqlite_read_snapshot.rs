@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 use std::cell::RefCell;
 
 use rusqlite::backup::StepResult;
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
@@ -215,6 +216,9 @@ fn first_backup_step(source: &Path) -> io::Result<StepResult> {
     source_conn
         .busy_timeout(Duration::ZERO)
         .map_err(io::Error::other)?;
+    source_conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .map_err(io::Error::other)?;
     drop(reserve_exclusive_file(&probe)?);
     let mut destination = Connection::open_with_flags(&probe, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(io::Error::other)?;
@@ -243,6 +247,9 @@ fn run_online_backup(
     // SQLite's busy handler. Cancel and deadline checkpoints run there.
     source
         .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    source
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(io::Error::other)?;
     let mut staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(io::Error::other)?;
@@ -1004,10 +1011,6 @@ async fn finish_one(
             )
         };
     let connection = SnapshotConnection::open(&open_path, flags).map_err(io::Error::other)?;
-    connection
-        .execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;")
-        .await
-        .map_err(io::Error::other)?;
     control.checkpoint()?;
     let snapshot = SnapshotDatabase {
         connection,
@@ -1721,6 +1724,116 @@ mod tests {
         );
         assert_eq!(durable_family_witness(&path).unwrap(), before);
         drop(writer);
+    }
+
+    async fn snapshot_pragma_i64(connection: &SnapshotConnection, name: &str) -> i64 {
+        let mut rows = connection
+            .query(&format!("PRAGMA {name}"), ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    fn hold_readonly_transaction(path: &Path) -> Connection {
+        let holder = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        holder.busy_timeout(Duration::ZERO).unwrap();
+        holder
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM durable;")
+            .unwrap();
+        holder
+    }
+
+    #[tokio::test]
+    async fn foreign_snapshot_succeeds_while_a_readonly_transaction_holds_the_source() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("user-sessions.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('held-reader');",
+            )
+            .unwrap();
+        let holder = hold_readonly_transaction(&path);
+        let before = durable_family_witness(&path).unwrap();
+
+        let snapshot = open_foreign_in(
+            &path,
+            &temp.path().join("scratch"),
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot_pragma_i64(snapshot.connection(), "busy_timeout").await,
+            0
+        );
+        assert_eq!(
+            snapshot_pragma_i64(snapshot.connection(), "query_only").await,
+            1
+        );
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "held-reader"
+        );
+        drop(snapshot);
+        assert_eq!(durable_family_witness(&path).unwrap(), before);
+        drop(holder);
+        drop(writer);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn owned_checkpointed_snapshot_does_not_checkpoint_a_held_source() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("user-sessions.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('checkpointed');",
+            )
+            .unwrap();
+        let holder = hold_readonly_transaction(&path);
+        let before = durable_family_witness(&path).unwrap();
+
+        let snapshot = open(&path).await.unwrap();
+        assert_eq!(
+            snapshot_pragma_i64(snapshot.connection(), "busy_timeout").await,
+            0
+        );
+        assert_eq!(
+            snapshot_pragma_i64(snapshot.connection(), "query_only").await,
+            1
+        );
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "checkpointed"
+        );
+        drop(snapshot);
+        assert_eq!(durable_family_witness(&path).unwrap(), before);
+        drop(holder);
     }
 
     #[cfg(not(windows))]

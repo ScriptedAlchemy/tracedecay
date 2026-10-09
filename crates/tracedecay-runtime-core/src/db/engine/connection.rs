@@ -14,6 +14,10 @@ use super::{
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
+/// Doctor and other health probes must not sit behind a writer or a saturated
+/// general lane. The reserved health reader either admits immediately or the
+/// caller reports a typed locked/unavailable state.
+const HEALTH_READER_WAIT: Duration = Duration::ZERO;
 
 #[derive(Clone)]
 pub struct Connection {
@@ -224,7 +228,7 @@ impl Connection {
 
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot(READER_WAIT))
+        tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot(HEALTH_READER_WAIT))
             .await
             .map_err(join_error)?
             .map(ReadSnapshot::from_runtime)

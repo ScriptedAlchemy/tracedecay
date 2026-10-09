@@ -37,6 +37,8 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 use tracedecay_store::StoreShardScopeV1;
 
+const CANONICAL_BODY_RECLAIM_PAGES: u64 = 4096;
+
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
         path TEXT PRIMARY KEY,
@@ -1017,6 +1019,7 @@ async fn install_registered_schema_stage_sequence(
                 },
                 error => global_db_operation_error("initialize LCM schema", error),
             })?;
+        observation::compact_attached_lcm_bodies(transaction).await?;
     }
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
@@ -1243,6 +1246,9 @@ pub(crate) async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
+    database
+        .run_incremental_vacuum(CANONICAL_BODY_RECLAIM_PAGES)
+        .await?;
     Ok(match refused_authority {
         Some(refused) => RegisteredSchemaAttachmentV1::SessionsRefused(refused),
         None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {
@@ -1327,12 +1333,11 @@ enum WorkflowSchemaAdmission {
 async fn inspect_workflow_schema_for_admission(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<Result<WorkflowSchemaAdmission, RefusedAuthorityV1>> {
-    // `td_runtime_writer_*` objects are runtime internals the writer installs
-    // at connection open; they do not make the store an existing store.
     let mut rows = conn
         .query(
             "SELECT type, name, sql FROM sqlite_master
-             WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'td_runtime_writer_%'
+             WHERE name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'td_runtime_%'
              ORDER BY type, name",
             (),
         )

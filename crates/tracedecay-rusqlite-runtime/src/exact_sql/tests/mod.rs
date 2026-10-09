@@ -186,10 +186,10 @@ fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
 mod async_dispatch;
 mod authority;
 mod dispatch;
-mod prepare_cache;
 mod guard;
 mod lease;
 mod limits;
 mod pragma;
+mod prepare_cache;
 mod reader_contention;
 mod transaction;

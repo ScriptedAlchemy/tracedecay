@@ -431,8 +431,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 *retained = Some(history);
                 entry.state.mark_history_pending();
             }
+            let blocked = !installed && entry.state.history_is_blocked();
             drop(retained);
-            entry.state.wake_history();
+            if !blocked {
+                entry.state.wake_history();
+            }
         }
         wake
     }
@@ -459,8 +462,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 *retained = Some(history);
                 entry.state.mark_history_pending();
             }
+            let blocked = !installed && entry.state.history_is_blocked();
             drop(retained);
-            entry.state.wake_history();
+            if !blocked {
+                entry.state.wake_history();
+            }
         }
         wake
     }

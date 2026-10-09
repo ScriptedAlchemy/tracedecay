@@ -150,10 +150,7 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
 const COMPOSITION_ENTRY_CEILING: usize = 4 * 1024;
 
 /// Every phase owns its temporaries and awaits at most one wide leaf at a
-/// time. Measured maximum: 21,200 B (`mount_full_server_owners`). The
-/// next-widest phases are `construct_full_server` (7,208 B) and `open_graph`
-/// (6,200 B); the background-CPU authority handle costs its phase well under
-/// 128 B.
+/// time. Measured maximum: 7,816 B (`compose_core_server`).
 const PHASE_CEILING: usize = 32 * 1024;
 
 #[test]

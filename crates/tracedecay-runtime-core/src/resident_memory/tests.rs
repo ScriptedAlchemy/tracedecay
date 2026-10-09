@@ -1301,6 +1301,41 @@ fn process_status_splits_clean_file_pages_from_unreclaimable_bytes() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_task_sampler_reads_current_process_memory() {
+    let sample = super::process_resident_sample_from_task_v1().expect("current task sample");
+    assert!(sample.resident_bytes > 0);
+    assert!(sample.unreclaimable_bytes > 0);
+    assert!(sample.resident_bytes >= sample.unreclaimable_bytes);
+}
+
+#[test]
+fn macos_phys_footprint_is_the_admission_charge() {
+    let sample = super::process_resident_sample_from_macos_vm_info_v1(
+        6_400 * 1024 * 1024,
+        5_200 * 1024 * 1024,
+        45 * 1024 * 1024,
+    )
+    .expect("a populated TASK_VM_INFO reading is observed");
+    assert_eq!(sample.resident_bytes, 6_400 * 1024 * 1024);
+    assert_eq!(sample.unreclaimable_bytes, 5_200 * 1024 * 1024);
+    assert_eq!(
+        sample.admission_bytes(),
+        5_200 * 1024 * 1024,
+        "jetsam charges phys_footprint, not the larger resident_size"
+    );
+    assert_eq!(
+        super::process_resident_sample_from_macos_vm_info_v1(0, 0, 0),
+        None,
+        "an empty TASK_VM_INFO reading is unobserved, not zero"
+    );
+    let internal_only = super::process_resident_sample_from_macos_vm_info_v1(8, 0, 5)
+        .expect("internal is the fallback when footprint is missing");
+    assert_eq!(internal_only.unreclaimable_bytes, 5);
+    assert_eq!(internal_only.admission_bytes(), 5);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn cgroup_committed_bytes_refuse_growth_that_unreclaimable_bytes_would_admit() {

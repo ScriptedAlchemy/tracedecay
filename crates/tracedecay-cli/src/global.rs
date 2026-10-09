@@ -107,68 +107,13 @@ pub(crate) fn try_flush(
     }
 }
 
-/// Best-effort version check with 5-minute network cache. If `skip_cache` is
-/// true, always fetches from GitHub (used during sync where the call runs in
-/// parallel). If `skip_suppression` is false, the warning is suppressed for 15
-/// minutes after it was last shown; if true it is always shown (used for status).
-pub(crate) fn check_for_update(
-    profile: &ProfileRoot,
-    config: &mut tracedecay_session_memory::user_config::UserConfig,
-    skip_cache: bool,
-    skip_suppression: bool,
-) {
-    let current_version = env!("CARGO_PKG_VERSION");
-    let now = current_unix_timestamp();
-
-    let latest = if !skip_cache && elapsed_since(now, config.last_version_check_at) < 300 {
-        if config.cached_latest_version.is_empty() {
-            return;
-        }
-        config.cached_latest_version.clone()
-    } else {
-        match crate::cloud::fetch_latest_version() {
-            Ok(v) => {
-                config.cached_latest_version = v.clone();
-                config.last_version_check_at = now;
-                if let Err(err) = config.save_if_exists(profile.data_dir()) {
-                    eprintln!("warning: could not save tracedecay config: {err}");
-                }
-                v
-            }
-            Err(error) => {
-                tracing::debug!(%error, "version-update check could not read releases");
-                return;
-            }
-        }
-    };
-
-    // The status page (skip_suppression=true) warns on any newer version;
-    // the CLI only warns on minor+ bumps to avoid nagging on patch releases.
-    let dominated = if skip_suppression {
-        crate::cloud::is_newer_version(current_version, &latest)
-    } else {
-        crate::cloud::is_newer_minor_version(current_version, &latest)
-    };
-
-    if dominated && (skip_suppression || elapsed_since(now, config.last_version_warning_at) >= 900)
-    {
-        eprintln!(
-            "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
-            current_version, latest
-        );
-        if !skip_suppression {
-            config.last_version_warning_at = now;
-            if let Err(err) = config.save_if_exists(profile.data_dir()) {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
-        }
-    }
-}
-
-/// Returns the project paths the `wipe` / `list` commands should act on.
+/// Returns the project paths the `wipe` command should act on.
 ///
 /// `--all` returns every path tracked in the global DB (including stale rows).
-/// Otherwise returns the local discovery from cwd / ancestors / descendants.
+/// Otherwise returns the pruned local walk from cwd / ancestors / descendants.
+/// Wipe runs inside the profile-offline window and cannot ask the daemon, so
+/// this path must not call [`admin_cli_result`]. `list` uses
+/// [`gather_list_projects`] instead.
 ///
 /// Global discovery is deliberately fail-closed: destructive callers must not
 /// interpret an unavailable daemon or malformed registry response as an empty
@@ -190,6 +135,82 @@ pub(crate) async fn gather_target_projects(
     } else {
         Ok(gather_local_projects(profile))
     }
+}
+
+/// Returns the project paths `list` (without `--all`) should show.
+///
+/// The registry is the authority: filter registered roots to cwd, its
+/// ancestors, and its descendants. Enrolled cwd/ancestor roots that the
+/// registry does not yet name are still included. Descendants are never
+/// discovered by walking the worktree.
+pub(crate) async fn gather_list_projects(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
+    let request = AdminCliSurfaceRequestV1::RegistryList {
+        limit: 100_000,
+        query: None,
+        project_arg: None,
+    };
+    let roots = match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryList(listing) => registry_project_roots(listing),
+        _ => return Err(admin_cli_result_mismatch("registry_list")),
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return Ok(Vec::new());
+    };
+    Ok(merge_local_list_projects(profile, &cwd, roots))
+}
+
+fn merge_local_list_projects(
+    profile: &ProfileRoot,
+    cwd: &Path,
+    registry_roots: Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let mut out = filter_local_registry_roots(cwd, registry_roots);
+    for dir in cwd.ancestors() {
+        if profile.is_initialized_project_root(dir)
+            && !profile.is_ambient_project_root(dir)
+            && !out.iter().any(|existing| paths_equivalent(existing, dir))
+        {
+            out.push(dir.to_path_buf());
+        }
+    }
+    out
+}
+
+fn filter_local_registry_roots(
+    cwd: &Path,
+    roots: impl IntoIterator<Item = std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    roots
+        .into_iter()
+        .filter(|root| project_root_is_local(cwd, root))
+        .collect()
+}
+
+fn project_root_is_local(cwd: &Path, project_root: &Path) -> bool {
+    let cwd = path_key(cwd);
+    let root = path_key(project_root);
+    if !(cwd.starts_with(&root) || root.starts_with(&cwd)) {
+        return false;
+    }
+    if root.starts_with(&cwd)
+        && let Ok(relative) = root.strip_prefix(&cwd)
+        && relative
+            .components()
+            .any(|component| is_skipped_descendant_dir(&component.as_os_str().to_string_lossy()))
+    {
+        return false;
+    }
+    true
+}
+
+fn path_key(path: &Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
 }
 
 fn registry_project_roots(listing: AdminCliRegistryListV1) -> Vec<std::path::PathBuf> {
@@ -237,10 +258,11 @@ pub(crate) fn gather_local_projects_from(
 /// Iteratively walks `start` looking for repository roots this profile holds
 /// a store for.
 ///
-/// Skips common heavy directories (node_modules, target, .git, etc.) and
-/// `.tracedecay` data dirs. Tracks canonicalized directories to break
-/// symlink/junction cycles, and uses an explicit worklist instead of
-/// recursion so deep trees can't overflow the stack.
+/// Skips `.git`, `.tracedecay`, and the canonical generated-directory
+/// segments (`node_modules`, `target`, `.worktrees`, …). Tracks
+/// canonicalized directories to break symlink/junction cycles, and uses an
+/// explicit worklist instead of recursion so deep trees can't overflow the
+/// stack.
 pub(crate) fn find_descendant_tracedecay(
     profile: &ProfileRoot,
     start: &Path,
@@ -276,31 +298,24 @@ pub(crate) fn find_descendant_tracedecay(
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == tracedecay_runtime_core::config::TRACEDECAY_DIR {
-                continue;
-            }
             if name_str == ".git" {
                 if profile.is_initialized_project_root(&dir) && seen.insert(dir.clone()) {
                     out.push(dir.clone());
                 }
                 continue;
             }
-            if matches!(
-                name_str.as_ref(),
-                "node_modules"
-                    | "target"
-                    | "vendor"
-                    | "dist"
-                    | "build"
-                    | ".next"
-                    | ".venv"
-                    | "__pycache__"
-            ) {
+            if is_skipped_descendant_dir(&name_str) {
                 continue;
             }
             work.push(path);
         }
     }
+}
+
+fn is_skipped_descendant_dir(name: &str) -> bool {
+    name == tracedecay_runtime_core::config::TRACEDECAY_DIR
+        || name == ".git"
+        || tracedecay_runtime_core::config::is_generated_dir_segment(name)
 }
 
 /// Prints the big flashing warning shown before a wipe.
@@ -608,6 +623,73 @@ mod gather_tests {
             !out.contains(&buried),
             "projects inside node_modules must be skipped, got {out:?}"
         );
+    }
+
+    #[test]
+    fn skips_projects_inside_generated_directories() {
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        // `.worktrees` is in the canonical generated-dir list but was missing
+        // from the hardcoded descendant skip set.
+        let buried = cwd.join(".worktrees").join("lane");
+        fs::create_dir_all(&buried).unwrap();
+        make_enrolled_project(profile, &buried, "proj_worktree");
+
+        let out = gather_local_projects_from(profile, &cwd);
+        assert!(
+            !out.contains(&buried),
+            "projects inside generated directories must be skipped, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn registry_local_targets_keep_cwd_ancestors_and_descendants() {
+        let cwd = std::path::Path::new("/repos/mono/crates/cli");
+        let out = filter_local_registry_roots(
+            cwd,
+            vec![
+                std::path::PathBuf::from("/repos/mono"),
+                std::path::PathBuf::from("/repos/mono/crates/cli"),
+                std::path::PathBuf::from("/repos/mono/crates/cli/nested"),
+                std::path::PathBuf::from("/elsewhere"),
+            ],
+        );
+        assert_eq!(
+            out,
+            vec![
+                std::path::PathBuf::from("/repos/mono"),
+                std::path::PathBuf::from("/repos/mono/crates/cli"),
+                std::path::PathBuf::from("/repos/mono/crates/cli/nested"),
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_local_targets_skip_generated_descendant_roots() {
+        let cwd = std::path::Path::new("/repos/mono");
+        let out = filter_local_registry_roots(
+            cwd,
+            vec![
+                std::path::PathBuf::from("/repos/mono"),
+                std::path::PathBuf::from("/repos/mono/node_modules/pkg"),
+                std::path::PathBuf::from("/repos/mono/.worktrees/lane"),
+            ],
+        );
+        assert_eq!(out, vec![std::path::PathBuf::from("/repos/mono")]);
+    }
+
+    #[test]
+    fn merge_local_list_keeps_enrolled_cwd_absent_from_the_registry() {
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        make_enrolled_project(profile, &cwd, "proj_cwd");
+
+        let out = merge_local_list_projects(profile, &cwd, Vec::new());
+        assert_eq!(out, vec![cwd]);
     }
 
     fn listing(projects: serde_json::Value) -> serde_json::Result<AdminCliRegistryListV1> {

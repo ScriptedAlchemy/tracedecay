@@ -43,7 +43,8 @@ pub(super) fn decode_sequence(value: i64, operation: &'static str) -> Projection
     u64::try_from(value).map_err(|_| storage_message(operation, "negative observation sequence"))
 }
 
-pub(super) fn decode_observation_row(
+pub(super) async fn decode_observation_row(
+    conn: &impl QueryExecutor,
     row: &Row,
     operation: &'static str,
 ) -> ProjectionStoreResult<(u64, DurableObservationV1)> {
@@ -55,8 +56,10 @@ pub(super) fn decode_observation_row(
     let observation_json = row
         .get::<String>(1)
         .map_err(|error| storage(operation, error))?;
-    let observation = serde_json::from_str(&observation_json)
-        .map_err(|error| storage("decode queued observation", error))?;
+    let observation =
+        crate::observation::decode_observation_json(conn, &observation_json, operation)
+            .await
+            .map_err(|error| storage(operation, error))?;
     Ok((sequence, observation))
 }
 
@@ -78,7 +81,9 @@ pub(super) async fn read_observation(
     else {
         return Ok(None);
     };
-    decode_observation_row(&row, "read queued observation").map(Some)
+    decode_observation_row(conn, &row, "read queued observation")
+        .await
+        .map(Some)
 }
 
 pub(super) async fn read_checkpoint(
@@ -1191,8 +1196,13 @@ pub(in super::super) async fn read_output_authorities(
             let observation_json = row
                 .get::<String>(3)
                 .map_err(|error| storage("read canonical projection output authority", error))?;
-            let canonical = serde_json::from_str(&observation_json)
-                .map_err(|error| storage("decode canonical projection output authority", error))?;
+            let canonical = crate::observation::decode_observation_json(
+                conn,
+                &observation_json,
+                "decode canonical projection output authority",
+            )
+            .await
+            .map_err(|error| storage("decode canonical projection output authority", error))?;
             resolved.insert(
                 (provider, message_id),
                 ProjectionOutputAuthority {

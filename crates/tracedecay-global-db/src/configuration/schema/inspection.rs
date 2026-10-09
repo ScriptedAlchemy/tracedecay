@@ -156,18 +156,17 @@ pub(super) async fn configuration_definition_digest(
     )))
 }
 
+/// Writer-ledger objects are installed with the connection, before registered
+/// schema admission. They are not application schema.
 pub(super) async fn registered_store_is_empty(
     connection: &impl QueryExecutor,
 ) -> Result<bool, ConfigurationSchemaError> {
-    // The writer ledger schema is installed when the store's writer
-    // connection opens, before registered admission classifies the store.
-    // Those `td_runtime_writer_*` objects are runtime internals, not
-    // registered content, so a store holding only them is still fresh.
     let mut rows = connection
         .query(
             "SELECT 1
              FROM sqlite_master
-             WHERE name NOT LIKE 'td_runtime_writer_%'
+             WHERE name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'td_runtime_%'
              LIMIT 1",
             (),
         )

@@ -291,7 +291,7 @@ import {
 } from "./generated.ts";
 
 const catchInput: z.input<typeof DashboardDomainStateV1Schema> = 42;
-const valid: Node = { id: "root", label: null, child: { id: "leaf", label: "ok" } };
+const valid: Node = { id: "root", label: null, metadata: null, child: { id: "leaf", label: "ok", metadata: {} } };
 const decoded: Node = NodeSchema.parse(valid);
 const inferred: z.infer<typeof NodeSchema> = valid;
 // @ts-expect-error required nullable fields cannot be omitted
@@ -368,10 +368,21 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
     } as JsonSchema;
 
     const generated = contractText(generateContracts([bundle]).files);
-    expect(generated).toContain("bounded: z.number().int().min(0).max(10),");
-    expect(generated).toContain("lower_only: z.number().int().min(1),");
-    expect(generated).toContain("unbounded: z.number().int(),");
-    expect(generated).toContain("upper_only: z.number().int().max(99),");
+    const bounded = emittedPropertyDecoder(generated, "bounded");
+    const lowerOnly = emittedPropertyDecoder(generated, "lower_only");
+    const unbounded = emittedPropertyDecoder(generated, "unbounded");
+    const upperOnly = emittedPropertyDecoder(generated, "upper_only");
+    expect(bounded.safeParse(0).success).toBe(true);
+    expect(bounded.safeParse(10).success).toBe(true);
+    expect(bounded.safeParse(-1).success).toBe(false);
+    expect(bounded.safeParse(11).success).toBe(false);
+    expect(bounded.safeParse(0.5).success).toBe(false);
+    expect(lowerOnly.safeParse(0).success).toBe(false);
+    expect(lowerOnly.safeParse(1).success).toBe(true);
+    expect(unbounded.safeParse(Number.MAX_SAFE_INTEGER + 1).success).toBe(true);
+    expect(unbounded.safeParse(0.5).success).toBe(false);
+    expect(upperOnly.safeParse(99).success).toBe(true);
+    expect(upperOnly.safeParse(100).success).toBe(false);
   });
 
   it("preserves exclusive numeric bounds as strict decoder limits", () => {
@@ -393,7 +404,7 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
     const integer = emittedPropertyDecoder(generated, "integer");
     const number = emittedPropertyDecoder(generated, "number");
 
-    expect(generated).toContain("integer: z.number().int().gt(0).lt(10),");
+    expect(generated).toContain("integer: z.number().refine(Number.isInteger).gt(0).lt(10),");
     expect(generated).toContain("number: z.number().gt(-1.5).lt(1.5),");
     expect(integer.safeParse(0).success).toBe(false);
     expect(integer.safeParse(1).success).toBe(true);
@@ -432,14 +443,14 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
     const unsigned = emittedPropertyDecoder(generated, "unsigned");
     const unsafeInteger = 9_007_199_254_740_992;
 
-    expect(generated).toContain("signed: z.number().int().safe(),");
-    expect(generated).toContain("unsigned: z.number().int().safe().min(0),");
-    expect(generated).toContain("platform: z.number().int().safe().min(1).max(100),");
+    expect(generated).toContain("signed: z.number().int(),");
+    expect(generated).toContain("unsigned: z.number().int().min(0),");
+    expect(generated).toContain("platform: z.number().int().min(1).max(100),");
     expect(generated).toContain(
-      "nullable_optional: z.number().int().safe().nullable().optional(),",
+      "nullable_optional: z.number().int().nullable().optional(),",
     );
-    expect(generated).toContain("uint32: z.number().int().min(0).max(4294967295),");
-    expect(generated).toContain("plain: z.number().int(),");
+    expect(generated).toContain("uint32: z.number().refine(Number.isInteger).min(0).max(4294967295),");
+    expect(generated).toContain("plain: z.number().refine(Number.isInteger),");
 
     expect(signed.safeParse(Number.MAX_SAFE_INTEGER).success).toBe(true);
     expect(signed.safeParse(Number.MIN_SAFE_INTEGER).success).toBe(true);

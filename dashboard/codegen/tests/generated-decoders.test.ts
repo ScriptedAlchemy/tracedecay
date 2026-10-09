@@ -6,6 +6,7 @@ import {
   DashboardDomainStateV1Schema,
   DashboardEnvelopeV1Schema,
   DoctorFindingsPayloadV1Schema,
+  ExplorerResultPageV1Schema,
   MemoryAlgebraStatusV1Schema,
   MemoryCategoryCountV1Schema,
   MemoryFactDetailPayloadV1Schema,
@@ -344,4 +345,15 @@ describe("wire storage payload decoders", () => {
     }
   });
 
+});
+
+
+describe("wire arbitrary JSON fields", () => {
+  it("requires declared metadata while preserving null and nested JSON values", () => {
+    const page = { limit: 10, next_offset: null, offset: 0, rows: [], total: 0 };
+    expect(ExplorerResultPageV1Schema.safeParse(page).success).toBe(false);
+    expect(ExplorerResultPageV1Schema.parse({ ...page, metadata: null }).metadata).toBeNull();
+    const metadata = { nested: [false, null, { label: "retained" }] };
+    expect(ExplorerResultPageV1Schema.parse({ ...page, metadata }).metadata).toEqual(metadata);
+  });
 });

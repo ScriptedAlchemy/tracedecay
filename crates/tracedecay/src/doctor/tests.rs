@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_session_temporal_store::{
+    SessionTemporalAccess, SessionTemporalHealthFindingKind, SessionTemporalHealthStatus,
+};
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
@@ -642,4 +644,104 @@ fn project_open_severity_tracks_typed_state() {
         render_project_open_status(&mut counters, &status).unwrap();
         assert_eq!((counters.issues, counters.warnings), (issues, warnings));
     }
+}
+
+#[tokio::test]
+async fn temporal_health_does_not_block_on_a_saturated_general_reader_lane() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let runtime = DoctorTestRuntime::open(
+        &dir.path().join("profile"),
+        "doctor temporal health concurrent reader",
+    )
+    .await;
+    let db = runtime.database();
+    let occupancy = db
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("reader pool occupancy");
+    let mut held = Vec::new();
+    for _ in 0..occupancy.available_general {
+        held.push(
+            db.read_snapshot()
+                .await
+                .expect("hold a general-lane snapshot"),
+        );
+    }
+    assert_eq!(
+        db.read_connection()
+            .reader_pool_occupancy()
+            .map(|snapshot| snapshot.available_general),
+        Some(0),
+        "the general lane must stay leased for the whole diagnosis"
+    );
+
+    let report = SessionTemporalAccess::new(db)
+        .session_temporal_doctor_health()
+        .await;
+
+    assert_eq!(
+        report.status(),
+        SessionTemporalHealthStatus::Complete,
+        "{report:?}"
+    );
+    assert!(
+        !report.findings().iter().any(|finding| {
+            finding.kind() == SessionTemporalHealthFindingKind::RelationGraphUnavailable
+        }),
+        "relation health must use the reserved health snapshot, not the general lane: {report:?}"
+    );
+    drop(held);
+}
+
+static NETWORK_PROBE_STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn rendezvous_network_probe() {
+    use std::sync::atomic::Ordering;
+
+    NETWORK_PROBE_STARTED.fetch_add(1, Ordering::SeqCst);
+    while NETWORK_PROBE_STARTED.load(Ordering::SeqCst) < 2 {
+        std::thread::yield_now();
+    }
+}
+
+fn overlapping_worldwide_total() -> Option<u64> {
+    rendezvous_network_probe();
+    Some(7)
+}
+
+fn overlapping_latest_version()
+-> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError> {
+    rendezvous_network_probe();
+    Ok("1.2.3".to_owned())
+}
+
+#[tokio::test]
+async fn independent_network_probes_overlap() {
+    use std::sync::atomic::Ordering;
+
+    NETWORK_PROBE_STARTED.store(0, Ordering::SeqCst);
+    let mut counters = DoctorCounters::quiet();
+    let mut network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
+        fetch_worldwide_total: overlapping_worldwide_total,
+        fetch_latest_version: overlapping_latest_version,
+    });
+    network.admit_worldwide(Ok(&UploadSetting::Resolved(true)));
+    network
+        .report(&mut counters, Ok(&UploadSetting::Resolved(true)))
+        .await
+        .unwrap();
+    assert!(
+        counters.checks.iter().any(|check| check
+            .message
+            .contains("Worldwide counter reachable (total: 7)")),
+        "{:?}",
+        counters.checks
+    );
+    assert!(
+        counters.checks.iter().any(|check| check
+            .message
+            .contains("GitHub releases API reachable (latest v1.2.3)")),
+        "{:?}",
+        counters.checks
+    );
 }

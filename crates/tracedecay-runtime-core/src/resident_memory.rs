@@ -8,6 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use mach2::{
+    kern_return::KERN_SUCCESS,
+    mach_types::task_name_t,
+    message::mach_msg_type_number_t,
+    task::task_info,
+    task_info::{TASK_VM_INFO, task_vm_info},
+    traps::mach_task_self,
+};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
@@ -418,6 +427,11 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
 /// private pages together, which is the kernel figure a memory kill line
 /// would count. It fills `unreclaimable_bytes` so `admission_bytes` compares
 /// the same quantity `/proc` reports as `RssAnon + RssShmem + VmSwap`.
+///
+/// macOS reads `TASK_VM_INFO`: `resident_size` is every resident page, and
+/// `phys_footprint` is the jetsam charge (Activity Monitor's physical
+/// footprint). Without this sample the daemon's pressure cell stays
+/// unobserved and never sheds retained ingest pages or trims mimalloc.
 #[must_use]
 pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     #[cfg(target_os = "linux")]
@@ -433,10 +447,73 @@ pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     {
         process_resident_sample_from_counters_v1()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        process_resident_sample_from_task_v1()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         None
     }
+}
+
+/// Maps a macOS `TASK_VM_INFO` reading onto [`ProcessResidentSampleV1`].
+///
+/// `phys_footprint` is the admission charge: jetsam and memory-pressure
+/// kills use it, not `resident_size`. A zero footprint falls back to
+/// `internal` (anonymous), then `resident_size`. All-zero is unobserved.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn process_resident_sample_from_macos_vm_info_v1(
+    resident_size: u64,
+    phys_footprint: u64,
+    internal: u64,
+) -> Option<ProcessResidentSampleV1> {
+    let unreclaimable_bytes = if phys_footprint > 0 {
+        phys_footprint
+    } else if internal > 0 {
+        internal
+    } else {
+        resident_size
+    };
+    if unreclaimable_bytes == 0 && resident_size == 0 {
+        return None;
+    }
+    Some(ProcessResidentSampleV1 {
+        resident_bytes: resident_size.max(unreclaimable_bytes),
+        unreclaimable_bytes,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn process_resident_sample_from_task_v1() -> Option<ProcessResidentSampleV1> {
+    let mut info = task_vm_info::default();
+    let mut count: mach_msg_type_number_t = (std::mem::size_of::<task_vm_info>()
+        / std::mem::size_of::<i32>())
+    .try_into()
+    .ok()?;
+    let required_count = (std::mem::offset_of!(task_vm_info, phys_footprint)
+        + std::mem::size_of::<u64>())
+        / std::mem::size_of::<i32>();
+    // SAFETY: the initialized buffer has room for `count` integer fields,
+    // and the queried task port belongs to this process.
+    let status = unsafe {
+        task_info(
+            mach_task_self() as task_name_t,
+            TASK_VM_INFO,
+            (&raw mut info).cast(),
+            &raw mut count,
+        )
+    };
+    if status != KERN_SUCCESS || (count as usize) < required_count {
+        return None;
+    }
+    process_resident_sample_from_macos_vm_info_v1(
+        info.resident_size,
+        info.phys_footprint,
+        info.internal,
+    )
 }
 
 /// The Windows kernel's per-process memory counters, mapped onto the

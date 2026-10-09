@@ -2,9 +2,9 @@ use super::{
     AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
     ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
-    daemon_cpu_threads_from, normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    daemon_cpu_threads_from, is_one_shot_daemon_client, normalize_tool_reserved_global_flags,
+    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
+    stderr_tracing_default, try_print_cli_version, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -355,9 +355,52 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     };
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
+    assert!(is_one_shot_daemon_client(Some(&command)));
     assert_eq!(
         async_runtime_flavor(Some(&command)),
         AsyncRuntimeFlavor::CurrentThread
+    );
+}
+
+#[test]
+fn status_is_a_one_shot_daemon_client() {
+    let command = parse_command(&["status", "--json"]);
+    assert!(should_skip_startup_maintenance(&command));
+    assert!(should_skip_agent_install_check(&command));
+    assert!(is_one_shot_daemon_client(Some(&command)));
+    assert_eq!(
+        async_runtime_flavor(Some(&command)),
+        AsyncRuntimeFlavor::CurrentThread
+    );
+    assert!(!is_one_shot_daemon_client(Some(&parse_command(&[
+        "init",
+        "/tmp/project"
+    ]))));
+    assert_eq!(
+        async_runtime_flavor(Some(&parse_command(&["init", "/tmp/project"]))),
+        AsyncRuntimeFlavor::MultiThread
+    );
+}
+
+#[test]
+fn lone_version_flags_are_recognized_without_clap() {
+    use std::ffi::OsString;
+    let version = |args: &[&str]| {
+        let argv = std::iter::once("tracedecay")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        try_print_cli_version(&argv)
+    };
+    assert!(version(&["--version"]).is_some());
+    assert!(version(&["-V"]).is_some());
+    assert!(
+        version(&[]).is_none(),
+        "bare argv must still go through clap"
+    );
+    assert!(
+        version(&["--version", "status"]).is_none(),
+        "mixed argv must still go through clap"
     );
 }
 

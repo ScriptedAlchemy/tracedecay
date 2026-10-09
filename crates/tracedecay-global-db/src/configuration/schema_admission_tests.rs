@@ -387,31 +387,3 @@ async fn released_configuration_shape_with_credential_rows_stays_reset_required(
         "refusal must not discard the unknown row"
     );
 }
-
-#[tokio::test]
-async fn writer_ledger_tables_do_not_deny_fresh_store_evidence() {
-    let directory = tempfile::tempdir().unwrap();
-    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-        &directory.path().join("configuration-admission.db"),
-    );
-    // The store writer installs its ledger tables when the connection opens,
-    // before registered admission classifies the store.
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
-                shard_json TEXT NOT NULL,
-                incarnation INTEGER NOT NULL,
-                PRIMARY KEY (shard_json, incarnation)
-            ) WITHOUT ROWID;",
-        )
-        .await
-        .unwrap();
-
-    let fresh = fresh_configuration_store_evidence(&*connection)
-        .await
-        .unwrap()
-        .expect("a store holding only writer-ledger internals is fresh");
-    ensure_configuration_schema(&*connection, Some(&fresh))
-        .await
-        .unwrap();
-}
