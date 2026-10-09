@@ -11,7 +11,7 @@ use tracedecay_domain::{
 use tracedecay_session_memory::session::{
     SessionCursorRequest, SessionRetrievalScope, SessionTemporalQuery,
 };
-use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::context::{ContextBudget, MAX_CONTEXT_RECORDS};
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -33,7 +33,6 @@ use tracedecay_session_runtime::session_retrieval::{
 
 const SUMMARY_DESCRIBE_CONCURRENCY: usize = 8;
 const DASHBOARD_AGGREGATE_PAGE_LIMIT: usize = 16;
-const ADMITTED_RETRIEVAL_PAGE_LIMIT: i64 = 100;
 const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -923,8 +922,8 @@ fn retrieval_query(
                 )
             }
         };
-    let limit = usize::try_from(limit.clamp(1, ADMITTED_RETRIEVAL_PAGE_LIMIT)).ok()?;
-    // The admitted application port caps each request at 100 records. Larger
+    let limit = usize::try_from(limit.max(1)).ok()?.min(MAX_CONTEXT_RECORDS);
+    // Selection must fit the canonical context assembler before hydration. Larger
     // dashboard windows advance only through its opaque cursor, preserving the
     // same immutable authorization and frozen participant manifest per page.
     let execution_limits = admitted_execution_limits(limit);
@@ -1124,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_session_page_preserves_temporal_cursor_and_exact_limit() {
+    fn dashboard_session_page_preserves_cursor_with_context_bounded_selection() {
         let request = DashboardLcmReadRequestV1::Session {
             session_id: "session.dashboard.cursor".to_owned(),
             limit: 100,
@@ -1133,7 +1132,7 @@ mod tests {
         let query = retrieval_query(&request, initial_cursor(&request))
             .expect("cursor-backed dashboard page");
 
-        assert_eq!(query.limit(), 100);
+        assert_eq!(query.limit(), MAX_CONTEXT_RECORDS);
         assert_eq!(query.cursor(), Some("opaque-temporal-cursor"));
         assert!(query.semantic_filter().include_summaries);
         assert_eq!(
@@ -1153,7 +1152,7 @@ mod tests {
         let query = retrieval_query(&request, Some("opaque-frozen-manifest-cursor".to_owned()))
             .expect("aggregate continuation");
 
-        assert_eq!(query.limit(), 100);
+        assert_eq!(query.limit(), MAX_CONTEXT_RECORDS);
         assert_eq!(query.cursor(), Some("opaque-frozen-manifest-cursor"));
         assert_eq!(
             query.retrieval_scope(),

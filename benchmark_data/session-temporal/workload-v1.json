@@ -49,15 +49,6 @@
       "SessionRetrievalService with GlobalDbSessionTemporalExecution and AllSessionsInAuthorizedRoot hydration"
     ]
   },
-  "profile": {
-    "cargo_profile": "bench",
-    "debug": false,
-    "debug_assertions": false,
-    "incremental": false,
-    "manifest_path": "Cargo.toml",
-    "opt_level": 3,
-    "overflow_checks": false
-  },
   "runner": {
     "path": "scripts/run-session-temporal-benchmark.sh"
   },

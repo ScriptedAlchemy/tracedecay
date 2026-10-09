@@ -570,24 +570,24 @@ fn session_temporal() -> Value {
 
 fn source_coverage(mode: &str) -> Value {
     json!({
-        "committed_frontier": 3,
+        "committed_frontier": 2,
         "covered_intervals": [],
         "missing_intervals": [],
-        "observed_frontier": 3,
+        "observed_frontier": 2,
         "reason": {"kind": "caught_up"},
         "request": {"mode": {"kind": mode}},
         "source_id": "orchard-describe:cursor",
         "state": "fresh",
-        "target_watermark": 3
+        "target_watermark": 2
     })
 }
 
 fn watermarks() -> Value {
     json!({
         "generation": 3,
-        "index": 3,
-        "projection": 3,
-        "source": 3,
+        "index": 2,
+        "projection": 2,
+        "source": 2,
         "summary": 1
     })
 }

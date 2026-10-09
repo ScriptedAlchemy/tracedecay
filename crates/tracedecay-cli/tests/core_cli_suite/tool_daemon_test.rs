@@ -1305,8 +1305,9 @@ fn capture_spool_refusal_names_its_typed_cause_on_stderr() {
         enroll_native_capture_project(&home_path, &project_path, "proj_capture_typed_cause");
     // A directory where the spool's records file belongs is a spool the hook
     // must refuse; the refusal must say which spool fault it hit.
-    std::fs::create_dir_all(native_capture_spool_root(&data_root, host).join("records.v1.bin"))
-        .unwrap();
+    let records_path = native_capture_spool_root(&data_root, host).join("records.v1.bin");
+    std::fs::remove_file(&records_path).unwrap();
+    std::fs::create_dir(&records_path).unwrap();
 
     let output = run_native_capture_hook(
         &home_path,

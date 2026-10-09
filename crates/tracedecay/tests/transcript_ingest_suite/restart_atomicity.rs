@@ -70,6 +70,10 @@ pub(super) struct ProjectSessionTestRuntime {
 }
 
 impl ProjectSessionTestRuntime {
+    pub(super) async fn shutdown(self) -> tracedecay_domain::errors::Result<()> {
+        self.runtime.shutdown().await
+    }
+
     pub(super) fn runtime(&self) -> &HostAdmissionTestRuntimeV1 {
         &self.runtime
     }

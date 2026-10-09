@@ -19,8 +19,9 @@
 # into the temp dir, so it never touches the user's real tracedecay state.
 #
 # Usage:
-#   scripts/mcp-conformance-smoke.sh                # auto-detect binary
-#   TRACEDECAY_BIN=target/debug/tracedecay scripts/mcp-conformance-smoke.sh
+#   bazel build //crates/tracedecay-cli:tracedecay
+#   scripts/mcp-conformance-smoke.sh                # use the Bazel output
+#   TRACEDECAY_BIN=/path/to/tracedecay scripts/mcp-conformance-smoke.sh
 
 set -euo pipefail
 
@@ -292,30 +293,12 @@ cleanup() {
   exit "$status"
 }
 
-find_tracedecay_bin() {
-  local target_dir candidate
-
-  if [[ -n "${TRACEDECAY_BIN:-}" ]]; then
-    printf '%s\n' "$TRACEDECAY_BIN"
-    return
-  fi
-
-  target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-  for candidate in "$target_dir/debug/tracedecay" "$target_dir/release/tracedecay"; do
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  command -v tracedecay || true
-}
-
 main() {
   local tracedecay_bin npm_cache fixture status
 
-  tracedecay_bin="$(find_tracedecay_bin)"
+  tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/bazel-bin/crates/tracedecay-cli/tracedecay}"
   if [[ -z "$tracedecay_bin" || ! -x "$tracedecay_bin" ]]; then
-    echo "error: no tracedecay binary found; build one or set TRACEDECAY_BIN" >&2
+    echo "error: tracedecay binary not executable at $tracedecay_bin; run bazel build //crates/tracedecay-cli:tracedecay or set TRACEDECAY_BIN" >&2
     return 2
   fi
   tracedecay_bin="$(readlink -f "$tracedecay_bin")"

@@ -1,0 +1,5 @@
+filegroup(
+    name = "scenarios",
+    srcs = glob(["scenarios/*.json"]),
+    visibility = ["//crates/tracedecay:__pkg__"],
+)

@@ -417,7 +417,6 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 /// admission with the run's receipt, and the run settles on the daemon.
 #[test]
 fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
-    const CURATOR_TURN: Duration = Duration::from_secs(3);
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -430,10 +429,9 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
 
         let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let fixture = seed_memory_fixture(&cg).await;
-        let slow_codex = FakeCodexAppServer::new_memory_curator_answering_after(
+        let slow_codex = FakeCodexAppServer::new_memory_curator_held(
             fixture.near_duplicate_fact_id.clone(),
             fixture.near_duplicate_last_event_id.clone(),
-            CURATOR_TURN,
         );
         let project_id = cg
             .configuration_runtime()
@@ -471,7 +469,6 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
         assert_eq!(status, 200, "automation config patch failed: {config}");
 
         let run_id = "request.dashboard.slow-curator-receipt";
-        let started = Instant::now();
         let response = agent
             .post(format!(
                 "{base_url}/api/application/retained/fact_store_curate"
@@ -482,7 +479,6 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
                 "min_confidence_millionths": 500_000
             }))
             .unwrap_or_else(|error| panic!("POST fact_store_curate failed: {error}"));
-        let answered = started.elapsed();
         let (status, receipt) = response_to_json(response);
         assert_eq!(status, 200, "fact_store_curate failed: {receipt}");
         let payload = &receipt["value"]["outcome"]["value"]["payload"];
@@ -499,16 +495,11 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
             receipt["value"]["outcome"]["value"]["reconciliation"],
             "pending"
         );
-        assert!(
-            answered < Duration::from_millis(250),
-            "fact_store_curate answered after {answered:?}, behind a {CURATOR_TURN:?} curator"
-        );
-
+        // The backend cannot complete before release, so receiving this receipt
+        // proves admission does not await the curator, independent of CPU load.
+        slow_codex.wait_for_turn();
+        slow_codex.release_turn();
         let settled = wait_for_settled_run(&agent, &base_url, run_id);
-        assert!(
-            started.elapsed() >= CURATOR_TURN,
-            "the run settled before its curator answered"
-        );
         assert_eq!(settled["status"], "succeeded", "{settled}");
         assert_eq!(settled["trigger"], "application");
         assert_eq!(settled["accepted_count"], 1);

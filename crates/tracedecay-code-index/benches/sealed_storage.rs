@@ -134,6 +134,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 struct Sealed {
     manifest: Vec<u8>,
     file_segments: BTreeMap<String, Vec<u8>>,
+    segment_kinds: BTreeMap<String, &'static str>,
     evidence: (String, Vec<u8>),
 }
 
@@ -288,8 +289,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let successor_restore_ms = digest_decoded(&successor_sealed, &store_segments, &mut decoded)?;
 
     let mut sections = BTreeMap::new();
-    for bytes in store_segments.values() {
-        add_sections(bytes, &mut sections)?;
+    let mut segment_kinds = clean_sealed.segment_kinds.clone();
+    segment_kinds.extend(successor_sealed.segment_kinds.clone());
+    for (digest, bytes) in &store_segments {
+        let kind = segment_kinds.get(digest).ok_or("segment kind is missing")?;
+        add_sections(bytes, kind, &mut sections)?;
     }
     for sealed in [&clean_sealed, &successor_sealed] {
         add_evidence_sections(&sealed.evidence.1, &mut sections)?;
@@ -484,13 +488,11 @@ fn request(
             content_digest: digest,
             disposition: SnapshotFileDispositionV1::Present,
         });
-        if changed.contains(&source.logical_path) {
-            captured_files.push(CodeIndexCapturedFileV1 {
-                file_occurrence_id: occurrence,
-                sanitized_bytes: Arc::clone(&source.bytes),
-                sensitivity_level: SensitivityLevelV1::Public,
-            });
-        }
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id: occurrence,
+            sanitized_bytes: Arc::clone(&source.bytes),
+            sensitivity_level: SensitivityLevelV1::Public,
+        });
     }
     Ok(CodeIndexBuildRequestV1 {
         snapshot: SanitizedCodeSnapshotV1 {
@@ -540,19 +542,28 @@ fn seal(
     parent: Option<&[u8]>,
 ) -> Result<Sealed, CodeIndexProductionErrorV1> {
     let mut file_segments = BTreeMap::new();
+    let mut segment_kinds = BTreeMap::new();
     let mut pack = Vec::new();
     let mut evidence = None;
     let manifest = publication.encode(parent, |publication| {
         match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                 file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                segment_kinds.insert(digest.as_str().to_owned(), "file");
+            }
+            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                segment_kinds.insert(digest.as_str().to_owned(), "file_evidence");
+            }
+            SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                segment_kinds.insert(digest.as_str().to_owned(), "resolution_index");
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {
                 page_digest, bytes, ..
             } => {
                 file_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                segment_kinds.insert(page_digest.as_str().to_owned(), "code_graph");
             }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 pack.extend_from_slice(bytes);
@@ -572,6 +583,7 @@ fn seal(
     Ok(Sealed {
         manifest,
         file_segments,
+        segment_kinds,
         evidence: evidence.ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed generation has no evidence".to_owned())
         })?,
@@ -654,10 +666,11 @@ fn digest_decoded(
     }
 }
 
-/// Split one stored file segment by payload section. The stored bytes are
+/// Split one stored segment by its production publication kind and payload section. The stored bytes are
 /// either the canonical JSON itself or its raw DEFLATE stream.
 fn add_sections(
     bytes: &[u8],
+    kind: &str,
     sections: &mut BTreeMap<String, usize>,
 ) -> Result<(), Box<dyn Error>> {
     let json = if bytes.first() == Some(&b'{') {
@@ -669,6 +682,10 @@ fn add_sections(
     };
     *sections.entry("total".to_owned()).or_default() += json.len();
     let value: serde_json::Value = serde_json::from_slice(&json)?;
+    if kind != "file" {
+        *sections.entry(kind.to_owned()).or_default() += json.len();
+        return Ok(());
+    }
     let file = value.get("file").ok_or("segment has no file payload")?;
     for (key, section) in file.as_object().ok_or("file payload is not an object")? {
         if key == "artifacts" {

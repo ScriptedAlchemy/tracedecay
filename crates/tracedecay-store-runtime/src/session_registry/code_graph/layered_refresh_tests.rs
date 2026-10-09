@@ -22,6 +22,7 @@ use tracedecay_graph_db::{
     GraphGenerationRowSpill, GraphGenerationRows, GraphProjectorRevision, NeverCancelled,
     VerifiedGraphSnapshot,
 };
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 
@@ -29,8 +30,8 @@ const MODULES: usize = 120;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(root))
         .output()
         .expect("run git fixture command");
     assert!(

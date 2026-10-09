@@ -102,7 +102,11 @@ fn reset_store(db_path: &Path) {
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = db_path.as_os_str().to_owned();
         sidecar.push(suffix);
-        std::fs::remove_file(sidecar).ok();
+        match std::fs::remove_file(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove closed store {suffix}: {error}"),
+        }
     }
 }
 
@@ -153,9 +157,16 @@ async fn shipped_store_is_reset_required_and_a_reset_store_serves_both_messages(
         search_texts(&db, "claude", "claudeprobe").await,
         [CLAUDE_TEXT]
     );
-    drop(db);
+    db.shutdown()
+        .await
+        .expect("close stores before shaping the shipped schema");
     shape_store_as_shipped(&db_path);
 
+    // Retain the profile owner across the refused project mount so its
+    // partially opened workers can be joined before the offline reset.
+    let profile = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .expect("mount the current profile around the shipped project store");
     let refused = HostAdmissionTestRuntimeV1::project(&profile_root, &project, project_id.clone())
         .await
         .err()
@@ -184,6 +195,10 @@ async fn shipped_store_is_reset_required_and_a_reset_store_serves_both_messages(
         "a refused store is left for the operator's reset, never rewritten"
     );
 
+    profile
+        .shutdown()
+        .await
+        .expect("close refused project mount before reset");
     reset_store(&db_path);
     let reset = open_project_session_db(&project).await.unwrap();
     ingest_both(&reset, &home, &project, &cursor_transcript).await;

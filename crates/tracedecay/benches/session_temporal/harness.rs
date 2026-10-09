@@ -320,7 +320,6 @@ pub fn validate_contract() -> BenchResult<()> {
         json!(RUNNER_PATH),
         "runner path",
     )?;
-    validate_bench_profile(&root)?;
     validate_sanitization_receipt(&root)?;
 
     let index = read_json(&root.join(EVIDENCE_INDEX_PATH))?;
@@ -519,7 +518,6 @@ fn validate_refresh_inputs(root: &Path, workload: &Value) -> BenchResult<()> {
         json!(true),
         "production path availability",
     )?;
-    validate_bench_profile(root)?;
     validate_sanitization_receipt(root)
 }
 
@@ -535,7 +533,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
         );
     }
     validate_contract()?;
-    validate_bench_profile_enforced()?;
+    validate_measurement_configuration()?;
 
     let root = repository_root();
     let measurement = Box::pin(capture_measurement()).await?;
@@ -556,7 +554,7 @@ pub async fn refresh_contract() -> BenchResult<Value> {
     if !host_policy.allows_contract_refresh() {
         return Err("Session-temporal contract refresh is Linux-hosted".to_owned());
     }
-    validate_bench_profile_enforced()?;
+    validate_measurement_configuration()?;
     let root = repository_root();
     let workload = read_json(&root.join(WORKLOAD_PATH))?;
     validate_refresh_inputs(&root, &workload)?;
@@ -789,7 +787,6 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
             )
         },
         root_sessions,
-        observation_count,
     ))
     .await?;
     let rebuild_activate_ns = elapsed_ns(started);
@@ -1090,31 +1087,10 @@ fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
     Ok(())
 }
 
-fn validate_bench_profile(root: &Path) -> BenchResult<()> {
-    let manifest = fs::read_to_string(root.join("Cargo.toml"))
-        .map_err(|error| format!("read Cargo.toml: {error}"))?;
-    let profile = manifest
-        .split_once("[profile.bench]")
-        .map(|(_, profile)| profile.split("\n[").next().unwrap_or(profile))
-        .ok_or_else(|| "Cargo.toml is missing [profile.bench]".to_owned())?;
-    for line in [
-        "opt-level = 3",
-        "debug = false",
-        "debug-assertions = false",
-        "overflow-checks = false",
-        "incremental = false",
-    ] {
-        if !profile.lines().any(|candidate| candidate.trim() == line) {
-            return Err(format!("bench profile is missing {line:?}"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_bench_profile_enforced() -> BenchResult<()> {
+fn validate_measurement_configuration() -> BenchResult<()> {
     if cfg!(debug_assertions) {
         return Err(
-            "optimized bench profile required: debug_assertions are enabled (use cargo bench)"
+            "optimized bench profile required: debug_assertions are enabled (use Bazel --config=release)"
                 .to_owned(),
         );
     }
@@ -1160,11 +1136,16 @@ fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResu
 fn repository_root() -> PathBuf {
     // The product package sits at `crates/tracedecay`; this benchmark reads git
     // metadata and fixtures that live at the workspace root above it.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root above crates/tracedecay")
-        .to_owned()
+    if let Some(root) = std::env::var_os("TRACEDECAY_BENCHMARK_REPO_ROOT") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+    )
+    .parent()
+    .and_then(Path::parent)
+    .expect("workspace root above crates/tracedecay")
+    .to_owned()
 }
 
 fn current_commit(root: &Path) -> BenchResult<String> {

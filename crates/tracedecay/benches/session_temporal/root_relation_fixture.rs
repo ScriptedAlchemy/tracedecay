@@ -1,6 +1,6 @@
 //! Production root-wide relation-hydration fixture for the session benchmark.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
@@ -10,15 +10,15 @@ use tracedecay_session_memory::session::{
     SessionRefreshTarget, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionTemporalQuery,
 };
-use tracedecay_store::{
-    SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
-};
+use tracedecay_store::{SessionRefreshCompletionRequestV1, SessionRefreshProgressV1};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, PROJECTOR_VERSION};
-use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalStore};
+use tracedecay_session_temporal_store::{
+    SessionTemporalAccess, SessionTemporalRefreshDiscoveryCursor, SessionTemporalStore,
+};
 
 pub(super) const ROOT_RELATION_PARTICIPANT_COUNT: usize = 64;
 
@@ -47,13 +47,28 @@ pub(super) async fn refresh_sessions(
     db: &RegisteredGlobalDb,
     request: impl Fn(&SessionId) -> BenchResult<(RequestContext, SessionRequestBinding)>,
     sessions: Vec<SessionId>,
-    observation_count: u64,
 ) -> BenchResult<RefreshedRootRelationFixture> {
     if sessions.len() != ROOT_RELATION_PARTICIPANT_COUNT {
         return Err(format!(
             "root relation fixture requires {ROOT_RELATION_PARTICIPANT_COUNT} sessions, got {}",
             sessions.len()
         ));
+    }
+    let mut frontiers = BTreeMap::new();
+    let mut cursor = SessionTemporalRefreshDiscoveryCursor::default();
+    loop {
+        let (requests, next, has_more) = SessionTemporalAccess::new(db)
+            .pending_session_temporal_refresh_page_result(sessions.len(), 1, &cursor)
+            .await
+            .map_err(|error| format!("discover root refresh frontiers: {error}"))?
+            .into_parts();
+        for request in requests {
+            frontiers.insert(request.session_id().clone(), request.target_frontier());
+        }
+        cursor = next;
+        if !has_more {
+            break;
+        }
     }
     let refresh = SessionRefreshService::new(
         AllowAuthorizer,
@@ -71,8 +86,9 @@ pub(super) async fn refresh_sessions(
             Some("codex".to_owned()),
             TemporalModeV1::Current,
             RetrievalGrainV1::LogicalMessage,
-            SessionRefreshFrontierV1::new(observation_count, 0)
-                .map_err(|error| format!("root refresh frontier: {error}"))?,
+            frontiers.remove(session_id).ok_or_else(|| {
+                format!("root session {session_id} has no pending canonical refresh")
+            })?,
         )
         .map_err(|error| format!("root refresh target: {error}"))?;
         let (context, binding) = request(session_id)?;

@@ -315,6 +315,9 @@ fn assert_edit_over_damaged_parent_builds_cold(damage: impl FnOnce(&Path)) {
     );
     published(scheduler.reconcile_now().expect("publish the parent"));
     drain_text(&scheduler);
+    // Corruption is an offline store change: Windows refuses to mutate an
+    // artifact while the scheduler still owns its mapped serving pages.
+    drop(scheduler);
     damage(&active_text_artifact_path(store.path()));
 
     fixture.edit(
@@ -322,6 +325,11 @@ fn assert_edit_over_damaged_parent_builds_cold(damage: impl FnOnce(&Path)) {
         &module(4, "").replace("wrapping_mul(31)", "wrapping_mul(37)"),
     );
     fixture.commit_all("edit over a damaged parent");
+    let mut scheduler = super::scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
     published(scheduler.reconcile_now().expect("publish the successor"));
     drain_text(&scheduler);
     let built = active_artifact(store.path());

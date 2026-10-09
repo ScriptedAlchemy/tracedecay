@@ -1729,3 +1729,6 @@ mod lcm_preserved_profile_journey_test;
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod idle_history_reads_journey_test;
+
+#[cfg(test)]
+mod source_body_readiness_journey_test;

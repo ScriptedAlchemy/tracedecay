@@ -79,7 +79,9 @@ unauthorized external action after completing independent, authorized work.
 - Bazel is the sole workspace build, test, check, run, benchmark, and
   code-generation authority. Run `bazel build //...`,
   `bazel test //... --test_output=errors`, `bazel run //crates/...`, and
-  `bazel test //... --test_arg=--bench` for benchmarks. Edition 2024,
+  `bazel test //crates/<crate>:<benchmark> --test_arg=--bench` for an explicit
+  benchmark target. Benchmarks with Cargo `test = false` remain compiled by
+  default builds but run only when selected explicitly. Edition 2024,
   resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
   canonical inputs. Never invoke `cargo` directly; route every build, test,
   check, run, bench, and codegen through Bazel.

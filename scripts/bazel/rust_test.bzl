@@ -96,13 +96,18 @@ def _isolated_rust_test_impl(ctx):
     }
     for variable, file in {"CARGO": toolchain.cargo, "RUSTC": toolchain.rustc, "RUSTDOC": toolchain.rust_doc}.items():
         paths[variable] = _runfiles_path(file, workspace)
+    # Distribution acceptance explicitly supplies its extracted CLI through
+    # --test_env. Every other runfile, and the default CLI, stays declared here.
     if windows:
         runfiles_env = "\n".join([
+            ('if not defined {} '.format(variable) if variable == "TRACEDECAY_TEST_BIN" else "") +
             'set "{}=%TEST_SRCDIR%/{}"'.format(variable, path)
             for variable, path in paths.items()
         ])
     else:
         runfiles_env = " ".join([
+            '"{}=${{{}:-$TEST_SRCDIR/{}}}"'.format(variable, variable, path)
+            if variable == "TRACEDECAY_TEST_BIN" else
             '"{}=$TEST_SRCDIR/{}"'.format(variable, path)
             for variable, path in paths.items()
         ])

@@ -6,9 +6,14 @@ bazel_dep(name = "rules_rust", version = "0.74.0")
 # Rustc adds every dependency search directory to PATH on Windows; large
 # graphs exceed its environment limit (rust-lang/rust#110889). Native
 # shared symlinks preserve artifact identities with one search directory.
+# Build-script flags use response files to keep the compiler wrapper's own
+# command line within Windows' separate CreateProcessW limit.
 single_version_override(
     module_name = "rules_rust",
-    patches = ["//scripts:bazel/patches/rules-rust-windows-dependency-search.patch"],
+    patches = [
+        "//scripts:bazel/patches/rules-rust-windows-dependency-search.patch",
+        "//scripts:bazel/patches/rules-rust-windows-build-flags.patch",
+    ],
     patch_strip = 1,
 )
 bazel_dep(name = "aspect_rules_js", version = "3.5.1")

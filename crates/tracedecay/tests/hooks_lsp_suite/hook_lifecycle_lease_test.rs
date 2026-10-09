@@ -3,6 +3,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_runtime_core::lifecycle_lease::{
+    ExclusiveLeaseAttempt, try_acquire_exclusive_for_profile,
+};
+
 use super::common::{
     apply_tracedecay_home_env, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
@@ -499,7 +503,17 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             assert_eq!(replay.stdout, expected_stdout, "{hook} replay: {replay:?}");
             assert!(replay.stderr.is_empty(), "{hook} replay: {replay:?}");
         }
-        assert!(!home.join(".tracedecay/lifecycle.lock").exists());
+        assert!(home.join(".tracedecay/lifecycle.lock").is_file(), "{hook}");
+        let maintenance = try_acquire_exclusive_for_profile(
+            &home.join(".tracedecay"),
+            "verify completed hook released its lease",
+        )
+        .unwrap();
+        assert!(
+            matches!(maintenance, ExclusiveLeaseAttempt::Acquired(_)),
+            "{hook} retained its lifecycle lease after exit"
+        );
+        drop(maintenance);
         assert!(!home.join(".tracedecay/global.db").exists());
         assert!(!data_root.join("tracedecay.db").exists());
         assert!(!data_root.join("sessions.db").exists());
