@@ -87,13 +87,12 @@ impl ResidentOwnerKindV1 {
         }
     }
 
-    /// Whether the idle window alone releases this kind. The graph catalog
-    /// stays until pressure needs it: rebuilding it is a full projection
-    /// scan that every name lookup waits on, while the engine beside it only
-    /// reopens from disk.
+    /// Whether the idle window alone releases this kind. An LSP session
+    /// never: nothing re-derives an unsaved buffer. The catalog rebuilds
+    /// from the durable projection the same way the engine reopens.
     #[must_use]
     pub const fn released_when_idle(self) -> bool {
-        !matches!(self, Self::GraphCatalog)
+        !matches!(self, Self::Session)
     }
 }
 
@@ -891,37 +890,102 @@ mod tests {
     }
 
     #[test]
-    fn the_idle_window_keeps_a_graph_catalog_that_pressure_still_sheds() {
+    fn the_idle_window_releases_idle_graph_catalogs_and_keeps_recent_ones() {
+        const CATALOG_MIB: u64 = 12 * 1024 * 1024;
+        const ENGINE_MIB: u64 = 2 * 1024 * 1024;
         let start = Instant::now();
         let now = start + Duration::from_secs(301);
         let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
-        let catalog = FixtureOwner::new("generation.catalog", 1_000, start, true);
-        let engine = FixtureOwner::new("generation.engine", 5_000, start, true);
+        let idle_catalog = FixtureOwner::new("generation.idle-catalog", CATALOG_MIB, start, true);
+        let idle_engine = FixtureOwner::new("generation.idle-engine", ENGINE_MIB, start, true);
+        let recent_catalog = FixtureOwner::new(
+            "generation.recent-catalog",
+            CATALOG_MIB,
+            start + Duration::from_secs(2),
+            true,
+        );
+        let recent_engine = FixtureOwner::new(
+            "generation.recent-engine",
+            ENGINE_MIB,
+            start + Duration::from_secs(2),
+            true,
+        );
         let _registrations = [
             register(
                 &owners,
-                "worktree.a",
+                "worktree.idle",
                 ResidentOwnerKindV1::GraphCatalog,
-                &catalog,
+                &idle_catalog,
             ),
             register(
                 &owners,
-                "worktree.a",
+                "worktree.idle",
                 ResidentOwnerKindV1::GraphEngine,
-                &engine,
+                &idle_engine,
+            ),
+            register(
+                &owners,
+                "worktree.recent",
+                ResidentOwnerKindV1::GraphCatalog,
+                &recent_catalog,
+            ),
+            register(
+                &owners,
+                "worktree.recent",
+                ResidentOwnerKindV1::GraphEngine,
+                &recent_engine,
             ),
         ];
 
-        assert_eq!(
-            released_generations(&owners.release_idle(now)),
-            ["generation.engine"]
+        let before = owners.report(now).measured_bytes;
+        let released = owners.release_idle(now);
+        let after = owners.report(now).measured_bytes;
+        let mut kinds = released
+            .iter()
+            .map(|release| release.kind)
+            .collect::<Vec<_>>();
+        kinds.sort();
+        eprintln!(
+            "STEADY_RSS_PROOF before={before} after={after} \
+             released_catalog={CATALOG_MIB} released_engine={ENGINE_MIB} worktrees=2"
         );
-        assert_eq!(owners.report(now).measured_bytes, 1_000);
+        assert_eq!(before, 2 * (CATALOG_MIB + ENGINE_MIB));
         assert_eq!(
-            released_generations(&owners.shed(1, now)),
-            ["generation.catalog"]
+            kinds,
+            [
+                ResidentOwnerKindV1::GraphCatalog,
+                ResidentOwnerKindV1::GraphEngine
+            ]
         );
-        assert_eq!(owners.report(now).measured_bytes, 0);
+        assert_eq!(
+            released_generations(&released),
+            ["generation.idle-catalog", "generation.idle-engine"]
+        );
+        assert_eq!(after, CATALOG_MIB + ENGINE_MIB);
+        assert_eq!(
+            released
+                .iter()
+                .map(|release| release.bytes.measured().unwrap_or(0))
+                .sum::<u64>(),
+            CATALOG_MIB + ENGINE_MIB
+        );
+    }
+
+    #[test]
+    fn the_idle_window_keeps_an_lsp_session() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(301);
+        let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
+        let session = FixtureOwner::new("generation.session", 8_000, start, true);
+        let _registration = register(
+            &owners,
+            "worktree.a",
+            ResidentOwnerKindV1::Session,
+            &session,
+        );
+
+        assert_eq!(owners.release_idle(now).len(), 0);
+        assert_eq!(owners.report(now).measured_bytes, 8_000);
     }
 
     #[test]
