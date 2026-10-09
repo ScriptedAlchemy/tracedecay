@@ -364,43 +364,21 @@ impl VerifiedGraphSnapshot {
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
-        let (store, entity) = self.with_operation(|| {
-            let lease = self.lease_for_projection(&reference.projection)?;
-            let namespace = lease.locator.physical_namespace()?;
-            if let Some(layered) = self
-                .sealed_store(&lease.locator)
-                .as_deref()
-                .and_then(crate::sealed_store::SealedGenerationStore::layered_reads)
-            {
-                return Ok((
-                    GraphReadStore::Sealed,
-                    layered.entity(&reference.identity, cancellation)?,
-                ));
-            }
-            if self.direct_sealed {
-                return Ok((
-                    GraphReadStore::Sealed,
+        let (store, entity) = if let Some(served) =
+            self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
+        {
+            served
+        } else {
+            self.with_operation(|| {
+                let lease = self.lease_for_projection(&reference.projection)?;
+                let namespace = lease.locator.physical_namespace()?;
+                Ok((
+                    GraphReadStore::Staging,
                     self.database
                         .entity(&namespace, &reference.identity, cancellation)?,
-                ));
-            }
-            // A sealed generation's point reads serve from its compacted
-            // per-generation store; the digest proved the exact row set, so
-            // a miss there is authoritative and never re-read from staging.
-            if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                return Ok((
-                    GraphReadStore::Sealed,
-                    sealed
-                        .database()
-                        .entity(&namespace, &reference.identity, cancellation)?,
-                ));
-            }
-            Ok((
-                GraphReadStore::Staging,
-                self.database
-                    .entity(&namespace, &reference.identity, cancellation)?,
-            ))
-        })?;
+                ))
+            })?
+        };
         if let Some(meter) = &self.meter {
             meter.record_point_read(
                 store,
@@ -417,31 +395,19 @@ impl VerifiedGraphSnapshot {
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
-        let (store, relation) = self.with_operation(|| {
-            let lease = self.lease_for_projection(&reference.projection)?;
-            // The owning generation's sealed store holds the relation, its
-            // edge, and full copies of any dependency-generation endpoints,
-            // so the endpoint decode below stays inside one store.
-            if let Some(sealed) = self.sealed_store(&lease.locator) {
-                if let Some(layered) = sealed.layered_reads() {
-                    return Ok((
-                        GraphReadStore::Sealed,
-                        layered.relation(&reference.identity, cancellation.as_ref())?,
-                    ));
-                }
-                return Ok((
-                    GraphReadStore::Sealed,
-                    sealed
-                        .database()
+        let (store, relation) = if let Some(served) =
+            self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
+        {
+            served
+        } else {
+            self.with_operation(|| {
+                Ok((
+                    GraphReadStore::Staging,
+                    self.database
                         .generation_relation(self, reference, cancellation)?,
-                ));
-            }
-            Ok((
-                GraphReadStore::Staging,
-                self.database
-                    .generation_relation(self, reference, cancellation)?,
-            ))
-        })?;
+                ))
+            })?
+        };
         if let Some(meter) = &self.meter {
             meter.record_point_read(
                 store,
@@ -941,6 +907,83 @@ impl VerifiedGraphSnapshot {
                 .database
                 .sealed_generation_reader(&self.head.locator)
                 .is_some()
+    }
+
+    /// Holds the staging snapshot gate exclusively while `while_held` runs.
+    ///
+    /// Publication page apply takes this same exclusive claim. A sealed
+    /// point read must finish inside `while_held` instead of waiting for it.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn hold_staging_snapshot_gate_for_test<R>(&self, while_held: impl FnOnce() -> R) -> R {
+        let _hold = self.database.inner.snapshot_gate.write();
+        while_held()
+    }
+
+    /// Serves one sealed-store entity without taking the staging snapshot
+    /// gate. Publication page apply holds that gate exclusively; ordinary
+    /// source-body point reads must not wait on it.
+    fn sealed_entity_without_staging_gate(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<(GraphReadStore, Option<GraphEntity>)>, GraphDbError> {
+        let lease = self.lease_for_projection(&reference.projection)?;
+        let namespace = lease.locator.physical_namespace()?;
+        if let Some(layered) = self
+            .sealed_store(&lease.locator)
+            .as_deref()
+            .and_then(crate::sealed_store::SealedGenerationStore::layered_reads)
+        {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                layered.entity(&reference.identity, cancellation)?,
+            )));
+        }
+        if self.direct_sealed {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                self.database
+                    .entity(&namespace, &reference.identity, cancellation)?,
+            )));
+        }
+        // A sealed generation's point reads serve from its compacted
+        // per-generation store; the digest proved the exact row set, so
+        // a miss there is authoritative and never re-read from staging.
+        if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                sealed
+                    .database()
+                    .entity(&namespace, &reference.identity, cancellation)?,
+            )));
+        }
+        Ok(None)
+    }
+
+    fn sealed_relation_without_staging_gate(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<(GraphReadStore, Option<GraphGenerationRelation>)>, GraphDbError> {
+        let lease = self.lease_for_projection(&reference.projection)?;
+        // The owning generation's sealed store holds the relation, its
+        // edge, and full copies of any dependency-generation endpoints,
+        // so the endpoint decode below stays inside one store.
+        let Some(sealed) = self.sealed_store(&lease.locator) else {
+            return Ok(None);
+        };
+        if let Some(layered) = sealed.layered_reads() {
+            return Ok(Some((
+                GraphReadStore::Sealed,
+                layered.relation(&reference.identity, cancellation.as_ref())?,
+            )));
+        }
+        Ok(Some((
+            GraphReadStore::Sealed,
+            sealed
+                .database()
+                .generation_relation(self, reference, cancellation)?,
+        )))
     }
 
     pub(crate) fn lease_for_projection(

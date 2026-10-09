@@ -22,12 +22,14 @@ permissions:
   contents: read
 
 # Explicit OS/host coverage must not be replaced by a default-coverage push
-# while queued (separate group suffixes). Within each group, a newer run
-# cancels the older one so tip validation is not blocked behind a stale
-# in-progress snapshot (observed as multi-minute runs with zero jobs).
+# while queued (separate group suffixes). Non-master refs cancel superseded
+# runs for tip-fast feedback. Master finishes the in-progress snapshot so a
+# green/red signal still lands when merges outpace the long pole; GitHub
+# keeps only the newest pending tip. Shorter shards cut how long that tip
+# may wait for first job — shard layout is owned elsewhere.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always

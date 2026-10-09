@@ -56,6 +56,8 @@ fn cancellation_before_commit_rolls_back_and_after_commit_returns_the_receipt() 
     });
     unwrap_arc(before_writer).shutdown_and_join().unwrap();
     assert_eq!(marker_count(&database), 0);
+    // First-request ledger DDL shares the cancelled transaction, so the
+    // tables may be absent entirely; either way there must be no residue.
     for table in [
         "td_runtime_writer_checkpoint_v1",
         "td_runtime_writer_idempotency_v2",

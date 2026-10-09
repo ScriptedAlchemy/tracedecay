@@ -3,10 +3,11 @@
 //! Content-size estimation has two quality tiers:
 //!
 //! 1. **tokenized**, stored text counted with a
-//!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
-//!    (`o200k_base` / `cl100k_base` per family); for other vendors
-//!    (Claude/Gemini have no public tokenizer) `o200k_base` is a
-//!    much-better-than-chars/4 approximation and is labeled as such.
+//!    real BPE tokenizer (tiktoken). Exact for modern OpenAI-family models
+//!    on `o200k_base`; legacy GPT-4 / GPT-3.5 / embeddings and other vendors
+//!    (Claude/Gemini have no public tokenizer) use the same vocabulary as a
+//!    labeled approximation. Shipping only `o200k_base` keeps ~1.6 MiB of
+//!    `cl100k_base` vocabulary out of the binary.
 //! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
@@ -34,7 +35,7 @@ use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
-use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
+use tiktoken_rs::o200k_base_singleton;
 
 /// Per-message content-token columns, derived once and reused by every savings
 /// aggregate. Billing usage never enters this content-sizing projection.
@@ -59,15 +60,14 @@ pub struct ModelEncoder {
 }
 
 pub const O200K: &str = "o200k_base";
-pub const CL100K: &str = "cl100k_base";
 
 /// Maps a transcript model id to its tokenizer.
 ///
-/// `OpenAI` families are exact: GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5,
-/// o-series, codex, and gpt-oss use `o200k_base`; legacy GPT-4 / GPT-3.5 /
-/// embeddings use `cl100k_base`. Everything else (Claude, Gemini, Grok, …)
-/// has no public tokenizer, so `o200k_base` is used as an approximation
-/// with `exact: false` so the UI can label it honestly.
+/// Modern OpenAI families are exact on the single shipped vocabulary
+/// (`o200k_base`): GPT-5 / GPT-4o / GPT-4.1 / GPT-4.5, o-series, codex, and
+/// gpt-oss. Legacy GPT-4 / GPT-3.5 / embeddings and every other vendor
+/// (Claude, Gemini, Grok, …) reuse `o200k_base` with `exact: false` so the UI
+/// can label the count honestly. A second vocabulary is not linked.
 pub fn encoder_for_model(model: &str) -> ModelEncoder {
     let id = model.trim().to_ascii_lowercase();
     let exact_o200k = id.starts_with("gpt-5")
@@ -79,21 +79,9 @@ pub fn encoder_for_model(model: &str) -> ModelEncoder {
         || id.starts_with("codex")
         || matches!(id.as_str(), "o1" | "o3" | "o4")
         || ["o1-", "o3-", "o4-"].iter().any(|p| id.starts_with(p));
-    if exact_o200k {
-        return ModelEncoder {
-            name: O200K,
-            exact: true,
-        };
-    }
-    if id.starts_with("gpt-4") || id.starts_with("gpt-3.5") || id.starts_with("text-embedding") {
-        return ModelEncoder {
-            name: CL100K,
-            exact: true,
-        };
-    }
     ModelEncoder {
         name: O200K,
-        exact: false,
+        exact: exact_o200k,
     }
 }
 
@@ -102,20 +90,18 @@ pub fn counting_available() -> bool {
     cfg!(feature = "token-counting")
 }
 
-/// Counts `text` with the BPE the model maps to. The singletons decode the
-/// embedded vocabularies lazily, so the first call pays the init cost and
-/// builds without the feature never do.
+/// Counts `text` with the shipped BPE. The singleton decodes the embedded
+/// vocabulary lazily, so the first call pays the init cost and builds without
+/// the feature never do. Counting always uses `o200k_base`; model-specific
+/// exactness is reported separately by [`encoder_for_model`].
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, model: &str) -> Option<i64> {
-    let bpe = match encoder_for_model(model).name {
-        CL100K => cl100k_base_singleton(),
-        _ => o200k_base_singleton(),
-    };
+pub fn count_text_tokens(text: &str) -> Option<i64> {
+    let bpe = o200k_base_singleton();
     i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub fn count_text_tokens(_text: &str, _model: &str) -> Option<i64> {
+pub fn count_text_tokens(_text: &str) -> Option<i64> {
     None
 }
 
@@ -191,9 +177,8 @@ pub struct TokenCountCache {
     /// keys without allocating, every polled search/session/overview/timeline
     /// message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
-    /// content with `o200k_base` specifically, while `map` counts stored
-    /// text with the model-mapped tokenizer, so entries are not
-    /// interchangeable.
+    /// content, while `map` counts stored text. Those content authorities
+    /// are different, so entries are not interchangeable.
     lcm_display: Mutex<DisplayedProviderCache>,
 }
 
@@ -331,7 +316,7 @@ async fn build_overlay(
 
     // Resolve cache hits and collect misses without holding the lock
     // across any await point.
-    let mut misses: Vec<(String, String, String, i64)> = Vec::new();
+    let mut misses: Vec<(String, String, i64)> = Vec::new();
     {
         let map = state
             .token_counts
@@ -345,7 +330,7 @@ async fn build_overlay(
             let key = (provider.to_owned(), message_id.to_owned());
             let stale = map.get(&key).is_none_or(|c| c.text_len != len);
             if stale && counting_available() && len > 0 {
-                misses.push((key.0, key.1, str_field(row, "model").to_owned(), len));
+                misses.push((key.0, key.1, len));
             }
         }
     }
@@ -390,7 +375,7 @@ async fn build_overlay(
 async fn count_and_store(
     state: &DashboardState,
     conn: &(impl QueryExecutor + ?Sized),
-    mut misses: Vec<(String, String, String, i64)>,
+    mut misses: Vec<(String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
     let mut computed: Vec<ComputedTokenCount> = Vec::with_capacity(misses.len());
@@ -410,7 +395,7 @@ async fn count_and_store(
         params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| DbValue::Text(message_id.clone())),
+                .map(|(_, message_id, _)| DbValue::Text(message_id.clone())),
         );
         let Ok(rows) = query_rows(conn, &sql, params_from_iter(params)).await else {
             continue;
@@ -428,20 +413,12 @@ async fn count_and_store(
             })
             .collect();
 
-        let batch: Vec<(String, String, String, i64, String)> = chunk
+        let batch: Vec<(String, String, i64, String)> = chunk
             .iter()
-            .filter_map(|(provider, message_id, model, len)| {
+            .filter_map(|(provider, message_id, len)| {
                 texts
                     .remove(&(provider.clone(), message_id.clone()))
-                    .map(|text| {
-                        (
-                            provider.clone(),
-                            message_id.clone(),
-                            model.clone(),
-                            *len,
-                            text,
-                        )
-                    })
+                    .map(|text| (provider.clone(), message_id.clone(), *len, text))
             })
             .collect();
 
@@ -449,8 +426,8 @@ async fn count_and_store(
         let counted = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .filter_map(|(provider, message_id, model, len, text)| {
-                    count_text_tokens(&text, &model).map(|token_count| ComputedTokenCount {
+                .filter_map(|(provider, message_id, len, text)| {
+                    count_text_tokens(&text).map(|token_count| ComputedTokenCount {
                         token_count,
                         provider,
                         message_id,
@@ -605,8 +582,11 @@ mod tests {
         }
         for model in ["gpt-4", "gpt-3.5-turbo", "text-embedding-3-small"] {
             let enc = encoder_for_model(model);
-            assert_eq!(enc.name, CL100K, "{model}");
-            assert!(enc.exact, "{model} should be exact");
+            assert_eq!(enc.name, O200K, "{model}");
+            assert!(
+                !enc.exact,
+                "{model} must be labeled approximate without cl100k_base"
+            );
         }
     }
 
@@ -629,14 +609,11 @@ mod tests {
         assert!(!encoder_for_model("opus-large").exact);
     }
 
-    // The two vocabulary tests are split so each test process pays only one
-    // BPE model load (the dominant cost, especially on Windows) and nextest
-    // can run them in parallel.
     #[cfg(feature = "token-counting")]
     #[test]
     fn bpe_counts_diverge_from_chars4() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let bpe = count_text_tokens(text, "gpt-5").expect("token counting is compiled in");
+        let bpe = count_text_tokens(text).expect("token counting is compiled in");
         assert!(bpe > 0);
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
@@ -646,7 +623,7 @@ mod tests {
     #[cfg(not(feature = "token-counting"))]
     #[test]
     fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {
-        assert_eq!(count_text_tokens("visible content", ""), None);
+        assert_eq!(count_text_tokens("visible content"), None);
     }
 
     #[tokio::test]
