@@ -969,6 +969,9 @@ fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
             .as_array()
             .unwrap_or_else(|| panic!("large session must serve a bounded page: {first}"));
         assert_eq!(first_messages.len(), 64);
+        assert_eq!(first["coverage"]["completeness"], "partial", "{first}");
+        assert_eq!(first["coverage"]["examined"], 64, "{first}");
+        assert_eq!(first["payload"]["counts"]["message_count"], 70, "{first}");
         let cursor = first["payload"]["next_cursor"]
             .as_str()
             .expect("bounded page continuation");
@@ -980,6 +983,12 @@ fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
             .unwrap_or_else(|| panic!("continuation must serve remaining messages: {second}"));
         assert_eq!(second_messages.len(), 6);
         assert!(second["payload"]["next_cursor"].is_null());
+        assert_eq!(second["coverage"]["completeness"], "complete", "{second}");
+        for field in ["eligible", "examined", "matched"] {
+            assert_eq!(second["coverage"][field], 6, "{second}");
+        }
+        assert_eq!(second["coverage"]["omitted"], 0, "{second}");
+        assert_eq!(second["payload"]["counts"]["message_count"], 70, "{second}");
         let ids = first_messages
             .iter()
             .chain(second_messages)
