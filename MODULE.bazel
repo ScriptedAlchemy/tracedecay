@@ -18,7 +18,7 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
-    versions = ["1.97.1"],
+    versions = ["1.99.0"],
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
