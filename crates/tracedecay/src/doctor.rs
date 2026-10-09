@@ -1438,7 +1438,9 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check network connectivity.
+/// Overlaps the two network probes for tests. Production launches the
+/// GitHub probe with the other independent checks and renders afterward.
+#[cfg(test)]
 #[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
 fn check_network(
     dc: &mut DoctorCounters,
