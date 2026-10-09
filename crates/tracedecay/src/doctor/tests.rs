@@ -704,17 +704,6 @@ fn rendezvous_network_probe() {
     }
 }
 
-fn overlapping_worldwide_total() -> Option<u64> {
-    rendezvous_network_probe();
-    Some(7)
-}
-
-fn overlapping_latest_version()
--> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError> {
-    rendezvous_network_probe();
-    Ok("1.2.3".to_owned())
-}
-
 #[tokio::test]
 async fn independent_network_probes_overlap() {
     use std::sync::atomic::Ordering;
@@ -722,8 +711,14 @@ async fn independent_network_probes_overlap() {
     NETWORK_PROBE_STARTED.store(0, Ordering::SeqCst);
     let mut counters = DoctorCounters::quiet();
     let mut network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
-        fetch_worldwide_total: overlapping_worldwide_total,
-        fetch_latest_version: overlapping_latest_version,
+        fetch_worldwide_total: || {
+            rendezvous_network_probe();
+            Some(7)
+        },
+        fetch_latest_version: || {
+            rendezvous_network_probe();
+            Ok("1.2.3".to_owned())
+        },
     });
     network.admit_worldwide(Ok(&UploadSetting::Resolved(true)));
     network

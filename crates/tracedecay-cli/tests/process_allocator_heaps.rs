@@ -15,7 +15,13 @@
 #[path = "../src/process_allocator.rs"]
 mod process_allocator;
 
+use std::ffi::{c_int, c_long};
+
 use process_allocator::mimalloc_v3;
+
+unsafe extern "C" {
+    fn mi_option_get(option: c_int) -> c_long;
+}
 
 #[global_allocator]
 static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -43,12 +49,14 @@ fn blocks() -> Vec<Vec<u8>> {
 fn process_allocator_purges_immediately_and_decommits() {
     mimalloc_v3::configure_purge();
     assert_eq!(
-        mimalloc_v3::purge_delay_ms(),
+        // SAFETY: option 15 is mi_option_purge_delay in mimalloc 3.3.2.
+        unsafe { mi_option_get(15) },
         0,
         "a daemon must purge on collect, not after the 10 ms default delay"
     );
     assert!(
-        mimalloc_v3::purge_decommits(),
+        // SAFETY: option 5 is mi_option_purge_decommits in mimalloc 3.3.2.
+        unsafe { mi_option_get(5) != 0 },
         "purge must decommit so macOS phys_footprint can fall"
     );
 }

@@ -337,7 +337,7 @@ fn run_inner(
             .iter()
             .find(|definition| definition.name == advertised_name)
         else {
-            let suggestion = nearest_tool_name(&canonical, &defs)
+            let suggestion = nearest_tool_name(&canonical, defs)
                 .map(|name| format!(" Did you mean '{name}'?"))
                 .unwrap_or_default();
             return Err(TraceDecayError::project_route(

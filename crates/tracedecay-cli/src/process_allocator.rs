@@ -82,7 +82,6 @@ pub(crate) mod mimalloc_v3 {
             visitor: BlockVisitor,
             arg: *mut c_void,
         ) -> bool;
-        fn mi_option_get(option: c_int) -> c_long;
         fn mi_option_set(option: c_int, value: c_long);
     }
 
@@ -104,18 +103,6 @@ pub(crate) mod mimalloc_v3 {
             mi_option_set(OPTION_PURGE_DELAY, 0);
             mi_option_set(OPTION_PURGE_DECOMMITS, 1);
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn purge_delay_ms() -> i64 {
-        // SAFETY: a pure option read.
-        unsafe { mi_option_get(OPTION_PURGE_DELAY) as i64 }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn purge_decommits() -> bool {
-        // SAFETY: a pure option read.
-        unsafe { mi_option_get(OPTION_PURGE_DECOMMITS) != 0 }
     }
 
     /// Point SQLite and tree-sitter at mimalloc, so the process has one heap:

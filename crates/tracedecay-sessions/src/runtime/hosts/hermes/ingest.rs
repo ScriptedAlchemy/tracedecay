@@ -569,7 +569,8 @@ mod tests {
         std::fs::write(hermes.join("state.db"), "not a sqlite database").unwrap();
         let admission = MemoryHostAdmission::default();
 
-        let first = ingest_user_homes_capped(&admission, &[hermes.clone()], &[], None).await;
+        let first =
+            ingest_user_homes_capped(&admission, std::slice::from_ref(&hermes), &[], None).await;
         assert!(
             first.source_failures > 0,
             "a corrupt state.db must fail the first sweep"
