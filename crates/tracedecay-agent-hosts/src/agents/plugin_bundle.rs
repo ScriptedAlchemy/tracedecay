@@ -52,7 +52,9 @@
 //! Composed per-host view = `GENERATED_SKILL_FILES` (recursively embedded from
 //! `plugin/skills/`, filtered per host) ∪ `<HOST>_MANIFEST_FILES` and extras.
 
-use tracedecay_domain::errors::Result;
+use std::io::Read;
+
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Stamp the plugin manifest `version` field with the crate version, returning
 /// pretty-printed JSON with a trailing newline. Shared by every host installer
@@ -233,10 +235,6 @@ pub const CURSOR_MANIFEST_FILES: &[PluginFile] = &[
 /// these assets to Cursor's extension root rather than the plugin root.
 const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
     plugin_file!("package.json", "cursor-native-extension/package.json"),
-    plugin_file!(
-        "dist/extension.js",
-        "cursor-native-extension/embedded/extension.js"
-    ),
     plugin_file!("README.md", "cursor-native-extension/README.md"),
     plugin_file!("LICENSE", "cursor-native-extension/LICENSE"),
 ];
@@ -267,21 +265,49 @@ pub const CHATGPT_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("README.md", "README-chatgpt.md"),
 ];
 
-/// The same MCP App and adapter are installed in Codex and ChatGPT.
-const EXPLORER_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "chatgpt-extension/embedded/server.mjs",
-        "chatgpt-extension/embedded/server.mjs"
-    ),
-    plugin_file!(
-        "chatgpt-extension/embedded/app.html",
-        "chatgpt-extension/embedded/app.html"
-    ),
-    plugin_file!(
-        "chatgpt-extension/assets/icon.svg",
-        "chatgpt-extension/assets/icon.svg"
-    ),
-];
+/// The explorer icon stays as UTF-8 `include_str!`; the compiled adapter and
+/// app resource are gzip-embedded by `build.rs` (~2.8 MiB off `.rodata`).
+const EXPLORER_ICON_FILES: &[PluginFile] = &[plugin_file!(
+    "chatgpt-extension/assets/icon.svg",
+    "chatgpt-extension/assets/icon.svg"
+)];
+
+fn gzip_utf8(bytes: &'static [u8], relative: &'static str) -> Result<String> {
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut out = String::new();
+    decoder
+        .read_to_string(&mut out)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("embedded gzip plugin asset {relative} could not be decoded: {error}"),
+        })?;
+    Ok(out)
+}
+
+fn explorer_compiled_files() -> Result<Vec<(&'static str, String)>> {
+    Ok(vec![
+        (
+            "chatgpt-extension/embedded/server.mjs",
+            gzip_utf8(
+                plugin_bundle_generated::gzip_assets::CHATGPT_SERVER_MJS,
+                "chatgpt-extension/embedded/server.mjs",
+            )?,
+        ),
+        (
+            "chatgpt-extension/embedded/app.html",
+            gzip_utf8(
+                plugin_bundle_generated::gzip_assets::CHATGPT_APP_HTML,
+                "chatgpt-extension/embedded/app.html",
+            )?,
+        ),
+    ])
+}
+
+fn owned_plugin_files(files: &'static [PluginFile]) -> Vec<(&'static str, String)> {
+    files
+        .iter()
+        .map(|file| (file.relative, file.contents.to_string()))
+        .collect()
+}
 
 /// Compose a host's deploy set as deterministic `(relative, contents)` tuples.
 fn compose(
@@ -350,11 +376,19 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
 /// Unpacked VS Code/Cursor extension files for the native-diagnostics host
 /// component. Its bundle includes `vscode-languageclient` and leaves only the
 /// host-provided `vscode` module external.
-pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
-    CURSOR_NATIVE_EXTENSION_FILES
-        .iter()
-        .map(|file| (file.relative, file.contents))
-        .collect()
+pub fn cursor_native_extension_files() -> Result<Vec<(&'static str, String)>> {
+    let mut files = owned_plugin_files(CURSOR_NATIVE_EXTENSION_FILES);
+    files.insert(
+        1,
+        (
+            "dist/extension.js",
+            gzip_utf8(
+                plugin_bundle_generated::gzip_assets::CURSOR_EXTENSION_JS,
+                "dist/extension.js",
+            )?,
+        ),
+    );
+    Ok(files)
 }
 
 /// Files Codex deploys: manifest + every file under `plugin/skills/`
@@ -362,8 +396,16 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
 /// The host-bundle catalog deploys the rendered variants of this inventory via
 /// `agents::codex::rendered_global_plugin_files`, the raw templates here are
 /// not directly installable (`hooks/hooks.json` is an empty scaffold).
-pub fn codex_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[CODEX_MANIFEST_FILES, EXPLORER_FILES], all_skill_files())
+pub fn codex_files() -> Result<Vec<(&'static str, String)>> {
+    let mut files: Vec<(&'static str, String)> = compose(
+        &[CODEX_MANIFEST_FILES, EXPLORER_ICON_FILES],
+        all_skill_files(),
+    )
+    .into_iter()
+    .map(|(relative, contents)| (relative, contents.to_string()))
+    .collect();
+    files.extend(explorer_compiled_files()?);
+    Ok(files)
 }
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown
@@ -383,12 +425,11 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
 /// ChatGPT consumes no TraceDecay skills/agents/commands through this bundle:
 /// the manifest's `extensions.com.openai` block is its whole registration
 /// payload, so none of the shared inventories ship here.
-pub fn chatgpt_files() -> Vec<(&'static str, &'static str)> {
-    CHATGPT_MANIFEST_FILES
-        .iter()
-        .chain(EXPLORER_FILES.iter())
-        .map(|file| (file.relative, file.contents))
-        .collect()
+pub fn chatgpt_files() -> Result<Vec<(&'static str, String)>> {
+    let mut files = owned_plugin_files(CHATGPT_MANIFEST_FILES);
+    files.extend(owned_plugin_files(EXPLORER_ICON_FILES));
+    files.extend(explorer_compiled_files()?);
+    Ok(files)
 }
 
 /// `OpenCode` Agent component: host-loadable skills, agent definitions, and
@@ -411,7 +452,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     /// No host deploys the same relative path twice.
-    fn assert_unique_relatives(files: &[(&str, &str)], host: &str) {
+    fn assert_unique_relatives<C>(files: &[(&str, C)], host: &str) {
         let mut seen = BTreeSet::new();
         for (relative, _) in files {
             assert!(
@@ -459,9 +500,9 @@ mod tests {
     fn each_host_deploys_unique_relative_paths() {
         assert_unique_relatives(&claude_files(), "claude");
         assert_unique_relatives(&cursor_files(), "cursor");
-        assert_unique_relatives(&codex_files(), "codex");
+        assert_unique_relatives(&codex_files().unwrap(), "codex");
         assert_unique_relatives(&kimi_files(), "kimi");
-        assert_unique_relatives(&chatgpt_files(), "chatgpt");
+        assert_unique_relatives(&chatgpt_files().unwrap(), "chatgpt");
     }
 
     /// Adding a slash command is adding the Markdown files. The bundle must
@@ -524,14 +565,20 @@ mod tests {
     fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
         use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;
 
+        let owned = |files: Vec<(&'static str, &'static str)>| {
+            files
+                .into_iter()
+                .map(|(relative, contents)| (relative, contents.to_string()))
+                .collect::<Vec<_>>()
+        };
         for (host, files) in [
-            ("claude", claude_files()),
-            ("cursor", cursor_files()),
-            ("cursor-native", cursor_native_extension_files()),
-            ("codex", codex_files()),
-            ("kimi", kimi_files()),
-            ("chatgpt", chatgpt_files()),
-            ("opencode-agent", opencode_agent_files()),
+            ("claude", owned(claude_files())),
+            ("cursor", owned(cursor_files())),
+            ("cursor-native", cursor_native_extension_files().unwrap()),
+            ("codex", codex_files().unwrap()),
+            ("kimi", owned(kimi_files())),
+            ("chatgpt", chatgpt_files().unwrap()),
+            ("opencode-agent", owned(opencode_agent_files())),
         ] {
             for (relative, contents) in files {
                 assert!(
@@ -541,5 +588,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gzip_explorer_and_cursor_extension_roundtrip_source_files() {
+        let plugin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
+        let chatgpt = chatgpt_files().unwrap();
+        let cursor = cursor_native_extension_files().unwrap();
+        for (relative, source) in [
+            (
+                "chatgpt-extension/embedded/server.mjs",
+                "chatgpt-extension/embedded/server.mjs",
+            ),
+            (
+                "chatgpt-extension/embedded/app.html",
+                "chatgpt-extension/embedded/app.html",
+            ),
+        ] {
+            let deployed = chatgpt
+                .iter()
+                .find(|(path, _)| *path == relative)
+                .unwrap_or_else(|| panic!("chatgpt bundle missing {relative}"));
+            let expected = std::fs::read_to_string(plugin.join(source)).unwrap();
+            assert_eq!(deployed.1, expected);
+        }
+        let extension = cursor
+            .iter()
+            .find(|(path, _)| *path == "dist/extension.js")
+            .expect("cursor native bundle missing dist/extension.js");
+        let expected =
+            std::fs::read_to_string(plugin.join("cursor-native-extension/embedded/extension.js"))
+                .unwrap();
+        assert_eq!(extension.1, expected);
     }
 }

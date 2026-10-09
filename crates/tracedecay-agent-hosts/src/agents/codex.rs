@@ -466,7 +466,7 @@ impl AgentIntegration for CodexIntegration {
 /// `(deploy_relative_path, file_contents)`; the manifest, `.mcp.json`, and
 /// `hooks/hooks.json` entries are rendered at install time to inject the
 /// package version and the absolute tracedecay binary path.
-fn codex_embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
+fn codex_embedded_plugin_files() -> Result<Vec<(&'static str, String)>> {
     crate::agents::plugin_bundle::codex_files()
 }
 
@@ -619,7 +619,7 @@ fn codex_project_registration_paths(
     let install_dir = codex_repo_plugin_install_dir(project_path);
     super::ensure_project_local_safe_path(project_path, &install_dir)?;
 
-    let mut paths = codex_embedded_plugin_files()
+    let mut paths = codex_embedded_plugin_files()?
         .into_iter()
         .filter(|(relative, _)| *relative != "hooks/hooks.json")
         .map(|(relative, _)| install_dir.join(relative))
@@ -823,15 +823,15 @@ fn rendered_plugin_files(
     tracedecay_bin: &str,
     policy: CodexBundlePolicy,
 ) -> Result<Vec<(&'static str, String)>> {
-    codex_embedded_plugin_files()
+    codex_embedded_plugin_files()?
         .into_iter()
         .filter_map(|(relative, contents)| {
             let rendered = match relative {
-                ".codex-plugin/plugin.json" => codex_plugin_manifest(contents, policy),
-                ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, policy),
+                ".codex-plugin/plugin.json" => codex_plugin_manifest(&contents, policy),
+                ".mcp.json" => codex_plugin_mcp(&contents, tracedecay_bin, policy),
                 "hooks/hooks.json" if !policy.include_hooks() => return None,
-                "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin),
-                _ => Ok(contents.to_string()),
+                "hooks/hooks.json" => codex_plugin_hooks(&contents, tracedecay_bin),
+                _ => Ok(contents),
             };
             Some(rendered.map(|rendered| (relative, rendered)))
         })
@@ -1121,13 +1121,13 @@ fn codex_hook_trust_entries_for_marketplace(
 /// Runtime trust is derived from the installed cache/source file instead.
 #[cfg(test)]
 fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHookTrustEntry>> {
-    let seed = codex_embedded_plugin_files()
+    let seed = codex_embedded_plugin_files()?
         .into_iter()
         .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
         .ok_or_else(|| TraceDecayError::Config {
             message: "Codex plugin bundle is missing hooks/hooks.json".to_string(),
         })?;
-    let rendered = codex_plugin_hooks(seed, tracedecay_bin)?;
+    let rendered = codex_plugin_hooks(&seed, tracedecay_bin)?;
     let value: serde_json::Value = serde_json::from_str(&rendered)?;
     codex_hook_trust_entries(&value)
 }
@@ -1480,13 +1480,14 @@ fn codex_loaded_cache_matches_rendered_bundle(
                 super::rendered_bundle_content_digest(&rendered).map_err(|_| ())?;
             (Some(digest), relatives)
         }
-        None => (
-            None,
-            codex_embedded_plugin_files()
+        None => {
+            let relatives = codex_embedded_plugin_files()
+                .map_err(|_| ())?
                 .into_iter()
                 .map(|(relative, _)| relative.to_string())
-                .collect(),
-        ),
+                .collect();
+            (None, relatives)
+        }
     };
     let Some(source) =
         super::observed_bundle_content_digest(&source_root, &relatives).map_err(|_| ())?
@@ -1540,7 +1541,7 @@ fn codex_expected_discovery_relatives(
 /// so the loaded plugin could never match the rendered bundle.
 fn codex_foreign_bundle_entrypoints(profile_root: &Path, home: &Path) -> Result<Vec<PathBuf>> {
     let source_root = codex_plugin_install_dir(home);
-    let relatives = codex_embedded_plugin_files()
+    let relatives = codex_embedded_plugin_files()?
         .into_iter()
         .map(|(relative, _)| relative.to_string())
         .collect();
@@ -1956,7 +1957,10 @@ fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = codex_embedded_plugin_files()
+    let Ok(files) = codex_embedded_plugin_files() else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = files
         .into_iter()
         .map(|(relative, _)| install_dir.join(relative))
         .collect();
