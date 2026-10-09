@@ -28,7 +28,7 @@ jobs:
     if: >-
       github.repository == 'ScriptedAlchemy/tracedecay' &&
       vars.BETA_CHANNEL_ENABLED == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -233,7 +233,7 @@ jobs:
       always() &&
       needs.validate.result == 'success' &&
       needs.build.result != 'cancelled'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write
