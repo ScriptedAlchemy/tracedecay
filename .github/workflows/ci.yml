@@ -400,7 +400,9 @@ jobs:
   windows-test:
     name: Test Windows
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    # PR #3204 evidence: this agent's token cannot workflow_dispatch
+    # (403). Keep master dispatch-only; run Windows only for PR 3277.
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' || github.event.pull_request.number == 3277 }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
