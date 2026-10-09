@@ -795,8 +795,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             && observed.fingerprint == fingerprint
             && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
         {
+            let cached_report = observed.report.clone();
+            drop(cached);
             return self
-                .with_relation_graph_health(observed.report.clone())
+                .relation_health_from_health_snapshot(cached_report)
                 .await;
         }
         let snapshot = match self.health_read_snapshot().await {
@@ -820,7 +822,24 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         } else {
             *cached = None;
         }
-        self.with_relation_graph_health(report).await
+        self.with_relation_graph_health(&snapshot, report).await
+    }
+
+    async fn relation_health_from_health_snapshot(
+        &self,
+        report: SessionTemporalHealthReport,
+    ) -> SessionTemporalHealthReport {
+        let snapshot = match self.health_read_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return unavailable_report_with_detail(
+                    classify_engine_error(&error),
+                    "relation_graph",
+                    &error,
+                );
+            }
+        };
+        self.with_relation_graph_health(&snapshot, report).await
     }
 }
 

@@ -204,6 +204,11 @@ async fn fill_codex_session_meta(
     })
     .await
     .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?;
+    let parsed = parsed.map_err(|source| TranscriptIngestError::ScanIo {
+        operation: "read Codex session metadata",
+        path: error_path.clone(),
+        source,
+    })?;
     let parsed = Arc::new(parsed.ok_or(TranscriptIngestError::InvalidSourceIdentity {
         provider: PROVIDER,
         path: error_path,

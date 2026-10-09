@@ -5,7 +5,7 @@ use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, Result as EngineResult};
 
-use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
+use crate::handle::{SessionTemporalAccess, SessionTemporalQuery, SessionTemporalRegisteredDb};
 
 use super::{
     SessionTemporalHealthFinding, SessionTemporalHealthFindingKind, SessionTemporalHealthReport,
@@ -28,6 +28,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     )]
     pub(super) async fn with_relation_graph_health(
         &self,
+        snapshot: &impl SessionTemporalQuery,
         mut report: SessionTemporalHealthReport,
     ) -> SessionTemporalHealthReport {
         if report.status != SessionTemporalHealthStatus::Complete {
@@ -35,17 +36,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
         let (scope, store) = match self.session_relation_store() {
             Ok(authority) => authority,
-            Err(_) => {
-                report.status = SessionTemporalHealthStatus::Partial;
-                report.findings.push(finding(
-                    SessionTemporalHealthFindingKind::RelationGraphUnavailable,
-                    1,
-                ));
-                return report;
-            }
-        };
-        let snapshot = match self.read_snapshot().await {
-            Ok(snapshot) => snapshot,
             Err(_) => {
                 report.status = SessionTemporalHealthStatus::Partial;
                 report.findings.push(finding(
@@ -159,7 +149,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     continue;
                 }
             };
-            match stale_summary_closure_count(&snapshot, &projection).await {
+            match stale_summary_closure_count(snapshot, &projection).await {
                 Ok(count) if count > 0 => merge_finding(
                     &mut report.findings,
                     SessionTemporalHealthFindingKind::StaleSummaryClosure,

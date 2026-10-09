@@ -36,8 +36,10 @@ use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
     open_registered_test_database_fixture,
 };
+use tracedecay_lcm::retrieval_content::derived_text_for_index;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+use tracedecay_sessions::runtime::user_sessions_db_path;
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -123,6 +125,7 @@ fn fixture_observation_from_facts(
     )
     .unwrap();
     let payload = serde_json::to_value(envelope).unwrap();
+    let receipt_id = format!("receipt.projector.{}", record_id.as_str());
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         ObservationScopeV1::Profile,
@@ -134,7 +137,7 @@ fn fixture_observation_from_facts(
     .unwrap();
     let observation = DurableObservationV1::new(
         identity,
-        fixture_receipt(&format!("receipt.projector.{ordinal}"), &payload),
+        fixture_receipt(&receipt_id, &payload),
         RetentionClass::new("retention.projector-test").unwrap(),
         payload,
     )
@@ -2683,4 +2686,155 @@ async fn readers_see_whole_generations_while_an_append_builds_and_after_it_is_ca
     expected.push(appended_id);
     expected.sort_unstable();
     assert_eq!(after, expected);
+}
+
+fn fixture_observation_with_text(
+    session_id: &SessionId,
+    unique: u64,
+    text: String,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    fixture_observation_from_facts(
+        session_id,
+        0,
+        ProviderId::new(format!("projector-test-{unique}")).unwrap(),
+        ObservationId::new(format!("record.projector.{unique}")).unwrap(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(ObservationId::new(format!("thread.projector.{unique}")).unwrap())
+            .with_turn_id(ObservationId::new(format!("turn.projector.{unique}")).unwrap())
+            .with_message_id(ObservationId::new(format!("message.projector.{unique}")).unwrap())
+            .with_agent_id(ObservationId::new(format!("agent.projector.{unique}")).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": text}),
+            model: Some("model.projector".to_owned()),
+            timestamp: Some(1_750_000_000 + i64::try_from(unique).unwrap()),
+        }],
+        None,
+    )
+}
+
+async fn session_effect_sequence(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> u64 {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("effect sequence snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence
+             FROM session_temporal_observation_effects
+             WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("effect sequence query");
+    let row = rows
+        .next()
+        .await
+        .expect("effect sequence row")
+        .expect("projected observation must leave a session effect");
+    u64::try_from(row.get::<i64>(0).expect("observation_sequence")).expect("sequence fits u64")
+}
+
+fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
+    ["", "-wal", "-shm"].iter().fold(0u64, |total, suffix| {
+        let member = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(*suffix);
+            std::path::PathBuf::from(name)
+        };
+        total.saturating_add(
+            std::fs::metadata(member)
+                .map(|meta| meta.len())
+                .unwrap_or(0),
+        )
+    })
+}
+
+#[tokio::test]
+async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
+    const PAYLOAD_CHARS: usize = 80_000;
+    const SESSION_COUNTS: [usize; 3] = [4, 8, 16];
+    let payload_stem = "m".repeat(PAYLOAD_CHARS);
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let derived = derived_text_for_index(&format!("payload-00-{payload_stem}"));
+    assert!(
+        derived.len() < PAYLOAD_CHARS,
+        "the synthetic payload must exceed the derived index budget"
+    );
+
+    let mut next_ordinal = 0u64;
+    let mut previous_family_bytes = 0u64;
+    for n in SESSION_COUNTS {
+        while next_ordinal < n as u64 {
+            let session_id = fixture_session(&format!("session.user-sessions.n{next_ordinal}"));
+            let text = format!("payload-{next_ordinal:02}-{payload_stem}");
+            let (observation, write) =
+                fixture_observation_with_text(&session_id, next_ordinal, text);
+            Box::pin(persist_fixture(&runtime, observation, write)).await;
+            let sequence = session_effect_sequence(&runtime, &session_id).await;
+            refresh_through(&store, &session_id, sequence, sequence.saturating_sub(1)).await;
+            next_ordinal += 1;
+        }
+
+        let snapshot = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database")
+            .read_snapshot()
+            .await
+            .expect("user-sessions size snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT SUM(length(index_text)), MAX(length(index_text)), COUNT(*)
+                 FROM session_occurrences",
+                (),
+            )
+            .await
+            .expect("index_text size query");
+        let row = rows
+            .next()
+            .await
+            .expect("index_text size row")
+            .expect("index_text size missing row");
+        let stored_index_bytes: i64 = row.get(0).expect("sum index_text");
+        let max_index_bytes: i64 = row.get(1).expect("max index_text");
+        let occurrence_count: i64 = row.get(2).expect("occurrence count");
+        let expected_index_bytes = i64::try_from(n * derived.len()).unwrap();
+        let uncapped_index_bytes =
+            i64::try_from(n * format!("payload-00-{payload_stem}").len()).unwrap();
+        assert_eq!(occurrence_count, i64::try_from(n).unwrap());
+        assert_eq!(
+            stored_index_bytes, expected_index_bytes,
+            "N={n}: index_text must store the derived budget, not the full body"
+        );
+        assert_eq!(
+            max_index_bytes,
+            i64::try_from(derived.len()).unwrap(),
+            "N={n}: no occurrence may store more than the derived budget"
+        );
+        assert!(
+            stored_index_bytes < uncapped_index_bytes,
+            "N={n}: capped index_text ({stored_index_bytes}) must be smaller than the full body ({uncapped_index_bytes})"
+        );
+
+        let family_bytes = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        assert!(
+            family_bytes > previous_family_bytes,
+            "N={n}: user-sessions family must grow with sessions ({family_bytes} vs {previous_family_bytes})"
+        );
+        println!(
+            "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes}"
+        );
+        previous_family_bytes = family_bytes;
+    }
 }

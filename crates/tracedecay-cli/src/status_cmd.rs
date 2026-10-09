@@ -14,16 +14,13 @@ use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
-use tracedecay_contracts::retrieval::{
-    AdminProjectResultV1, AdminProjectStatusAccountingV1, AdminProjectSurfaceRequestV1,
-    StatusCodeIndexFreshnessV1,
-};
+use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
 
 use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
-use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
+use crate::{commands, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
 /// project resolution and every daemon RPC. Override with
@@ -83,98 +80,6 @@ async fn await_daemon_tool_result<T>(
 
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
     !short && stdout_is_terminal
-}
-
-/// Cache lifetimes of the two decorative worldwide-counter reads. The status
-/// render always shows the cache; these only decide whether one bounded
-/// refresh for the next invocation is worth starting.
-const WORLDWIDE_TOTAL_MAX_AGE_SECS: i64 = 60;
-const COUNTRY_FLAGS_MAX_AGE_SECS: i64 = 1800;
-
-/// Which decorative caches have expired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OnlineRefreshPlan {
-    worldwide_total: bool,
-    country_flags: bool,
-}
-
-impl OnlineRefreshPlan {
-    fn for_cache(config: &tracedecay_session_memory::user_config::UserConfig, now: i64) -> Self {
-        Self {
-            worldwide_total: now - config.last_worldwide_fetch_at >= WORLDWIDE_TOTAL_MAX_AGE_SECS,
-            country_flags: now - config.last_flags_fetch_at >= COUNTRY_FLAGS_MAX_AGE_SECS,
-        }
-    }
-
-    fn is_needed(&self) -> bool {
-        self.worldwide_total || self.country_flags
-    }
-
-    /// Runs the synchronous `ureq` reads this plan calls for. Blocking: must
-    /// run on a blocking thread, never on the async executor.
-    fn fetch(self) -> OnlineRefresh {
-        OnlineRefresh {
-            worldwide_total: self
-                .worldwide_total
-                .then(crate::cloud::fetch_worldwide_total)
-                .flatten(),
-            country_flags: if self.country_flags {
-                crate::cloud::fetch_country_flags()
-            } else {
-                Vec::new()
-            },
-        }
-    }
-}
-
-/// What a refresh brought back. `None` / empty means that endpoint did not
-/// answer and its cache stands untouched.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct OnlineRefresh {
-    worldwide_total: Option<u64>,
-    country_flags: Vec<String>,
-}
-
-impl OnlineRefresh {
-    /// Writes the answered reads into the cache; returns whether anything
-    /// changed and therefore needs saving.
-    fn apply(
-        self,
-        config: &mut tracedecay_session_memory::user_config::UserConfig,
-        now: i64,
-    ) -> bool {
-        let mut changed = false;
-        if let Some(total) = self.worldwide_total {
-            config.last_worldwide_total = total;
-            config.last_worldwide_fetch_at = now;
-            changed = true;
-        }
-        if !self.country_flags.is_empty() {
-            config.cached_country_flags = self.country_flags;
-            config.last_flags_fetch_at = now;
-            changed = true;
-        }
-        changed
-    }
-}
-
-/// Joins the refresh within the command deadline. Past the deadline the handle
-/// is dropped and nothing is cached: only this caller writes the cache, and
-/// the abandoned read ends on its own `ureq` timeout inside the runtime's
-/// bounded shutdown rather than as a detached worker.
-#[tracing::instrument(name = "cli.status.online", level = "trace", skip_all)]
-async fn await_online_refresh(
-    deadline: Instant,
-    refresh: tokio::task::JoinHandle<OnlineRefresh>,
-) -> Option<OnlineRefresh> {
-    match timeout_at(deadline, refresh).await {
-        Ok(Ok(fresh)) => Some(fresh),
-        Ok(Err(join_error)) => {
-            tracing::debug!(error = %join_error, "worldwide counter refresh did not complete");
-            None
-        }
-        Err(_) => None,
-    }
 }
 
 /// Compact CLI status args: keep graph identity fields while skipping the
@@ -475,45 +380,6 @@ async fn handle_status_command_within(
         }) => Some((message, remediation)),
         _ => None,
     };
-    // The shorter deadline rides inside the call so the owner can settle a
-    // typed terminal; the command deadline is only the response backstop.
-    let accounting = await_daemon_tool_result(
-        deadline,
-        "tracedecay_admin_project",
-        commands::admin_project_until(
-            profile,
-            commands::client_handshake(profile, Some(&project_path))?,
-            AdminProjectSurfaceRequestV1::StatusAccounting {},
-            server_deadline,
-        ),
-    )
-    .await?;
-    let AdminProjectResultV1::StatusAccounting(AdminProjectStatusAccountingV1 {
-        tokens_saved,
-        global_tokens_saved,
-    }) = accounting
-    else {
-        return Err(commands::unexpected_admin_project_result());
-    };
-    let upload_enabled = timeout_at(
-        deadline,
-        commands::canonical_upload_enabled(profile),
-    )
-    .await
-    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-        message:
-            "timed out waiting for canonical worldwide-counter upload setting before status deadline"
-                .to_string(),
-    })??;
-    let mut config =
-        match tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir()) {
-            Ok(config) => Some(config),
-            Err(error) => {
-                eprintln!("warning: {error}");
-                None
-            }
-        };
-    let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
     let schema_convergences: Vec<SchemaConvergenceFindingV1> = daemon_status
@@ -528,23 +394,6 @@ async fn handle_status_command_within(
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
-    let show_online = stdout_is_terminal && upload_enabled;
-    // The worldwide counter and country flags are decoration served from the
-    // local cache: the render below never waits on the network. When a cache
-    // has expired, one refresh for the next invocation starts here so its
-    // round-trip overlaps the render, and is joined after it within the
-    // command deadline.
-    let online_config = config.as_ref().filter(|_| show_online);
-    let refresh = online_config
-        .map(|config| OnlineRefreshPlan::for_cache(config, now))
-        .filter(OnlineRefreshPlan::is_needed)
-        .map(|plan| tokio::task::spawn_blocking(move || plan.fetch()));
-    let worldwide = online_config
-        .map(|config| config.last_worldwide_total)
-        .filter(|total| *total > 0);
-    let country_flags = online_config
-        .map(|config| config.cached_country_flags.clone())
-        .unwrap_or_default();
     {
         let _span = tracing::trace_span!("cli.status.render").entered();
         {
@@ -559,10 +408,10 @@ async fn handle_status_command_within(
                 crate::display::print_status_header(
                     &census,
                     freshness.as_ref(),
-                    tokens_saved,
-                    global_tokens_saved,
-                    worldwide,
-                    &country_flags,
+                    None,
+                    None,
+                    None,
+                    &[],
                     branch_info.as_ref(),
                     cost_info.as_ref(),
                 );
@@ -570,10 +419,10 @@ async fn handle_status_command_within(
                 crate::display::print_status_table_with(crate::display::StatusTable {
                     census: &census,
                     freshness: freshness.as_ref(),
-                    tokens_saved,
-                    global_tokens_saved,
-                    worldwide,
-                    country_flags: &country_flags,
+                    tokens_saved: None,
+                    global_tokens_saved: None,
+                    worldwide: None,
+                    country_flags: &[],
                     branch_info: branch_info.as_ref(),
                     cost_info: cost_info.as_ref(),
                 });
@@ -621,18 +470,6 @@ async fn handle_status_command_within(
             eprintln!("\nWarning: {message}\n{remediation}");
         }
     }
-
-    if let Some(refresh) = refresh
-        && let Some(fresh) = await_online_refresh(deadline, refresh).await
-        && let Some(config) = config.as_mut()
-        && fresh.apply(config, now)
-        && let Err(err) = config.save_if_exists(profile.data_dir())
-    {
-        eprintln!("warning: could not save tracedecay config: {err}");
-    }
-    if stdout_is_terminal && let Some(config) = config.as_mut() {
-        global::check_for_update(profile, config, false, true);
-    }
     Ok(())
 }
 
@@ -679,10 +516,9 @@ fn status_branch_info(
 #[cfg(test)]
 mod tests {
     use super::{
-        COUNTRY_FLAGS_MAX_AGE_SECS, OnlineRefresh, OnlineRefreshPlan, WORLDWIDE_TOTAL_MAX_AGE_SECS,
-        await_daemon_tool_result, await_online_refresh, project_open_line,
-        reject_truncation_envelope, schema_convergence_line, status_branch_info,
-        status_command_deadline_from, status_server_request_budget,
+        await_daemon_tool_result, project_open_line, reject_truncation_envelope,
+        schema_convergence_line, status_branch_info, status_command_deadline_from,
+        status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -694,82 +530,6 @@ mod tests {
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
     };
-    use tracedecay_session_memory::user_config::UserConfig;
-
-    #[tokio::test]
-    async fn hanging_online_refresh_settles_at_the_deadline_and_leaves_the_cache_alone() {
-        let hang = Duration::from_millis(600);
-        let budget = Duration::from_millis(100);
-        let started = Instant::now();
-        let refresh = tokio::task::spawn_blocking(move || {
-            std::thread::sleep(hang);
-            OnlineRefresh {
-                worldwide_total: Some(7),
-                country_flags: vec!["🇮🇸".to_owned()],
-            }
-        });
-
-        let fresh = await_online_refresh(started + budget, refresh).await;
-        let settled_after = started.elapsed();
-
-        assert_eq!(
-            fresh, None,
-            "a read that outlives the budget yields nothing"
-        );
-        assert!(
-            settled_after < hang,
-            "settled after {settled_after:?}; the hanging read needs {hang:?}"
-        );
-        let mut config = UserConfig::default();
-        let changed = fresh.is_some_and(|fresh| fresh.apply(&mut config, 1_000));
-        assert!(!changed);
-        assert_eq!(config.last_worldwide_total, 0);
-        assert_eq!(config.last_worldwide_fetch_at, 0);
-        assert!(config.cached_country_flags.is_empty());
-    }
-
-    #[tokio::test]
-    async fn answered_online_refresh_within_budget_updates_the_cache() {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let refresh = tokio::task::spawn_blocking(|| OnlineRefresh {
-            worldwide_total: Some(42),
-            country_flags: vec!["🇳🇴".to_owned()],
-        });
-        let fresh = await_online_refresh(deadline, refresh)
-            .await
-            .expect("answered within budget");
-        let mut config = UserConfig::default();
-        assert!(fresh.apply(&mut config, 1_000));
-        assert_eq!(config.last_worldwide_total, 42);
-        assert_eq!(config.last_worldwide_fetch_at, 1_000);
-        assert_eq!(config.cached_country_flags, ["🇳🇴"]);
-        assert_eq!(config.last_flags_fetch_at, 1_000);
-
-        assert!(
-            !OnlineRefresh::default().apply(&mut config, 2_000),
-            "unanswered reads must not touch the cache or its timestamps"
-        );
-        assert_eq!(config.last_worldwide_fetch_at, 1_000);
-        assert_eq!(config.last_flags_fetch_at, 1_000);
-    }
-
-    #[test]
-    fn online_refresh_plan_follows_cache_age() {
-        let mut config = UserConfig::default();
-        let now = 10_000;
-        config.last_worldwide_fetch_at = now - WORLDWIDE_TOTAL_MAX_AGE_SECS + 1;
-        config.last_flags_fetch_at = now - COUNTRY_FLAGS_MAX_AGE_SECS + 1;
-        let plan = OnlineRefreshPlan::for_cache(&config, now);
-        assert!(!plan.is_needed(), "fresh caches start no refresh: {plan:?}");
-
-        config.last_worldwide_fetch_at = now - WORLDWIDE_TOTAL_MAX_AGE_SECS;
-        let plan = OnlineRefreshPlan::for_cache(&config, now);
-        assert!(plan.worldwide_total && !plan.country_flags);
-
-        config.last_flags_fetch_at = 0;
-        let plan = OnlineRefreshPlan::for_cache(&config, now);
-        assert!(plan.worldwide_total && plan.country_flags);
-    }
 
     #[test]
     fn status_deadline_boundaries_preserve_override_and_maximum() {

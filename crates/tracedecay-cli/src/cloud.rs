@@ -6,7 +6,7 @@
 //! are synchronous `ureq` calls that block the calling thread for up to their
 //! own timeout, which an enclosing Tokio deadline cannot cut short. A caller
 //! on an async or deadline-bound path must run them on a blocking thread and
-//! bound the join itself (see the CLI status command).
+//! bound the join itself.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ const GITHUB_REPOSITORY: &str = "tracedecay";
 /// Timeout for flush (upload) requests.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Timeout for fetching the worldwide total (used in status).
+/// Timeout for fetching the worldwide total.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Response from the worker's POST /increment and GET /total endpoints.
@@ -75,26 +75,6 @@ pub fn fetch_worldwide_total() -> Option<u64> {
         .read_json()
         .ok()?;
     Some(parsed.total)
-}
-
-/// Response from the worker's GET /countries endpoint.
-#[derive(serde::Deserialize)]
-struct CountriesResponse {
-    flags: Vec<String>,
-}
-
-/// Fetches country flags from the worldwide counter.
-/// Returns a list of emoji flags, or an empty vec on failure.
-#[tracing::instrument(name = "cloud.fetch_country_flags", level = "trace", skip_all)]
-pub fn fetch_country_flags() -> Vec<String> {
-    let agent = agent_with_timeout(Duration::from_millis(500));
-    let Ok(mut resp) = agent.get(&format!("{WORKER_URL}/countries")).call() else {
-        return Vec::new();
-    };
-    let Ok(parsed): Result<CountriesResponse, _> = resp.body_mut().read_json() else {
-        return Vec::new();
-    };
-    parsed.flags
 }
 
 /// Response from GitHub releases API (only the fields we need).
@@ -370,10 +350,6 @@ pub fn doctor_network_probes() -> tracedecay::doctor::AdmittedDoctorNetworkProbe
 
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
     tracedecay_dashboard_api::cloud::is_newer_version(current, latest)
-}
-
-pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
-    tracedecay_dashboard_api::cloud::is_newer_minor_version(current, latest)
 }
 
 /// How tracedecay was installed, detected from the binary path.

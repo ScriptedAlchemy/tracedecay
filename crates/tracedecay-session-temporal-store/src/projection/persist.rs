@@ -8,7 +8,7 @@ use tracedecay_domain::{
     SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
     derive_exact_observation_anchor_id,
 };
-use tracedecay_lcm::retrieval_content::projected_content_hash;
+use tracedecay_lcm::retrieval_content::{derived_text_for_index, projected_content_hash};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
@@ -331,6 +331,9 @@ async fn persist_occurrence(
     let sanitized_content_digest = projected_content_hash(sanitized_content);
     let sanitized_content_bytes = i64::try_from(sanitized_content.len())
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    // Index/FTS store the derived budget, not a second full copy of the body.
+    // Canonical text stays on the observation/LCM payload.
+    let index_text = derived_text_for_index(sanitized_content);
     let relations = envelope.relations();
     // Occurrences are append-only and keyed per session, so a row the base or
     // an earlier batch already holds is ignored here and must match exactly.
@@ -390,7 +393,7 @@ async fn persist_occurrence(
                 evidence,
                 sanitized_content_digest,
                 sanitized_content_bytes,
-                sanitized_content,
+                index_text,
             ],
         )
         .await
@@ -726,8 +729,8 @@ pub(super) async fn require_exact_occurrence(
         "evidence_json": occurrence.evidence,
         "sanitized_content_digest": projected_content_hash(text),
         "sanitized_content_bytes": text.len(),
-        "snippet_text": text,
-        "index_text": text,
+        "snippet_text": derived_text_for_index(text),
+        "index_text": derived_text_for_index(text),
     });
     if actual != expected {
         return Err(storage_message(

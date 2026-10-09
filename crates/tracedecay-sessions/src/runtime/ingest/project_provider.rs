@@ -301,21 +301,51 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let admitted = match pending {
-                Ok(pending) => codex::try_admit_codex_jsonl_observations_for_project_window(
-                    path,
-                    self.project_root,
-                    self.project_id.clone(),
-                    self.facade,
-                    remaining,
-                    self.cancellation,
-                )
-                .await
-                .map(|progress| (progress, pending)),
-                Err(error) => Err(error),
+            let pending = match pending {
+                Ok(pending) => pending,
+                Err(error) => {
+                    if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                        return cancelled;
+                    }
+                    let failure = warn_transcript_catch_up_failure(
+                        "codex",
+                        "observation",
+                        &error,
+                        "project Codex observation catch-up failed",
+                    );
+                    let stop = codex_source_failure_saturates_pass(
+                        outcome.failures.len().saturating_add(1),
+                        failure.retryable,
+                    );
+                    outcome.add_failure(failure);
+                    frontier_committable = false;
+                    if stop {
+                        deferred = true;
+                        break;
+                    }
+                    continue;
+                }
             };
-            match admitted {
-                Ok((progress, pending)) => {
+            if let Some(failure) = pending.cached_source_failure(path) {
+                outcome.add_failure(failure);
+                frontier_committable = false;
+                if codex_source_failure_saturates_pass(outcome.failures.len(), failure.retryable) {
+                    deferred = true;
+                    break;
+                }
+                continue;
+            }
+            match codex::try_admit_codex_jsonl_observations_for_project_window(
+                path,
+                self.project_root,
+                self.project_id.clone(),
+                self.facade,
+                remaining,
+                self.cancellation,
+            )
+            .await
+            {
+                Ok(progress) => {
                     if let Err(error) =
                         pending.admitted(path, progress.source_deferred, progress.covered_through)
                     {
@@ -361,6 +391,15 @@ impl<'a> ProjectProviderRun<'a> {
                         outcome.failures.len().saturating_add(1),
                         failure.retryable,
                     );
+                    if let Err(record_error) = pending.record_source_failure(path, &error, failure)
+                    {
+                        outcome.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "discovery",
+                            &record_error,
+                            "project Codex source failure retention failed",
+                        ));
+                    }
                     outcome.add_failure(failure);
                     frontier_committable = false;
                     if stop {
@@ -864,9 +903,9 @@ impl<'a> ProjectProviderRun<'a> {
     }
 }
 
-/// One Hermes sweep as the scheduler sees it. A skipped source is a partial
-/// scan, reported as a retryable failure because the next pass re-discovers
-/// the same `state.db`; an incomplete projection drain is a deferred unit.
+/// A failed Hermes source remains a retryable partial scan: destination
+/// admission and SQLite availability can recover without changing the source
+/// file. An incomplete projection drain is a deferred unit.
 pub(super) fn hermes_run_outcome(
     outcome: hermes::HermesSweepOutcome,
     byte_cap_exceeded: bool,

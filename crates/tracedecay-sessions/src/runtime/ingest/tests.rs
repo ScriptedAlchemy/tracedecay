@@ -11,7 +11,11 @@ use tracedecay_store::{
     ObservationCoverageV1, ObservationStoreError,
 };
 
+use crate::admission::test_support::MemoryHostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::hosts::codex::session_meta_read_count_for_test;
+use crate::runtime::ingest::project_provider::ProjectProviderRun;
+use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, hosts::claude_observation, hosts::codex, source};
 
@@ -490,5 +494,95 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
             admitted_units: 5,
             rejected_units: 3,
         }
+    );
+}
+
+#[tokio::test]
+async fn unchanged_codex_contract_failure_stays_blocked_without_reopening() {
+    install_test_shared_jsonl_preparation_authority();
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let dir = home.path().join(".codex/sessions/2026/10/09");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-10-09T10-00-00-invalid.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    let settled = crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
+    hub.register("project", Some(home.path()));
+    hub.register("other-project", Some(home.path()));
+    let project_id = ProjectId::new("project.terminal-codex-skip").unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+
+    let run = || {
+        ProjectProviderRun {
+            project_root: &project,
+            project_id: &project_id,
+            facade: &admission,
+            scope: &scope,
+            candidate: SessionProvider::Codex,
+            max_new_bytes: 1 << 20,
+            cancellation: &cancellation,
+            codex_discovery: Some((&hub, "project")),
+        }
+        .run_codex()
+    };
+
+    let first = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(first.failures.len(), 1);
+    assert_eq!(
+        first.failures[0].reason_code,
+        "transcript_source_contract_invalid"
+    );
+    assert!(!first.failures[0].retryable);
+    let reads_after_first = session_meta_read_count_for_test(&path);
+    assert!(
+        reads_after_first > 0,
+        "the first pass must open the invalid rollout"
+    );
+
+    let second = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(second.failures, first.failures);
+    assert!(
+        !second.succeeded(),
+        "cached failure must not become complete coverage"
+    );
+    if settled {
+        assert_eq!(
+            session_meta_read_count_for_test(&path),
+            reads_after_first,
+            "the unchanged invalid rollout must not be reopened"
+        );
+    }
+    let other = crate::runtime::hosts::codex::PendingTranscript::observe(
+        Some((&hub, "other-project")),
+        &path,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(other.cached_source_failure(&path).is_none());
+
+    let before = std::fs::metadata(&path).unwrap();
+    std::fs::write(&path, "[]\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    let third = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(
+        third.failures.len(),
+        1,
+        "a changed terminal source must be retried"
+    );
+    assert!(
+        session_meta_read_count_for_test(&path) > reads_after_first,
+        "the changed rollout must be opened again"
     );
 }
