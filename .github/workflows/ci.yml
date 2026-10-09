@@ -419,8 +419,12 @@ jobs:
           cache-key: ci-linux-test
           test-tools: "true"
 
-      # `bazel test` builds every target in the pattern, so tests start
-      # while the rest of the workspace still links.
+      # Root suites exercise latency-sensitive daemon journeys. Finish their
+      # compilation before testing so compiler work cannot consume that budget.
+      - name: Build root suite binaries
+        if: ${{ matrix.test_resources == '' }}
+        run: bazel build --config=ci ${{ matrix.targets }}
+
       - name: Build and test this shard
         run: bazel test --config=ci ${{ matrix.test_resources }} ${{ matrix.targets }}
 
