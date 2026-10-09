@@ -228,7 +228,7 @@ jobs:
     name: Test macOS
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 330
     steps:
       # Full history: the search-quality workload fixture pins a
