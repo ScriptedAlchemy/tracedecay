@@ -200,29 +200,6 @@ fn verify_retrieval_anchor(
 // Alias promotion belongs to the projector transaction: a newly captured
 // successor may wait behind the still-readable predecessor. Once promoted,
 // immutable historical anchor replay requires the exact supersession receipt.
-/// `observations.observation_json` may carry `tracedecay.body_ref` markers
-/// for strings stored in `session_canonical_bodies`; hydrate before decoding
-/// so authority comparisons see the same observation every other reader does.
-fn decode_stored_observation(
-    connection: &rusqlite::Connection,
-    json: &str,
-) -> rusqlite::Result<DurableObservationV1> {
-    tracedecay_store::parse_stored_observation(json, |hash| {
-        connection
-            .query_row(tracedecay_store::LOAD_CANONICAL_BODY_SQL, [hash], |row| {
-                let encoding = row.get::<_, String>(0)?;
-                let blob = row.get::<_, Vec<u8>>(1)?;
-                let uncompressed = row.get::<_, i64>(2)?;
-                tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed)
-                    .map_err(|error| invalid(error.to_string()))
-            })
-            .map_err(|error| tracedecay_store::CanonicalBodyError::Missing {
-                content_hash: format!("{hash}: {error}"),
-            })
-    })
-    .map_err(|error| invalid(error.to_string()))
-}
-
 fn cline_alias_transition_is_valid(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecord,
@@ -278,9 +255,9 @@ fn cline_alias_transition_is_valid(
         return Ok(false);
     };
     let candidate_observation: DurableObservationV1 =
-        decode_stored_observation(connection, anchor_json.as_str())?;
+        super::decode_stored_observation(connection, anchor_json.as_str())?;
     let current_observation: DurableObservationV1 =
-        decode_stored_observation(connection, current_json.as_str())?;
+        super::decode_stored_observation(connection, current_json.as_str())?;
     if prove_cline_native_source_transition(&current_observation, &candidate_observation).is_some()
     {
         // Pending successor: leave current alias and predecessor availability

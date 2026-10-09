@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn unpack_rejects_a_declared_size_mismatch() {
-        let bytes = "inflate source ".repeat(64).into_bytes();
+        let bytes = "inflate source ".repeat(INLINE_BODY_BYTES).into_bytes();
         let stored = StoredCanonicalBody::pack(&bytes).unwrap();
         for declared in [
             stored.uncompressed_bytes - 1,

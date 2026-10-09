@@ -681,7 +681,7 @@ mod tests {
         let encoding: String = body_row.get(0).unwrap();
         let blob: Vec<u8> = body_row.get(1).unwrap();
         assert_eq!(
-            unpack_body(&hash, &encoding, &blob, row.get(2).unwrap()).unwrap(),
+            unpack_body(&hash, &encoding, &blob, body_row.get(2).unwrap()).unwrap(),
             expected.as_bytes()
         );
         println!(

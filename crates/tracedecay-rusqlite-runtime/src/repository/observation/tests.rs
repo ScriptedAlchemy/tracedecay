@@ -1473,3 +1473,39 @@ fn cline_stream_alias_refuses_changed_usage_or_wrong_native_stream() {
         assert_eq!(alias, old.retrieval_anchor_id().as_str());
     }
 }
+
+#[test]
+fn stored_observation_body_errors_preserve_database_and_body_causes() {
+    let conn = Connection::open_in_memory().unwrap();
+    let encoded = json!({
+        "payload": null,
+        (tracedecay_store::BODY_REF_KEY): {"/payload": "missing"},
+    })
+    .to_string();
+    assert!(matches!(
+        super::decode_stored_observation(&conn, &encoded),
+        Err(rusqlite::Error::SqliteFailure(..))
+    ));
+    conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).unwrap();
+    let error = super::decode_stored_observation(&conn, &encoded).unwrap_err();
+    let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+        panic!("missing body must retain its typed cause");
+    };
+    assert!(
+        matches!(source.downcast_ref::<tracedecay_store::CanonicalBodyError>(),
+        Some(tracedecay_store::CanonicalBodyError::Missing { content_hash }) if content_hash == "missing")
+    );
+    conn.execute(
+        "INSERT INTO session_canonical_bodies VALUES ('missing', 'identity', X'61', 1)",
+        [],
+    )
+    .unwrap();
+    let error = super::decode_stored_observation(&conn, &encoded).unwrap_err();
+    let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+        panic!("corrupt body must retain its typed cause");
+    };
+    assert!(matches!(
+        source.downcast_ref::<tracedecay_store::CanonicalBodyError>(),
+        Some(tracedecay_store::CanonicalBodyError::Corrupt { .. })
+    ));
+}
