@@ -5,6 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.76](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.75...v1.0.0-beta.76) (2026-10-08)
+
+
+### Bug Fixes
+
+* **observability:** keep aborted coverage failed closed ([8c2d8fc](https://github.com/ScriptedAlchemy/tracedecay/commit/8c2d8fcc334bd87f244b84b4e32d760d1f19ad1c))
+* **observability:** keep terminal writes before maintenance ([af903db](https://github.com/ScriptedAlchemy/tracedecay/commit/af903db8e8bcec4a45970bda62683385b8c79906))
+* **observability:** recover joined owners on mount demand ([adfc517](https://github.com/ScriptedAlchemy/tracedecay/commit/adfc5175c53c6d97abfeadff867ec6845f483a93))
+* **observability:** retain durable terminal coverage proof ([b4d17d9](https://github.com/ScriptedAlchemy/tracedecay/commit/b4d17d9a4c9f06836a0fe32ac2848a57a1d96e3f))
+* **observability:** reuse final write settlement on shutdown ([75ae3c5](https://github.com/ScriptedAlchemy/tracedecay/commit/75ae3c502f8a4a8285f22a4c2506f07b21c40569))
+* **observability:** settle retired owners and batch writes ([97491c3](https://github.com/ScriptedAlchemy/tracedecay/commit/97491c3131c04094ac3bbb3248aaadc093624077))
+* **observability:** settle retired owners and batch writes ([1ff4b39](https://github.com/ScriptedAlchemy/tracedecay/commit/1ff4b393c84978a4cf90fa4ceb17ff321b038c1f))
+
+## [1.0.0-beta.75](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.74...v1.0.0-beta.75) (2026-10-08)
+
+
+### Bug Fixes
+
+* **code-index:** preserve freshness during attribution preparation ([594eef0](https://github.com/ScriptedAlchemy/tracedecay/commit/594eef0cc42bc0300eb11b47d88fb110cd907380))
+* **dashboard:** label project identity aliases accurately ([744225d](https://github.com/ScriptedAlchemy/tracedecay/commit/744225d9395e5173e5654ca8498f2c12681a8906))
+* **feedback:** prepare attribution under retained workers ([231b23b](https://github.com/ScriptedAlchemy/tracedecay/commit/231b23b9489f860503b759b0e074a97a49ab0f78))
+* **feedback:** prepare cold attribution in retained workers ([827f593](https://github.com/ScriptedAlchemy/tracedecay/commit/827f593a1a7b7d2aacb419f3211510c6451df1ea))
+* **feedback:** yield attribution to source changes ([9c2b525](https://github.com/ScriptedAlchemy/tracedecay/commit/9c2b525ea6c965688095771eef2897a1717e672c))
+
+
+### Performance Improvements
+
+* **code-index:** hash exact attribution join lookups ([5fe6d0c](https://github.com/ScriptedAlchemy/tracedecay/commit/5fe6d0c641a47b8a841743e0722ae753f874d8c0))
+* **code-index:** reuse resolved attribution identities ([c1d2d1a](https://github.com/ScriptedAlchemy/tracedecay/commit/c1d2d1a90d1ea80e1e1caf60ddcfc800edef83fa))
+* **code-index:** share canonical attribution construction ([0e4c07e](https://github.com/ScriptedAlchemy/tracedecay/commit/0e4c07e7fd9ea817f018a41b1b4aca9ca19e2df1))
+* **feedback:** batch affected-test retrieval by generation ([de6dd3a](https://github.com/ScriptedAlchemy/tracedecay/commit/de6dd3adee7d7834d804ba9632fefb6c891d2ce6))
+
+## [1.0.0-beta.74](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.73...v1.0.0-beta.74) (2026-10-07)
+
+
+### Bug Fixes
+
+* **ci:** correct action version hints for dependency updates ([901e9c7](https://github.com/ScriptedAlchemy/tracedecay/commit/901e9c75d1af082310ca52ced0eaae7118ecab95))
+* **daemon:** refuse unrecognized launchd activity states ([beac4af](https://github.com/ScriptedAlchemy/tracedecay/commit/beac4af0e0f404d2ef854393d755ea7d0e90bf48)), closes [#3162](https://github.com/ScriptedAlchemy/tracedecay/issues/3162)
+* **daemon:** report launchd service state independently of sockets ([2099773](https://github.com/ScriptedAlchemy/tracedecay/commit/2099773b1523e9a203997355b83fc4f9c6450c9e))
+* **daemon:** retire idle degraded project owners ([fd136d4](https://github.com/ScriptedAlchemy/tracedecay/commit/fd136d4d4407f60e89e4edda3dabb116c87a343f)), closes [#3157](https://github.com/ScriptedAlchemy/tracedecay/issues/3157)
+* **git:** preserve terminal runtime publication refusals ([08544d2](https://github.com/ScriptedAlchemy/tracedecay/commit/08544d2b76c4af5ead0217f583855cb337db873f)), closes [#3159](https://github.com/ScriptedAlchemy/tracedecay/issues/3159)
+* **hooks:** expose typed feedback cycle failure classes ([ddfda03](https://github.com/ScriptedAlchemy/tracedecay/commit/ddfda031a13516eccd9a41c3cf608fffc98f2f6a)), closes [#3168](https://github.com/ScriptedAlchemy/tracedecay/issues/3168)
+* **index:** compress oversized graph records without data loss ([a768f3d](https://github.com/ScriptedAlchemy/tracedecay/commit/a768f3dddd2e70c9dfec835661eb310d9a918abf)), closes [#3167](https://github.com/ScriptedAlchemy/tracedecay/issues/3167)
+* **index:** reap completed retiring owners before remount ([362e621](https://github.com/ScriptedAlchemy/tracedecay/commit/362e621816282acc246bfec9956451e9c5070135)), closes [#3166](https://github.com/ScriptedAlchemy/tracedecay/issues/3166)
+* **memory:** honor native pages and retained mutex ownership ([4f1c6b2](https://github.com/ScriptedAlchemy/tracedecay/commit/4f1c6b29ece2036aa42b07f5cc40ce18563d4d0d))
+* recover project availability and speed up feedback ([65827d8](https://github.com/ScriptedAlchemy/tracedecay/commit/65827d8544231e56348213ed2128d42a93962808))
+* **search:** distinguish scanned files in grep summaries ([ca892db](https://github.com/ScriptedAlchemy/tracedecay/commit/ca892dbc40608b05172b97c83d256d91bee8b55f)), closes [#3158](https://github.com/ScriptedAlchemy/tracedecay/issues/3158)
+* **search:** refuse dangling Git control links ([158e76b](https://github.com/ScriptedAlchemy/tracedecay/commit/158e76b74246fd5cad1305da06616a554819950f)), closes [#3163](https://github.com/ScriptedAlchemy/tracedecay/issues/3163)
+* **search:** refuse non-git indexing without warming retries ([9a6ad6d](https://github.com/ScriptedAlchemy/tracedecay/commit/9a6ad6d90bfc8d71181a8f44e1f1b075246ae0c5))
+
+
+### Performance Improvements
+
+* **index:** index test attribution traversal and lookups ([95d88a4](https://github.com/ScriptedAlchemy/tracedecay/commit/95d88a41c63813b99840f93a710c2030c10ae9c7)), closes [#3169](https://github.com/ScriptedAlchemy/tracedecay/issues/3169)
+
+## [1.0.0-beta.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.72...v1.0.0-beta.73) (2026-10-07)
+
+
+### Bug Fixes
+
+* Bazel test compatibility on macOS ([cbed880](https://github.com/ScriptedAlchemy/tracedecay/commit/cbed8800c1dd922ef81833912ebbd75de4e6e0e5))
+* **bazel:** apply platform overrides after generic defaults ([b7d27ef](https://github.com/ScriptedAlchemy/tracedecay/commit/b7d27ef40b920e8166e631acd4e2ddc3655c1e81))
+* **bazel:** bound Windows Rust dependency search paths ([7879be1](https://github.com/ScriptedAlchemy/tracedecay/commit/7879be1ced10b762fee3aa8c696ca234a3642def))
+* **bazel:** build bundled SQLite with Cargo's LIBSQLITE3_FLAGS ([3f51fa9](https://github.com/ScriptedAlchemy/tracedecay/commit/3f51fa9ed24ebf568d9d463479660dd8ab6167fc))
+* **bazel:** build serde_json and unit tests with Cargo's features ([14b8ffd](https://github.com/ScriptedAlchemy/tracedecay/commit/14b8ffd4576adaa7fd2722df124bc5799d6e6ec4))
+* **bazel:** enable Windows links instead of copying runfiles ([686877e](https://github.com/ScriptedAlchemy/tracedecay/commit/686877e2a99987019b0e6f045ad21eede98e8553))
+* **bazel:** give tests one resolution and the binaries Cargo would spawn ([a24afd2](https://github.com/ScriptedAlchemy/tracedecay/commit/a24afd228ab4d94c40a4f679b7be250682f784d0))
+* **bazel:** keep Windows build-script headers under MAX_PATH ([558b65f](https://github.com/ScriptedAlchemy/tracedecay/commit/558b65f79aad48f33851c12a9d82475d462781d8))
+* **bazel:** match per-crate opt-levels and stamp on Windows ([7114985](https://github.com/ScriptedAlchemy/tracedecay/commit/71149854ca9b4dd71bfe20a426e9daf15881f733))
+* **bazel:** pass build scripts' C flags past rules_rust's CFLAGS ([1baabab](https://github.com/ScriptedAlchemy/tracedecay/commit/1baabab6a4e71fce1dd6f17c0566077dda92157d))
+* **bazel:** preserve spaces in runfile paths ([76f42cd](https://github.com/ScriptedAlchemy/tracedecay/commit/76f42cd0d01ed6abb133358a5ee4564d9d395b75))
+* **bazel:** preserve test runtime features and isolation ([68ff1ee](https://github.com/ScriptedAlchemy/tracedecay/commit/68ff1eeae9d763f25476f46d460f41f1073ba30f))
+* **bazel:** resolve runfile targets from providers ([dc31b7e](https://github.com/ScriptedAlchemy/tracedecay/commit/dc31b7e14b23c0d5abac822c7ba60f726380ae4a))
+* **bazel:** restore test execution and CI progress ([e22b850](https://github.com/ScriptedAlchemy/tracedecay/commit/e22b8506b7bdccdbad9eaff1f22efd94da51ad47))
+* **bazel:** root runfiles_env paths at the workspace directory ([ae64f8d](https://github.com/ScriptedAlchemy/tracedecay/commit/ae64f8d966e18466ec7532b8b1d126714e4f05e0))
+* **bazel:** run Rust tests with native rules and runfiles ([d4ee88f](https://github.com/ScriptedAlchemy/tracedecay/commit/d4ee88fb83a33a52406700c4b629154cefd6f23b))
+* **bazel:** run tests from their crate and patch aws-lc's long include ([db0abfd](https://github.com/ScriptedAlchemy/tracedecay/commit/db0abfdb29dfd8bf9d96829a74cc14c102fc4755))
+* **bazel:** run Windows genrules and stamping without bash lookups ([f46beb2](https://github.com/ScriptedAlchemy/tracedecay/commit/f46beb221da3de76da724fb7ae908158d6bf6eff))
+* **bazel:** stage runtime resources for library tests ([debb3f4](https://github.com/ScriptedAlchemy/tracedecay/commit/debb3f47802cb1d963f3cfd0e12545b10d34c1b9))
+* **ci:** avoid rebuilding Bazel tests twice ([0cf10f4](https://github.com/ScriptedAlchemy/tracedecay/commit/0cf10f4da2de718f138b22ac1b1dc78ae61b58de))
+* **ci:** avoid rebuilding Bazel tests twice ([1be7037](https://github.com/ScriptedAlchemy/tracedecay/commit/1be703701403cccd311d4b9287dc2aa870b1601c))
+* **ci:** avoid rebuilding Bazel tests twice ([#3123](https://github.com/ScriptedAlchemy/tracedecay/issues/3123)) ([0cf10f4](https://github.com/ScriptedAlchemy/tracedecay/commit/0cf10f4da2de718f138b22ac1b1dc78ae61b58de))
+* **deps:** regenerate Playwright dependency locks ([5f63062](https://github.com/ScriptedAlchemy/tracedecay/commit/5f630624d1a8923ee3e3254de636538d4b20867f))
+* **deps:** regenerate Zod embedded assets and Bazel lock ([0970990](https://github.com/ScriptedAlchemy/tracedecay/commit/09709900b11fc6b2e73f164d2d4077ee4140a020))
+* **deps:** synchronize Bazel dependency lock ([7f997e2](https://github.com/ScriptedAlchemy/tracedecay/commit/7f997e2aa17b008f0e8f99ec363afe49a7fdc106))
+* **deps:** synchronize Bazel dependency lock ([3785a64](https://github.com/ScriptedAlchemy/tracedecay/commit/3785a643939ef62214b95dc3fcfad31393a6471a))
+* **deps:** synchronize Bazel dependency lock ([9b14dd3](https://github.com/ScriptedAlchemy/tracedecay/commit/9b14dd374b715bdacc7ba593368da754da393bcb))
+* **deps:** synchronize Bazel dependency lock ([e6a47d7](https://github.com/ScriptedAlchemy/tracedecay/commit/e6a47d742d107c4c6fa9836f91634dcb0f3c6702))
+* **deps:** synchronize Bazel dependency lock ([f4a95c6](https://github.com/ScriptedAlchemy/tracedecay/commit/f4a95c66d682e0e600534c4ec4a06a5e01d001e9))
+* **deps:** synchronize pnpm and Bazel lockfiles ([8e68f60](https://github.com/ScriptedAlchemy/tracedecay/commit/8e68f6022554fdaa1a65003b5ba2661e1972bc80))
+* **deps:** update dependency lucide-react to ^0.577.0 ([9da8b41](https://github.com/ScriptedAlchemy/tracedecay/commit/9da8b4167cd5eb1745d2feef837bb4bfbf7fb7ec))
+* **deps:** update Lucide with synchronized dependency locks ([289ab1e](https://github.com/ScriptedAlchemy/tracedecay/commit/289ab1e04aed7580c9fb77c3cc227a746fc73a3b))
+* **hooks:** honor explicit tracing in native capture callbacks ([498be91](https://github.com/ScriptedAlchemy/tracedecay/commit/498be9181c3bf09d13786eab77492e4ef4e0ce32))
+* **hosts:** exclude Bazel convenience paths from registration ([fc80b39](https://github.com/ScriptedAlchemy/tracedecay/commit/fc80b397a5f0f000da33c33598e250e8d1289442))
+* **hosts:** exclude Bazel convenience paths from registration ([8ea7d46](https://github.com/ScriptedAlchemy/tracedecay/commit/8ea7d466521833d04bd6c9f1a84e85c5ce3fe6cc))
+* **hosts:** prefer installed executables over Bazel outputs ([6fa1005](https://github.com/ScriptedAlchemy/tracedecay/commit/6fa1005ddf5b89afcf65406e435f3bd51948a540))
+* **index:** retain successors published during projection verification ([48a5694](https://github.com/ScriptedAlchemy/tracedecay/commit/48a5694819320e871acddc1e936f94cd85077cf2))
+* **release:** refresh Cargo lock before frozen installation ([0eba95d](https://github.com/ScriptedAlchemy/tracedecay/commit/0eba95d402b1516f16394cd95c95845ed1f24029))
+* **sessions:** publish an absent host record on its first sweep ([08994f4](https://github.com/ScriptedAlchemy/tracedecay/commit/08994f44fa9acf22b2ae47b7b248cf80a7e62bd4))
+* **sessions:** retract stale inference before extending captures ([cae569c](https://github.com/ScriptedAlchemy/tracedecay/commit/cae569ccf491b1fb9d248ffca1845e97ccd5f66f))
+
+
+### Performance Improvements
+
+* **bazel:** resolve test features once for the whole workspace ([b39e82d](https://github.com/ScriptedAlchemy/tracedecay/commit/b39e82df2cea0493c027fbfb7221499e655552df))
+
 ## [1.0.0-beta.72](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.71...v1.0.0-beta.72) (2026-10-06)
 
 

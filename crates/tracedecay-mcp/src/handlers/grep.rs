@@ -352,7 +352,7 @@ fn render_grep_md(result: &GrepSearchResultV1) -> String {
     }
 
     md.blank();
-    let mut summary = format!("_{} matches across {files_scanned} files._", hits.len());
+    let mut summary = format!("_{} matches; {files_scanned} files scanned._", hits.len());
     if result.truncated {
         let _ = write!(
             summary,

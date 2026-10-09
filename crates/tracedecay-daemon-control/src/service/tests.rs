@@ -49,6 +49,121 @@ fn launchd_profiles_have_distinct_labels_and_plists() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_foreground_socket_does_not_imply_a_managed_service() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        "#!/bin/sh\necho 'Could not find service' >&2\nexit 113\n",
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let socket = root.path().join("foreground.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    assert_eq!(runner.service_state().unwrap(), DaemonServiceState::Missing);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_service_activity_comes_from_the_owned_job() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = waiting'\nfi\n",
+            plist.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let socket = root.path().join("foreground.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    assert_eq!(
+        runner.service_state().unwrap(),
+        DaemonServiceState::StoppedEnabled
+    );
+    write_executable_script(
+        &launchctl,
+        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nfi\n", plist.display()),
+    ).unwrap();
+    assert_eq!(
+        runner.service_state().unwrap(),
+        DaemonServiceState::RunningEnabled
+    );
+    write_executable_script(
+        &launchctl,
+        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nelse\n  echo 'permission denied' >&2\n  exit 1\nfi\n", plist.display()),
+    ).unwrap();
+    assert!(
+        runner
+            .service_state()
+            .unwrap_err()
+            .to_string()
+            .contains("permission denied")
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_owned_job_requires_a_recognized_activity_state() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+
+    for state in [
+        "",
+        "state = ",
+        "state = unfamiliar",
+        "state = running\nstate = waiting",
+    ] {
+        write_executable_script(
+            &launchctl,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo '{state}'\nfi\n",
+                plist.display()
+            ),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                runner.observe_service_state(),
+                Err(super::runner::ServiceStateError::Failed(
+                    tracedecay_domain::errors::TraceDecayError::Config { message }
+                )) if message.contains("service state")
+            ),
+            "unrecognized activity must fail: {state:?}"
+        );
+    }
+
+    write_executable_script(
+        &launchctl,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = not running'\nfi\n",
+            plist.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        runner.service_state().unwrap(),
+        DaemonServiceState::StoppedEnabled
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn launchd_stop_refuses_a_foreign_loaded_plist_before_mutating_it() {
@@ -991,7 +1106,7 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
         .expect("fixture systemd runner");
 
     let error = runner
-        .service_state(&dir.path().join("daemon.sock"))
+        .service_state()
         .expect_err("an unreachable user manager has no unit state");
     let message = error.to_string();
     assert!(
@@ -1125,14 +1240,13 @@ fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
     .expect("fixture systemd runner")
 }
 
-/// launchd has no liveness query; an empty `print-disabled` leaves the agent
-/// enabled and the socket connect decides whether it runs.
+/// The owned launchd job reports running and has no disabled override.
 #[cfg(target_os = "macos")]
 fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
     let launchctl = fake_service_program(
         bin,
         "launchctl",
-        "#!/bin/sh\n[ \"$1\" = print ] && printf 'path = %s\\n' \"${0%/bin/launchctl}/home/Library/LaunchAgents/com.tracedecay.daemon.plist\"\nexit 0\n",
+        "#!/bin/sh\n[ \"$1\" = print ] && printf 'state = running\\npath = %s\\n' \"${0%/bin/launchctl}/home/Library/LaunchAgents/com.tracedecay.daemon.plist\"\nexit 0\n",
     );
     let id = fake_service_program(bin, "id", "#!/bin/sh\necho 501\n");
     ServiceRunner::launchd(
@@ -2574,9 +2688,7 @@ fn systemd_service_state_detects_runtime_mask() {
         .expect("fixture systemd runner");
 
     assert_eq!(
-        runner
-            .service_state(&dir.path().join("daemon.sock"))
-            .expect("systemd service state"),
+        runner.service_state().expect("systemd service state"),
         DaemonServiceState::Masked
     );
 }

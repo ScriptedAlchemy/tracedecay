@@ -4,8 +4,10 @@ use tracedecay_code_extraction::{
     ExtractedSchemaEvidenceV1, ExtractedSchemaFactV1, SchemaEvidenceIssueV1,
     SchemaEvidenceStatusV1, SqlSchemaObjectKindV1,
 };
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort;
+use tracedecay_code_index::production::{
+    CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
+    CodeIndexPublishedGenerationV1,
+};
 use tracedecay_code_index::test_attribution::GenerationTestJoinCoverageV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, NativeIntegrationPortError};
 use tracedecay_domain::{
@@ -198,10 +200,7 @@ impl<'a> GenerationView<'a> {
     }
 
     fn test_coverage_pairs(&self) -> Vec<(SymbolIdentityDigest, SymbolIdentityDigest)> {
-        let Ok(authority) = self.generation.test_attribution_authority() else {
-            return Vec::new();
-        };
-        let read = authority.read_test_attribution(&self.generation.manifest().generation_id);
+        let read = self.generation.test_attribution_read();
         let Some(join) = &read.evidence else {
             return Vec::new();
         };
@@ -259,15 +258,7 @@ fn lane(
 }
 
 fn test_lane(view: &GenerationView<'_>) -> NativeIntegrationAnalysisLaneV1 {
-    let read = match view.generation.test_attribution_authority() {
-        Ok(authority) => authority.read_test_attribution(&view.generation.manifest().generation_id),
-        Err(_) => {
-            return lane(
-                NativeIntegrationAnalysisCoverageV1::Partial,
-                vec![NativeIntegrationAnalysisGapV1::AuthorityUnavailable],
-            );
-        }
-    };
+    let read = view.generation.test_attribution_read();
     match read.evidence.as_ref().map(|evidence| &evidence.coverage) {
         Some(GenerationTestJoinCoverageV1::Complete) if read.coverage.is_complete() => {
             lane(NativeIntegrationAnalysisCoverageV1::Complete, Vec::new())
@@ -293,7 +284,7 @@ fn test_lane(view: &GenerationView<'_>) -> NativeIntegrationAnalysisLaneV1 {
             vec![NativeIntegrationAnalysisGapV1::UnresolvedRequiredEdge],
         ),
         None => lane(
-            NativeIntegrationAnalysisCoverageV1::Unsupported,
+            NativeIntegrationAnalysisCoverageV1::Partial,
             vec![NativeIntegrationAnalysisGapV1::AuthorityUnavailable],
         ),
     }
@@ -752,6 +743,21 @@ fn schema_conflicts(
     Ok(conflicts)
 }
 
+struct NativeAnalysisControl<'a> {
+    deadline: &'a Deadline,
+    cancellation: &'a CancellationSignal,
+}
+
+impl CodeIndexExecutionControlV1 for NativeAnalysisControl<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+    fn is_deadline_exceeded(&self) -> bool {
+        self.deadline
+            .is_elapsed_at(tracedecay_contracts::clock::now_micros())
+    }
+}
+
 pub fn analyze_native_integration_generations(
     merge_base: &CodeIndexPublishedGenerationV1,
     source: &CodeIndexPublishedGenerationV1,
@@ -773,6 +779,26 @@ pub fn analyze_native_integration_generations(
         NativeIntegrationPortError::Native(error.to_string())
     };
     ensure_active()?;
+    // Historical branch generations are owned by this explicit, controlled
+    // analysis, not by a live worktree's serving worker.
+    let control = NativeAnalysisControl {
+        deadline,
+        cancellation,
+    };
+    for generation in [merge_base, source, destination, candidate] {
+        match generation.prepare_test_attribution(&control) {
+            Ok(_) => {}
+            Err(CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)) => {
+                return Err(NativeIntegrationPortError::Cancelled);
+            }
+            Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::DeadlineExceeded,
+            )) => return Err(NativeIntegrationPortError::Unavailable),
+            Err(error) => tracing::warn!(error = %error,
+                generation_id = %generation.manifest().generation_id,
+                "native integration test attribution is unavailable; retaining partial coverage"),
+        }
+    }
     let base = GenerationView::new(merge_base);
     let source = GenerationView::new(source);
     let destination = GenerationView::new(destination);

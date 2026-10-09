@@ -196,6 +196,7 @@ fn map_branch_error(error: LocalBranchSnapshotErrorV1) -> DashboardCodeReadError
 fn map_unavailable(reason: CodeIndexSearchUnavailableReasonV1) -> DashboardCodeReadErrorV1 {
     match reason {
         CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable
+        | CodeIndexSearchUnavailableReasonV1::NotApplicable
         | CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
         | CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled => {
             DashboardCodeReadErrorV1::AuthorityUnavailable

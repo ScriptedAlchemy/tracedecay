@@ -26,7 +26,7 @@ tracing = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
 
-# The TypeScript codegen binary is compiled by sdks/codegen via a [[bin]] path
-# reference; it is intentionally not a target of this crate (autobins = false).
+# The TypeScript codegen binary is compiled by //sdks/codegen:generate;
+# it is intentionally not a Cargo target of this crate (autobins = false).
 [package.metadata.cargo-shear]
 ignored-paths = ["src/bin/generate.rs"]
