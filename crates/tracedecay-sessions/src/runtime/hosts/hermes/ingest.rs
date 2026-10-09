@@ -188,8 +188,11 @@ pub async fn ingest_homes_for_projects(
     let mut stats = TranscriptIngestStats::default();
     let mut budget = new_sweep_budget(None);
     let sources = {
-        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
-        run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
+        run_blocking_transcript_section({
+            let hermes_homes = hermes_homes.to_vec();
+            move || all_profile_sources(&hermes_homes)
+        })
+        .await
     };
     for source in sources {
         if budget.exhausted() {
@@ -197,15 +200,22 @@ pub async fn ingest_homes_for_projects(
             break;
         }
         let eligible = {
-            let _span =
-                tracing::trace_span!("sessions.hosts.hermes.scope_profiles_blocking").entered();
-            run_blocking_transcript_section(|| {
-                destinations
-                    .iter()
-                    .filter(|destination| project_is_real(destination.project_root))
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let roots = destinations
+                .iter()
+                .map(|destination| destination.project_root.to_path_buf())
+                .collect::<Vec<_>>();
+            let real_roots = run_blocking_transcript_section(move || {
+                roots
+                    .into_iter()
+                    .filter(|root| project_is_real(root))
+                    .collect::<BTreeSet<_>>()
             })
+            .await;
+            destinations
+                .iter()
+                .filter(|destination| real_roots.contains(destination.project_root))
+                .cloned()
+                .collect::<Vec<_>>()
         };
         if eligible.is_empty() {
             continue;
@@ -304,8 +314,12 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     }
     let mut budget = new_sweep_budget(max_new_bytes);
     let sources = {
-        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
-        run_blocking_transcript_section(|| candidate_state_dbs(hermes_homes, project_root))
+        run_blocking_transcript_section({
+            let hermes_homes = hermes_homes.to_vec();
+            let project_root = project_root.to_path_buf();
+            move || candidate_state_dbs(&hermes_homes, &project_root)
+        })
+        .await
     };
     for source in sources {
         if cancellation.is_cancelled() {
@@ -430,8 +444,11 @@ async fn ingest_user_homes_capped_with_admission(
     }
     let mut budget = new_sweep_budget(max_new_bytes);
     let sources = {
-        let _span = tracing::trace_span!("sessions.hosts.hermes.discover_blocking").entered();
-        run_blocking_transcript_section(|| all_profile_sources(hermes_homes))
+        run_blocking_transcript_section({
+            let hermes_homes = hermes_homes.to_vec();
+            move || all_profile_sources(&hermes_homes)
+        })
+        .await
     };
     for source in sources {
         if cancellation.is_cancelled() {
@@ -484,6 +501,7 @@ async fn ingest_user_homes_capped_with_admission(
 
 /// A profile `state.db` is only a bounded candidate source: each session must
 /// carry a matching code-project cwd.
+#[derive(Clone)]
 pub(super) struct HermesProfileSource {
     pub state_db: PathBuf,
     pub profile: Option<String>,

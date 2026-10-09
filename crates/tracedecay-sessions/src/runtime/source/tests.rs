@@ -865,34 +865,148 @@ fn content_hash_stays_inside_the_persisted_cursor_domain() {
     );
 }
 
-/// The offload helper must hand the worker's run queue to another thread:
-/// with a single-worker multi-thread runtime, a task spawned *from inside*
-/// the blocking section can only run if `block_in_place` released the
-/// worker. Running the section inline would deadlock this test until the
-/// receive timeout fails it.
+fn busy_transcript_section() -> (u64, std::thread::ThreadId) {
+    let work_thread = std::thread::current().id();
+    let start = std::time::Instant::now();
+    let mut acc = 0u64;
+    while start.elapsed() < std::time::Duration::from_millis(200) {
+        acc = acc.wrapping_add(1);
+        std::hint::black_box(acc);
+    }
+    (acc, work_thread)
+}
+
+async fn ping_spawned_request_runtime(
+    started: tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+) -> (
+    std::time::Duration,
+    Vec<std::time::Duration>,
+    std::thread::ThreadId,
+) {
+    let worker = started.await.expect("busy section must start");
+    let first_poll_start = std::time::Instant::now();
+    let first_poll = tokio::spawn(async move { first_poll_start.elapsed() })
+        .await
+        .expect("join first request poll");
+    let mut latencies = Vec::with_capacity(40);
+    for _ in 0..40 {
+        let ping = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        latencies.push(ping.elapsed());
+    }
+    (first_poll, latencies, worker)
+}
+
+fn print_section_scorecard(
+    label: &str,
+    first_poll: std::time::Duration,
+    mut latencies: Vec<std::time::Duration>,
+    ingest_elapsed: std::time::Duration,
+) {
+    latencies.sort();
+    let p50 = latencies[latencies.len() / 2];
+    let p95 = latencies[(latencies.len() * 95) / 100];
+    eprintln!(
+        "blocking-section scorecard ({label}): first-poll={first_poll:?} request p50={p50:?} p95={p95:?} ingest={ingest_elapsed:?}"
+    );
+}
+
+/// Same-host scorecard: request-runtime ping latency while a CPU-heavy
+/// historical ingest section runs with the old `block_in_place` placement
+/// and with `spawn_blocking`. Pings are spawned tasks so they compete for
+/// the only worker the way daemon requests do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn blocking_section_request_latency_scorecard() {
+    let (before_started_tx, before_started_rx) = tokio::sync::oneshot::channel();
+    let before_ingest = tokio::spawn(async move {
+        let worker = std::thread::current().id();
+        let wall = std::time::Instant::now();
+        tokio::task::block_in_place(move || {
+            let _ = before_started_tx.send(worker);
+            let (work, work_thread) = busy_transcript_section();
+            (wall.elapsed(), work, work_thread)
+        })
+    });
+    let before_pings = tokio::spawn(ping_spawned_request_runtime(before_started_rx));
+    let (before_first_poll, before_latencies, before_worker) =
+        before_pings.await.expect("join before pings");
+    let (before_ingest, before_work, before_thread) =
+        before_ingest.await.expect("join legacy section");
+    assert!(before_work > 0, "legacy section must perform work");
+    assert_eq!(
+        before_thread, before_worker,
+        "block_in_place must keep CPU on the Tokio worker"
+    );
+    print_section_scorecard(
+        "before block_in_place",
+        before_first_poll,
+        before_latencies,
+        before_ingest,
+    );
+
+    let (after_started_tx, after_started_rx) = tokio::sync::oneshot::channel();
+    let after_ingest = tokio::spawn(async move {
+        let worker = std::thread::current().id();
+        let wall = std::time::Instant::now();
+        run_blocking_transcript_section(move || {
+            let _ = after_started_tx.send(worker);
+            let (work, work_thread) = busy_transcript_section();
+            (wall.elapsed(), work, work_thread)
+        })
+        .await
+    });
+    let after_pings = tokio::spawn(ping_spawned_request_runtime(after_started_rx));
+    let (after_first_poll, after_latencies, after_worker) =
+        after_pings.await.expect("join after pings");
+    let (after_ingest, after_work, after_thread) =
+        after_ingest.await.expect("join ingest section");
+    assert!(after_work > 0, "ingest section must perform work");
+    assert_ne!(
+        after_thread, after_worker,
+        "historical ingest CPU must leave the Tokio worker thread"
+    );
+    print_section_scorecard(
+        "after spawn_blocking",
+        after_first_poll,
+        after_latencies,
+        after_ingest,
+    );
+}
+
+/// The offload helper must run the section on the blocking pool: with a
+/// single-worker multi-thread runtime, a task spawned *from inside* the
+/// section can only run if the worker is free. Running the section inline
+/// would deadlock this test until the receive timeout fails it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn blocking_transcript_section_yields_the_worker_queue() {
     let handle = tokio::runtime::Handle::current();
-    let value = tokio::spawn(async move {
+    let worker = std::thread::current().id();
+    let (value, work_thread) = tokio::spawn(async move {
         let (sender, receiver) = std::sync::mpsc::channel();
         run_blocking_transcript_section(move || {
+            let work_thread = std::thread::current().id();
             handle.spawn(async move {
                 let _ = sender.send(());
             });
             receiver
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .map(|()| 7)
+                .map(|()| (7, work_thread))
                 .expect("a task spawned during the blocking section must run")
         })
+        .await
     })
     .await
     .expect("join blocking section");
     assert_eq!(value, 7);
+    assert_ne!(
+        work_thread, worker,
+        "transcript sections must not execute on a Tokio worker"
+    );
 }
 
-/// On a current-thread runtime `block_in_place` would panic, so the helper
-/// must run the section inline and still return its value.
+/// Current-thread runtimes have no `block_in_place`, so the helper must
+/// still return its value through the blocking pool.
 #[tokio::test]
-async fn blocking_transcript_section_runs_inline_on_current_thread() {
-    assert_eq!(run_blocking_transcript_section(|| 11), 11);
+async fn blocking_transcript_section_runs_on_current_thread_runtime() {
+    assert_eq!(run_blocking_transcript_section(|| 11).await, 11);
 }

@@ -86,6 +86,7 @@ fn cursor_observation_context(
 }
 
 /// A Cursor hook event scoped to one transcript file.
+#[derive(Clone)]
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
@@ -228,13 +229,17 @@ fn admit_cursor_jsonl_observations<'a>(
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
         let subagent_model = {
-            let _span =
-                tracing::trace_span!("sessions.hosts.cursor.dispatch_model_blocking").entered();
-            run_blocking_transcript_section(|| {
-                subagent.as_ref().and_then(|(_, agent_id)| {
-                    parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
-                })
+            run_blocking_transcript_section({
+                let path = path.to_path_buf();
+                let parent_session_id = parent_session_id.to_string();
+                let agent_id = subagent.as_ref().map(|(_, agent_id)| agent_id.clone());
+                move || {
+                    agent_id.as_ref().and_then(|agent_id| {
+                        parent_dispatch_model_for_subagent(&path, &parent_session_id, agent_id)
+                    })
+                }
             })
+            .await
         };
         let progress = admit_jsonl_observations(
             request,
@@ -466,8 +471,12 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         None => IngestByteBudget::unbounded(),
     };
     let paths = {
-        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
-        run_blocking_transcript_section(|| source.transcript_paths(&project_root))
+        run_blocking_transcript_section({
+            let source = source.clone();
+            let project_root = project_root.clone();
+            move || source.transcript_paths(&project_root)
+        })
+        .await
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
@@ -615,8 +624,11 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         None => IngestByteBudget::unbounded(),
     };
     let paths = {
-        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
-        run_blocking_transcript_section(|| source.transcript_paths(&placeholder))
+        run_blocking_transcript_section({
+            let source = source.clone();
+            move || source.transcript_paths(&placeholder)
+        })
+        .await
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
@@ -738,8 +750,13 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         .map_err(|outcome| host_admission_error("cursor", outcome))?
         .unwrap_or_default();
     let page = {
-        let _span = tracing::trace_span!("sessions.hosts.cursor.discover_blocking").entered();
-        run_blocking_transcript_section(|| source.sweep_page(project_root, frontier.byte_offset))
+        run_blocking_transcript_section({
+            let source = source.clone();
+            let project_root = project_root.to_path_buf();
+            let byte_offset = frontier.byte_offset;
+            move || source.sweep_page(&project_root, byte_offset)
+        })
+        .await
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     let mut unfinished = None;
@@ -899,6 +916,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// `parse_cursor_jsonl` parser and (path-keyed) `parse_offsets` cursors as
 /// the hook path, files either path has already ingested are byte-offset
 /// no-ops for the other, so sweep and hooks never double-ingest.
+#[derive(Clone)]
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
     /// Session ids already owned by the richer composer store

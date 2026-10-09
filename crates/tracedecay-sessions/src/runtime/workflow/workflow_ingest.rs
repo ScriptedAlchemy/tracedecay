@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
@@ -91,7 +92,7 @@ async fn ingest_workflow_runs_with_sink_and_discover<S, D>(
 ) -> WorkflowIngestStats
 where
     S: WorkflowIngestSink,
-    D: FnOnce(&Path) -> Vec<DiscoveredRun>,
+    D: FnOnce(&Path) -> Vec<DiscoveredRun> + Send + 'static,
 {
     if !sink.matches_project_sessions_authority(project_id) {
         tracing::warn!(
@@ -109,24 +110,27 @@ where
     let mut max_mtime = watermark;
 
     let (project_matcher, discovered) = {
-        let _span = tracing::trace_span!("sessions.workflow_ingest.discover_blocking").entered();
-        run_blocking_transcript_section(|| {
+        let project_root = project_root.to_path_buf();
+        let projects_dir = projects_dir.to_path_buf();
+        run_blocking_transcript_section(move || {
             // Resolve the fixed project-side git identity once; every
             // in-window run's membership test reuses it instead of
             // re-resolving the same project root.
             (
-                ProjectRootMatcher::new(project_root),
-                discover(projects_dir),
+                ProjectRootMatcher::new(&project_root),
+                discover(&projects_dir),
             )
         })
+        .await
     };
+    let project_matcher = Arc::new(project_matcher);
     for run in discovered {
         let prepared = {
-            let _span =
-                tracing::trace_span!("sessions.workflow_ingest.prepare_run_blocking").entered();
-            run_blocking_transcript_section(|| {
+            let project_matcher = Arc::clone(&project_matcher);
+            run_blocking_transcript_section(move || {
                 prepare_discovered_run(run, &project_matcher, watermark)
             })
+            .await
         };
         let Some(prepared) = prepared else {
             continue;

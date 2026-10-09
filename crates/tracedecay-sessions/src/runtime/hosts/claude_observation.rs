@@ -625,8 +625,11 @@ where
         return Err(ObservationApplicationError::Cancelled.into());
     }
     let identity = {
-        let _span = tracing::trace_span!("sessions.hosts.claude.identify_blocking").entered();
-        run_blocking_transcript_section(|| identify_claude_source(path))
+        run_blocking_transcript_section({
+            let path = path.to_path_buf();
+            move || identify_claude_source(&path)
+        })
+        .await
     }
     .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
         provider: "claude",
@@ -652,16 +655,20 @@ where
     let mut prefix_recovery = JsonlPrefixRecovery::Report;
     let scan = loop {
         let scan = {
-            let _span = tracing::trace_span!("sessions.hosts.claude.scan_blocking").entered();
-            run_blocking_transcript_section(|| {
-                try_scan_claude_source_frames_with_resume(
-                    identity.clone(),
-                    previous,
-                    max_new_bytes,
-                    resume_state,
-                    prefix_recovery.clone(),
-                )
+            run_blocking_transcript_section({
+                let identity = identity.clone();
+                let prefix_recovery = prefix_recovery.clone();
+                move || {
+                    try_scan_claude_source_frames_with_resume(
+                        identity,
+                        previous,
+                        max_new_bytes,
+                        resume_state,
+                        prefix_recovery,
+                    )
+                }
             })
+            .await
         }?;
         // Only `Report` stops at a diverged prefix, and the retry supplies
         // checkpoints, so this runs at most twice.
@@ -708,14 +715,18 @@ where
             end_offset: covered_through,
         };
     }
-    let retained = {
-        let _span = tracing::trace_span!("sessions.hosts.claude.scope_blocking").entered();
-        run_blocking_transcript_section(|| {
-            context
-                .source_adapter
-                .retain_scoped_frames(&mut scan, context.project_root)
+    let (scan, retained) = {
+        run_blocking_transcript_section({
+            let source_adapter = context.source_adapter.clone();
+            let project_root = context.project_root.to_path_buf();
+            move || {
+                let retained = source_adapter.retain_scoped_frames(&mut scan, &project_root);
+                (scan, retained)
+            }
         })
+        .await
     };
+    let mut scan = scan;
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(
@@ -1269,10 +1280,11 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     source: &ClaudeSource,
 ) -> Result<(Vec<PathBuf>, usize, bool), ClaudeObservationIngestError> {
     let discovery = {
-        let _span = tracing::trace_span!("sessions.hosts.claude.discover_blocking").entered();
-        run_blocking_transcript_section(|| {
-            source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        run_blocking_transcript_section({
+            let source = source.clone();
+            move || source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
+        .await
     };
     let discovery_truncated = discovery.is_truncated();
     let mut paths = discovery.paths;

@@ -216,7 +216,6 @@ impl PiSource {
         convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(PiDiscoveryReport, HostScanBudget)> {
         {
-            let _span = tracing::trace_span!("sessions.hosts.pi.discover").entered();
             {
                 let mut discovery = PiDiscoveryReport {
                     files: bound_path_list(Vec::new(), bounds),
@@ -612,7 +611,7 @@ pub async fn capture_pi_observations(
                     break;
                 }
                 processed_sequence = Some(sequence);
-                let pending = match PendingTranscript::observe(convergence, &path) {
+                let pending = match PendingTranscript::observe(convergence, &path).await {
                     Ok(Some(pending)) => pending,
                     Ok(None) => continue,
                     Err(error) => {
@@ -700,7 +699,12 @@ pub async fn capture_pi_session(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<PiCaptureOutcome> {
-    let files = run_blocking_transcript_section(|| source.session_files(cwd, session_id))?;
+    let files = {
+        let source = source.clone();
+        let cwd = cwd.to_path_buf();
+        let session_id = session_id.to_string();
+        run_blocking_transcript_section(move || source.session_files(&cwd, &session_id)).await
+    }?;
     let matcher = source.matcher(project_root);
     let mut outcome = PiCaptureOutcome::default();
     for path in files {
@@ -738,7 +742,10 @@ async fn admit_scheduled_file(
     cancellation: &ObservationCancellation,
     outcome: &mut PiCaptureOutcome,
 ) -> TranscriptIngestResult<Option<JsonlObservationAdmissionProgress>> {
-    let header = match run_blocking_transcript_section(|| read_session_header(path)) {
+    let header = match {
+        let path = path.to_path_buf();
+        run_blocking_transcript_section(move || read_session_header(&path)).await
+    } {
         Ok(HeaderRead::Header(header)) => header,
         Ok(HeaderRead::Incomplete) => {
             outcome.deferred = true;
@@ -797,7 +804,12 @@ async fn admit_session_file(
         protect_sensitive_structural_id(&header.session_id).map_err(|_| invalid_frame())?;
     let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
     let file_identity =
-        run_blocking_transcript_section(|| jsonl_file_identity(path)).map_err(|source| {
+        run_blocking_transcript_section({
+            let path = path.to_path_buf();
+            move || jsonl_file_identity(&path)
+        })
+        .await
+        .map_err(|source| {
             TranscriptIngestError::ScanIo {
                 operation: "read Pi session identity",
                 path: path.to_path_buf(),

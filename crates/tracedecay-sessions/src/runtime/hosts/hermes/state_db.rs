@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
@@ -390,8 +391,11 @@ async fn open_state_source(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let (generation, file_identity, resume_fingerprint) = {
-        let _span = tracing::trace_span!("sessions.hosts.hermes.incarnation_blocking").entered();
-        run_blocking_transcript_section(|| sqlite_incarnation(state_db))
+        run_blocking_transcript_section({
+            let state_db = state_db.to_path_buf();
+            move || sqlite_incarnation(&state_db)
+        })
+        .await
     }?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
@@ -428,8 +432,8 @@ async fn ingest_bounded_pages<F, R>(
     cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String>
 where
-    F: FnMut(&[HermesRow]) -> R,
-    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+    F: FnMut(&[HermesRow]) -> R + Send + 'static,
+    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata> + Send + 'static,
 {
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
@@ -450,14 +454,19 @@ where
         if bounded_count == 0 {
             return Ok(stats);
         }
-        let bounded = &new.items[..bounded_count];
-        let route = {
-            let _span = tracing::trace_span!("sessions.hosts.hermes.route_page_blocking").entered();
-            run_blocking_transcript_section(|| route_page(bounded))
+        let mut items = new.items;
+        let bounded = items.drain(..bounded_count).collect::<Vec<_>>();
+        let (route, bounded, next_route_page) = {
+            run_blocking_transcript_section(move || {
+                let route = route_page(&bounded);
+                (route, bounded, route_page)
+            })
+            .await
         };
+        route_page = next_route_page;
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
-            bounded,
+            &bounded,
             scope.clone(),
             generation,
             file_identity,
@@ -502,6 +511,8 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scope = ObservationScopeV1::Project { project_id };
+    let project_root = project_root.to_path_buf();
+    let source = source.clone();
     ingest_bounded_pages(
         admission,
         &conn,
@@ -511,12 +522,18 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
         file_identity,
         resume_fingerprint,
         budget,
-        |bounded| {
-            let locations = turn_project_locations(bounded, project_root);
-            move |row: &HermesRow| {
-                locations.get(&row.id).copied().map(|provenance| {
-                    project_projection_metadata(row, source, project_root, provenance)
-                })
+        {
+            let project_root = project_root.clone();
+            let source = source.clone();
+            move |bounded| {
+                let locations = turn_project_locations(bounded, &project_root);
+                let project_root = project_root.clone();
+                let source = source.clone();
+                move |row: &HermesRow| {
+                    locations.get(&row.id).copied().map(|provenance| {
+                        project_projection_metadata(row, &source, &project_root, provenance)
+                    })
+                }
             }
         },
         cancellation,
@@ -541,15 +558,21 @@ pub(super) async fn try_ingest_state_db_for_projects(
         })
         .collect::<Vec<_>>();
     let destination_matchers = {
-        let _span =
-            tracing::trace_span!("sessions.hosts.hermes.destination_matchers_blocking").entered();
-        run_blocking_transcript_section(|| {
-            destinations
-                .par_iter()
-                .map(|destination| ProjectRootMatcher::new(destination.project_root))
-                .collect::<Vec<_>>()
+        run_blocking_transcript_section({
+            let roots = destinations
+                .iter()
+                .map(|destination| destination.project_root.to_path_buf())
+                .collect::<Vec<_>>();
+            move || {
+                roots
+                    .par_iter()
+                    .map(|root| ProjectRootMatcher::new(root))
+                    .collect::<Vec<_>>()
+            }
         })
+        .await
     };
+    let destination_matchers = Arc::new(destination_matchers);
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
@@ -566,19 +589,21 @@ pub(super) async fn try_ingest_state_db_for_projects(
         if bounded_count == 0 {
             return Ok(stats);
         }
-        let bounded = &new.items[..bounded_count];
+        let mut items = new.items;
+        let bounded = items.drain(..bounded_count).collect::<Vec<_>>();
         // Per-page route cache: avoid unbounded growth across many SQLite pages.
-        let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-        let locations = {
-            let _span =
-                tracing::trace_span!("sessions.hosts.hermes.destination_routes_blocking").entered();
-            run_blocking_transcript_section(|| {
+        let (locations, bounded) = {
+            let destination_matchers = Arc::clone(&destination_matchers);
+            run_blocking_transcript_section(move || {
+                let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
                 turn_project_locations_for_destinations(
-                    bounded,
+                    &bounded,
                     &destination_matchers,
                     &mut destination_routes,
                 )
+                .map(|locations| (locations, bounded))
             })
+            .await
         }
         .map_err(|_| {
             format!(
@@ -589,7 +614,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
         for (index, destination) in destinations.iter().enumerate() {
             let admitted = admit_rows_with_admission(
                 destination.admission,
-                bounded,
+                &bounded,
                 scopes[index].clone(),
                 generation,
                 file_identity,
@@ -654,8 +679,10 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         file_identity,
         resume_fingerprint,
         budget,
-        |bounded| {
-            let locations = user_turn_locations(bounded, source);
+        {
+            let source = source.clone();
+            move |bounded| {
+            let locations = user_turn_locations(bounded, &source);
             let profile = source.profile.clone();
             let transcript_path = source.state_db.to_string_lossy().into_owned();
             let fallback_provenance = "session_cwd";
@@ -669,6 +696,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
                         location_provenance: Some(fallback_provenance),
                         transcript_path: Some(transcript_path.clone()),
                     })
+            }
             }
         },
         cancellation,

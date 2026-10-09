@@ -235,14 +235,20 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 Err(error) => Err(error),
             },
-            None => run_blocking_transcript_section(|| {
-                source
-                    .discover_transcript_paths_with_frontier(
-                        TranscriptDiscoveryBounds::default_walk(),
-                        frontier,
-                    )
-                    .map(Arc::new)
-            }),
+            None => {
+                run_blocking_transcript_section({
+                    let source = source.clone();
+                    move || {
+                        source
+                            .discover_transcript_paths_with_frontier(
+                                TranscriptDiscoveryBounds::default_walk(),
+                                frontier,
+                            )
+                            .map(Arc::new)
+                    }
+                })
+                .await
+            }
         };
         let pass = match discovered {
             Ok(pass) => pass,
@@ -287,15 +293,22 @@ impl<'a> ProjectProviderRun<'a> {
                 break;
             }
             let Some(pending) =
-                codex::PendingTranscript::observe(self.codex_discovery, path).transpose()
+                codex::PendingTranscript::observe(self.codex_discovery, path)
+                    .await
+                    .transpose()
             else {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day))
-                && run_blocking_transcript_section(|| {
-                    codex::codex_rollout_project_membership(path, self.project_root)
-                        == Some(ProjectMembership::NoMatch)
+                && run_blocking_transcript_section({
+                    let path = path.clone();
+                    let project_root = self.project_root.to_path_buf();
+                    move || {
+                        codex::codex_rollout_project_membership(&path, &project_root)
+                            == Some(ProjectMembership::NoMatch)
+                    }
                 })
+                .await
             {
                 deferred = true;
                 frontier_committable = false;

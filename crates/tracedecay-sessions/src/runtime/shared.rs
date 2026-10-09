@@ -529,6 +529,7 @@ impl ProjectRootMatcherCache {
 /// Resolving the fixed root side once is the point: the equivalent per-record
 /// [`path_belongs_to_project`] call re-resolves the same unchanging root for
 /// every record.
+#[derive(Clone)]
 pub enum TranscriptScopeMatcher {
     Project(Arc<ProjectRootMatcher>),
     Profile(Vec<Arc<ProjectRootMatcher>>),

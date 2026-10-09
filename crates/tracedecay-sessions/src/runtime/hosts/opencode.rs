@@ -384,11 +384,14 @@ pub(crate) async fn capture_opencode_observations(
                         materialized.input_bytes,
                         &scope,
                         cancellation,
-                        || {
-                            Ok(Some(vec![SnapshotAdmissionBatch::new(
-                                database.generation,
-                                materialized.records,
-                            )]))
+                        {
+                            let generation = database.generation;
+                            move || {
+                                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                                    generation,
+                                    materialized.records,
+                                )]))
+                            }
                         },
                     )
                     .await?;

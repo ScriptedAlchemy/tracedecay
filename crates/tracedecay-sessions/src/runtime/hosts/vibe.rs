@@ -47,6 +47,7 @@ const MAX_SCAN_DEPTH: u8 = 4;
 /// Bound global history enumeration so one large Vibe profile cannot stall ingest.
 const MAX_SESSION_FILES: usize = 512;
 
+#[derive(Clone)]
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
@@ -171,12 +172,12 @@ enum ScopedMeta {
 
 /// The session this pass must admit, or `None` when its transcript already
 /// converged, lies outside the scope, or cannot be scoped yet.
-fn pending_session<'a>(
+fn pending_session(
     source: &VibeSource,
     path: &Path,
     project_root: &Path,
-    convergence: Option<(&'a CodexDiscoveryHub, &'a str)>,
-) -> TranscriptIngestResult<Option<(PendingTranscript<'a>, VibeMeta)>> {
+    convergence: Option<(&CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestResult<Option<(PendingTranscript, VibeMeta)>> {
     let Some(pending) = PendingTranscript::observe_blocking(convergence, path)? else {
         return Ok(None);
     };
@@ -198,13 +199,15 @@ pub async fn capture_vibe_observations(
     convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
     let discovery = {
-        let _span = tracing::trace_span!("sessions.hosts.vibe.discover_blocking").entered();
-        run_blocking_transcript_section(|| {
+        let source = source.clone();
+        let project_root = project_root.to_path_buf();
+        run_blocking_transcript_section(move || {
             source.discover_transcript_paths(
-                project_root,
+                &project_root,
                 TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
             )
         })
+        .await
     };
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
@@ -221,10 +224,21 @@ pub async fn capture_vibe_observations(
             break;
         }
         let Some((pending, meta)) = {
-            let _span = tracing::trace_span!("sessions.hosts.vibe.meta_blocking").entered();
-            run_blocking_transcript_section(|| {
-                pending_session(source, &path, project_root, convergence)
+            let source = source.clone();
+            let project_root = project_root.to_path_buf();
+            let session_path = path.clone();
+            let convergence = convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
+            run_blocking_transcript_section(move || {
+                pending_session(
+                    &source,
+                    &session_path,
+                    &project_root,
+                    convergence
+                        .as_ref()
+                        .map(|(hub, consumer)| (hub, consumer.as_str())),
+                )
             })
+            .await
         }?
         else {
             continue;

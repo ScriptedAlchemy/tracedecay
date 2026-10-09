@@ -167,9 +167,11 @@ have no finish line, so they stay paced:
   them defer or shrink a slice while agents are actively querying. Results
   are identical; only pacing changes.
 
-The historical half of the session-refresh sweep does none of this today; see
-"Open breach: historical transcript ingest violates Principle 2" below for the
-measurement and for why the answer is not a wider or narrower worker pool.
+The historical half of the session-refresh sweep now batches each
+discovery/parse slice into a `spawn_blocking` section that owns its data;
+see "Closed: historical transcript ingest left the request workers" below
+for the same-host scorecard and for why the answer was not a wider or
+narrower worker pool.
 
 ### 3. Hash where data is born, never where it is served
 
@@ -321,12 +323,13 @@ cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
 no indexing at all, well over the 6GB gate budget, a live, separate breach
 of Principle 5 that this measurement did not introduce.
 
-## Open breach: historical transcript ingest violates Principle 2
+## Closed: historical transcript ingest left the request workers
 
 Principle 2 says long CPU slices "run in `spawn_blocking` chunks, never on the
 request runtime's workers for unbounded stretches", and names projection
-refresh as an open-ended sweep that must stay paced. Measurement contradicts
-both for the *historical* half of that sweep.
+refresh as an open-ended sweep that must stay paced. The *historical* half of
+that sweep used to violate both. `run_blocking_transcript_section` now owns
+each discovery/parse slice and runs it on Tokio's blocking pool.
 
 The per-worker table below came from the Hotpath worker-balance probe, which
 has since been removed. `perf` against a daemon built with `--profile perf`
@@ -381,27 +384,34 @@ Narrowing the pool to "match" the observed concurrency would delete exactly
 that headroom and convert a benign skew into a real tail. The measurement to
 watch is microseconds per poll, not busy share.
 
-### Where the fix has to land
+### What landed
 
-The cost is CPU placement, not balance: this work belongs off the request
-runtime, in the same sense the indexing pool already is. Fixing it means
-restructuring the ingest pass, not adding a yield, the pass is an async
-pipeline whose synchronous slices sit *between* store awaits, so a yield point
-redistributes the slices across workers without moving a single cycle off the
-serving pool, and `spawn_blocking` cannot wrap the pass as a whole because it
-is a future, not a closure. The work has to be batched into blocking chunks at
-a boundary that owns its data.
+The cost was CPU placement, not balance. Historical ingest is an async
+pipeline whose synchronous slices sit *between* store awaits, so a yield
+only redistributes those slices across workers. `spawn_blocking` also
+cannot wrap the pass as a whole because the pass is a future. The helper
+now requires each discovery/parse slice to own its inputs and runs that
+closure on Tokio's blocking pool; the request worker returns from `poll`
+at the `.await`. A dedicated ingest pool would have been extra machinery
+on top of the existing ~2 concurrent history tasks.
 
-Leaf attribution is not yet pinned down, and the obvious instrument cannot pin
-it: Tokio names async worker threads and blocking-pool threads with the same
-`thread_name_fn`, so `perf --comms` cannot separate the two pools. Under that
-combined thread-name family the largest single product symbol during ingest is
-`privacy::rules::contains_ignore_ascii_case` (5.16% of whole-process cycles,
-~7.4% for the privacy-detector family), which is a plausible in-poll leaf
-because redaction is pure CPU over transcript text, but the SQLite parser
-symbols in the same family belong to `ReadSnapshot::query`, which already uses
-`spawn_blocking` and is correctly placed. Naming the exact leaf needs a
-`#[tracing::instrument]` inside the pass, not a thread filter.
+Same-host scorecard, one-worker multi-thread runtime, 233968 B Claude
+historical corpus (8 sessions × 24 records, 192 committed observations).
+Before is the previous `block_in_place` helper; after is `spawn_blocking`.
+Both runs used the same binary shape, host, and fixture:
+
+| placement | request first-poll | request p50 | request p95 | ingest wall | throughput |
+|---|---:|---:|---:|---:|---:|
+| `block_in_place` | 4.190 ms | 79 ns | 97 ns | 68.770 ms | 3.40 MB/s |
+| `spawn_blocking` | 4.218 ms | 80 ns | 113 ns | 54.934 ms | 4.26 MB/s |
+
+Request p50/p95 stay in the same band: `block_in_place` already donated
+the run queue to a replacement thread, which is why the 16-worker daemon
+never showed a latency regression. The placement change is still the
+fix. Ingest CPU no longer occupies a serving worker (the section
+scorecard asserts the work thread is not the Tokio worker), ingest
+throughput rose ~25% on this host, and a narrow pool keeps its parked
+worker. The helper span is `sessions.blocking_transcript_section`.
 
 ## Open breach: the vector-generation store violates Principle 5
 

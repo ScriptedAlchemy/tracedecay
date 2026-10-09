@@ -961,3 +961,97 @@ async fn edited_middle_record_rescans_only_the_claude_bytes_after_the_edit() {
         .unwrap();
     assert_eq!(cursor.byte_offset(), 40 * line_bytes);
 }
+
+/// Same-host scorecard for historical Claude ingest: daemon-like request
+/// latency on a one-worker runtime plus ingest throughput.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn historical_ingest_request_latency_scorecard() {
+    const SESSIONS: usize = 8;
+    const RECORDS: usize = 24;
+    let payload = "privacy-scan ".repeat(80);
+    let fixture_home = Fixture::new("scorecard-base");
+    for session in 0..SESSIONS {
+        let session_id = format!("scorecard-session-{session:02}");
+        let path = fixture_home
+            .home
+            .join(".claude/projects/project-scope")
+            .join(format!("{session_id}.jsonl"));
+        let mut body = String::new();
+        for record in 0..RECORDS {
+            let line = json!({
+                "type": "user",
+                "sessionId": session_id,
+                "uuid": format!("scorecard-{session:02}-{record:02}"),
+                "timestamp": "2026-07-15T00:00:00Z",
+                "cwd": fixture_home.temp.path(),
+                "message": {
+                    "role": "user",
+                    "content": format!("{payload} {session} {record}"),
+                }
+            });
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        fs::write(&path, body).expect("write historical scorecard transcript");
+    }
+    let corpus_bytes = fs::read_dir(fixture_home.transcript.parent().expect("project scope"))
+        .expect("list transcripts")
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| fs::metadata(entry.path()).ok())
+        .map(|meta| meta.len())
+        .sum::<u64>();
+
+    let ingest = tokio::spawn({
+        let home = fixture_home.home.clone();
+        let profile = fixture_home.profile.clone();
+        let admission = fixture_home.admission.clone();
+        async move {
+            let source = ClaudeSource::with_home(&home).for_user_scope(None, Vec::new());
+            let started = std::time::Instant::now();
+            let stats = ingest_source_with_observations_with_admission(
+                &source,
+                &profile,
+                ObservationScopeV1::Profile,
+                &admission,
+                None,
+                ObservationCancellation::default(),
+            )
+            .await
+            .expect("historical ingest");
+            (started.elapsed(), stats)
+        }
+    });
+    tokio::task::yield_now().await;
+    let first_poll_start = std::time::Instant::now();
+    let pings = tokio::spawn({
+        let admission = fixture_home.admission.clone();
+        let ping_source = observation_source(&fixture_home.transcript);
+        async move {
+            let first_poll = first_poll_start.elapsed();
+            let mut latencies = Vec::with_capacity(48);
+            for _ in 0..48 {
+                let started = std::time::Instant::now();
+                let _ = admission
+                    .get_source_cursor(&ping_source, &ObservationScopeV1::Profile)
+                    .await
+                    .expect("daemon-like cursor read");
+                latencies.push(started.elapsed());
+            }
+            (first_poll, latencies)
+        }
+    });
+    let (ingest_elapsed, stats) = ingest.await.expect("join historical ingest");
+    let (first_poll, mut latencies) = pings.await.expect("join request pings");
+    latencies.sort();
+    let p50 = latencies[latencies.len() / 2];
+    let p95 = latencies[(latencies.len() * 95) / 100];
+    let bytes_per_sec = (corpus_bytes as f64) / ingest_elapsed.as_secs_f64();
+    eprintln!(
+        "historical-ingest scorecard: first-poll={first_poll:?} request p50={p50:?} p95={p95:?} ingest={ingest_elapsed:?} corpus={corpus_bytes}B throughput={bytes_per_sec:.0}B/s committed={}",
+        stats.observations_committed
+    );
+    assert!(
+        stats.observations_committed > 0,
+        "scorecard must ingest at least one observation"
+    );
+}
