@@ -16,11 +16,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
-    CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1, ObservationCoverageReason,
-    ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
-    ObservationWrite, RetrievalAnchorDispositionRecordV1, SESSION_MESSAGE_PROJECTOR_VERSION,
-    StorageRuntimeErrorV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor,
+    CANONICAL_BODIES_TABLE_SQL, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
+    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
+    ObservationReadResultV1, ObservationWrite, RetrievalAnchorDispositionRecordV1,
+    SESSION_MESSAGE_PROJECTOR_VERSION, StorageRuntimeErrorV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use crate::operation::StorageOperationError;
@@ -440,6 +440,9 @@ fn connection() -> Connection {
                     state TEXT NOT NULL
                  );",
         )
+        .unwrap();
+    connection
+        .execute_batch(CANONICAL_BODIES_TABLE_SQL)
         .unwrap();
     connection
 }

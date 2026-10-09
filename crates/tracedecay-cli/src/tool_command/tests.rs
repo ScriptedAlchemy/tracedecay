@@ -17,7 +17,7 @@ use tracedecay_tool_catalog::{
 };
 
 fn defs() -> Vec<ToolDefinition> {
-    get_tool_definitions().expect("tool definitions")
+    tracedecay_mcp::get_tool_definitions().expect("tool definitions")
 }
 
 fn def(name: &str) -> ToolDefinition {
@@ -25,6 +25,14 @@ fn def(name: &str) -> ToolDefinition {
         .into_iter()
         .find(|d| d.name == format!("tracedecay_{name}"))
         .unwrap()
+}
+
+#[test]
+fn search_flags_bind_query_from_the_one_tool_schema() {
+    let definition =
+        tracedecay_mcp::cli_tool_definition("tracedecay_search").expect("search CLI definition");
+    let parsed = parse_invocation(&definition, &["findable_symbol".to_string()]).unwrap();
+    assert_eq!(parsed.tool_args, json!({ "query": "findable_symbol" }));
 }
 
 #[test]

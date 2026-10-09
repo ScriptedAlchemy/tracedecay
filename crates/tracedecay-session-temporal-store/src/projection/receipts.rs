@@ -251,8 +251,12 @@ pub(super) async fn validate_canonical_assertion_completeness(
             .get::<String>(1)
             .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
         let observation: tracedecay_domain::DurableObservationV1 =
-            serde_json::from_str(&observation_json)
-                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            crate::query::decode_stored_observation(
+                conn,
+                &observation_json,
+                super::super::query::ACTIVATE_OPERATION,
+            )
+            .await?;
         let Ok(envelope) = observation_envelope_from_payload(observation.payload()) else {
             continue;
         };

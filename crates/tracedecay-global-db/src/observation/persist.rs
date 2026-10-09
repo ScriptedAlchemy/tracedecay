@@ -54,7 +54,8 @@ async fn read_observation_row(
     Ok(Some(
         ObservationCommitReceipt::new(
             sequence,
-            decode(&observation_json, operation)?,
+            super::canonical_bodies::decode_observation_json(conn, &observation_json, operation)
+                .await?,
             decode(&cursor_json, operation)?,
             decode(&anchor_json, operation)?,
             ProjectionGenerationId::new(projection_generation)

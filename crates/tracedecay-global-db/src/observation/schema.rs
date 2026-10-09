@@ -173,6 +173,12 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             capture_id TEXT PRIMARY KEY,
             capture_json TEXT NOT NULL CHECK(json_valid(capture_json))
         );
+        CREATE TABLE IF NOT EXISTS session_canonical_bodies (
+            content_hash TEXT PRIMARY KEY,
+            encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
+            body BLOB NOT NULL,
+            uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes >= 0)
+        );
         CREATE TRIGGER IF NOT EXISTS observation_retrieval_anchors_immutable_update
         BEFORE UPDATE ON observation_retrieval_anchors BEGIN
             SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
@@ -281,6 +287,7 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
+    super::canonical_bodies::compact_observation_bodies(conn).await?;
     Ok(None)
 }
 

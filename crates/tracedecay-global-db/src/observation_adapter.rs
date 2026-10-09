@@ -1445,11 +1445,15 @@ async fn read_stored_observations_from_snapshot(
                 .map_err(|error| runtime_storage_error(operation, error))?,
         )
         .map_err(|_| runtime_storage_error(operation, "negative observation sequence"))?;
-        let observation: DurableObservationV1 = decode_json(
-            row.get::<String>(2)
-                .map_err(|error| runtime_storage_error(operation, error))?,
+        let observation_json = row
+            .get::<String>(2)
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        let observation: DurableObservationV1 = crate::observation::decode_observation_json(
+            snapshot,
+            &observation_json,
             operation,
-        )?;
+        )
+        .await?;
         if observation.observation_id().as_str() != observation_id {
             return Err(runtime_storage_error(
                 operation,
