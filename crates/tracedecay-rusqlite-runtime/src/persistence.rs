@@ -25,11 +25,10 @@ impl<E> RuntimeWriterPersistence<E> {
         }
     }
 
-    /// Marks the ledger tables as already installed on this writer's
-    /// connection. The worker calls this after the one open-time install so
-    /// request-path lookups never parse `CREATE TABLE`.
-    pub(crate) fn mark_ledger_schema_ready(&mut self) {
-        self.ledger_schema_ready = true;
+    /// The first request may create the ledger inside its outer transaction.
+    /// A rollback must invalidate that observation before another request.
+    pub(crate) fn transaction_rolled_back(&mut self) {
+        self.ledger_schema_ready = false;
     }
 
     fn ensure_ledger_schema(

@@ -145,6 +145,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
             })),
         }));
         drop(transaction);
+        persistence.transaction_rolled_back();
         let lock_held = lock_held_from.elapsed();
         record_transaction(
             telemetry,
@@ -181,6 +182,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         .collect::<Vec<_>>();
     if authority_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        persistence.transaction_rolled_back();
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -206,6 +208,7 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         .collect::<Vec<_>>();
     if commit_denied.iter().any(|denied| *denied) {
         drop(transaction);
+        persistence.transaction_rolled_back();
         record_transaction(
             telemetry,
             WriterTransactionOutcome::RolledBack,
@@ -225,7 +228,10 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         transaction.commit()
     };
     let commit_failure = match match_result {
-        Err(error) => Some(driver_failure(error, "commit writer transaction")),
+        Err(error) => {
+            persistence.transaction_rolled_back();
+            Some(driver_failure(error, "commit writer transaction"))
+        }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
             Err(_) => {

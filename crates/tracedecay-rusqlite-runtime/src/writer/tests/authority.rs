@@ -135,11 +135,22 @@ fn fact_write_rechecks_authority_before_outer_commit_and_rolls_back() {
     let table_count: i64 = Connection::open(&database.0)
         .unwrap()
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(table_count, 0);
+    let retry = fact_request(
+        "operation.authority.precommit",
+        "key.authority.precommit",
+        'p',
+    );
+    let retry_probe = Arc::new(Probe::new(&retry, None));
+    assert!(matches!(
+        runtime.block_on(writer.submit(retry, retry_probe)).unwrap(),
+        RuntimeSubmitOutcomeV1::Committed { .. }
+    ));
+    assert_eq!(applied.load(Ordering::SeqCst), 2);
     writer.shutdown_and_join().unwrap();
 }
