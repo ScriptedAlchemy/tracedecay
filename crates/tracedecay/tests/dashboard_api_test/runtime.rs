@@ -392,6 +392,17 @@ impl DashboardTestRuntimeV1 {
         .await
     }
 
+    pub(crate) async fn materialize_session_temporal_refreshes_for_test(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<()> {
+        dashboard::observation_seed::materialize_session_temporal_refreshes_for_test(
+            self.project_database.as_ref(),
+            session_ids,
+        )
+        .await
+    }
+
     fn database(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
         match scope {
             HostAdmissionScope::Project => Ok(self.project_database.as_ref()),

@@ -1169,9 +1169,9 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 
 /// A provider that traps `SIGINT` and keeps running forces the full ladder:
 /// the graceful rung is delivered, ignored, and then escalated to a kill.
-/// The fake provider parks on a writerless FIFO instead of a sleep loop:
-/// the group `SIGINT` kills the blocked `cat`, the trap records the rung,
-/// and the loop parks again with no polling until the group kill lands.
+/// The shell parks in its own `read` builtin on a FIFO held open for both
+/// directions. No child can inherit a pending interrupt between fork and exec
+/// and leave the shell waiting without running its trap.
 /// This test spends the real `CANCELLATION_GRACE` window on purpose, a
 /// virtual clock would let the grace expire without proving the child
 /// actually survived it.
@@ -1188,7 +1188,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
         root,
         "stubborn-provider",
         &format!(
-            "#!/bin/sh\ntrap \"printf x >> {interrupted}\" INT\nmkfifo {blocker}\nprintf x > {started}\nwhile :; do cat {blocker}; done\n",
+            "#!/bin/sh\ntrap \"printf x >> {interrupted}\" INT\nmkfifo {blocker}\nexec 3<> {blocker}\nprintf x > {started}\nwhile :; do read -r line <&3; done\n",
             interrupted = interrupted_marker.display(),
             blocker = blocker.display(),
             started = started_marker.display(),
