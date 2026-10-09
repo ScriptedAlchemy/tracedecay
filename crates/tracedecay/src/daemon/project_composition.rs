@@ -1784,7 +1784,12 @@ impl ProjectOpenInputs<'_> {
         error: TraceDecayError,
     ) -> Result<()> {
         let failed_key = core.current_key.lock().await.clone();
-        let retain_core = !self.cancellation.is_cancelled() && failed_key == opened.key;
+        // A retiring store owner can settle after this attempt. Caching a
+        // degraded core would bypass composition on every later request and
+        // make its missing owners permanent instead of using admission retry.
+        let retain_core = !self.cancellation.is_cancelled()
+            && failed_key == opened.key
+            && !project_open_admission::is_observability_retiring(&error);
         let (core_retained, failed_full_server) = if retain_core {
             reclaim_core_after_failed_upgrade(
                 self.store_administration,

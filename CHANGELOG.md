@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.76](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.75...v1.0.0-beta.76) (2026-10-08)
+
+
+### Bug Fixes
+
+* **observability:** keep aborted coverage failed closed ([8c2d8fc](https://github.com/ScriptedAlchemy/tracedecay/commit/8c2d8fcc334bd87f244b84b4e32d760d1f19ad1c))
+* **observability:** keep terminal writes before maintenance ([af903db](https://github.com/ScriptedAlchemy/tracedecay/commit/af903db8e8bcec4a45970bda62683385b8c79906))
+* **observability:** recover joined owners on mount demand ([adfc517](https://github.com/ScriptedAlchemy/tracedecay/commit/adfc5175c53c6d97abfeadff867ec6845f483a93))
+* **observability:** retain durable terminal coverage proof ([b4d17d9](https://github.com/ScriptedAlchemy/tracedecay/commit/b4d17d9a4c9f06836a0fe32ac2848a57a1d96e3f))
+* **observability:** reuse final write settlement on shutdown ([75ae3c5](https://github.com/ScriptedAlchemy/tracedecay/commit/75ae3c502f8a4a8285f22a4c2506f07b21c40569))
+* **observability:** settle retired owners and batch writes ([97491c3](https://github.com/ScriptedAlchemy/tracedecay/commit/97491c3131c04094ac3bbb3248aaadc093624077))
+* **observability:** settle retired owners and batch writes ([1ff4b39](https://github.com/ScriptedAlchemy/tracedecay/commit/1ff4b393c84978a4cf90fa4ceb17ff321b038c1f))
+
 ## [1.0.0-beta.75](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.74...v1.0.0-beta.75) (2026-10-08)
 
 
