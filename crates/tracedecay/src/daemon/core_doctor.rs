@@ -448,7 +448,7 @@ async fn doctor_runtime_value_inner(
     // A retained registry handle only proves the schema contract held at
     // publication; it is not evidence that the invariant pass ran now.
     let (authority_ok, authority_reason, authority_detail) = match registry.as_ref() {
-        Some(registry) => match Box::pin(registry.read_snapshot()).await {
+        Some(registry) => match Box::pin(registry.health_read_snapshot()).await {
             Ok(snapshot) => {
                 match Box::pin(
                     tracedecay_global_db::schema_stages::validate_observation_authority_connection(

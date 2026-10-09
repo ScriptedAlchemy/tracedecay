@@ -3243,6 +3243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(doctor)* independent `tracedecay doctor` checks run concurrently, and
+  health reads use the reserved reader lane without waiting on DB locks.
+
 - *(admission)* `NotApplicable` is a terminal no-op in the shared replay-pass
   decision. A closed status that leaves the spool unchanged now stops until
   the next kick instead of entering the retryable backoff arm.

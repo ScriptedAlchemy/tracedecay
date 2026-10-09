@@ -808,6 +808,9 @@ pub struct DoctorCounters {
     /// installation is not converged until they are done.
     pub pending_actions: u32,
     pub checks: Vec<DoctorCheckV1>,
+    /// Section titles keyed by the check index they precede, so concurrent
+    /// collectors can replay human output in the original order.
+    pub sections: Vec<(usize, String)>,
     quiet: bool,
 }
 
@@ -844,7 +847,8 @@ impl DoctorCounters {
     pub fn is_quiet(&self) -> bool {
         self.quiet
     }
-    pub fn section(&self, title: &str) {
+    pub fn section(&mut self, title: &str) {
+        self.sections.push((self.checks.len(), title.to_owned()));
         if !self.quiet {
             eprintln!("\n\x1b[1m{title}\x1b[0m");
         }
@@ -867,6 +871,27 @@ impl DoctorCounters {
     }
     pub fn info(&mut self, msg: &str) {
         self.report(DoctorCheckLevelV1::Info, msg);
+    }
+    /// Replays another collector's sections and check lines onto this one.
+    pub fn replay_from(&mut self, src: Self) {
+        let mut sections = src.sections.into_iter().peekable();
+        for (index, check) in src.checks.into_iter().enumerate() {
+            while sections.peek().is_some_and(|(at, _)| *at == index) {
+                let (_, title) = sections.next().expect("peeked section");
+                self.section(&title);
+            }
+            match check.level {
+                DoctorCheckLevelV1::Pass => self.pass(&check.message),
+                DoctorCheckLevelV1::Issue => self.fail(&check.message),
+                DoctorCheckLevelV1::Warning => self.warn(&check.message),
+                DoctorCheckLevelV1::PendingOperatorAction => self.pending(&check.message),
+                DoctorCheckLevelV1::Skipped => self.skipped(&check.message),
+                DoctorCheckLevelV1::Info => self.info(&check.message),
+            }
+        }
+        for (_, title) in sections {
+            self.section(&title);
+        }
     }
     fn report(&mut self, level: DoctorCheckLevelV1, msg: &str) {
         let marker = match level {
