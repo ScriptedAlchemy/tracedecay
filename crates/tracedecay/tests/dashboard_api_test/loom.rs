@@ -603,42 +603,59 @@ fn default_message_timeline_reports_bounded_counts_for_large_history() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
         let session_count = 3_000_u64;
-        let mut session_ids = Vec::new();
+        let mut sessions = Vec::with_capacity(session_count as usize);
+        let mut message_ids = Vec::with_capacity(session_count as usize);
         for index in 0..session_count {
             let session =
                 large_history_session(&fixture.host_runtime, &fixture.project_root, index as usize);
+            message_ids.push(format!("{}-message", session.session_id));
+            sessions.push(session);
+        }
+        const BATCH_ITEMS: usize = 32;
+        for chunk in sessions.chunks(BATCH_ITEMS) {
             assert!(
                 fixture
                     .host_runtime
-                    .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                    .upsert_sessions_for_test(HostAdmissionScope::Project, chunk)
                     .await
                     .unwrap()
             );
-            fixture
-                .host_runtime
-                .seed_session_message_observation_for_test(
+        }
+        for (session_chunk, message_id_chunk) in sessions
+            .chunks(BATCH_ITEMS)
+            .zip(message_ids.chunks(BATCH_ITEMS))
+        {
+            let seeds = session_chunk
+                .iter()
+                .zip(message_id_chunk.iter())
+                .map(|(session, message_id)| {
                     tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
                         project_id: fixture.host_runtime.project_id().as_str(),
                         provider: "cursor",
                         session_id: &session.session_id,
-                        message_id: &format!("{}-message", session.session_id),
+                        message_id,
                         role: "user",
                         content: "A canonical timeline message.",
                         model: None,
                         timestamp: session.started_at.unwrap(),
                         ordinal: 1,
-                    },
-                )
+                    }
+                })
+                .collect::<Vec<_>>();
+            fixture
+                .host_runtime
+                .seed_session_message_observations_for_test(&seeds)
                 .await
                 .unwrap();
-            session_ids.push(session.session_id);
         }
+        let session_ids = sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>();
 
         fixture
             .host_runtime
-            .materialize_session_temporal_refreshes_for_test(
-                &session_ids.iter().map(String::as_str).collect::<Vec<_>>(),
-            )
+            .materialize_session_temporal_refreshes_for_test(&session_ids)
             .await
             .unwrap();
         let (status, timeline) = get_json(
@@ -725,19 +742,25 @@ fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        for index in 0..LARGE_HISTORY_SESSIONS {
-            let session =
-                large_history_session(&fixture.host_runtime, &fixture.project_root, index);
-            fixture
-                .host_runtime
-                .seed_session_messages_for_test(
-                    HostAdmissionScope::Project,
-                    &session,
-                    &large_history_messages(&session),
-                )
-                .await
-                .unwrap_or_else(|error| panic!("seed {}: {error}", session.session_id));
-        }
+        let histories = (0..LARGE_HISTORY_SESSIONS)
+            .map(|index| {
+                let session =
+                    large_history_session(&fixture.host_runtime, &fixture.project_root, index);
+                let messages = large_history_messages(&session);
+                (session, messages)
+            })
+            .collect::<Vec<_>>();
+        fixture
+            .host_runtime
+            .seed_session_histories_for_test(
+                HostAdmissionScope::Project,
+                &histories
+                    .iter()
+                    .map(|(session, messages)| (session, messages.as_slice()))
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("seed large history: {error}"));
 
         // The suite's standard HTTP client gives up after four seconds; the
         // first page must arrive inside that budget regardless of how much

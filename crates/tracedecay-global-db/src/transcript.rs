@@ -15,6 +15,17 @@ impl RegisteredGlobalDb {
         SessionStoreAccess::new(self).upsert_session(session).await
     }
 
+    #[tracing::instrument(
+        name = "global_db.transcript.upsert_sessions",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn upsert_sessions(&self, sessions: &[SessionRecord]) -> bool {
+        SessionStoreAccess::new(self)
+            .upsert_sessions(sessions)
+            .await
+    }
+
     #[tracing::instrument(name = "global_db.transcript.get_session", level = "trace", skip_all)]
     pub async fn get_session(
         &self,

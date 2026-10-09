@@ -751,7 +751,7 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
         // and the session-temporal refresh discovers sessions only from
         // output-producing observation effects.
         runtime
-            .seed_session_message_observation_for_test(
+            .seed_session_message_observations_for_test(&[
                 tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
                     project_id: runtime.project_id().as_str(),
                     provider: &message.provider,
@@ -770,7 +770,7 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
                         )
                     }),
                 },
-            )
+            ])
             .await
             .unwrap_or_else(|error| {
                 panic!(

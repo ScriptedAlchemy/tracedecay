@@ -27,6 +27,7 @@ use tracedecay_lcm::raw::{commit_staged_raw_message, stage_raw_message_with_payl
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -331,16 +332,16 @@ impl DashboardTestRuntimeV1 {
         &self.project_id
     }
 
-    /// Seeds one canonical message observation through the production
+    /// Seeds canonical message observations through the production
     /// observation-capture route; the temporal projection discovers sessions
     /// only from these effects, never from raw session-message upserts.
-    pub(crate) async fn seed_session_message_observation_for_test(
+    pub(crate) async fn seed_session_message_observations_for_test(
         &self,
-        seed: dashboard::observation_seed::DashboardSessionMessageSeedV1<'_>,
+        seeds: &[dashboard::observation_seed::DashboardSessionMessageSeedV1<'_>],
     ) -> Result<()> {
-        dashboard::observation_seed::seed_session_message_observation_for_test(
+        dashboard::observation_seed::seed_session_message_observations_for_test(
             self.project_database.as_ref(),
-            seed,
+            seeds,
         )
         .await
     }
@@ -483,6 +484,14 @@ impl DashboardTestRuntimeV1 {
         Ok(self.database(scope)?.upsert_session(session).await)
     }
 
+    pub(crate) async fn upsert_sessions_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        sessions: &[SessionRecord],
+    ) -> Result<bool> {
+        Ok(self.database(scope)?.upsert_sessions(sessions).await)
+    }
+
     /// Seeds one raw LCM message into its already-registered session.
     pub(crate) async fn upsert_session_message_for_test(
         &self,
@@ -517,12 +526,31 @@ impl DashboardTestRuntimeV1 {
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
     ) -> Result<Vec<i64>> {
+        self.seed_session_histories_for_test(scope, &[(session, messages)])
+            .await?;
+        self.raw_message_store_ids_for_test(scope, messages).await
+    }
+
+    /// Bounds both session and message writes independently, so one long
+    /// session cannot extend a fixture transaction without limit.
+    pub(crate) async fn seed_session_histories_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        histories: &[(&SessionRecord, &[SessionMessageRecord])],
+    ) -> Result<()> {
+        const BATCH_ITEMS: usize = 32;
         let database = self.database(scope)?;
-        if !database.upsert_session(session).await {
-            return Err(TraceDecayError::Database {
-                operation: "seed dashboard test session".to_owned(),
-                message: "registered session write failed".to_owned(),
-            });
+        for window in histories.chunks(BATCH_ITEMS) {
+            let sessions = window
+                .iter()
+                .map(|(session, _)| (*session).clone())
+                .collect::<Vec<_>>();
+            if !database.upsert_sessions(&sessions).await {
+                return Err(TraceDecayError::Database {
+                    operation: "seed dashboard test sessions".to_owned(),
+                    message: "registered session write failed".to_owned(),
+                });
+            }
         }
         let storage_root =
             database
@@ -532,8 +560,12 @@ impl DashboardTestRuntimeV1 {
                     operation: "seed dashboard test session message".to_owned(),
                     message: "registered session database has no storage root".to_owned(),
                 })?;
-        // Keep fixture write leases bounded like the host projection drain.
-        for chunk in messages.chunks(32) {
+        let mut messages = histories.iter().flat_map(|(_, messages)| messages.iter());
+        loop {
+            let chunk = messages.by_ref().take(BATCH_ITEMS).collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
             let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
             let staged = chunk
                 .iter()
@@ -546,7 +578,7 @@ impl DashboardTestRuntimeV1 {
                     message: error.to_string(),
                 })?;
             let transaction = database.begin_write_transaction().await?;
-            for (message, staged) in chunk.iter().zip(staged) {
+            for (message, staged) in chunk.into_iter().zip(staged) {
                 commit_staged_raw_message(&transaction, message, staged)
                     .await
                     .map_err(|error| TraceDecayError::Database {
@@ -563,10 +595,34 @@ impl DashboardTestRuntimeV1 {
                 })?;
             rollback.disarm();
         }
+        Ok(())
+    }
+
+    async fn raw_message_store_ids_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        messages: &[SessionMessageRecord],
+    ) -> Result<Vec<i64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let snapshot = self.database(scope)?.read_snapshot().await?;
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
-            let store_id = database
-                .lcm_raw_message_store_id(&message.provider, &message.message_id)
+            let mut rows = snapshot
+                .query(
+                    "SELECT store_id
+                     FROM lcm_raw_messages
+                     WHERE provider = ?1 AND message_id = ?2",
+                    params![message.provider.clone(), message.message_id.clone()],
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
+                })?;
+            let store_id = rows
+                .next()
                 .await
                 .map_err(|error| TraceDecayError::Database {
                     operation: "read dashboard test transcript store id".to_owned(),
@@ -578,6 +634,11 @@ impl DashboardTestRuntimeV1 {
                         "LCM raw message {}/{} is unavailable after insert",
                         message.provider, message.message_id
                     ),
+                })?
+                .get(0)
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read dashboard test transcript store id".to_owned(),
+                    message: error.to_string(),
                 })?;
             store_ids.push(store_id);
         }

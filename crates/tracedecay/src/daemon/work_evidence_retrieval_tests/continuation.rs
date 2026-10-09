@@ -56,19 +56,21 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
         (1, "first continuation page"),
         (2, "second continuation page"),
     ] {
-        crate::dashboard::observation_seed::seed_session_message_observation_for_test(
+        crate::dashboard::observation_seed::seed_session_message_observations_for_test(
             database.as_ref(),
-            crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
-                project_id: project_id.as_str(),
-                provider: "codex",
-                session_id: session_id.as_str(),
-                message_id: &format!("message.work-task-session-continuation.{ordinal}"),
-                role: "assistant",
-                content: &format!("{query_text} completed with {suffix}"),
-                model: Some("gpt-5.6"),
-                timestamp: 100 + i64::try_from(ordinal).expect("fixture ordinal"),
-                ordinal,
-            },
+            &[
+                crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                    project_id: project_id.as_str(),
+                    provider: "codex",
+                    session_id: session_id.as_str(),
+                    message_id: &format!("message.work-task-session-continuation.{ordinal}"),
+                    role: "assistant",
+                    content: &format!("{query_text} completed with {suffix}"),
+                    model: Some("gpt-5.6"),
+                    timestamp: 100 + i64::try_from(ordinal).expect("fixture ordinal"),
+                    ordinal,
+                },
+            ],
         )
         .await
         .expect("seed canonical provider observation");
