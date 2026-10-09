@@ -92,16 +92,16 @@ pub fn counting_available() -> bool {
 
 /// Counts `text` with the shipped BPE. The singleton decodes the embedded
 /// vocabulary lazily, so the first call pays the init cost and builds without
-/// the feature never do. `model` selects exact vs approximate labeling via
-/// [`encoder_for_model`]; counting always uses `o200k_base`.
+/// the feature never do. Counting always uses `o200k_base`; model-specific
+/// exactness is reported separately by [`encoder_for_model`].
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, _model: &str) -> Option<i64> {
+pub fn count_text_tokens(text: &str) -> Option<i64> {
     let bpe = o200k_base_singleton();
     i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub fn count_text_tokens(_text: &str, _model: &str) -> Option<i64> {
+pub fn count_text_tokens(_text: &str) -> Option<i64> {
     None
 }
 
@@ -177,9 +177,8 @@ pub struct TokenCountCache {
     /// keys without allocating, every polled search/session/overview/timeline
     /// message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
-    /// content with `o200k_base` specifically, while `map` counts stored
-    /// text with the model-mapped tokenizer, so entries are not
-    /// interchangeable.
+    /// content, while `map` counts stored text. Those content authorities
+    /// are different, so entries are not interchangeable.
     lcm_display: Mutex<DisplayedProviderCache>,
 }
 
@@ -317,7 +316,7 @@ async fn build_overlay(
 
     // Resolve cache hits and collect misses without holding the lock
     // across any await point.
-    let mut misses: Vec<(String, String, String, i64)> = Vec::new();
+    let mut misses: Vec<(String, String, i64)> = Vec::new();
     {
         let map = state
             .token_counts
@@ -331,7 +330,7 @@ async fn build_overlay(
             let key = (provider.to_owned(), message_id.to_owned());
             let stale = map.get(&key).is_none_or(|c| c.text_len != len);
             if stale && counting_available() && len > 0 {
-                misses.push((key.0, key.1, str_field(row, "model").to_owned(), len));
+                misses.push((key.0, key.1, len));
             }
         }
     }
@@ -376,7 +375,7 @@ async fn build_overlay(
 async fn count_and_store(
     state: &DashboardState,
     conn: &(impl QueryExecutor + ?Sized),
-    mut misses: Vec<(String, String, String, i64)>,
+    mut misses: Vec<(String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
     let mut computed: Vec<ComputedTokenCount> = Vec::with_capacity(misses.len());
@@ -396,7 +395,7 @@ async fn count_and_store(
         params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| DbValue::Text(message_id.clone())),
+                .map(|(_, message_id, _)| DbValue::Text(message_id.clone())),
         );
         let Ok(rows) = query_rows(conn, &sql, params_from_iter(params)).await else {
             continue;
@@ -414,20 +413,12 @@ async fn count_and_store(
             })
             .collect();
 
-        let batch: Vec<(String, String, String, i64, String)> = chunk
+        let batch: Vec<(String, String, i64, String)> = chunk
             .iter()
-            .filter_map(|(provider, message_id, model, len)| {
+            .filter_map(|(provider, message_id, len)| {
                 texts
                     .remove(&(provider.clone(), message_id.clone()))
-                    .map(|text| {
-                        (
-                            provider.clone(),
-                            message_id.clone(),
-                            model.clone(),
-                            *len,
-                            text,
-                        )
-                    })
+                    .map(|text| (provider.clone(), message_id.clone(), *len, text))
             })
             .collect();
 
@@ -435,8 +426,8 @@ async fn count_and_store(
         let counted = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .filter_map(|(provider, message_id, model, len, text)| {
-                    count_text_tokens(&text, &model).map(|token_count| ComputedTokenCount {
+                .filter_map(|(provider, message_id, len, text)| {
+                    count_text_tokens(&text).map(|token_count| ComputedTokenCount {
                         token_count,
                         provider,
                         message_id,
@@ -618,14 +609,11 @@ mod tests {
         assert!(!encoder_for_model("opus-large").exact);
     }
 
-    // The two vocabulary tests are split so each test process pays only one
-    // BPE model load (the dominant cost, especially on Windows) and nextest
-    // can run them in parallel.
     #[cfg(feature = "token-counting")]
     #[test]
     fn bpe_counts_diverge_from_chars4() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let bpe = count_text_tokens(text, "gpt-5").expect("token counting is compiled in");
+        let bpe = count_text_tokens(text).expect("token counting is compiled in");
         assert!(bpe > 0);
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
@@ -635,7 +623,7 @@ mod tests {
     #[cfg(not(feature = "token-counting"))]
     #[test]
     fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {
-        assert_eq!(count_text_tokens("visible content", ""), None);
+        assert_eq!(count_text_tokens("visible content"), None);
     }
 
     #[tokio::test]
