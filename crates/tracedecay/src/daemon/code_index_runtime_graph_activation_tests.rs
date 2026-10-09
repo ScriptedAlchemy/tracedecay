@@ -2200,8 +2200,9 @@ async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
 
 /// Issue #2874. Once the idle window lapsed, status went on reporting the
 /// graph `ready` while name lookups refused as warming. The idle release
-/// keeps the catalog, status and doctor name the warming state while the
-/// engine is away, and the next read restores it instead of failing.
+/// takes the engine and the catalog; status and doctor name the warming
+/// state while they are away, and the next read restores them instead of
+/// failing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -2273,17 +2274,24 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     assert_eq!(warm.len(), 1, "{warm:?}");
 
     let released = owners.release_idle(std::time::Instant::now() + RESIDENT_OWNER_IDLE_WINDOW_V1);
-    assert_eq!(
-        released
-            .iter()
-            .map(|release| release.kind)
-            .filter(|kind| matches!(
+    let mut graph_kinds = released
+        .iter()
+        .map(|release| release.kind)
+        .filter(|kind| {
+            matches!(
                 kind,
                 ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
-            ))
-            .collect::<Vec<_>>(),
-        [ResidentOwnerKindV1::GraphEngine],
-        "the idle window takes the engine and keeps the catalog"
+            )
+        })
+        .collect::<Vec<_>>();
+    graph_kinds.sort();
+    assert_eq!(
+        graph_kinds,
+        [
+            ResidentOwnerKindV1::GraphCatalog,
+            ResidentOwnerKindV1::GraphEngine
+        ],
+        "the idle window takes the engine and the catalog"
     );
     assert_eq!(
         serving().await,
