@@ -455,3 +455,25 @@ fn torn_down_fill_task_releases_its_claim_without_publishing() {
     assert!(!lock_codex_meta_cache().in_flight.contains_key(&key));
     runtime.shutdown_background();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn metadata_open_failure_is_retryable_instead_of_invalid_source_identity() {
+    let (_tmp, path, gate) = fixture("removed-during-fill.jsonl", true);
+    let key = cache_key(&path);
+    let fill = spawn_lookup(&path, ObservationCancellation::default());
+    wait_parked(&gate, 1).await;
+    std::fs::remove_file(&path).unwrap();
+    gate.release();
+    let error = tokio::time::timeout(SETTLE_WITHIN, fill)
+        .await
+        .unwrap()
+        .unwrap()
+        .err()
+        .expect("missing source must fail");
+    assert!(matches!(error, TranscriptIngestError::ScanIo { .. }));
+    assert!(crate::runtime::ingest::classify_transcript_ingest_disposition(&error).retryable);
+    let cache = lock_codex_meta_cache();
+    assert!(!cache.in_flight.contains_key(&key));
+    assert!(cache.entries.iter().all(|entry| entry.key != key));
+}

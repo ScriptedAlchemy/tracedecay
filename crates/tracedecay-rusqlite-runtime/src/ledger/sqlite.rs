@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use rusqlite::{Savepoint, Statement, Transaction};
+use rusqlite::{CachedStatement, Connection, Savepoint, Transaction};
 use tracedecay_store::{
     DurabilityClassV1, OperationPriorityV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
     StoreCommitReceiptV1, StoreIncarnationV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
@@ -12,7 +12,7 @@ use super::LedgerError;
 pub(crate) trait LedgerTransaction {
     fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize>;
     fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
-    fn prepare(&self, sql: &str) -> rusqlite::Result<Statement<'_>>;
+    fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>>;
 }
 
 macro_rules! impl_transaction {
@@ -30,8 +30,8 @@ macro_rules! impl_transaction {
                 self.deref().execute_batch(sql)
             }
 
-            fn prepare(&self, sql: &str) -> rusqlite::Result<Statement<'_>> {
-                self.deref().prepare(sql)
+            fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>> {
+                self.deref().prepare_cached(sql)
             }
         }
     };
@@ -39,6 +39,20 @@ macro_rules! impl_transaction {
 
 impl_transaction!(Transaction<'_>);
 impl_transaction!(Savepoint<'_>);
+
+impl LedgerTransaction for Connection {
+    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize> {
+        Connection::execute(self, sql, parameters)
+    }
+
+    fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        Connection::execute_batch(self, sql)
+    }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>> {
+        self.prepare_cached(sql)
+    }
+}
 
 pub(super) trait CanonicalJson: Sized {
     fn encode(&self) -> serde_json::Result<String>;
