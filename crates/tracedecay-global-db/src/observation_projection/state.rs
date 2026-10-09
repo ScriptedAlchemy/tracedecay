@@ -720,8 +720,13 @@ pub(super) async fn read_output_state(
     let latest_json = row
         .get::<String>(1)
         .map_err(|error| storage("read projection output state", error))?;
-    let latest: DurableObservationV1 = serde_json::from_str(&latest_json)
-        .map_err(|error| storage("decode latest projection output owner", error))?;
+    let latest: DurableObservationV1 = crate::observation::decode_observation_json(
+        conn,
+        &latest_json,
+        "read projection output state",
+    )
+    .await
+    .map_err(|error| storage("decode latest projection output owner", error))?;
     let latest_observation_id: String = row
         .get(5)
         .map_err(|error| storage("read projection output state", error))?;
@@ -731,10 +736,14 @@ pub(super) async fn read_output_state(
     let canonical = if latest_observation_id == canonical_observation_id {
         latest.clone()
     } else {
-        serde_json::from_str(
-            &row.get::<String>(2)
-                .map_err(|error| storage("read projection output state", error))?,
+        crate::observation::decode_observation_json(
+            conn,
+            row.get::<String>(2)
+                .map_err(|error| storage("read projection output state", error))?
+                .as_str(),
+            "read projection output state",
         )
+        .await
         .map_err(|error| storage("decode canonical projection output owner", error))?
     };
     let projector_owned = row
@@ -1037,15 +1046,15 @@ pub(in super::super) async fn read_projection_rows_batch(
             };
             let columns = ProjectionStorageColumns {
                 session_id: message.session_id.clone(),
-                storage_kind: decode(18)?,
-                content: if decode(18)? == "inline" {
+                storage_kind: decode(19)?,
+                content: if decode(19)? == "inline" {
                     message.text.clone()
                 } else {
-                    decode(19)?
+                    decode(20)?
                 },
-                content_hash: decode(20)?,
-                snippet_text: decode(21)?,
-                index_text: decode(22)?,
+                content_hash: decode(21)?,
+                snippet_text: decode(22)?,
+                index_text: decode(23)?,
             };
             let key = (message.provider.clone(), message.message_id.clone());
             storage_columns.insert(key.clone(), columns);

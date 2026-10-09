@@ -31,6 +31,8 @@ pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
                     (SELECT encoding FROM session_canonical_bodies
                       WHERE content_hash = lcm_raw_messages.content_hash),
                     (SELECT body FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash),
+                    (SELECT uncompressed_bytes FROM session_canonical_bodies
                       WHERE content_hash = lcm_raw_messages.content_hash)";
 fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
     format!(
@@ -84,7 +86,8 @@ fn body_record_select_columns(alias: &str, metadata: &str) -> String {
     format!(
         "{record}, {alias}.content, {alias}.storage_kind, {alias}.content_hash,
         (SELECT encoding FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash),
-        (SELECT body FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash)"
+        (SELECT body FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash),
+        (SELECT uncompressed_bytes FROM session_canonical_bodies WHERE content_hash = {alias}.content_hash)"
     )
 }
 
@@ -107,7 +110,7 @@ pub fn message_body_from_record_row(row: &Row, offset: i32) -> Result<String, Lc
             let body = row
                 .get::<Option<Vec<u8>>>(offset + 17)?
                 .ok_or(LcmError::PayloadIntegrityMismatch)?;
-            let bytes = unpack_body(&hash, &encoding, &body)
+            let bytes = unpack_body(&hash, &encoding, &body, row.get(offset + 18)?)
                 .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
             String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
         }
@@ -219,7 +222,7 @@ fn inline_content_from_canonical_body(row: &Row, content_hash: &str) -> Result<S
     let blob = row
         .get::<Option<Vec<u8>>>(14)?
         .ok_or(LcmError::PayloadIntegrityMismatch)?;
-    let bytes = unpack_body(content_hash, &encoding, &blob)
+    let bytes = unpack_body(content_hash, &encoding, &blob, row.get(15)?)
         .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
 }

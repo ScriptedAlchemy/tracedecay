@@ -65,13 +65,13 @@ async fn require_current_protection_input(
     };
     let actual_message = message_record_from_row(&row)?;
     let actual_raw_revision = RawProtectionRevision {
-        role: row.get(18)?,
-        ordinal: row.get(19)?,
-        timestamp: row.get(20)?,
-        content_hash: row.get(21)?,
-        storage_kind: row.get(22)?,
-        payload_ref: row.get(23)?,
-        metadata_json: row.get(24)?,
+        role: row.get(19)?,
+        ordinal: row.get(20)?,
+        timestamp: row.get(21)?,
+        content_hash: row.get(22)?,
+        storage_kind: row.get(23)?,
+        payload_ref: row.get(24)?,
+        metadata_json: row.get(25)?,
     };
     if actual_message != expected.message || actual_raw_revision != expected.raw_revision {
         return Err(LcmError::StaleRawProtectionSource {
@@ -468,9 +468,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         let mut frontier_store_id = after_store_id;
         let mut byte_limited = false;
         while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(25)?;
-            let needs_protection = row.get::<i64>(26)? != 0;
-            let row_bytes = u64::try_from(row.get::<i64>(27)?).map_err(|error| {
+            let store_id: i64 = row.get(26)?;
+            let needs_protection = row.get::<i64>(27)? != 0;
+            let row_bytes = u64::try_from(row.get::<i64>(28)?).map_err(|error| {
                 LcmError::Db(format!("invalid LCM protection row byte count: {error}"))
             })?;
             if bytes_scanned.saturating_add(row_bytes) > page_max_bytes {
@@ -484,13 +484,13 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             bytes_scanned = bytes_scanned.saturating_add(row_bytes);
             frontier_store_id = store_id;
             let raw_revision = RawProtectionRevision {
-                role: row.get(18)?,
-                ordinal: row.get(19)?,
-                timestamp: row.get(20)?,
-                content_hash: row.get(21)?,
-                storage_kind: row.get(22)?,
-                payload_ref: row.get(23)?,
-                metadata_json: row.get(24)?,
+                role: row.get(19)?,
+                ordinal: row.get(20)?,
+                timestamp: row.get(21)?,
+                content_hash: row.get(22)?,
+                storage_kind: row.get(23)?,
+                payload_ref: row.get(24)?,
+                metadata_json: row.get(25)?,
             };
             scanned_revisions.push((store_id, raw_revision.clone()));
             if !needs_protection {

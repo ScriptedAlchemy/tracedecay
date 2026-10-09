@@ -384,7 +384,15 @@ async fn raw_like_grep_hits(
         query_plan.like_terms.len(),
         &["r.index_text", "r.snippet_text", "COALESCE(r.content, '')"],
     );
-    filters.push(like_sql);
+    // A canonical-body row keeps only its bounded placeholder in the derived
+    // columns, so the LIKE prefilter cannot see the rest of its body. Admit
+    // those rows unconditionally and verify every term on the hydrated body
+    // before ranking instead of losing the infix matches it still holds.
+    filters.push(format!(
+        "({like_sql} OR (r.content IS NULL AND EXISTS(
+             SELECT 1 FROM session_canonical_bodies AS canonical
+             WHERE canonical.content_hash = r.content_hash)))"
+    ));
     for term in &query_plan.like_terms {
         let escaped = escape_like(term);
         let pattern = format!("%{escaped}%");
@@ -393,7 +401,6 @@ async fn raw_like_grep_hits(
         }
     }
 
-    values.push(Value::Integer(limit as i64));
     let order_by = grep_order_by(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
@@ -402,13 +409,17 @@ async fn raw_like_grep_hits(
     let sql = format!(
         "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
                 COALESCE(NULLIF(s.parent_session_id, ''), r.session_id),
-                COALESCE(s.is_subagent, 0), 0.0 AS rank
+                COALESCE(s.is_subagent, 0), 0.0 AS rank,
+                r.content_hash,
+                CASE WHEN r.content IS NULL AND EXISTS(
+                    SELECT 1 FROM session_canonical_bodies AS canonical
+                    WHERE canonical.content_hash = r.content_hash)
+                     THEN 1 ELSE 0 END AS stored_outside_row
          FROM lcm_raw_messages r
          LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
          WHERE r.store_id IN ({})
            AND {}
-         ORDER BY {order_by}
-         LIMIT ?",
+         ORDER BY {order_by}",
         candidate_ids
             .iter()
             .map(|_| "?")
@@ -419,7 +430,19 @@ async fn raw_like_grep_hits(
     let mut rows = conn.query(&sql, values).await?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
-        candidates.push(raw_hit_candidate_from_row(&row, &query_plan.like_terms)?);
+        let mut candidate = raw_hit_candidate_from_row(&row, &query_plan.like_terms)?;
+        if row.get::<i64>(10)? != 0 {
+            let content_hash: String = row.get(9)?;
+            let text = load_canonical_body_text(conn, &content_hash)
+                .await?
+                .ok_or(LcmError::PayloadIntegrityMismatch)?;
+            if !like_terms_match_text(&text, &query_plan.like_terms) {
+                continue;
+            }
+            candidate.hit.snippet = match_centered_snippet(&text, &query_plan.like_terms);
+            candidate.content = text;
+        }
+        candidates.push(candidate);
     }
     let mut hits = dedupe_related_raw_hits(candidates);
     if hits.len() > limit {
@@ -838,6 +861,39 @@ struct RawGrepCandidate {
     content: String,
 }
 
+/// `LIKE` over `lcm_raw_messages` derived text is `find_term` over the whole
+/// stored body for a canonical-body row: every term must appear in the body.
+fn like_terms_match_text(text: &str, like_terms: &[String]) -> bool {
+    let lower_text = text.to_ascii_lowercase();
+    like_terms
+        .iter()
+        .all(|term| find_term(text, &lower_text, term).is_some())
+}
+
+async fn load_canonical_body_text(
+    conn: &(impl QueryExecutor + ?Sized),
+    content_hash: &str,
+) -> Result<Option<String>, LcmError> {
+    let mut rows = conn
+        .query(
+            tracedecay_store::LOAD_CANONICAL_BODY_SQL,
+            params![content_hash],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let encoding: String = row.get(0)?;
+    let blob: Vec<u8> = row.get(1)?;
+    let uncompressed: i64 = row.get(2)?;
+    drop(rows);
+    let bytes = tracedecay_store::unpack_body(content_hash, &encoding, &blob, uncompressed)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)
+}
+
 fn raw_hit_candidate_from_row(
     row: &tracedecay_runtime_core::db::engine::Row,
     like_terms: &[String],
@@ -892,4 +948,166 @@ fn summary_hit_from_row(
         role: None,
         snippet: match_centered_snippet(&summary_text, like_terms),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_runtime_core::db::engine::TestConnection;
+    use tracedecay_store::{
+        CANONICAL_BODIES_TABLE_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
+    };
+
+    use super::*;
+
+    const LIKE_GREP_TEST_SCHEMA_TAIL: &str = "
+        CREATE TABLE lcm_raw_messages (
+            store_id INTEGER PRIMARY KEY,
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            content TEXT,
+            content_hash TEXT NOT NULL,
+            snippet_text TEXT NOT NULL DEFAULT '',
+            index_text TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT
+        );
+        CREATE INDEX idx_lcm_raw_session_id ON lcm_raw_messages(session_id);
+        CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            parent_session_id TEXT,
+            is_subagent INTEGER NOT NULL DEFAULT 0
+        );";
+
+    fn like_grep_request() -> LcmGrepRequest {
+        LcmGrepRequest {
+            provider: "all".to_string(),
+            query: "needleword".to_string(),
+            scope: LcmScope::Session,
+            session_id: Some("session-a".to_string()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+            git_filter: crate::GitScopeFilter::default(),
+        }
+    }
+
+    async fn insert_canonical_body(conn: &TestConnection, body: &StoredCanonicalBody) {
+        conn.execute(
+            UPSERT_CANONICAL_BODY_SQL,
+            params![
+                body.content_hash.as_str(),
+                body.encoding,
+                body.blob.as_slice(),
+                body.uncompressed_bytes
+            ],
+        )
+        .await
+        .expect("insert canonical body");
+    }
+
+    async fn insert_raw_message(
+        conn: &TestConnection,
+        store_id: i64,
+        message_id: &str,
+        content: Option<&str>,
+        content_hash: &str,
+        snippet_text: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO lcm_raw_messages
+                (store_id, provider, session_id, message_id, role, timestamp,
+                 content, content_hash, snippet_text, index_text)
+             VALUES (?1, 'claude', 'session-a', ?2, 'user', ?1, ?3, ?4, ?5, '')",
+            params![store_id, message_id, content, content_hash, snippet_text],
+        )
+        .await
+        .expect("insert raw message");
+    }
+
+    #[tokio::test]
+    async fn like_grep_matches_inside_a_canonical_body() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(&format!(
+            "{CANONICAL_BODIES_TABLE_SQL}{LIKE_GREP_TEST_SCHEMA_TAIL}"
+        ))
+        .await
+        .expect("like grep schema");
+
+        let padded_body = format!(
+            "{}pre needleword post{}",
+            "x".repeat(2100),
+            "y".repeat(2100)
+        );
+
+        let matching = StoredCanonicalBody::pack(padded_body.as_bytes()).expect("pack matching");
+        insert_canonical_body(&conn, &matching).await;
+        insert_raw_message(
+            &conn,
+            1,
+            "m-cas-match",
+            None,
+            &matching.content_hash,
+            "placeholder",
+        )
+        .await;
+
+        let other_body = format!("{}unrelated{}", "a".repeat(2100), "b".repeat(2100));
+        let unrelated = StoredCanonicalBody::pack(other_body.as_bytes()).expect("pack unrelated");
+        insert_canonical_body(&conn, &unrelated).await;
+        insert_raw_message(
+            &conn,
+            2,
+            "m-cas-miss",
+            None,
+            &unrelated.content_hash,
+            "placeholder",
+        )
+        .await;
+
+        insert_raw_message(
+            &conn,
+            3,
+            "m-inline-match",
+            Some("inline needleword hit"),
+            "hash-inline",
+            "inline snippet",
+        )
+        .await;
+
+        let hits = raw_grep_hits(
+            &conn,
+            &like_grep_request(),
+            &LcmGrepFilters::default(),
+            Some("session-a"),
+            LcmGitScopeSessions::Unscoped,
+            &GrepQueryPlan {
+                fts_query: String::new(),
+                like_terms: vec!["needleword".to_string()],
+                requires_like_fallback: true,
+            },
+            2,
+        )
+        .await
+        .expect("like grep hits");
+
+        let mut message_ids = hits
+            .iter()
+            .map(|hit| hit.message_id.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>();
+        message_ids.sort_unstable();
+        assert_eq!(message_ids, ["m-cas-match", "m-inline-match"]);
+        let cas_hit = hits
+            .iter()
+            .find(|hit| hit.message_id.as_deref() == Some("m-cas-match"))
+            .expect("canonical-body hit");
+        assert!(cas_hit.snippet.contains("needleword"));
+    }
 }

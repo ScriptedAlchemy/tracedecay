@@ -2583,7 +2583,7 @@ async fn load_raw_messages_for_session_page(
     let mut bytes_scanned = 0_u64;
     let mut byte_limited = false;
     while let Some(row) = rows.next().await? {
-        let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
+        let row_bytes = u64::try_from(row.get::<i64>(16)?).map_err(|error| {
             LcmError::Db(format!("invalid retained compression byte count: {error}"))
         })?;
         if bytes_scanned.saturating_add(row_bytes) > limit.byte_limit {

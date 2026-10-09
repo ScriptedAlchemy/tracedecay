@@ -550,7 +550,8 @@ fn decode_stored_observation_on_savepoint(
             .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
                 let encoding = row.get::<_, String>(0)?;
                 let blob = row.get::<_, Vec<u8>>(1)?;
-                tracedecay_store::unpack_body(hash, &encoding, &blob)
+                let uncompressed = row.get::<_, i64>(2)?;
+                tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed)
                     .map_err(|error| invalid(error.to_string()))
             })
             .map_err(|error| CanonicalBodyError::Missing {
@@ -582,7 +583,8 @@ fn decode_hydrated_observation_row(
                 .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
                     let encoding = row.get::<_, String>(0)?;
                     let blob = row.get::<_, Vec<u8>>(1)?;
-                    tracedecay_store::unpack_body(hash, &encoding, &blob)
+                    let uncompressed = row.get::<_, i64>(2)?;
+                    tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed)
                         .map_err(|error| invalid(error.to_string()))
                 })
                 .map_err(|error| CanonicalBodyError::Missing {

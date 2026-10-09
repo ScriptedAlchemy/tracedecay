@@ -285,7 +285,13 @@ pub(crate) async fn load_canonical_body(
         })?;
     let encoding: String = row.get(0).map_err(|error| storage(OPERATION, error))?;
     let blob: Vec<u8> = row.get(1).map_err(|error| storage(OPERATION, error))?;
-    unpack_body(content_hash, &encoding, &blob).map_err(|error| storage(OPERATION, error))
+    unpack_body(
+        content_hash,
+        &encoding,
+        &blob,
+        row.get(2).map_err(|error| storage(OPERATION, error))?,
+    )
+    .map_err(|error| storage(OPERATION, error))
 }
 
 async fn persist_bodies(
@@ -675,7 +681,7 @@ mod tests {
         let encoding: String = body_row.get(0).unwrap();
         let blob: Vec<u8> = body_row.get(1).unwrap();
         assert_eq!(
-            unpack_body(&hash, &encoding, &blob).unwrap(),
+            unpack_body(&hash, &encoding, &blob, row.get(2).unwrap()).unwrap(),
             expected.as_bytes()
         );
         println!(

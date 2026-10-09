@@ -36,8 +36,8 @@ pub const UPSERT_CANONICAL_BODY_SQL: &str = "INSERT OR IGNORE INTO session_canon
             (content_hash, encoding, body, uncompressed_bytes)
          VALUES (?1, ?2, ?3, ?4)";
 
-pub const LOAD_CANONICAL_BODY_SQL: &str =
-    "SELECT encoding, body FROM session_canonical_bodies WHERE content_hash = ?1";
+pub const LOAD_CANONICAL_BODY_SQL: &str = "SELECT encoding, body, uncompressed_bytes
+         FROM session_canonical_bodies WHERE content_hash = ?1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredCanonicalBody {
@@ -91,18 +91,33 @@ impl StoredCanonicalBody {
     }
 
     pub fn unpack(&self) -> Result<Vec<u8>, CanonicalBodyError> {
-        unpack_body(&self.content_hash, self.encoding, &self.blob)
+        unpack_body(
+            &self.content_hash,
+            self.encoding,
+            &self.blob,
+            self.uncompressed_bytes,
+        )
     }
 }
 
+/// Reverses [`StoredCanonicalBody::pack`]: inflates when the row deflates,
+/// then proves the bytes by their declared size and content hash. The
+/// `uncompressed_bytes` bound keeps a corrupt or hostile row from inflating
+/// past the size its writer recorded before either check runs.
 pub fn unpack_body(
     content_hash: &str,
     encoding: &str,
     blob: &[u8],
+    uncompressed_bytes: i64,
 ) -> Result<Vec<u8>, CanonicalBodyError> {
+    let declared =
+        usize::try_from(uncompressed_bytes).map_err(|_| CanonicalBodyError::Corrupt {
+            content_hash: content_hash.to_owned(),
+            encoding: encoding.to_owned(),
+        })?;
     let bytes = match encoding {
         ENCODING_IDENTITY => blob.to_vec(),
-        ENCODING_DEFLATE => inflate(blob).ok_or_else(|| CanonicalBodyError::Corrupt {
+        ENCODING_DEFLATE => inflate(blob, declared).ok_or_else(|| CanonicalBodyError::Corrupt {
             content_hash: content_hash.to_owned(),
             encoding: encoding.to_owned(),
         })?,
@@ -113,7 +128,7 @@ pub fn unpack_body(
             });
         }
     };
-    if sha256_hex(&bytes) != content_hash {
+    if bytes.len() != declared || sha256_hex(&bytes) != content_hash {
         return Err(CanonicalBodyError::Corrupt {
             content_hash: content_hash.to_owned(),
             encoding: encoding.to_owned(),
@@ -321,11 +336,12 @@ fn deflate_if_smaller(bytes: &[u8]) -> Option<Vec<u8>> {
     (compressed.len() < bytes.len()).then_some(compressed)
 }
 
-fn inflate(blob: &[u8]) -> Option<Vec<u8>> {
-    let mut decoder = DeflateDecoder::new(blob);
+fn inflate(blob: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
+    let mut decoder =
+        DeflateDecoder::new(blob).take(u64::try_from(max_bytes).ok()?.saturating_add(1));
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;
-    Some(out)
+    (out.len() <= max_bytes).then_some(out)
 }
 
 #[cfg(test)]
@@ -440,7 +456,7 @@ mod tests {
         });
         assert!(matches!(missing, Err(CanonicalBodyError::Missing { .. })));
         let corrupt = hydrate_json_value(&mut legacy.clone(), |hash| {
-            unpack_body(hash, ENCODING_IDENTITY, b"wrong bytes")
+            unpack_body(hash, ENCODING_IDENTITY, b"wrong bytes", 11)
         });
         assert!(matches!(corrupt, Err(CanonicalBodyError::Corrupt { .. })));
     }
@@ -452,6 +468,32 @@ mod tests {
             panic!("an invalid pointer must not read body storage")
         });
         assert!(matches!(result, Err(CanonicalBodyError::InvalidJson)));
+    }
+
+    #[test]
+    fn unpack_rejects_a_declared_size_mismatch() {
+        let bytes = "inflate source ".repeat(64).into_bytes();
+        let stored = StoredCanonicalBody::pack(&bytes).unwrap();
+        for declared in [
+            stored.uncompressed_bytes - 1,
+            stored.uncompressed_bytes + 1,
+            i64::MAX,
+            -1,
+        ] {
+            assert!(
+                matches!(
+                    unpack_body(
+                        &stored.content_hash,
+                        stored.encoding,
+                        &stored.blob,
+                        declared
+                    ),
+                    Err(CanonicalBodyError::Corrupt { .. })
+                ),
+                "declared {declared} must not unpack {encoding}",
+                encoding = stored.encoding,
+            );
+        }
     }
 
     #[test]

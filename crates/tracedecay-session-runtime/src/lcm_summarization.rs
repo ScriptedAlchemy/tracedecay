@@ -206,15 +206,15 @@ pub(super) async fn native_summary_evidence(
         candidates.push((
             message.message_id,
             message.content,
-            row.get::<Option<String>>(15)
+            row.get::<Option<String>>(16)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
             message.metadata_json,
-            row.get::<Option<i64>>(17)
-                .map_err(|error| LcmError::Db(error.to_string()))?,
             row.get::<Option<i64>>(18)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
+            row.get::<Option<i64>>(19)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
             Some(message.store_id),
-            row.get::<Option<String>>(19)
+            row.get::<Option<String>>(20)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
         ));
     }
@@ -336,12 +336,12 @@ async fn native_store_is_recognized(
     let message_id = message.message_id;
     let text = message.content;
     let kind = row
-        .get::<Option<String>>(15)
+        .get::<Option<String>>(16)
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let metadata = parse_message_metadata(message.metadata_json.as_deref());
     let envelope = decode_message_envelope(
         snapshot,
-        row.get::<Option<String>>(17)
+        row.get::<Option<String>>(18)
             .map_err(|error| LcmError::Db(error.to_string()))?
             .as_deref(),
     )
