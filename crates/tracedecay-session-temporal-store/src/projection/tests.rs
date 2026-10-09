@@ -2890,6 +2890,24 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
             lcm_copy, 0,
             "N={n}: lcm_raw_messages.content must not keep the canonical body"
         );
+        let placeholder_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("lcm placeholder leak query")
+            .next()
+            .await
+            .expect("lcm placeholder leak row")
+            .expect("lcm placeholder leak missing row")
+            .get(0)
+            .expect("lcm placeholder leak count");
+        assert_eq!(
+            placeholder_copy, 0,
+            "N={n}: placeholder_text must not keep a second full body"
+        );
         println!(
             "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes} stored_body_bytes={stored_body_bytes}"
         );
@@ -3035,8 +3053,48 @@ async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes:
         let name: String = row.get(0).expect("dbstat name");
         let bytes = u64::try_from(row.get::<i64>(1).expect("dbstat pgsize")).unwrap();
         accounted = accounted.saturating_add(bytes);
-        println!("user-sessions dbstat N={n} name={name} pgsize={bytes}");
+        if bytes >= 32_768 {
+            println!("user-sessions dbstat N={n} name={name} pgsize={bytes}");
+        }
     }
+    let unused_sql = "SELECT name, SUM(pgsize), SUM(unused), SUM(payload)
+         FROM dbstat
+         WHERE name IN (
+            'lcm_raw_messages', 'observations', 'retrieval_anchors',
+            'lcm_raw_messages_fts_data', 'session_canonical_bodies',
+            'sanitization_receipts', 'observation_projection_provenance'
+         )
+         GROUP BY name
+         ORDER BY SUM(pgsize) DESC";
+    let mut unused_rows = snapshot.query(unused_sql, ()).await.expect("dbstat unused");
+    while let Some(row) = unused_rows.next().await.expect("unused row") {
+        println!(
+            "user-sessions unused N={n} name={} pgsize={} unused={} payload={}",
+            row.get::<String>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<i64>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+        );
+    }
+    let lcm_sql = "SELECT
+            COALESCE(SUM(length(COALESCE(content, ''))), 0),
+            COALESCE(SUM(length(COALESCE(metadata_json, ''))), 0),
+            COALESCE(SUM(length(COALESCE(placeholder_text, ''))), 0),
+            COALESCE(SUM(length(COALESCE(payload_ref, ''))), 0),
+            COALESCE(SUM(length(content_hash)), 0),
+            COALESCE(SUM(length(provider)+length(message_id)+length(session_id)+length(role)+length(storage_kind)), 0)
+         FROM lcm_raw_messages";
+    let mut lcm = snapshot.query(lcm_sql, ()).await.expect("lcm census");
+    let lcm_row = lcm.next().await.expect("lcm row").expect("lcm");
+    println!(
+        "user-sessions lcm-cols N={n} content={} metadata={} placeholder={} payload_ref={} content_hash={} ids={}",
+        lcm_row.get::<i64>(0).unwrap(),
+        lcm_row.get::<i64>(1).unwrap(),
+        lcm_row.get::<i64>(2).unwrap(),
+        lcm_row.get::<i64>(3).unwrap(),
+        lcm_row.get::<i64>(4).unwrap(),
+        lcm_row.get::<i64>(5).unwrap(),
+    );
     let column_sql = "SELECT
             (SELECT COUNT(*) FROM observations),
             (SELECT COALESCE(SUM(length(observation_json)), 0) FROM observations),
@@ -3147,6 +3205,24 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
         assert!(
             family > previous_family,
             "N={n}: family must grow ({family} vs {previous_family})"
+        );
+        let oversized: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > 4096",
+                (),
+            )
+            .await
+            .expect("placeholder cap query")
+            .next()
+            .await
+            .expect("placeholder cap row")
+            .expect("placeholder cap missing row")
+            .get(0)
+            .expect("placeholder cap count");
+        assert_eq!(
+            oversized, 0,
+            "N={n}: LCM placeholder must stay on the snippet budget"
         );
         print_user_sessions_dbstat(&snapshot, family, n).await;
         previous_family = family;

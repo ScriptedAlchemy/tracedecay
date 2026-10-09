@@ -10,6 +10,7 @@ use super::codec::storage;
 
 pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-v1";
 const LCM_CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-lcm-v1";
+const LCM_PLACEHOLDER_SNIPPET_MIGRATION: &str = "session-canonical-bodies-lcm-snippet-v1";
 const OPERATION: &str = "compact session canonical bodies";
 const COMPACT_PAGE: i64 = 64;
 const INLINE_BODY_BYTES_SQL: i64 = INLINE_BODY_BYTES as i64;
@@ -101,16 +102,25 @@ pub(crate) async fn compact_observation_bodies(
 pub(crate) async fn compact_attached_lcm_bodies(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<bool> {
-    if migration_recorded(conn, LCM_CANONICAL_BODY_MIGRATION).await? {
-        return Ok(false);
+    let mut rewrote = false;
+    if !migration_recorded(conn, LCM_CANONICAL_BODY_MIGRATION).await? {
+        rewrote |= compact_lcm_bodies(conn).await?;
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![LCM_CANONICAL_BODY_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
     }
-    let rewrote = compact_lcm_bodies(conn).await?;
-    conn.execute(
-        "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![LCM_CANONICAL_BODY_MIGRATION],
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if !migration_recorded(conn, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await? {
+        rewrote |= compact_lcm_placeholders(conn).await?;
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![LCM_PLACEHOLDER_SNIPPET_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
     Ok(rewrote)
 }
 
@@ -153,12 +163,62 @@ pub(crate) async fn compact_lcm_bodies(
             let body = StoredCanonicalBody::pack(content.as_bytes())
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             persist_bodies(conn, std::slice::from_ref(&body)).await?;
-            let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_index(&content);
+            let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&content);
             conn.execute(
                 "UPDATE lcm_raw_messages
                  SET content = NULL, placeholder_text = ?1
                  WHERE store_id = ?2",
                 params![placeholder, store_id],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            rewrote = true;
+        }
+    }
+    Ok(rewrote || compact_lcm_placeholders(conn).await?)
+}
+
+const SNIPPET_CAP_SQL: i64 = 4096;
+
+pub(crate) async fn compact_lcm_placeholders(
+    conn: &impl Executor,
+) -> tracedecay_domain::errors::Result<bool> {
+    if !table_exists(conn, "lcm_raw_messages").await? {
+        return Ok(false);
+    }
+    let mut rewrote = false;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT store_id, placeholder_text FROM lcm_raw_messages
+                 WHERE placeholder_text IS NOT NULL AND length(placeholder_text) > ?1
+                 LIMIT ?2",
+                params![SNIPPET_CAP_SQL, COMPACT_PAGE],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut page = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            page.push((
+                row.get::<i64>(0)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            ));
+        }
+        drop(rows);
+        if page.is_empty() {
+            break;
+        }
+        for (store_id, placeholder) in page {
+            let snippet = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&placeholder);
+            conn.execute(
+                "UPDATE lcm_raw_messages SET placeholder_text = ?1 WHERE store_id = ?2",
+                params![snippet, store_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -404,6 +464,21 @@ mod tests {
             .get(0)
             .unwrap();
         assert_eq!(lcm_copy, 0);
+        let long_placeholder: i64 = conn
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE length(COALESCE(placeholder_text, '')) > ?1",
+                params![SNIPPET_CAP_SQL],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(long_placeholder, 0, "CAS rows must not keep a second full body in placeholder_text");
 
         let expected = format!("payload-00-{stem}");
         let stored_json: String = conn
