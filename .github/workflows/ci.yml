@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       run_os:
-        description: "Also run macOS and Windows matrices"
+        description: "Also run the macOS matrix"
         type: boolean
         default: false
       run_hosts:
@@ -21,10 +21,11 @@ on:
 permissions:
   contents: read
 
-# PR updates and branch dispatches supersede their own run. Master finishes
-# its current snapshot and retains only the newest pending run.
+# Explicit OS/host coverage must not be replaced by a default-coverage push
+# while queued. Within each coverage request, master finishes its current
+# snapshot and retains only the newest pending run.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master') }}
 
 env:
@@ -32,8 +33,8 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Drafts run cheap gates. Ready PRs and pushes run the Bazel Linux authority;
-  # dispatch can request additional OS and stock-host journeys.
+  # Drafts run cheap gates. Ready PRs and pushes run Bazel on Linux and Windows;
+  # dispatch can request macOS and stock-host journeys.
   scope-gate:
     name: Scope gate
     permissions:
@@ -274,6 +275,15 @@ jobs:
         shell: bash
         run: bazel test --config=ci //...
 
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-test-logs-${{ runner.os }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -314,6 +324,15 @@ jobs:
       - name: Build and test the workspace
         run: bazel test --config=ci //...
 
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-test-logs-${{ runner.os }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -324,7 +343,7 @@ jobs:
   windows-test:
     name: Test Windows
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' || needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
@@ -352,6 +371,15 @@ jobs:
         shell: bash
         run: bazel test --config=ci //...
 
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-test-logs-${{ runner.os }}
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -377,30 +405,6 @@ jobs:
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
-
-      # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
-      # first compiles in the release build. Bazel has no MSVC toolchain on
-      # Linux, so this cross-target type check stays on Cargo: `cargo check`
-      # needs no linker, and mingw supplies the C compiler the native build
-      # scripts run. macOS has no equivalent: its build scripts need the Apple
-      # SDK headers.
-      - name: Install pinned toolchain and Windows check target
-        run: |
-          rustup toolchain install
-          rustup target add x86_64-pc-windows-gnu
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Install the Windows C cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
-
-      - name: Check the Windows target
-        run: >-
-          cargo check --workspace --all-targets --locked
-          --target x86_64-pc-windows-gnu
-          --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''

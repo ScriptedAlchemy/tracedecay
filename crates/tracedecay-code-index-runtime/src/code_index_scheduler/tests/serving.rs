@@ -6269,6 +6269,33 @@ async fn generation_read_callers_install_exact_affected_test_attribution() {
         .expect("mount fixture");
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let generation_id = latest.generation().manifest().generation_id.clone();
+    let mut readiness = registry
+        .subscribe_serving_generation_changes(fixture.path())
+        .await
+        .expect("mounted readiness channel");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            registry
+                .latest_complete_fresh(fixture.path())
+                .await
+                .expect("seated graph stays available");
+            let read = registry.read_test_attribution(&generation_id);
+            if read.evidence.is_some() {
+                break;
+            }
+            assert_eq!(read.provider_state, ProviderEvaluationStateV1::Indexing);
+            readiness
+                .changed()
+                .await
+                .expect("same-generation readiness notification");
+        }
+    })
+    .await
+    .expect("mounted worker prepares attribution");
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id.clone())
+    );
     let snapshot = latest.generation().snapshot();
     let scope = ResolvedScope::new(
         test_project_id(),
@@ -6971,5 +6998,119 @@ async fn name_shaped_queries_take_the_symbol_name_route_by_query_shape() {
         Some(&Some("src/session.ts::loadSessionUser".to_owned()))
     );
     assert_eq!(prose_ranking, ranked_symbol_names(&suppressed, &latest));
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_attribution_demand_wakes_same_generation_without_foreground_decode() {
+    let fixture = GitFixture::new(&[(
+        "tests/production.rs",
+        "fn helper() {}\n#[test] fn verifies_helper() { helper(); }\n",
+    )]);
+    let store = TempDir::new().unwrap();
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .unwrap();
+    let latest = wait_for_live_complete_generation(&first, fixture.path()).await;
+    let generation = latest.generation().manifest().generation_id.clone();
+    let snapshot = latest.generation().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().unwrap(),
+        snapshot.reference.clone(),
+    )
+    .unwrap();
+    first.shutdown().await;
+    drop(latest);
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let root = canonical_existing_identity(fixture.path()).unwrap();
+    let (recovered, release) = registry
+        .pause_next_retained_graph_recovery(
+            root.clone(),
+            super::super::registry::RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+        )
+        .await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, recovered)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        registry.latest_generation_id(&root).await,
+        Some(generation.clone())
+    );
+    // Foreground demand is a read and wake, never a join of the held worker.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            registry.latest_complete_fresh_for_scope(&scope)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        registry.read_test_attribution(&generation).provider_state,
+        ProviderEvaluationStateV1::Unavailable
+    );
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        registry
+            .await_test_attribution_for_scope(&root, &scope, &generation, &cancellation)
+            .await,
+        ProviderEvaluationStateV1::Cancelled
+    );
+    release.send(()).unwrap();
+    let active = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let ready = tokio::time::timeout(
+        SERVING_SEAT_FAILURE_CEILING,
+        registry.await_test_attribution_for_scope(&root, &scope, &generation, &active),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready, ProviderEvaluationStateV1::Partial);
+    let read = registry.read_test_attribution(&generation);
+    assert!(
+        read.evidence
+            .as_ref()
+            .is_some_and(|join| !join.records.is_empty())
+    );
+    assert_eq!(
+        registry.latest_generation_id(&root).await,
+        Some(generation.clone())
+    );
+    let foreign = CodeGenerationId::new("generation.foreign-attribution").unwrap();
+    assert_eq!(
+        registry
+            .await_test_attribution_for_scope(&root, &scope, &foreign, &active)
+            .await,
+        ProviderEvaluationStateV1::Stale
+    );
+    assert_eq!(
+        registry.read_test_attribution(&foreign).provider_state,
+        ProviderEvaluationStateV1::Unavailable
+    );
     registry.shutdown().await;
 }

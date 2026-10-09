@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use tracedecay_query::search_quality::{
-    DirectEvaluationReportV1, QUERY_BASELINE_PROFILE, compute_profile_material_digest,
-    evaluate_generated_outputs,
+    CandidateWorkloadV1, DirectEvaluationReportV1, GenerateCandidateOutputsResultV1,
+    QUERY_BASELINE_PROFILE, compute_profile_material_digest, evaluate_generated_outputs,
 };
 
 use crate::{GenerateCandidateOutputsOptions, generate_candidate_outputs};
@@ -21,23 +21,11 @@ fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_contracts::Resol
     .ok()
 }
 
-#[test]
-fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
-    // The packaged root carries the checked-in evaluator object pack, so the
-    // historical query resolves here as it does in the daemon.
-    let fixture = crate::candidate_output::tests::packaged_fixture();
-    let repo_root = fixture.root();
-    let workload = fixture.workload();
-    let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
-    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root,
-        workload_path: None,
-        profile_ids: Some(&profile_ids),
-        admitted_scope: direct_fixture_scope,
-    })
-    .expect("generate direct fixture outputs");
-    let report = evaluate_generated_outputs(repo_root, workload, &generated)
-        .expect("evaluate direct fixture outputs");
+fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
+    workload: &CandidateWorkloadV1,
+    generated: &GenerateCandidateOutputsResultV1,
+    report: &DirectEvaluationReportV1,
+) {
     // A ranking change must move the receipt. A generation reseal must not:
     // the receipt hashes ordered rows and lane coverage, not the sealed
     // generation those rows were bound under.
@@ -114,7 +102,7 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     .expect("hash raw outputs")
     .as_str()
     .to_owned();
-    let value = serde_json::to_value(&report).expect("serialize direct report");
+    let value = serde_json::to_value(report).expect("serialize direct report");
     assert_eq!(
         value
             .get("raw_output_digest")
@@ -174,22 +162,12 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
 /// activation fields are refused on the wire, and workload documents may not
 /// be re-read as the candidate evidence an evaluator run produces. See
 /// `docs/development/search-quality-direct-evaluation.md`.
-#[test]
-fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
-    let fixture = crate::candidate_output::tests::packaged_fixture();
-    let repo_root = fixture.root();
-    let workload = fixture.workload();
-    let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
-    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root,
-        workload_path: None,
-        profile_ids: Some(&profile_ids),
-        admitted_scope: direct_fixture_scope,
-    })
-    .expect("generate direct fixture outputs");
-    let report = evaluate_generated_outputs(repo_root, workload, &generated)
-        .expect("evaluate direct fixture outputs");
-
+fn assert_direct_report_is_evidence_only_and_owns_its_candidate_schema(
+    repo_root: &Path,
+    workload: &CandidateWorkloadV1,
+    generated: &GenerateCandidateOutputsResultV1,
+    report: &DirectEvaluationReportV1,
+) {
     // Closed evidence statuses only. An activation claim such as
     // status:"qualified" is not a representable DirectEvaluationStatusV1.
     assert!(matches!(
@@ -213,7 +191,7 @@ fn direct_report_is_evidence_only_and_owns_its_candidate_schema() {
         assert!(profile_value.get("cancellation_bounded").is_none());
     }
 
-    let value = serde_json::to_value(&report).expect("serialize direct report");
+    let value = serde_json::to_value(report).expect("serialize direct report");
     let mut activation_claim = value.clone();
     activation_claim
         .as_object_mut()
@@ -282,7 +260,7 @@ fn baseline_report_is_self_validating_and_refuses_conceptual_misses() {
         .output()
         .expect("run baseline report in a dedicated process");
         assert!(
-            output.status.success(),
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
             "dedicated baseline report failed:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -303,6 +281,15 @@ fn baseline_report_is_self_validating_and_refuses_conceptual_misses() {
     .expect("generate direct fixture outputs");
     let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
+
+    // All report contracts inspect the same production evaluation. Keep it
+    // in this child so resource evidence remains process-isolated.
+    assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
+        workload, &generated, &report,
+    );
+    assert_direct_report_is_evidence_only_and_owns_its_candidate_schema(
+        repo_root, workload, &generated, &report,
+    );
 
     report
         .validate_against(repo_root, workload)

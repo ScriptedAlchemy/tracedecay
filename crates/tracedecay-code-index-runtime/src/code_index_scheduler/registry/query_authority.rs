@@ -8,7 +8,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     /// Record which serving generation answers attribution reads for a root.
-    /// Constant-time on the query path: attribution is built on first read.
+    /// Constant-time on the query path: preparation belongs to the mounted worker.
     pub(super) async fn install_test_attribution_authority(
         &self,
         project_root: &Path,

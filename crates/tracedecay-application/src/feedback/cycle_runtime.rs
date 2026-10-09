@@ -1039,27 +1039,30 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 }
                 let mut affected_tests = Vec::new();
                 let mut affected_tests_states = Vec::with_capacity(seed_symbols.len());
-                for symbol in seed_symbols {
+                let test_requests = seed_symbols
+                    .into_iter()
+                    .map(|symbol| AffectedTestsRequest {
+                        symbol,
+                        generation: generation.clone(),
+                        meta: meta.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let outcomes = self.tests.affected_tests(
+                    &RetrievalPortContext {
+                        request: context,
+                        operation: &self.tests_operation,
+                    },
+                    &test_requests,
+                );
+                if outcomes.len() != test_requests.len() {
+                    return FeedbackImpactPortOutcome::Unavailable;
+                }
+                for tests in outcomes {
                     match context.admission_at(request.input.observed_at) {
                         RequestAdmission::Admitted => {}
-                        RequestAdmission::Cancelled => {
-                            return FeedbackImpactPortOutcome::Cancelled;
-                        }
-                        RequestAdmission::TimedOut => {
-                            return FeedbackImpactPortOutcome::TimedOut;
-                        }
+                        RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                        RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
                     }
-                    let tests = self.tests.affected_tests(
-                        &RetrievalPortContext {
-                            request: context,
-                            operation: &self.tests_operation,
-                        },
-                        &AffectedTestsRequest {
-                            symbol,
-                            generation: generation.clone(),
-                            meta: meta.clone(),
-                        },
-                    );
                     match affected_tests_outcome(tests) {
                         DirectAffectedTestsOutcome::Evidence { tests, state } => {
                             affected_tests.extend(tests);

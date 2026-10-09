@@ -228,6 +228,21 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
         &attributions,
         &occurrences,
     );
+    let mut owned_reference = attributions.clone();
+    owned_reference.sort_by_key(|attribution| attribution.evidence_class);
+    let legacy_digest = tracedecay_domain::canonical_sha256(&serde_json::json!({
+        "domain": "tracedecay.test-attribution-evidence.v1",
+        "generation_id": watermark.generation_id,
+        "snapshot_digest": watermark.snapshot_digest,
+        "content_identity": watermark.content_identity,
+        "source_revision": watermark.source_revision,
+        "attribution_revision": watermark.attribution_revision,
+        "coverage": watermark.coverage,
+        "attributions": owned_reference,
+        "occurrences": occurrences,
+    }))
+    .unwrap();
+    assert_eq!(watermark.evidence_digest, legacy_digest);
     let mut reversed_attributions = attributions.clone();
     reversed_attributions.reverse();
     let mut reversed_occurrences = occurrences.clone();
@@ -241,6 +256,27 @@ fn attribution_evidence_digest_is_canonical_across_input_order() {
             .recompute_evidence_digest(&reversed_attributions, &reversed_occurrences)
             .expect("canonical digest")
     );
+    let joined = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &attributions,
+        &occurrences,
+        &watermark,
+    )
+    .unwrap();
+    let reversed = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &reversed_attributions,
+        &reversed_occurrences,
+        &watermark,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&joined).unwrap(),
+        serde_json::to_vec(&reversed).unwrap()
+    );
+    assert_eq!(joined.retained_bytes(), reversed.retained_bytes());
 }
 
 #[test]
@@ -341,4 +377,69 @@ fn records_covering_one_occurrence_share_a_single_resident_copy() {
         "every test covering an occurrence must share it; a transitive closure \
          copied per test makes the join quadratic in resident memory"
     );
+}
+
+#[test]
+fn join_preserves_first_duplicate_and_first_stale_covered_occurrence() {
+    let (snapshot, manifest) = generation();
+    let mut attribution = attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    );
+    attribution.covered_occurrences.push(id("symbol.z-missing"));
+    let attributions = vec![attribution];
+    let mut evidence = occurrences();
+    evidence[0].content_digest = content('c');
+    let watermark = watermark(
+        &snapshot,
+        &manifest,
+        TestAttributionJoinInputCoverageV1::Complete,
+        &attributions,
+        &evidence,
+    );
+    evidence.reverse();
+    let joined =
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+            .unwrap();
+    assert!(matches!(
+        &joined.records[0].disposition,
+        GenerationTestJoinDispositionV1::StaleContent { occurrence_id, .. }
+            if occurrence_id.as_str() == "symbol.source"
+    ));
+    evidence.extend(evidence.clone());
+    assert_eq!(
+        GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark),
+        Err(GenerationTestJoinErrorV1::DuplicateOccurrence(id(
+            "symbol.test"
+        ))),
+    );
+}
+
+#[test]
+fn join_checks_missing_test_and_covered_occurrences_without_content_drift() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![attribution(
+        &manifest,
+        TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+    )];
+    for missing in ["symbol.source", "symbol.test"] {
+        let mut evidence = occurrences();
+        evidence.retain(|occurrence| occurrence.occurrence_id.as_str() != missing);
+        let watermark = watermark(
+            &snapshot,
+            &manifest,
+            TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &evidence,
+        );
+        let joined =
+            GenerationTestJoinV1::join(&manifest, &snapshot, &attributions, &evidence, &watermark)
+                .unwrap();
+        assert_eq!(
+            joined.records[0].disposition,
+            GenerationTestJoinDispositionV1::MissingOccurrence {
+                occurrence_id: id(missing),
+            },
+        );
+    }
 }

@@ -456,6 +456,10 @@ impl SharedRetainedParsePool {
                             artifact_revision: extraction
                                 .and_then(|(_, revision)| revision.cloned()),
                         }));
+                        // pthread mutexes allocate their backing on first lock.
+                        // Initialize it in the owner's heap before publishing
+                        // the entry, without changing the parse lock order.
+                        drop(entry.lock().unwrap_or_else(PoisonError::into_inner));
                         let mut state = self
                             .state
                             .lock()

@@ -335,8 +335,15 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
     )
     .expect("open scheduler");
     let runtime = bind_automatic_worker_runtime(&scheduler, 128, 128 * 1024 * 1024 * 1024);
-    let authority = Arc::new(ProcessResidentMemoryV1::new(
+    // This case isolates the ledger's worker/snapshot split. Live process
+    // pressure can narrow the slab and is exercised with explicit samples below.
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        Arc::new(|| None),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        pressure,
     ));
     scheduler.bind_resident_memory(Arc::clone(&authority));
 

@@ -181,6 +181,21 @@ fn assert_unknown_handle_markdown(response: &JsonRpcResponse) {
 
 async fn published_cycle(fixture: &ProductionCompositionFixture, document_uri: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let attribution = tokio::time::timeout_at(
+        deadline.into(),
+        fixture
+            .harness
+            .await_test_attribution(&fixture.project_root, &cancellation),
+    )
+    .await
+    .expect("current generation attribution must settle before the cycle deadline")
+    .expect("production attribution readiness");
+    assert_eq!(
+        attribution,
+        tracedecay_domain::ProviderEvaluationStateV1::Partial,
+        "the current generation must expose conservative test attribution"
+    );
     loop {
         let response = call(
             fixture,

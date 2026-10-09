@@ -36,8 +36,15 @@ fn ephemeral_safe_fixture_base(test_path: &str) -> Option<PathBuf> {
         assert!(!tracedecay_global_db::is_ephemeral_path(&root));
         return Some(root);
     }
-    // Keep daemon socket paths short enough for Unix sockaddr_un.
-    let scratch = TempDir::new().expect("isolated temp-policy fixture");
+    // macOS's per-user temporary directory leaves too little room for the
+    // nested child home and its Unix daemon socket. The private child TMPDIR
+    // still defines the ephemeral boundary, with durable fixtures beside it.
+    let scratch = if cfg!(target_os = "macos") {
+        TempDir::new_in("/tmp")
+    } else {
+        TempDir::new()
+    }
+    .expect("isolated temp-policy fixture");
     let temporary = scratch.path().join("temporary");
     let durable = scratch.path().join("durable");
     std::fs::create_dir(&temporary).unwrap();
@@ -387,17 +394,28 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
         );
     }
 
-    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-    command.args(["sessions", "search", "recovery", "--limit", "3", "--json"]);
-    let output = run_with_timeout(command, cli_timeout());
-    assert!(
-        output.status.success(),
-        "sessions search --json should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    // Socket readiness precedes the daemon's historical session projection.
+    // Wait for that background work, while still rejecting malformed or failed
+    // CLI responses immediately and asserting the final public status below.
+    let payload = crate::common::poll_until(
+        Instant::now() + cli_timeout(),
+        Duration::from_millis(100),
+        || {
+            let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+            command.args(["sessions", "search", "recovery", "--limit", "3", "--json"]);
+            let output = run_with_timeout(command, cli_timeout());
+            assert!(
+                output.status.success(),
+                "sessions search --json should succeed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .expect("sessions search --json prints one document");
+            (payload["status"] != "stale").then_some(payload)
+        },
+        || "session search projection did not finish historical convergence".to_owned(),
     );
-    let payload: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("sessions search --json prints one document");
     assert_eq!(payload["query"], "recovery", "{payload:#}");
     assert_eq!(payload["status"], "ok", "{payload:#}");
     assert!(payload["results"].is_array(), "{payload:#}");

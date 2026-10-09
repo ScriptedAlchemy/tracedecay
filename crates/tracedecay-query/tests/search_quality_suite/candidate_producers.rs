@@ -6385,7 +6385,9 @@ fn disk_artifact_ledger_charges_stay_page_local_across_corpus_scaling() {
 /// term, and those body mentions must still share the capped result page.
 #[test]
 fn warm_lexical_search_finds_the_named_symbol_ahead_of_bulk_body_matches() {
-    const BULK_FILES: usize = 800;
+    // Hundreds of bulky bodies exercise ranking and page capping; this
+    // contract does not measure indexing or query throughput.
+    const BULK_FILES: usize = 256;
     let mut sources = Vec::with_capacity(BULK_FILES + 1);
     sources.push((
         "file.cascade.marker".to_owned(),
@@ -6395,7 +6397,7 @@ fn warm_lexical_search_finds_the_named_symbol_ahead_of_bulk_body_matches() {
     for ordinal in 0..BULK_FILES {
         let mut source = format!("export function bulk{ordinal}() {{\n  const payload = \"");
         let mut state = (ordinal as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-        while source.len() < 60 * 1024 {
+        while source.len() < 8 * 1024 {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
