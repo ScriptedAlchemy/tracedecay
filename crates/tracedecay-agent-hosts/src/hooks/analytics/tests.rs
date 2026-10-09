@@ -33,6 +33,43 @@ fn record_stop(profile: &ProfileRoot, event: &str, parsed: &Value) {
 }
 
 #[test]
+fn hook_analytics_do_not_recreate_stores_during_profile_maintenance() {
+    let home = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(home.path());
+    let store = enroll_project(checkout.path(), profile.data_dir(), "proj_hook_maintenance");
+    let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+        profile.data_dir(),
+        "wipe",
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&store).unwrap();
+
+    for root in [None, Some(checkout.path())] {
+        record_hook_analytics(
+            profile.data_dir(),
+            root,
+            "hook_invoked",
+            serde_json::json!({}),
+        );
+    }
+    assert!(!store.exists());
+    assert!(!profile.data_dir().join(HOOK_ANALYTICS_FILENAME).exists());
+
+    drop(lease);
+    record_hook_analytics(
+        profile.data_dir(),
+        None,
+        "hook_invoked",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        read_analytics_rows(&profile.data_dir().join(HOOK_ANALYTICS_FILENAME)).len(),
+        1
+    );
+}
+
+#[test]
 fn unbound_hook_analytics_do_not_create_a_missing_profile() {
     let home = tempfile::tempdir().unwrap();
     let profile_root = home.path().join(".tracedecay");

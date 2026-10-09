@@ -12,6 +12,9 @@ use tracedecay_hooks::{
     HookGuidanceDispositionV1, HookScopedFeedbackV1,
 };
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::lifecycle_lease::{
+    ExclusiveLeaseAttempt, acquire_exclusive_for_profile, try_acquire_exclusive_for_profile,
+};
 
 /// Test shim over [`super::native_material`], which now takes the identity
 /// fields `prepare_bound_hook` already decoded. These cases start from the raw
@@ -972,4 +975,54 @@ async fn events_spooled_before_a_binding_republication_replay_after_it() {
         (1, 0, 0),
         "the queued Stop must replay, not be tombstoned as stale: {pass:?}"
     );
+}
+
+#[test]
+fn bound_hook_excludes_maintenance_until_dispatch_is_released() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(home.path());
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&root, "proj_hook_lease")
+        .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &root,
+        profile.data_dir(),
+        "proj_hook_lease",
+    )
+    .unwrap();
+    fn hook_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.hook-lease"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: hook_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
+    };
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let payload = include_str!(
+        "../../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
+    );
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+    let prepare = || {
+        prepare_bound_hook(
+            &runtime,
+            host,
+            payload,
+            &root,
+            tracedecay_hooks::decode_native_hook_event(host, payload.as_bytes()).unwrap(),
+        )
+    };
+    let prepared = prepare().unwrap();
+    assert!(matches!(
+        try_acquire_exclusive_for_profile(profile.data_dir(), "wipe").unwrap(),
+        ExclusiveLeaseAttempt::Busy { .. }
+    ));
+    drop(prepared);
+    let maintenance = acquire_exclusive_for_profile(profile.data_dir(), "wipe").unwrap();
+    let spool = tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host);
+    std::fs::remove_dir_all(&spool).unwrap();
+    assert!(prepare().is_none());
+    assert!(!spool.exists());
+    drop(maintenance);
+    assert!(prepare().is_some());
 }
