@@ -20,6 +20,8 @@ use tracedecay_sessions::runtime::store_access::{
     message_record_from_row, session_record_from_row,
 };
 
+use crate::observation::decode_observation_json;
+
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
 pub(super) fn storage(
@@ -56,10 +58,9 @@ pub(super) async fn decode_observation_row(
     let observation_json = row
         .get::<String>(1)
         .map_err(|error| storage(operation, error))?;
-    let observation =
-        crate::observation::decode_observation_json(conn, &observation_json, operation)
-            .await
-            .map_err(|error| storage(operation, error))?;
+    let observation = decode_observation_json(conn, &observation_json, operation)
+        .await
+        .map_err(|error| storage(operation, error))?;
     Ok((sequence, observation))
 }
 
@@ -1196,8 +1197,13 @@ pub(in super::super) async fn read_output_authorities(
             let observation_json = row
                 .get::<String>(3)
                 .map_err(|error| storage("read canonical projection output authority", error))?;
-            let canonical = serde_json::from_str(&observation_json)
-                .map_err(|error| storage("decode canonical projection output authority", error))?;
+            let canonical = decode_observation_json(
+                conn,
+                &observation_json,
+                "decode canonical projection output authority",
+            )
+            .await
+            .map_err(|error| storage("decode canonical projection output authority", error))?;
             resolved.insert(
                 (provider, message_id),
                 ProjectionOutputAuthority {
