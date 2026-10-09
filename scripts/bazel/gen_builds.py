@@ -1174,6 +1174,14 @@ def main():
 
         if test_sizes:
             sys.exit(f"{name}: test_sizes names unknown test targets: {', '.join(sorted(test_sizes))}")
+        if name == "tracedecay-sdk":
+            # The Bazel-only SDK generator reuses the canonical renderer and
+            # compares its output with the checked-in Rust descriptors.
+            out += [
+                'exports_files(["src/bin/generate.rs", "src/codegen.rs", "src/operations.rs"],',
+                '    visibility = ["//visibility:public"],',
+                ')\n',
+            ]
         return "\n".join(out)
 
     outputs = {}

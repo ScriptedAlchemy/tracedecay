@@ -110,12 +110,14 @@ pub trait SourceRetrievalPort {
     ) -> Pin<Box<dyn Future<Output = RetrievalPortOutcome<SourceLinesResult>> + Send + 'a>>;
 }
 
+/// One typed outcome per request, preserving request order. Implementations may
+/// share generation authority reads across the batch.
 pub trait AffectedTestsRetrievalPort {
     fn affected_tests(
         &self,
         context: &RetrievalPortContext<'_>,
-        request: &AffectedTestsRequest,
-    ) -> RetrievalPortOutcome<AffectedTestsResult>;
+        requests: &[AffectedTestsRequest],
+    ) -> Vec<RetrievalPortOutcome<AffectedTestsResult>>;
 }
 
 /// Structural budget boundary that rejected a session retrieval request.

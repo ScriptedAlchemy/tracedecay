@@ -719,7 +719,6 @@ jobs:
           cache_dependency_path: |
             pnpm-lock.yaml
             Cargo.lock
-            sdks/codegen/Cargo.lock
 
       - name: Install npm packages and Cargo sources
         run: pnpm install --frozen-lockfile
@@ -762,7 +761,7 @@ jobs:
           echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
             | sha256sum -c -
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true

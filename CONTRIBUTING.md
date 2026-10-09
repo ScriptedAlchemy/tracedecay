@@ -20,11 +20,10 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
 installs every crate into `.pnpm/crates`, which the committed
 `.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
 `cargo` cannot resolve dependencies until it has run. Bazel is the workspace
-build, lint, test, and release runner on every CI host. Cargo remains for the
-local edit loop, packaging, Hawk, the Windows cross-target type check, and the
-`sdks/codegen` workspace; install `cargo-nextest` only for the local
-`cargo test-ci` / `cargo test-all` aliases. Commands below run from the
-repository root unless noted.
+build, test, check, run, benchmark, and code-generation authority locally
+and in CI. Cargo metadata and dependency resolution remain inputs to Bazel;
+formatting does not compile or execute the workspace. Commands below run
+from the repository root unless noted.
 
 Two Cargo errors mean "run `pnpm install` at the repository root". Before any
 install, Cargo reports `failed to read root of directory source
@@ -50,9 +49,9 @@ Inside the checkout `cargo update` refuses the vendored git sources and
 member directory it regenerates the whole `Cargo.lock`, and at the root it
 fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
 stay in place after `pnpm install` and are inert once the lock stops naming
-them. Cargo reads `.cargo/config.toml` from its working directory, so run
-`sdks/codegen` cargo commands from `sdks/codegen`; the dashboard
-`contracts:generate` and `contracts:check` scripts do this themselves.
+them. Dashboard `contracts:generate` and `contracts:check` run the
+`//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets
+from the repository root.
 
 Use your current checkout; no particular absolute path or historical PR branch
 is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
@@ -161,9 +160,8 @@ with `-D warnings`:
 bazel build --config=clippy //...
 ```
 
-`cargo clippy --workspace --all-targets -- -D warnings` checks the same targets
-in the Cargo edit loop. Either way the check is blocking: the workflow fails on
-any Clippy warning. The composition-root lint policy in
+The check is blocking: the workflow fails on any Clippy warning.
+The composition-root lint policy in
 `crates/tracedecay/src/lib.rs` currently denies `clippy::all`, `clippy::unwrap_used`, and
 `clippy::expect_used`; new violations of those lints must be fixed or justified
 with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
@@ -214,8 +212,8 @@ ecosystem bundle correctly.
 `dashboard/src/contracts/generated.ts`, and
 `dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
 hand-written. The Rust `schemars` output is authoritative: the codegen CLI
-exports the schema through the `tracedecay-dashboard-api` library's ignored
-`contract_schema::tests::writes_dashboard_contract_schema` test. In
+exports the schema through `//sdks/codegen:dashboard_schema`, which calls
+the `tracedecay-dashboard-api` library's canonical renderer. In
 `contracts:check` mode, it generates all four dashboard files and the
 TypeScript SDK sources, then compares every generated output byte-for-byte
 with the committed files.
@@ -299,17 +297,16 @@ integration branch waits behind, so a run spends only what its state earns:
 
 | State | Runs |
 |---|---|
-| Pull request | Nothing automatically. Dispatch CI on its branch ref when the head is ready. |
-| `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: Bazel build and test, clippy, feature gates, the shipped CLI, and the dashboard. |
-| `CI` with `run_os=true` | Adds the macOS and Windows Bazel build and test lanes. |
+| Draft pull request | Repository gates and benchmark-harness self-tests. |
+| Ready pull request, push to `master`, or `CI` dispatch | Repository gates, benchmark-harness self-tests, Linux and Windows Bazel build and test, Clippy, feature gates, the shipped CLI, and the dashboard. |
+| `CI` with `run_os=true` | Adds the macOS Bazel build and test lane. |
 | `CI` with `run_hosts=true` | Adds stock host integrations. |
-| Push to `master` | Everything. |
 
-Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add
-`-f run_os=true` or `-f run_hosts=true` only for those lanes. Opening,
-pushing, labeling, and marking ready create no run at all. A newer
-master push cancels the one in flight. Closing or merging a PR cancels
-its remaining runs and drops its Actions caches. Nothing runs on a
+Use `gh workflow run ci.yml --ref <branch>` to request an additional run; add
+`-f run_os=true` or `-f run_hosts=true` for the optional lanes. A newer PR
+head replaces its prior run. Master finishes its current snapshot and retains
+only the newest pending run. Closing or merging a PR cancels its remaining
+runs and drops its Actions caches. Nothing runs on a
 timer: the packaged-crate distribution battery and the Hawk lint are
 `workflow_dispatch` only.
 

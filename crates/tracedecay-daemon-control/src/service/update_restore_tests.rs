@@ -205,9 +205,7 @@ impl DrainingDaemonFixture {
 
     fn assert_daemon_running_after(&self, phase: &str) {
         assert_eq!(
-            self.runner
-                .service_state(&self.socket_path)
-                .expect("service state"),
+            self.runner.service_state().expect("service state"),
             DaemonServiceState::RunningEnabled,
             "the managed daemon must be running after {phase}"
         );

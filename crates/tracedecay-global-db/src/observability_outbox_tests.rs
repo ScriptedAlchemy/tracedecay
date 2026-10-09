@@ -110,6 +110,153 @@ async fn observability_batch_appends_every_event() {
     );
 }
 
+fn ordinary_batch_event(index: usize) -> AnalyticsEventInsert {
+    AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_owned(),
+        project_id: "scope:ordinary-batch".to_owned(),
+        session_id: None,
+        timestamp: 1,
+        event_kind: "retrieval.query.completed.v1".to_owned(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(format!("ordinary:{index}")),
+        outcome: Some("succeeded".to_owned()),
+        metadata_json: Some(format!("{{\"index\":{index}}}")),
+    }
+}
+
+#[tokio::test]
+async fn ordinary_observability_batch_matches_single_appends_across_chunks_and_replays() {
+    let batch = RegisteredGlobalDbHarness::open("ordinary-batch-equivalence").await;
+    let singles = RegisteredGlobalDbHarness::open("ordinary-single-equivalence").await;
+    let seeded = ordinary_batch_event(0);
+    for db in [&batch.registered, &singles.registered] {
+        db.append_observability_event(&seeded).await.unwrap();
+    }
+    let mut events = vec![
+        ordinary_batch_event(1),
+        seeded.clone(),
+        ordinary_batch_event(1),
+    ];
+    let mut other_scope = ordinary_batch_event(1);
+    other_scope.project_id = "scope:other".to_owned();
+    events.push(other_scope);
+    events.extend(
+        (2..=crate::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT)
+            .map(ordinary_batch_event),
+    );
+    events.extend([ordinary_batch_event(1), seeded]);
+    let mut expected = Vec::new();
+    for event in &events {
+        expected.push(
+            singles
+                .registered
+                .append_observability_event(event)
+                .await
+                .unwrap(),
+        );
+    }
+    let actual = batch
+        .registered
+        .append_observability_events(&events)
+        .await
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0], actual[2]);
+    assert_eq!(actual[0], actual[actual.len() - 2]);
+    assert_ne!(actual[0], actual[3]);
+    assert_eq!(
+        batch
+            .registered
+            .append_observability_events(&events)
+            .await
+            .unwrap(),
+        actual
+    );
+    for (event, id) in events.iter().zip(actual) {
+        let record = batch
+            .registered
+            .read_observability_event(&event.project_id, event.hint_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.id, id);
+        assert_eq!(record.metadata_json, event.metadata_json);
+    }
+}
+
+#[tokio::test]
+async fn ordinary_observability_batch_conflicts_roll_back_all_chunks() {
+    let harness = RegisteredGlobalDbHarness::open("ordinary-batch-rollback").await;
+    let seeded = ordinary_batch_event(0);
+    let seeded_id = harness
+        .registered
+        .append_observability_event(&seeded)
+        .await
+        .unwrap();
+    let count = crate::registered_analytics::ANALYTICS_INSERT_ROWS_PER_STATEMENT;
+    let mut events = (1..=count).map(ordinary_batch_event).collect::<Vec<_>>();
+    let mut conflict = events[0].clone();
+    conflict.metadata_json = Some("{\"changed\":true}".to_owned());
+    events.push(conflict);
+    let error = harness
+        .registered
+        .append_observability_events(&events)
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(&seeded.project_id), 0)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        harness
+            .registered
+            .append_observability_event(&seeded)
+            .await
+            .unwrap(),
+        seeded_id
+    );
+
+    // A conflict within the first run must also leave no accepted prefix.
+    let mut changed = ordinary_batch_event(1);
+    changed.timestamp += 1;
+    let error = harness
+        .registered
+        .append_observability_events(&[ordinary_batch_event(1), changed])
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(&seeded.project_id), 0)
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Preserve input failure precedence: an earlier replay conflict precedes
+    // an invalid later envelope, even though lookup is performed in a batch.
+    let mut changed = seeded.clone();
+    changed.timestamp += 1;
+    let mut invalid = ordinary_batch_event(2);
+    invalid.hint_id = None;
+    let error = harness
+        .registered
+        .append_observability_events(&[changed, invalid])
+        .await
+        .unwrap_err();
+    assert!(error.contains("idempotency conflict"), "{error}");
+}
+
 #[tokio::test]
 async fn observability_outbox_replay_reuses_exact_delivery_and_settles_atomically() {
     let harness = RegisteredGlobalDbHarness::open("observability-outbox-replay").await;

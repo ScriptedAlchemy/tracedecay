@@ -1,12 +1,14 @@
 //! Affected-tests retrieval port and its attribution evidence.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_code_index::provider::{
     GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_code_index::test_attribution::{
-    GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
+    GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinRecordV1,
+    GenerationTestJoinV1,
 };
 use tracedecay_contracts::retrieval::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, RetrievalPortContext,
@@ -58,39 +60,164 @@ impl tracedecay_contracts::AffectedTestsRetrievalPort for TraceDecayAffectedTest
     fn affected_tests(
         &self,
         context: &RetrievalPortContext<'_>,
-        request: &AffectedTestsRequest,
-    ) -> RetrievalPortOutcome<AffectedTestsResult> {
+        requests: &[AffectedTestsRequest],
+    ) -> Vec<RetrievalPortOutcome<AffectedTestsResult>> {
         let finished_at = now_observed();
+        let unavailable = || {
+            requests
+                .iter()
+                .map(|request| {
+                    affected_tests_unavailable(
+                        request,
+                        finished_at,
+                        OmissionReason::Unavailable,
+                        FreshnessState::Unknown,
+                    )
+                })
+                .collect()
+        };
         if self.project_id.as_ref() != Some(&context.request.scope().project_id) {
-            return affected_tests_unavailable(
-                request,
-                finished_at,
-                OmissionReason::Unavailable,
-                FreshnessState::Unknown,
-            );
+            return unavailable();
         }
         let Some(attribution) = &self.attribution else {
-            return affected_tests_unavailable(
-                request,
-                finished_at,
-                OmissionReason::Unavailable,
-                FreshnessState::Unknown,
-            );
+            return unavailable();
         };
-        attributed_tests_outcome(
-            request,
-            context.request.scope().clone(),
-            &attribution.read_test_attribution(&request.generation),
-            finished_at,
-        )
+        let mut generations = BTreeMap::<_, Vec<usize>>::new();
+        for (index, request) in requests.iter().enumerate() {
+            generations
+                .entry(&request.generation)
+                .or_default()
+                .push(index);
+        }
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for (generation, indices) in generations {
+            if context.request.cancellation().is_cancelled() {
+                return requests
+                    .iter()
+                    .map(|request| cancelled_tests_outcome(request, finished_at))
+                    .collect();
+            }
+            let read = attribution.read_test_attribution(generation);
+            let batch = attributed_tests_batch(
+                requests,
+                &indices,
+                context.request.scope(),
+                &read,
+                finished_at,
+                &|| context.request.cancellation().is_cancelled(),
+            );
+            outcomes.extend(batch);
+        }
+        outcomes.sort_unstable_by_key(|(index, _)| *index);
+        outcomes.into_iter().map(|(_, outcome)| outcome).collect()
     }
 }
 
-pub(super) fn attributed_tests_outcome(
+pub(super) fn attributed_tests_batch(
+    requests: &[AffectedTestsRequest],
+    indices: &[usize],
+    scope: &ResolvedScope,
+    read: &GenerationProviderReadV1<GenerationTestJoinV1>,
+    finished_at: UtcMicros,
+    cancelled: &dyn Fn() -> bool,
+) -> Vec<(usize, RetrievalPortOutcome<AffectedTestsResult>)> {
+    let mut selected = vec![Vec::new(); indices.len()];
+    let mut seeds = BTreeMap::<_, Vec<usize>>::new();
+    for (slot, &index) in indices.iter().enumerate() {
+        seeds.entry(&requests[index].symbol).or_default().push(slot);
+    }
+    if let Some(join) = &read.evidence {
+        for record in &join.records {
+            if cancelled() {
+                return indices
+                    .iter()
+                    .map(|&index| {
+                        (
+                            index,
+                            cancelled_tests_outcome(&requests[index], finished_at),
+                        )
+                    })
+                    .collect();
+            }
+            // Every single-symbol read checks this before matching. Preserve
+            // its position among matching refusals, even for unrelated seeds.
+            if indices.first().is_some_and(|&index| {
+                record.attribution.generation_id != requests[index].generation
+            }) {
+                for records in &mut selected {
+                    records.push(record);
+                }
+                continue;
+            }
+            let covered = &record.attribution.covered_occurrences;
+            // Probe the smaller side: a test may cover millions of occurrences
+            // while feedback asks for only a few hundred changed symbols.
+            if seeds.len() <= covered.len() {
+                for (seed, slots) in &seeds {
+                    if covered.binary_search(seed).is_ok() {
+                        for &slot in slots {
+                            selected[slot].push(record);
+                        }
+                    }
+                }
+            } else {
+                for occurrence in covered {
+                    if let Some(slots) = seeds.get(occurrence) {
+                        for &slot in slots {
+                            selected[slot].push(record);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    indices
+        .iter()
+        .copied()
+        .zip(selected)
+        .map(|(index, records)| {
+            (
+                index,
+                if cancelled() {
+                    cancelled_tests_outcome(&requests[index], finished_at)
+                } else {
+                    attributed_tests_outcome(
+                        &requests[index],
+                        scope.clone(),
+                        read,
+                        finished_at,
+                        records.into_iter(),
+                    )
+                },
+            )
+        })
+        .collect()
+}
+
+fn cancelled_tests_outcome(
+    request: &AffectedTestsRequest,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<AffectedTestsResult> {
+    RetrievalPortOutcome::Cancelled(affected_tests_evidence(
+        request,
+        None,
+        finished_at,
+        CoverageCompleteness::Unknown,
+        FreshnessState::Unknown,
+        None,
+        None,
+        None,
+        None,
+        Some(OmissionReason::Cancelled),
+    ))
+}
+
+pub(super) fn attributed_tests_outcome<'a>(
     request: &AffectedTestsRequest,
     scope: ResolvedScope,
     read: &GenerationProviderReadV1<GenerationTestJoinV1>,
     finished_at: UtcMicros,
+    records: impl Iterator<Item = &'a GenerationTestJoinRecordV1>,
 ) -> RetrievalPortOutcome<AffectedTestsResult> {
     if read.validate().is_err() {
         return affected_tests_unavailable(
@@ -174,7 +301,7 @@ pub(super) fn attributed_tests_outcome(
 
     let mut attributions = Vec::new();
     let mut matching_incomplete = false;
-    for record in &join.records {
+    for record in records {
         if record.attribution.generation_id != request.generation {
             return affected_tests_unavailable(
                 request,
@@ -186,7 +313,8 @@ pub(super) fn attributed_tests_outcome(
         let covers_requested_symbol = record
             .attribution
             .covered_occurrences
-            .contains(&request.symbol);
+            .binary_search(&request.symbol)
+            .is_ok();
         if !covers_requested_symbol {
             continue;
         }

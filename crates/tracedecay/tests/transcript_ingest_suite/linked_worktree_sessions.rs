@@ -178,7 +178,7 @@ fn write_codex_rollout(home: &Path, session: &str, turns: &[&Path]) {
 
 fn worktree_query(worktree: &Path) -> SessionsForQuery {
     SessionsForQuery {
-        git_ref: GitRefFilter::Worktree(worktree.to_string_lossy().into_owned()),
+        git_ref: GitRefFilter::parse("worktree", &worktree.to_string_lossy()).unwrap(),
         since: None,
         until: None,
         limit: 20,

@@ -1346,26 +1346,26 @@ async fn sealing_keeps_symbol_records_only_in_the_graph_store() {
     );
 }
 
-/// A symbol whose record is longer than 64 KiB, here from a long doc
-/// comment, seals and serves its whole record like any other symbol.
-///
-/// Fails if sealed publication panics or refuses a string column value
-/// longer than `u16::MAX` bytes, or if the served docstring is cut short.
+/// JSON escaping makes this sub-1MiB source's symbol record exceed the
+/// graph's property limit; publication must preserve its entire documentation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_symbol_record_over_64_kib_seals_and_serves_whole() {
+async fn an_oversized_symbol_record_seals_and_serves_whole() {
     let doc_lines = (0..800)
-        .map(|line| format!("doc line {line:04} {}", "x".repeat(80)))
+        .map(|line| format!("doc line {line:04} {}", "\"\\".repeat(400)))
         .collect::<Vec<_>>();
     let mut source = String::new();
     for line in &doc_lines {
         writeln!(source, "/// {line}").expect("write doc line");
     }
     source.push_str("pub fn long_doc_value() -> usize { 64 }\n");
+    assert!(source.len() < tracedecay_code_index::extract::MAX_EXTRACTION_SOURCE_BYTES);
+    let doc_json = serde_json::to_vec(&doc_lines.join("\n")).unwrap();
+    assert!(doc_json.len() > tracedecay_graph_db::MAX_GRAPH_PROPERTY_VALUE_BYTES);
     let fixture = sealed_generation_fixture("project.long-record", &source).await;
     let snapshot = fixture
         .runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
-        .expect("seal a code graph with a record over 64 KiB");
+        .expect("seal a code graph with an oversized record");
     let store =
         tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,

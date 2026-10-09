@@ -901,7 +901,6 @@ impl LatestCompleteCodeIndexV1 {
             CodeGraphServingAuthorityV1::Persistent { _lease: authority },
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-        let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
         Ok(Some(PendingInteractiveCatalogWarmV1 {
             store,

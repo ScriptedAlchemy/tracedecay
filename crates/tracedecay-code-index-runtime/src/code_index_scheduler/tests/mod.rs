@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -232,6 +234,22 @@ fn git(root: &Path, args: &[&str]) {
     .status()
     .expect("run git fixture command");
     assert!(status.success(), "git fixture command failed: {args:?}");
+}
+
+/// Stage exact Git path bytes without requiring the host filesystem to admit
+/// that spelling (APFS rejects non-UTF-8 filenames).
+#[cfg(unix)]
+pub(super) fn stage_raw_git_path(root: &Path, git_path: &[u8], source: &str) {
+    let blob = git_stdout(root, &["hash-object", "-w", source]);
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program().expect("absolute git executable"),
+    )
+    .current_dir(root)
+    .args(["update-index", "--add", "--cacheinfo", "100644", &blob])
+    .arg(std::ffi::OsStr::from_bytes(git_path))
+    .output()
+    .expect("stage raw Git path");
+    assert!(output.status.success(), "stage raw Git path: {output:?}");
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {

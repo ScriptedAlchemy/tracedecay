@@ -1,0 +1,39 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//scripts:bazel/rust_test.bzl", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+SDK_SOURCES = [
+    "//crates/tracedecay-sdk:src/bin/generate.rs",
+    "//crates/tracedecay-sdk:src/codegen.rs",
+]
+
+SDK_DEPS = [
+    "@c//:serde_json",
+    "//crates/tracedecay-contracts:tracedecay-contracts",
+    "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog",
+]
+
+rust_binary(
+    name = "generate",
+    srcs = SDK_SOURCES,
+    crate_root = "//crates/tracedecay-sdk:src/bin/generate.rs",
+    edition = "2024",
+    deps = SDK_DEPS,
+)
+
+rust_test(
+    name = "unit_test",
+    srcs = SDK_SOURCES,
+    crate_root = "//crates/tracedecay-sdk:src/bin/generate.rs",
+    compile_data = ["//crates/tracedecay-sdk:src/operations.rs"],
+    edition = "2024",
+    deps = SDK_DEPS,
+)
+
+rust_binary(
+    name = "dashboard_schema",
+    srcs = ["dashboard_schema.rs"],
+    edition = "2024",
+    deps = ["//crates/tracedecay-dashboard-api:tracedecay-dashboard-api"],
+)

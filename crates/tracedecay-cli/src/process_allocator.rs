@@ -48,6 +48,8 @@ pub(crate) mod mimalloc_v3 {
         fn mi_free(block: *mut c_void);
         fn mi_usable_size(block: *const c_void) -> usize;
         fn mi_good_size(size: usize) -> usize;
+        #[cfg_attr(target_env = "msvc", link_name = "?_mi_os_page_size@@YA_KXZ")]
+        fn _mi_os_page_size() -> usize;
         fn mi_collect(force: bool);
         fn mi_heap_new() -> *mut c_void;
         fn mi_heap_delete(heap: *mut c_void);
@@ -296,8 +298,6 @@ pub(crate) mod mimalloc_v3 {
         free_late_theaps(serialize_thread_exit());
     }
 
-    /// Granule both residency queries report in.
-    const OS_PAGE_BYTES: usize = 4096;
     /// OS pages queried per call, sized for a stack buffer: the visitor runs
     /// inside the heap walk and must not allocate.
     const RESIDENCY_BATCH_PAGES: usize = 512;
@@ -308,20 +308,20 @@ pub(crate) mod mimalloc_v3 {
     /// cannot allocate its own bookkeeping, and an owner must not read as
     /// smaller than it is.
     #[cfg(unix)]
-    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+    fn resident_page_bytes(start: usize, len: usize, page_bytes: usize) -> u64 {
         let mut resident = 0_u64;
         let mut vector = [0_u8; RESIDENCY_BATCH_PAGES];
         let mut offset = 0;
         while offset < len {
             let pages = (len - offset)
-                .div_ceil(OS_PAGE_BYTES)
+                .div_ceil(page_bytes)
                 .min(RESIDENCY_BATCH_PAGES);
             // SAFETY: the range lies in a live mimalloc page mapping and
             // `vector` holds one byte per OS page of it.
             let status = unsafe {
                 libc::mincore(
                     (start + offset) as *mut c_void,
-                    pages * OS_PAGE_BYTES,
+                    pages * page_bytes,
                     vector.as_mut_ptr().cast(),
                 )
             };
@@ -333,8 +333,8 @@ pub(crate) mod mimalloc_v3 {
             } else {
                 pages
             };
-            resident += (present * OS_PAGE_BYTES) as u64;
-            offset += pages * OS_PAGE_BYTES;
+            resident += (present * page_bytes) as u64;
+            offset += pages * page_bytes;
         }
         resident
     }
@@ -344,16 +344,16 @@ pub(crate) mod mimalloc_v3 {
     /// a live page of this process, so an owner must not read as smaller than
     /// it is.
     #[cfg(windows)]
-    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+    fn resident_page_bytes(start: usize, len: usize, page_bytes: usize) -> u64 {
         let mut resident = 0_u64;
         let mut entries = [PSAPI_WORKING_SET_EX_INFORMATION::default(); RESIDENCY_BATCH_PAGES];
         let mut offset = 0;
         while offset < len {
             let pages = (len - offset)
-                .div_ceil(OS_PAGE_BYTES)
+                .div_ceil(page_bytes)
                 .min(RESIDENCY_BATCH_PAGES);
             for (index, entry) in entries[..pages].iter_mut().enumerate() {
-                entry.VirtualAddress = (start + offset + index * OS_PAGE_BYTES) as *mut c_void;
+                entry.VirtualAddress = (start + offset + index * page_bytes) as *mut c_void;
             }
             // SAFETY: `entries` holds `pages` initialized requests for this
             // process's own addresses.
@@ -373,8 +373,8 @@ pub(crate) mod mimalloc_v3 {
             } else {
                 pages
             };
-            resident += (present * OS_PAGE_BYTES) as u64;
-            offset += pages * OS_PAGE_BYTES;
+            resident += (present * page_bytes) as u64;
+            offset += pages * page_bytes;
         }
         resident
     }
@@ -395,10 +395,16 @@ pub(crate) mod mimalloc_v3 {
         unsafe {
             let area = &*area;
             let blocks = area.blocks as usize;
-            let start = blocks & !(OS_PAGE_BYTES - 1);
+            // The allocator has initialized the native OS granule before
+            // creating this heap; mincore and QueryWorkingSetEx use it too.
+            let page_bytes = _mi_os_page_size();
+            let start = blocks & !(page_bytes - 1);
             let total = &mut *total.cast::<u64>();
-            *total =
-                total.saturating_add(resident_page_bytes(start, blocks + area.reserved - start));
+            *total = total.saturating_add(resident_page_bytes(
+                start,
+                blocks + area.reserved - start,
+                page_bytes,
+            ));
         }
         true
     }

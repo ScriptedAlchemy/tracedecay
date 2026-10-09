@@ -191,7 +191,7 @@ freshness: fresh
 
 _Use `tracedecay_source_body` with a result's `node_id` to read the verified enclosing symbol._
 
-_1 matches across {FILES_SCANNED} files._
+_1 matches; {FILES_SCANNED} files scanned._
 "
     )
 }

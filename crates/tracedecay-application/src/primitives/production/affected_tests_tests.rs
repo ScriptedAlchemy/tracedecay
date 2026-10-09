@@ -734,13 +734,15 @@ fn exact_project_and_generation_route_canonical_attribution() {
     );
     let (context, operation, _) = context(project_id);
 
-    let outcome = port.affected_tests(
-        &RetrievalPortContext {
-            request: &context,
-            operation: &operation,
-        },
-        &request(generation.clone()),
-    );
+    let outcome = port
+        .affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &[request(generation.clone())],
+        )
+        .remove(0);
 
     assert_eq!(authority.calls.load(Ordering::Relaxed), 1);
     let RetrievalPortOutcome::Completed(evidence) = outcome else {
@@ -789,13 +791,16 @@ fn attribution_class_is_preserved_without_inference() {
         );
         let (context, operation, _) = context(project_id);
 
-        let RetrievalPortOutcome::Completed(evidence) = port.affected_tests(
-            &RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request(generation),
-        ) else {
+        let RetrievalPortOutcome::Completed(evidence) = port
+            .affected_tests(
+                &RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &[request(generation)],
+            )
+            .remove(0)
+        else {
             panic!("current attribution must complete");
         };
         assert_eq!(
@@ -836,13 +841,16 @@ fn unknown_attribution_remains_typed_partial() {
     );
     let (context, operation, _) = context(project_id);
 
-    let RetrievalPortOutcome::Partial(evidence) = port.affected_tests(
-        &RetrievalPortContext {
-            request: &context,
-            operation: &operation,
-        },
-        &request(generation),
-    ) else {
+    let RetrievalPortOutcome::Partial(evidence) = port
+        .affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &[request(generation)],
+        )
+        .remove(0)
+    else {
         panic!("unknown attribution must stay partial");
     };
     let payload = evidence.payload.expect("payload");
@@ -874,13 +882,16 @@ fn current_disposition_with_non_candidate_class_fails_closed() {
         );
         let (context, operation, _) = context(project_id);
 
-        let RetrievalPortOutcome::Unavailable(evidence) = port.affected_tests(
-            &RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request(generation),
-        ) else {
+        let RetrievalPortOutcome::Unavailable(evidence) = port
+            .affected_tests(
+                &RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &[request(generation)],
+            )
+            .remove(0)
+        else {
             panic!("a current disposition must carry a candidate class");
         };
         assert!(evidence.payload.is_none());
@@ -900,13 +911,15 @@ fn absent_or_mismatched_authority_never_fabricates_complete_empty() {
     );
     let (context, operation, _) = context(project_id);
 
-    let outcome = port.affected_tests(
-        &RetrievalPortContext {
-            request: &context,
-            operation: &operation,
-        },
-        &request(requested_generation),
-    );
+    let outcome = port
+        .affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &[request(requested_generation)],
+        )
+        .remove(0);
 
     assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
 
@@ -919,13 +932,15 @@ fn absent_or_mismatched_authority_never_fabricates_complete_empty() {
         expected_generation.clone(),
         Some(authority.clone()),
     );
-    let outcome = port.affected_tests(
-        &RetrievalPortContext {
-            request: &context,
-            operation: &operation,
-        },
-        &request(expected_generation),
-    );
+    let outcome = port
+        .affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &[request(expected_generation)],
+        )
+        .remove(0);
 
     assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
     assert_eq!(authority.calls.load(Ordering::Relaxed), 0);
@@ -946,13 +961,15 @@ fn port_routes_each_current_generation_instead_of_pinning_open_generation() {
     );
     let (context, operation, _) = context(project_id);
 
-    let outcome = port.affected_tests(
-        &RetrievalPortContext {
-            request: &context,
-            operation: &operation,
-        },
-        &request(current_generation),
-    );
+    let outcome = port
+        .affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &[request(current_generation)],
+        )
+        .remove(0);
 
     assert!(matches!(outcome, RetrievalPortOutcome::Completed(_)));
 }
@@ -1105,4 +1122,131 @@ fn invalid_storage_status_history_is_reset_without_claiming_full_history() {
 
     assert_eq!(history.len(), 1);
     assert_eq!(coverage, "durable_project_store_history_reset_invalid");
+}
+
+#[test]
+fn batched_attribution_preserves_single_seed_evidence_and_refusal_order() {
+    let generation = generation("generation.batch");
+    let mut unmatched = request(generation.clone());
+    unmatched.symbol = SymbolOccurrenceId::new("symbol.unmatched").unwrap();
+    let requests = vec![
+        unmatched,
+        request(generation.clone()),
+        request(generation.clone()),
+    ];
+    let (_, _, scope) = context(ProjectId::new("project.affected-tests").unwrap());
+    let complete = complete_read(generation.clone());
+    let mut partial = complete.clone();
+    partial.provider_state = ProviderEvaluationStateV1::Partial;
+    partial.coverage = GenerationProviderCoverageV1::Partial {
+        examined: 1,
+        eligible: 1,
+        excluded: 0,
+        unknown: 1,
+        capped: false,
+    };
+    partial.evidence.as_mut().unwrap().records[0].disposition =
+        GenerationTestJoinDispositionV1::StaleEvidence;
+    let mut refusal_order = complete.clone();
+    let join = refusal_order.evidence.as_mut().unwrap();
+    let mut wrong_generation = join.records[0].clone();
+    wrong_generation.attribution.generation_id = CodeGenerationId::new("generation.other").unwrap();
+    wrong_generation.attribution.covered_occurrences.clear();
+    join.records[0].test_occurrence = None;
+    join.records.push(wrong_generation);
+    let cancelled = GenerationProviderReadV1::new(
+        ProviderEvaluationStateV1::Cancelled,
+        GenerationProviderCoverageV1::Unavailable,
+        None,
+    )
+    .unwrap();
+    let timed_out = GenerationProviderReadV1::new(
+        ProviderEvaluationStateV1::TimedOut,
+        GenerationProviderCoverageV1::Unavailable,
+        None,
+    )
+    .unwrap();
+    for read in [complete, partial, refusal_order, cancelled, timed_out] {
+        let actual = super::affected_tests::attributed_tests_batch(
+            &requests,
+            &[0, 1, 2],
+            &scope,
+            &read,
+            UtcMicros(100),
+            &|| false,
+        );
+        let expected = requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                (
+                    index,
+                    super::affected_tests::attributed_tests_outcome(
+                        request,
+                        scope.clone(),
+                        &read,
+                        UtcMicros(100),
+                        read.evidence.iter().flat_map(|join| join.records.iter()),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn batch_reads_each_generation_once_and_preserves_request_order() {
+    let project = ProjectId::new("project.affected-tests").unwrap();
+    let current = generation("generation.current");
+    let authority = Arc::new(AttributionFixture {
+        calls: AtomicUsize::new(0),
+        read: complete_read(current.clone()),
+    });
+    let port = TraceDecayAffectedTestsPortV1::from_binding(
+        Some(project.clone()),
+        current.clone(),
+        Some(authority.clone()),
+    );
+    let (context, operation, _) = context(project);
+    let port_context = RetrievalPortContext {
+        request: &context,
+        operation: &operation,
+    };
+    assert!(port.affected_tests(&port_context, &[]).is_empty());
+    assert_eq!(authority.calls.load(Ordering::Relaxed), 0);
+    let requests = [
+        request(current.clone()),
+        request(generation("generation.other")),
+        request(current),
+    ];
+    let outcomes = port.affected_tests(&port_context, &requests);
+    assert_eq!(outcomes.len(), 3);
+    assert!(matches!(outcomes[0], RetrievalPortOutcome::Completed(_)));
+    assert!(matches!(outcomes[1], RetrievalPortOutcome::Unavailable(_)));
+    assert!(matches!(outcomes[2], RetrievalPortOutcome::Completed(_)));
+    assert_eq!(outcomes[0], outcomes[2]);
+    assert_eq!(authority.calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn batch_observes_cancellation_between_records() {
+    let current = generation("generation.cancel-batch");
+    let mut read = complete_read(current.clone());
+    let join = read.evidence.as_mut().unwrap();
+    join.records.push(join.records[0].clone());
+    let (_, _, scope) = context(ProjectId::new("project.affected-tests").unwrap());
+    let checks = AtomicUsize::new(0);
+    let requests = [request(current)];
+    let outcomes = super::affected_tests::attributed_tests_batch(
+        &requests,
+        &[0],
+        &scope,
+        &read,
+        UtcMicros(100),
+        &|| checks.fetch_add(1, Ordering::Relaxed) > 0,
+    );
+    assert_eq!(checks.load(Ordering::Relaxed), 2);
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(outcomes[0].1, RetrievalPortOutcome::Cancelled(_)));
 }

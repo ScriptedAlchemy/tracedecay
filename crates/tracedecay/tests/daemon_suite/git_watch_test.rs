@@ -54,6 +54,7 @@ async fn indexed_repo() -> (TempDir, PathBuf, ProductionProjectCompositionHarnes
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");
     fs::create_dir_all(project.join("src")).unwrap();
+    let project = project.canonicalize().expect("canonical fixture project");
     git(&project, &["init", "-b", "main"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
