@@ -159,10 +159,15 @@ pub(super) async fn configuration_definition_digest(
 pub(super) async fn registered_store_is_empty(
     connection: &impl QueryExecutor,
 ) -> Result<bool, ConfigurationSchemaError> {
+    // The writer ledger schema is installed when the store's writer
+    // connection opens, before registered admission classifies the store.
+    // Those `td_runtime_writer_*` objects are runtime internals, not
+    // registered content, so a store holding only them is still fresh.
     let mut rows = connection
         .query(
             "SELECT 1
              FROM sqlite_master
+             WHERE name NOT LIKE 'td_runtime_writer_%'
              LIMIT 1",
             (),
         )
