@@ -1,9 +1,13 @@
+mod canonical_bodies;
 mod codec;
 mod persist;
 mod refusal_census;
 pub mod retention;
 mod schema;
 
+pub(crate) use canonical_bodies::{
+    compact_attached_lcm_bodies, compact_lcm_bodies, decode_observation_json,
+};
 pub use refusal_census::ingest_refusal_read_from_censuses;
 pub(super) use schema::{OBSERVATION_ADMISSION_MARKERS, ensure_observation_schema};
 
