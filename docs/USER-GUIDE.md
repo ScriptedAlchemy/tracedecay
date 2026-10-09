@@ -923,13 +923,11 @@ Adds scripting, config, and additional systems languages.
 
 Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
 
-### Full (Medium + shipping extras)
+### Full (Medium + 27+ languages)
 
-Default shipping set for additional systems and scripting languages.
+Everything, including legacy and niche languages.
 
-Lua, Zig, Objective-C, Perl, Batch/CMD, Dockerfile, GLSL, WGSL, HLSL, Metal, R, SQL, Clojure, Erlang, Elixir, TOML
-
-Legacy and niche grammars (Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Julia, Haskell, OCaml, F#, Lean, Quint) remain available on source builds through individual `lang-*` features; they are not in the default `production`/`full` set.
+Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5
 
 ### Mixing individual languages
 
