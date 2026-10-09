@@ -3264,6 +3264,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and busy deferrals stay typed instead of Storage/Unavailable
   ([#918](https://github.com/ScriptedAlchemy/tracedecay/issues/918)).
 
+### Performance Improvements
+
+- *(rusqlite)* install the writer ledger schema once at connection open and
+  reuse cached ledger statements, so request-path lookups no longer parse
+  `CREATE TABLE`.
+
 ### Removed
 
 - *(cli)* for the explicit 0.1.0 breaking release, remove the shipped

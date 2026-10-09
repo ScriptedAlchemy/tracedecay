@@ -312,6 +312,24 @@ impl RuntimeRequestProbeV1 for Probe {
     }
 }
 
+#[test]
+fn writer_start_installs_ledger_schema_before_the_first_request() {
+    let database = TestDatabase::new();
+    let request = request(metadata("operation.schema.open", "key.schema.open", 'o'));
+    let writer = start(&database, &request, Arc::new(AtomicU64::new(0)));
+    let installed: i64 = Connection::open(&database.0)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(installed, 1);
+    writer.shutdown_and_join().unwrap();
+}
+
 fn start(
     database: &TestDatabase,
     request: &RuntimeSubmitRequestV1,

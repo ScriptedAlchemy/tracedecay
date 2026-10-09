@@ -38,6 +38,7 @@ use crate::{
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
     connection::{self, OpenedDatabaseFile},
+    ledger,
     exact_sql::{
         WriterCommand as ExactSqlWriterCommand, reject_writer_command, run_writer_command,
     },
@@ -325,7 +326,7 @@ pub(super) struct Worker {
 }
 
 impl Worker {
-    pub(super) fn run(self) {
+    pub(super) fn run(mut self) {
         #[cfg(any(unix, windows))]
         if let Some(opened_database) = self._opened_database.as_deref() {
             #[cfg(unix)]
@@ -409,6 +410,10 @@ impl Worker {
             }
             None => None,
         };
+        if let Err(error) = ledger::initialize_schema(&connection) {
+            return self.fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
+        }
+        self.persistence.mark_ledger_schema_ready();
         let page_cache = match connection::WriterPageCache::new(&connection) {
             Ok(page_cache) => page_cache,
             Err(error) => {

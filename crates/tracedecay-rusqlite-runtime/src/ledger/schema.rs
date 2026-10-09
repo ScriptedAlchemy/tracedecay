@@ -104,6 +104,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
 ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 "#;
 
+/// Installs the runtime ledger tables.
+///
+/// Call this once when the writer connection opens. Request-path lookups
+/// must not run it: `CREATE TABLE IF NOT EXISTS` still parses DDL and
+/// enters `sqlite3StartTable`, and a first-time create changes the schema
+/// cookie so cached statements reprepare.
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
     transaction
         .execute_batch(RUNTIME_LEDGER_SCHEMA)
