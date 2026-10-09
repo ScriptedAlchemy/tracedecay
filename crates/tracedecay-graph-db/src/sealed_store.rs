@@ -1146,19 +1146,6 @@ impl GraphDb {
         }))
     }
 
-    /// Installs the proven on-disk sealed artifact for `identity` as the
-    /// serving reader: the adoption recovery performs, without the snapshot
-    /// choreography around it, so a test can seat a reader while the
-    /// staging gate is held.
-    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn adopt_sealed_generation_reader(
-        &self,
-        identity: &GraphGenerationManifestIdentity,
-        expected: &GraphRecoveredGenerationDigestV1,
-    ) -> Result<(), GraphDbError> {
-        self.open_sealed_generation_store_if_present(identity, expected, &|| Ok(()))
-    }
-
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn discard_sealed_generation_reader(
         &self,
