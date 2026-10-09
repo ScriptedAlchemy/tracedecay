@@ -262,7 +262,10 @@ fn activation_releases_exact_staging_without_cooling_query_owners() {
         "reading warm query owners must not reconstruct exact-admission staging"
     );
     latest
-        .test_attribution_authority()
+        .generation()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("test attribution authority");
     // A second request repeats the whole sequence.
     let repeat = scheduler.latest_complete().expect("repeat generation read");

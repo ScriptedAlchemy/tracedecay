@@ -46,9 +46,9 @@ dashboard/src/contracts/generated.ts linguist-generated=true
 dashboard/src/contracts/index.ts linguist-generated=true
 dashboard/codegen/schemas/dashboard-contracts.schema.json linguist-generated=true
 plugin/cursor-native-extension/embedded/extension.js linguist-generated=true
-# Generated TypeScript SDK sources: `sdks/codegen/generate.sh` writes exactly
-# these three files from the canonical registry and CI verifies the committed
-# copies byte-for-byte (`scripts/check-sdk-codegen.sh`). The authored client,
+# Generated TypeScript SDK sources: `//sdks/codegen:generate` writes these
+# files from the canonical registry and `contracts:check` verifies the committed
+# copies byte-for-byte. The authored client,
 # request controls, automation terminal, tests, and generator stay reviewable.
 sdks/typescript/src/operations.ts linguist-generated=true
 sdks/typescript/src/types.ts linguist-generated=true

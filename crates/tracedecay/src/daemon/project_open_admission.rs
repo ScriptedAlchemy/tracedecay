@@ -322,10 +322,21 @@ async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver
     }
 }
 
+pub(super) fn is_observability_retiring(error: &TraceDecayError) -> bool {
+    matches!(error, TraceDecayError::ProjectRoute { reason_code, retryable: true, .. }
+        if reason_code == tracedecay_daemon_service::StoreObservabilityMountErrorV1::RETIRING_REASON_CODE)
+}
+
 /// How long a failed project-open route declines reopening, or `None` when the
 /// failure may clear on its own.
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
+        error if is_observability_retiring(error) => Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF),
+        TraceDecayError::ProjectRoute { reason_code, .. }
+            if reason_code == PROJECT_SERVER_CAPACITY_REASON_CODE =>
+        {
+            Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+        }
         TraceDecayError::ProjectRoute { reason_code, .. }
             if reason_code == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE =>
         {
@@ -1056,6 +1067,8 @@ pub(super) fn graph_tool_requirement(
 pub(super) enum ProjectServerPublication {
     Pending,
     Core,
+    /// Full admission finished unsuccessfully; the retained core still serves reads.
+    DegradedCore,
     RegisteredHostIngest,
 }
 

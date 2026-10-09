@@ -890,6 +890,18 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
+    assert!(registry.mark_ready(&idle));
+    assert!(!registry.mark_degraded_core_if(&idle, |_| false));
+    assert!(registry.mark_degraded_core_if(&idle, |_| true));
+    assert!(registry.get_route(&route("idle")).is_some());
+    assert!(
+        registry
+            .get_route_and_touch_for(
+                &route("idle"),
+                ProjectServerRequirement::RegisteredHostIngest
+            )
+            .is_none()
+    );
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));
 
     let (server, was_inserted, retired) = registry
@@ -1025,7 +1037,7 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
 }
 
 #[tokio::test]
-async fn graph_pressure_retires_only_fully_published_response_idle_owners() {
+async fn graph_pressure_retires_only_settled_response_idle_owners() {
     fn key(name: &str) -> ProjectServerKey {
         ProjectServerKey {
             owner: StoreOwnerKey {
@@ -1080,6 +1092,23 @@ async fn graph_pressure_retires_only_fully_published_response_idle_owners() {
     );
     assert!(registry.get(&pending).is_some());
     assert!(registry.get(&core).is_some());
+
+    let upgrading_core = Arc::clone(registry.get(&core).expect("retained core"));
+    assert!(registry.mark_degraded_core_if(&core, |current| Arc::ptr_eq(current, &upgrading_core)));
+    assert!(
+        registry
+            .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+            .is_err()
+    );
+    drop(upgrading_core);
+    let (owner, retired_core) = registry
+        .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+        .expect("completed degraded core can retire")
+        .expect("degraded core victim");
+    assert_eq!(owner, core.owner);
+    assert_eq!(retired_core.len(), 1);
+    assert!(registry.get_route(&route("core")).is_none());
+    assert!(registry.get(&pending).is_some());
 
     let idle_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
     registry.insert_at(idle.clone(), idle_lifecycle, std::time::Instant::now());

@@ -402,34 +402,34 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
     assert_eq!(current.payload().unwrap().content(), "base fact content");
 }
 
-/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixture
-/// paths that must NOT be classified as an isolated-test path by
-/// `db::access::is_isolated_test_path`. `std::env::current_dir()` (the
-/// package root under `cargo test`) plus a `target/...` suffix used to serve
-/// this purpose, but that only holds when the checkout itself lives outside
-/// the OS temp directory; a repo cloned under `/tmp` (as some sandboxed
-/// CI/dev environments do) breaks that assumption. Deriving the base from
-/// the running test binary's own on-disk location is robust regardless of
-/// where the checkout lives, because cargo (or any build-cache shim in front
-/// of it) never places build output inside the volatile system temp
-/// directory.
-fn ephemeral_safe_fixture_base() -> PathBuf {
-    let exe = std::env::current_exe().expect("test binary has a current_exe path");
-    let profile_dir = exe
-        .parent() // .../target/<profile>/deps
-        .and_then(Path::parent) // .../target/<profile>
-        .expect("test binary sits under a cargo target profile directory")
-        .to_path_buf();
-    let base = profile_dir.join("tracedecay-fact-anchor-authority");
-    std::fs::create_dir_all(&base).expect("failed to create hermetic fixture base directory");
-    base
-}
-
 #[tokio::test]
 async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
-    // A path outside every isolated-test root keeps `for_runtime` on the
-    // production branch: no live daemon, no maintenance scope, no fallback.
-    let root = ephemeral_safe_fixture_base().join(format!("missing-daemon-{}", std::process::id()));
+    const ROOT_ENV: &str = "TRACEDECAY_MISSING_DAEMON_FIXTURE";
+    if !crate::common::in_child_test() {
+        let scratch = TempDir::new_in(
+            std::env::var_os("TEST_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
+        )
+        .unwrap();
+        let temporary = scratch.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let root = scratch.path().join("missing-daemon");
+        // Keep the database outside both ambient test-authority roots without
+        // changing the environment observed by sibling tests.
+        crate::common::rerun_test_in_child(
+            "fact_anchor_authority::missing_daemon_authority_fails_closed_without_a_fallback_store",
+            &[
+                (ROOT_ENV, Some(root.as_os_str())),
+                ("TMPDIR", Some(temporary.as_os_str())),
+                ("TMP", Some(temporary.as_os_str())),
+                ("TEMP", Some(temporary.as_os_str())),
+                ("TRACEDECAY_DATA_DIR", None),
+            ],
+        );
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
     let db_path = root.join("global.db");
 
     let error = match DatabaseAuthority::for_runtime(&db_path, "missing daemon fixture") {
@@ -452,9 +452,6 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         "no fallback database file may be created without an authority"
     );
     assert!(!root.join(".tracedecay-database-locks").exists());
-
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir(root.parent().unwrap());
 }
 
 async fn register_project(

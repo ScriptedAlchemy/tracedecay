@@ -6,10 +6,12 @@
 //! class is preserved verbatim, and stale/unknown evidence can never be
 //! upgraded to proof of execution or correctness.
 
-use std::collections::BTreeMap;
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, CommitId, ComponentVersion, ContentDigest,
@@ -53,8 +55,36 @@ struct TestAttributionEvidenceDigestInput<'a> {
     source_revision: &'a Option<CommitId>,
     attribution_revision: &'a ComponentVersion,
     coverage: &'a TestAttributionJoinInputCoverageV1,
-    attributions: &'a [GenerationTestAttributionV1],
-    occurrences: &'a [TestAttributionOccurrenceV1],
+    attributions: CheckedSlice<'a, &'a GenerationTestAttributionV1>,
+    occurrences: CheckedSlice<'a, &'a TestAttributionOccurrenceV1>,
+}
+
+/// Preserve ordinary slice serialization while checking the owning operation
+/// between records. Canonical ordering and hashing stay with canonical_sha256.
+struct CheckedSlice<'a, T> {
+    items: &'a [T],
+    interrupted: &'a dyn Fn() -> bool,
+}
+
+impl<T: Serialize> Serialize for CheckedSlice<'_, T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.items.len()))?;
+        for item in self.items {
+            if (self.interrupted)() {
+                return Err(serde::ser::Error::custom("test attribution interrupted"));
+            }
+            sequence.serialize_element(item)?;
+        }
+        sequence.end()
+    }
+}
+
+fn checkpoint(interrupted: &dyn Fn() -> bool) -> Result<(), GenerationTestJoinErrorV1> {
+    if interrupted() {
+        Err(GenerationTestJoinErrorV1::Interrupted)
+    } else {
+        Ok(())
+    }
 }
 
 impl TestAttributionWatermarkV1 {
@@ -63,8 +93,17 @@ impl TestAttributionWatermarkV1 {
         attributions: &[GenerationTestAttributionV1],
         occurrences: &[TestAttributionOccurrenceV1],
     ) -> Result<ManifestDigest, GenerationTestJoinErrorV1> {
-        let attributions = canonical_attributions(attributions)?;
-        let occurrences = canonical_occurrences(occurrences)?;
+        let attributions = canonical_attributions(attributions.iter().collect())?;
+        index_occurrences(occurrences)?;
+        let occurrences = canonical_occurrences(occurrences);
+        self.digest_canonical(&attributions, &occurrences)
+    }
+
+    fn digest_canonical(
+        &self,
+        attributions: &[&GenerationTestAttributionV1],
+        occurrences: &[&TestAttributionOccurrenceV1],
+    ) -> Result<ManifestDigest, GenerationTestJoinErrorV1> {
         canonical_sha256(&TestAttributionEvidenceDigestInput {
             domain: TEST_ATTRIBUTION_EVIDENCE_SEPARATOR,
             generation_id: &self.generation_id,
@@ -73,8 +112,14 @@ impl TestAttributionWatermarkV1 {
             source_revision: &self.source_revision,
             attribution_revision: &self.attribution_revision,
             coverage: &self.coverage,
-            attributions: &attributions,
-            occurrences: &occurrences,
+            attributions: CheckedSlice {
+                items: attributions,
+                interrupted: &|| false,
+            },
+            occurrences: CheckedSlice {
+                items: occurrences,
+                interrupted: &|| false,
+            },
         })
         .map_err(|error| GenerationTestJoinErrorV1::Contract(error.to_string()))
     }
@@ -173,6 +218,8 @@ pub struct GenerationTestJoinV1 {
 /// result.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GenerationTestJoinErrorV1 {
+    #[error("test attribution preparation was interrupted")]
+    Interrupted,
     #[error("the code generation does not seal the supplied sanitized snapshot")]
     StaleGenerationWatermark,
     #[error("the test-attribution watermark is stale")]
@@ -189,7 +236,6 @@ impl GenerationTestJoinV1 {
     /// copies once each.
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
-        use std::collections::BTreeSet;
         use std::mem::size_of;
         let occurrence_bytes = |occurrence: &TestAttributionOccurrenceV1| {
             size_of::<TestAttributionOccurrenceV1>()
@@ -197,7 +243,7 @@ impl GenerationTestJoinV1 {
                 .saturating_add(occurrence.file_occurrence_id.as_str().len())
                 .saturating_add(occurrence.content_digest.as_str().len())
         };
-        let mut shared = BTreeSet::new();
+        let mut shared = HashSet::new();
         let bytes = self.records.iter().fold(0_usize, |bytes, record| {
             let covered_ids =
                 record
@@ -240,18 +286,139 @@ impl GenerationTestJoinV1 {
         validate_generation_snapshot(generation, snapshot)?;
         validate_watermark(generation, snapshot, watermark)?;
         let occurrence_by_id = index_occurrences(occurrences)?;
-        let attributions = canonical_attributions(attributions)?;
-        if watermark.recompute_evidence_digest(&attributions, occurrences)?
-            != watermark.evidence_digest
+        let attributions = canonical_attributions(attributions.to_vec())?;
+        if watermark.digest_canonical(
+            &attributions.iter().collect::<Vec<_>>(),
+            &canonical_occurrences(occurrences),
+        )? != watermark.evidence_digest
         {
             return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
         }
-        let content_by_file: BTreeMap<&FileOccurrenceId, &ContentDigest> = snapshot
+        Self::join_canonical(
+            generation,
+            snapshot,
+            attributions,
+            occurrence_by_id,
+            watermark,
+            &|| false,
+        )
+    }
+
+    /// Mint evidence from the owning producer without immediately rehashing
+    /// its complete relation set as though it came from another authority.
+    pub(crate) fn produce(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        attributions: Vec<GenerationTestAttributionV1>,
+        occurrences: &[TestAttributionOccurrenceV1],
+        attribution_revision: ComponentVersion,
+        coverage: TestAttributionJoinInputCoverageV1,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Self, GenerationTestJoinErrorV1> {
+        checkpoint(interrupted)?;
+        validate_generation_snapshot(generation, snapshot)?;
+        let occurrence_by_id = index_occurrences(occurrences)?;
+        let attributions = canonical_attributions(attributions)?;
+        checkpoint(interrupted)?;
+        let digest = tracing::trace_span!("code_index.test_attribution.digest").entered();
+        let evidence_digest = canonical_sha256(&TestAttributionEvidenceDigestInput {
+            domain: TEST_ATTRIBUTION_EVIDENCE_SEPARATOR,
+            generation_id: &generation.generation_id,
+            snapshot_digest: &generation.snapshot_digest,
+            content_identity: &snapshot.snapshot.content_identity,
+            source_revision: &snapshot.snapshot.source_revision,
+            attribution_revision: &attribution_revision,
+            coverage: &coverage,
+            attributions: CheckedSlice {
+                items: &attributions.iter().collect::<Vec<_>>(),
+                interrupted,
+            },
+            occurrences: CheckedSlice {
+                items: &canonical_occurrences(occurrences),
+                interrupted,
+            },
+        })
+        .map_err(|error| {
+            if interrupted() {
+                GenerationTestJoinErrorV1::Interrupted
+            } else {
+                GenerationTestJoinErrorV1::Contract(error.to_string())
+            }
+        })?;
+        drop(digest);
+        let watermark = TestAttributionWatermarkV1 {
+            generation_id: generation.generation_id.clone(),
+            snapshot_digest: generation.snapshot_digest.clone(),
+            content_identity: snapshot.snapshot.content_identity.clone(),
+            source_revision: snapshot.snapshot.source_revision.clone(),
+            attribution_revision,
+            evidence_digest,
+            coverage,
+        };
+        validate_watermark(generation, snapshot, &watermark)?;
+        Self::join_canonical(
+            generation,
+            snapshot,
+            attributions,
+            occurrence_by_id,
+            &watermark,
+            interrupted,
+        )
+    }
+
+    fn join_canonical(
+        generation: &CodeGenerationManifestV1,
+        snapshot: &ValidatedCodeSnapshotV1,
+        attributions: Vec<GenerationTestAttributionV1>,
+        occurrence_by_id: HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
+        watermark: &TestAttributionWatermarkV1,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Self, GenerationTestJoinErrorV1> {
+        // These indices are used only for exact lookups. Canonical record and
+        // evidence ordering is established separately, so repeated covered
+        // occurrences need not compare their long identities down a tree.
+        let content_by_file: HashMap<&FileOccurrenceId, &ContentDigest> = snapshot
             .snapshot
             .files
             .iter()
             .map(|file| (&file.file_occurrence_id, &file.content_digest))
             .collect();
+
+        // Content identity belongs to each occurrence, not to every test
+        // that reaches it. Retain only drift; the common current case has no
+        // repeated file lookup or digest comparison per covered pair.
+        let content_drift = occurrence_by_id
+            .iter()
+            .filter_map(|(id, occurrence)| {
+                match content_by_file.get(&occurrence.file_occurrence_id) {
+                    None => Some((
+                        *id,
+                        (
+                            GenerationTestJoinDispositionV1::MissingOccurrence {
+                                occurrence_id: (*id).clone(),
+                            },
+                            GenerationTestJoinPartialReasonV1::MissingOccurrence {
+                                occurrence_id: (*id).clone(),
+                            },
+                        ),
+                    )),
+                    Some(expected) if **expected != occurrence.content_digest => Some((
+                        *id,
+                        (
+                            GenerationTestJoinDispositionV1::StaleContent {
+                                occurrence_id: (*id).clone(),
+                                expected: (*expected).clone(),
+                                observed: occurrence.content_digest.clone(),
+                            },
+                            GenerationTestJoinPartialReasonV1::StaleContent {
+                                occurrence_id: (*id).clone(),
+                            },
+                        ),
+                    )),
+                    Some(_) => None,
+                }
+            })
+            .collect::<HashMap<_, _>>();
 
         let mut partial_reasons = match &watermark.coverage {
             TestAttributionJoinInputCoverageV1::Complete => Vec::new(),
@@ -261,25 +428,36 @@ impl GenerationTestJoinV1 {
                 }]
             }
         };
-        let shared_occurrences: BTreeMap<&SymbolOccurrenceId, Arc<TestAttributionOccurrenceV1>> =
+        let shared_occurrences: HashMap<&SymbolOccurrenceId, Arc<TestAttributionOccurrenceV1>> =
             occurrence_by_id
                 .iter()
                 .map(|(id, occurrence)| (*id, Arc::new((*occurrence).clone())))
                 .collect();
+        checkpoint(interrupted)?;
         let mut records = Vec::with_capacity(attributions.len());
         for attribution in attributions {
+            checkpoint(interrupted)?;
             let test_occurrence = occurrence_by_id.get(&attribution.test_occurrence).copied();
-            let covered_occurrences = attribution
-                .covered_occurrences
-                .iter()
-                .filter_map(|occurrence| shared_occurrences.get(occurrence).map(Arc::clone))
-                .collect();
+            let mut covered_occurrences = Vec::with_capacity(attribution.covered_occurrences.len());
+            for occurrence in &attribution.covered_occurrences {
+                checkpoint(interrupted)?;
+                if let Some(covered) = shared_occurrences.get(occurrence) {
+                    covered_occurrences.push(Arc::clone(covered));
+                }
+            }
+            // Resolution already proved presence for every requested identity
+            // when no entry was filtered. With no content drift, checking the
+            // same covered identities again cannot change the disposition.
+            let occurrences_to_check = (test_occurrence.is_none()
+                || covered_occurrences.len() != attribution.covered_occurrences.len()
+                || !content_drift.is_empty())
+            .then_some(&occurrence_by_id);
             let disposition = disposition_for(
                 generation,
                 snapshot,
                 watermark,
-                &occurrence_by_id,
-                &content_by_file,
+                occurrences_to_check,
+                &content_drift,
                 &attribution,
                 &mut partial_reasons,
             );
@@ -300,6 +478,7 @@ impl GenerationTestJoinV1 {
                 reasons: partial_reasons,
             }
         };
+        checkpoint(interrupted)?;
         Ok(Self {
             generation_id: generation.generation_id.clone(),
             code_snapshot_digest: generation.snapshot_digest.clone(),
@@ -311,14 +490,15 @@ impl GenerationTestJoinV1 {
     }
 }
 
-fn canonical_attributions(
-    attributions: &[GenerationTestAttributionV1],
-) -> Result<Vec<GenerationTestAttributionV1>, GenerationTestJoinErrorV1> {
-    let mut canonical = attributions.to_vec();
+fn canonical_attributions<T: Borrow<GenerationTestAttributionV1>>(
+    mut canonical: Vec<T>,
+) -> Result<Vec<T>, GenerationTestJoinErrorV1> {
     for attribution in &canonical {
-        validate_attribution(attribution)?;
+        validate_attribution(attribution.borrow())?;
     }
     canonical.sort_by(|left, right| {
+        let left = left.borrow();
+        let right = right.borrow();
         (
             &left.generation_id,
             &left.source_revision,
@@ -341,19 +521,24 @@ fn canonical_attributions(
 
 fn canonical_occurrences(
     occurrences: &[TestAttributionOccurrenceV1],
-) -> Result<Vec<TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1> {
-    index_occurrences(occurrences)?;
-    let mut canonical = occurrences.to_vec();
+) -> Vec<&TestAttributionOccurrenceV1> {
+    let mut canonical = occurrences.iter().collect::<Vec<_>>();
     canonical.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
-    Ok(canonical)
+    canonical
 }
 
 fn disposition_for(
     generation: &CodeGenerationManifestV1,
     snapshot: &ValidatedCodeSnapshotV1,
     watermark: &TestAttributionWatermarkV1,
-    occurrences: &BTreeMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>,
-    content_by_file: &BTreeMap<&FileOccurrenceId, &ContentDigest>,
+    occurrences_to_check: Option<&HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>>,
+    content_drift: &HashMap<
+        &SymbolOccurrenceId,
+        (
+            GenerationTestJoinDispositionV1,
+            GenerationTestJoinPartialReasonV1,
+        ),
+    >,
     attribution: &GenerationTestAttributionV1,
     partial_reasons: &mut Vec<GenerationTestJoinPartialReasonV1>,
 ) -> GenerationTestJoinDispositionV1 {
@@ -386,34 +571,22 @@ fn disposition_for(
         };
     }
 
-    for occurrence_id in
-        std::iter::once(&attribution.test_occurrence).chain(attribution.covered_occurrences.iter())
-    {
-        let Some(occurrence) = occurrences.get(occurrence_id).copied() else {
-            partial_reasons.push(GenerationTestJoinPartialReasonV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            });
-            return GenerationTestJoinDispositionV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            };
-        };
-        let Some(expected) = content_by_file.get(&occurrence.file_occurrence_id).copied() else {
-            partial_reasons.push(GenerationTestJoinPartialReasonV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            });
-            return GenerationTestJoinDispositionV1::MissingOccurrence {
-                occurrence_id: occurrence_id.clone(),
-            };
-        };
-        if expected != &occurrence.content_digest {
-            partial_reasons.push(GenerationTestJoinPartialReasonV1::StaleContent {
-                occurrence_id: occurrence_id.clone(),
-            });
-            return GenerationTestJoinDispositionV1::StaleContent {
-                occurrence_id: occurrence_id.clone(),
-                expected: expected.clone(),
-                observed: occurrence.content_digest.clone(),
-            };
+    if let Some(occurrences) = occurrences_to_check {
+        for occurrence_id in std::iter::once(&attribution.test_occurrence)
+            .chain(attribution.covered_occurrences.iter())
+        {
+            if !occurrences.contains_key(occurrence_id) {
+                partial_reasons.push(GenerationTestJoinPartialReasonV1::MissingOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                });
+                return GenerationTestJoinDispositionV1::MissingOccurrence {
+                    occurrence_id: occurrence_id.clone(),
+                };
+            }
+            if let Some((disposition, reason)) = content_drift.get(occurrence_id) {
+                partial_reasons.push(reason.clone());
+                return disposition.clone();
+            }
         }
     }
 
@@ -442,9 +615,8 @@ fn disposition_for(
 
 fn index_occurrences(
     occurrences: &[TestAttributionOccurrenceV1],
-) -> Result<BTreeMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1>
-{
-    let mut by_id = BTreeMap::new();
+) -> Result<HashMap<&SymbolOccurrenceId, &TestAttributionOccurrenceV1>, GenerationTestJoinErrorV1> {
+    let mut by_id = HashMap::with_capacity(occurrences.len());
     for occurrence in occurrences {
         occurrence
             .occurrence_id
@@ -562,4 +734,56 @@ fn validate_watermark(
         return Err(GenerationTestJoinErrorV1::StaleAttributionWatermark);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn attribution_digest_slice_keeps_canonical_bytes_and_interrupts_between_records() {
+        struct Record<'a> {
+            value: u64,
+            visited: &'a Cell<usize>,
+            stop: &'a Cell<bool>,
+        }
+        impl Serialize for Record<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.visited.set(self.visited.get() + 1);
+                let result = self.value.serialize(serializer);
+                self.stop.set(true);
+                result
+            }
+        }
+        let values = [3_u64, 7, 11];
+        let checked = CheckedSlice {
+            items: &values,
+            interrupted: &|| false,
+        };
+        assert_eq!(
+            canonical_sha256(&checked).unwrap(),
+            canonical_sha256(&values).unwrap()
+        );
+        let visited = Cell::new(0);
+        let stop = Cell::new(false);
+        let records = values.map(|value| Record {
+            value,
+            visited: &visited,
+            stop: &stop,
+        });
+        let interrupted = || stop.get();
+        assert!(
+            canonical_sha256(&CheckedSlice {
+                items: &records,
+                interrupted: &interrupted
+            })
+            .is_err()
+        );
+        assert_eq!(
+            visited.get(),
+            1,
+            "cancellation stops inside serialization, before the next record"
+        );
+    }
 }

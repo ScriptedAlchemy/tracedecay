@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -166,8 +168,15 @@ const CLINE_CONFIGS: &[(&str, &[u8])] = &[(
 }
 "#,
 )];
+#[cfg(target_os = "macos")]
+const ROO_SETTINGS_RELATIVE: &str = "Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json";
+#[cfg(target_os = "windows")]
+const ROO_SETTINGS_RELATIVE: &str = "AppData/Roaming/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const ROO_SETTINGS_RELATIVE: &str =
+    ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json";
 const ROO_CONFIGS: &[(&str, &[u8])] = &[(
-    ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
+    ROO_SETTINGS_RELATIVE,
     br#"{
   "mcpServers": {
     "foreign": {
@@ -229,7 +238,13 @@ struct IsolatedCli {
 
 impl IsolatedCli {
     fn new() -> Self {
-        let home = TempDir::new().unwrap();
+        // The native macOS per-user temp path leaves insufficient space for
+        // the profile's Unix socket; keep the isolated home under short /tmp.
+        let home = if cfg!(target_os = "macos") {
+            TempDir::new_in(fs::canonicalize("/tmp").unwrap()).unwrap()
+        } else {
+            TempDir::new().unwrap()
+        };
         let project = TempDir::new().unwrap();
         let profile = home.path().join(".tracedecay-test-profile");
         let bin_dir = home.path().join("bin");
@@ -264,6 +279,9 @@ impl IsolatedCli {
             .args(args)
             .current_dir(self.project.path())
             .env("PATH", hermetic_path(&[&self.bin_dir]))
+            // Python stand-ins must not mutate the home with interpreter
+            // caches during exact host install/uninstall restoration checks.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -332,10 +350,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         HostKindV1::Kiro => (".kiro/settings/mcp.json", "mcpServers"),
         HostKindV1::Zed => (ZED_SETTINGS_RELATIVE, "context_servers"),
         HostKindV1::Antigravity => (".gemini/antigravity/mcp_config.json", "mcpServers"),
-        HostKindV1::RooCode => (
-            ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
-            "mcpServers",
-        ),
+        HostKindV1::RooCode => (ROO_SETTINGS_RELATIVE, "mcpServers"),
         HostKindV1::Kilo => (".config/kilo/kilo.jsonc", "mcp"),
         HostKindV1::Pi => {
             let extension = fs::read_to_string(
@@ -1106,7 +1121,12 @@ fn hermes_opt_out_and_uninstall_remove_plugin_after_python_imported_it() {
         cli.run(&["install", "--agent", case.id]),
     );
     let hermes_loader = r#"
-import importlib, importlib.util, sys, types
+import sys
+# Apple Python redirects bytecode into a platform cache by default. Exercise
+# plugin-local caches explicitly: those are the artifacts uninstall must remove.
+sys.pycache_prefix = None
+sys.dont_write_bytecode = False
+import importlib, importlib.util, types
 from pathlib import Path
 plugin = Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location(
@@ -2363,10 +2383,14 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
+    // The file owner is mapped in the current user namespace; an arbitrary
+    // numeric user ID may be unmapped inside Bazel's Linux sandbox. A named
+    // user entry still requires an extended ACL even when it names the owner.
+    let named_user = fs::metadata(&config_path).unwrap().uid();
     let mut original_acl = 2_u32.to_le_bytes().to_vec();
     for (tag, permissions, id) in [
         (0x01_u16, 0x06_u16, u32::MAX),
-        (0x02, 0x04, 65_534),
+        (0x02, 0x04, named_user),
         (0x04, 0x04, u32::MAX),
         (0x10, 0x04, u32::MAX),
         (0x20, 0x00, u32::MAX),

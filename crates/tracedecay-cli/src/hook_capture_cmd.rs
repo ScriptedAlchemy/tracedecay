@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_daemon_service::logging::{StderrTracingDefault, install_stderr_tracing};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::NativeHostIdentityV1;
@@ -171,6 +172,7 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     // lifecycle maintenance and may open product state before the daemon has
     // admitted the observation.
     if command == "hook-pre-tool-use" {
+        install_stderr_tracing(StderrTracingDefault::Silent);
         if args.len() != 2 {
             return Some(refused("hook callbacks take no arguments"));
         }
@@ -203,6 +205,9 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         return None;
     }
     let (source, hook_name) = capture_command_from_name(command)?;
+    // Native capture returns before normal CLI startup installs its logger.
+    // Keep host stderr quiet by default while honoring operator trace filters.
+    install_stderr_tracing(StderrTracingDefault::Silent);
     Some(if args.len() == 2 {
         match ProfileRoot::from_env() {
             Ok(profile) => run_native_capture(&profile, source, hook_name),

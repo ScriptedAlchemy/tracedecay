@@ -118,8 +118,12 @@ impl DaemonInvocationService {
                                     "a different observability producer is already mounted for this project store"
                                         .to_owned(),
                             },
-                            error @ (StoreObservabilityMountErrorV1::Retiring
-                            | StoreObservabilityMountErrorV1::ShutdownFailed
+                            StoreObservabilityMountErrorV1::Retiring => TraceDecayError::project_route(
+                                StoreObservabilityMountErrorV1::RETIRING_REASON_CODE,
+                                true,
+                                "The previous observability owner is settling; retry this project shortly",
+                            ),
+                            error @ (StoreObservabilityMountErrorV1::ShutdownFailed
                             | StoreObservabilityMountErrorV1::Unavailable(_)) => {
                                 TraceDecayError::Config {
                                     message: format!(

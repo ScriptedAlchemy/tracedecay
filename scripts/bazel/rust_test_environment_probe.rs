@@ -65,10 +65,13 @@ fn main() {
         );
     }
     let fixture = home.join("fixture");
+    // Windows test scratch lives beneath the execroot workspace. Exercise
+    // ancestor workspace discovery on every host.
+    std::fs::write(home.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
     std::fs::create_dir_all(fixture.join("src")).unwrap();
     std::fs::write(
         fixture.join("Cargo.toml"),
-        "[package]\nname = \"toolchain-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"toolchain-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
     )
     .unwrap();
     std::fs::write(

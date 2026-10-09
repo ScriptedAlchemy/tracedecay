@@ -166,6 +166,13 @@ async fn clean_shutdown_persists_zero_drop_terminal_without_relabeling_cancel() 
     assert_eq!(idle_summary.persisted, 1);
     assert_eq!(idle_summary.dropped, 0);
     assert!(!idle_summary.cancelled);
+    assert!(
+        db.claim_observability_rollup_dirty_day(scope, "shutdown:rollup-check", 30)
+            .await
+            .expect("inspect terminal day")
+            .is_none(),
+        "shutdown maintenance must include its final terminal carrier",
+    );
 
     let active =
         BoundedObservabilityProducerV1::start(db.clone(), identity(scope, "boot:clean-active"), 4)

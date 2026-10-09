@@ -76,25 +76,29 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - uses: ./.github/actions/setup-pnpm
-      # Cargo reads .cargo/config.toml from the working directory, and the
-      # codegen workspace has its own pnpm-vendored sources and lockfile.
-      - run: cargo test
-        working-directory: sdks/codegen
-      - run: pnpm run contracts:check
-        working-directory: dashboard
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
           cache-key: sdk-conformance
+      - run: bazel test --config=ci //sdks/codegen:unit_test
+      - run: pnpm run contracts:check
+        working-directory: dashboard
       - run: bazel test --config=ci //crates/tracedecay-sdk/...
       - run: pnpm run typecheck
         working-directory: sdks/typescript
       - run: pnpm test
         working-directory: sdks/typescript
+
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   production-router:
     runs-on: ubuntu-latest
