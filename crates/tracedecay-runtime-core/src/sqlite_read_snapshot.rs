@@ -1731,12 +1731,7 @@ mod tests {
             .query(&format!("PRAGMA {name}"), ())
             .await
             .unwrap();
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<i64>(0)
-            .unwrap()
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
     }
 
     fn hold_readonly_transaction(path: &Path) -> Connection {
