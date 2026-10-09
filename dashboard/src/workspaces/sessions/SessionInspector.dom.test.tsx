@@ -35,7 +35,7 @@ describe('Session transcript drill-down', () => {
     expect(await screen.findByText('Unknown')).toBeTruthy();
     expect(await screen.findByText(/lcm_temporal_retrieval_not_mounted/)).toBeTruthy();
     expect(screen.queryByText('assistant')).toBeNull();
-    expect(screen.queryByText(/raw messages/)).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Transcript messages' })).toBeNull();
   });
 
   /** The two governed refusals the LCM read routes actually serve
@@ -69,7 +69,7 @@ describe('Session transcript drill-down', () => {
     expect(screen.getByText(new RegExp(reason))).toBeTruthy();
     const chip = document.querySelector(`[data-state="${state}"]`);
     expect(chip).not.toBeNull();
-    expect(screen.queryByText(/raw messages/)).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Transcript messages' })).toBeNull();
     expect(screen.queryByText(/no transcript/i)).toBeNull();
   });
 
@@ -168,6 +168,33 @@ describe('Session transcript drill-down', () => {
     const requests = fetchMock.mock.calls.map(([input]) => String(input));
     expect(requests.some((url) => url.includes('cursor=opaque%2Bcursor%2F%3D%3D'))).toBe(true);
     expect(requests.some((url) => /[?&](?:offset|order)=/.test(url))).toBe(false);
+  });
+
+  it('keeps stored totals separate from the end of the available transcript', async () => {
+    renderTranscript(
+      fixtureEnvelope(
+        sessionPage({
+          counts: {
+            message_count: 478,
+            source_token_count: null,
+            summary_node_count: 0,
+            summary_token_count: null,
+          },
+          messages: [message('available canonical message')],
+          next_cursor: null,
+        }),
+      ),
+    );
+
+    expect(await screen.findByText('available canonical message')).toBeTruthy();
+    expect(screen.getByText('stored messages')).toBeTruthy();
+    expect(screen.getByText('478')).toBeTruthy();
+    const pageStatus = screen.getByText(/1 on this page/);
+    expect(pageStatus.textContent).toContain('last available page');
+    expect(pageStatus.textContent).not.toContain('478');
+    expect(screen.getByText(/does not establish that every stored message is represented/)).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Transcript messages' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next page' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
