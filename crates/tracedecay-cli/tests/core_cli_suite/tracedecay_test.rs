@@ -83,6 +83,40 @@ fn daemon_tool_searches_the_active_project() {
     );
 }
 
+#[test]
+fn daemon_tool_search_flags_find_the_indexed_symbol() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn findable_symbol() {}\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            let output = run_tool(
+                &project_path,
+                &home_path,
+                &[
+                    "--project",
+                    &project_arg,
+                    "search",
+                    "--json",
+                    "findable_symbol",
+                    "--limit",
+                    "10",
+                ],
+            );
+            (output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("findable_symbol"))
+            .then_some(output)
+        },
+        || "daemon scheduler did not publish findable_symbol for flag search".to_owned(),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("findable_symbol"),
+        "flag-based search must return the indexed symbol"
+    );
+}
+
 /// `status --json .` names the CLI's working directory as the diagnostic
 /// target. The daemon runs from its own directory, so a `.` forwarded verbatim
 /// resolved to whatever that was (`/` under launchd) and reported the wrong
