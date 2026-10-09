@@ -489,11 +489,11 @@ mod tests {
             .unwrap()
             .get(0)
             .unwrap();
-        let hash = serde_json::from_str::<serde_json::Value>(&stored_json).unwrap()["text"]
-            [BODY_REF_KEY]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let hash =
+            serde_json::from_str::<serde_json::Value>(&stored_json).unwrap()[BODY_REF_KEY]["/text"]
+                .as_str()
+                .unwrap()
+                .to_owned();
         let mut body_rows = conn
             .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
             .await

@@ -5,6 +5,7 @@
 //! a hash ref. Bodies at or above [`INLINE_BODY_BYTES`] are deflated when that
 //! shrinks them.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 
 use flate2::Compression;
@@ -16,7 +17,9 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{DurableObservationV1, ObservationContractError};
 
 pub const INLINE_BODY_BYTES: usize = 4096;
-pub const BODY_REF_KEY: &str = "tracedecay.body_ref";
+// DurableObservationV1 never serializes this root field. Provider-controlled
+// JSON stays under payload and cannot be mistaken for storage metadata.
+pub const BODY_REF_KEY: &str = "_tracedecay_canonical_body_refs";
 pub const ENCODING_IDENTITY: &str = "identity";
 pub const ENCODING_DEFLATE: &str = "deflate";
 
@@ -126,15 +129,38 @@ pub fn collect_body_refs(json: &str) -> Result<Vec<String>, CanonicalBodyError> 
     if !stored_json_needs_hydrate(json) {
         return Ok(Vec::new());
     }
-    let value: Value = serde_json::from_str(json).map_err(|_| CanonicalBodyError::InvalidJson)?;
-    let mut hashes = Vec::new();
-    collect_refs(&value, &mut hashes);
-    Ok(hashes)
+    let value: Value = serde_json::from_str(json)?;
+    Ok(body_refs(&value)?
+        .into_values()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+fn body_refs(value: &Value) -> Result<BTreeMap<String, String>, CanonicalBodyError> {
+    match value.as_object().and_then(|map| map.get(BODY_REF_KEY)) {
+        None => Ok(BTreeMap::new()),
+        Some(refs) => serde_json::from_value(refs.clone()).map_err(Into::into),
+    }
 }
 
 pub fn slim_json_value(value: &mut Value) -> Result<Vec<StoredCanonicalBody>, CanonicalBodyError> {
+    let map = value
+        .as_object_mut()
+        .ok_or(CanonicalBodyError::InvalidJson)?;
+    if map.contains_key(BODY_REF_KEY) {
+        body_refs(value)?;
+        return Ok(Vec::new());
+    }
     let mut bodies = Vec::new();
-    slim_value(value, &mut bodies)?;
+    let mut refs = BTreeMap::new();
+    slim_value(value, "", &mut bodies, &mut refs)?;
+    if !refs.is_empty() {
+        value
+            .as_object_mut()
+            .ok_or(CanonicalBodyError::InvalidJson)?
+            .insert(BODY_REF_KEY.to_owned(), serde_json::to_value(refs)?);
+    }
     Ok(bodies)
 }
 
@@ -145,14 +171,35 @@ pub fn hydrate_json_value<E>(
 where
     E: From<CanonicalBodyError>,
 {
-    hydrate_value(value, &mut load)
+    let refs = body_refs(value).map_err(E::from)?;
+    if refs.is_empty() {
+        return Ok(false);
+    }
+    for (path, hash) in refs {
+        let target = value
+            .pointer_mut(&path)
+            .filter(|target| target.is_null())
+            .ok_or_else(|| E::from(CanonicalBodyError::InvalidJson))?;
+        let bytes = load(&hash)?;
+        let text = String::from_utf8(bytes).map_err(|_| {
+            E::from(CanonicalBodyError::Corrupt {
+                content_hash: hash,
+                encoding: ENCODING_IDENTITY.to_owned(),
+            })
+        })?;
+        *target = Value::String(text);
+    }
+    value
+        .as_object_mut()
+        .ok_or_else(|| E::from(CanonicalBodyError::InvalidJson))?
+        .remove(BODY_REF_KEY);
+    Ok(true)
 }
 
 pub fn slim_stored_json(
     json: &str,
 ) -> Result<(String, Vec<StoredCanonicalBody>), CanonicalBodyError> {
-    let mut value: Value =
-        serde_json::from_str(json).map_err(|_| CanonicalBodyError::InvalidJson)?;
+    let mut value: Value = serde_json::from_str(json)?;
     let bodies = slim_json_value(&mut value)?;
     if bodies.is_empty() {
         return Ok((json.to_owned(), bodies));
@@ -171,105 +218,38 @@ where
         return serde_json::from_str(json).map_err(|error| E::from(error.into()));
     }
     let mut value: Value =
-        serde_json::from_str(json).map_err(|_| E::from(CanonicalBodyError::InvalidJson))?;
+        serde_json::from_str(json).map_err(|error| E::from(CanonicalBodyError::from(error)))?;
     hydrate_json_value(&mut value, &mut load)?;
     serde_json::from_value(value).map_err(|error| E::from(error.into()))
 }
 
 fn slim_value(
     value: &mut Value,
+    path: &str,
     bodies: &mut Vec<StoredCanonicalBody>,
+    refs: &mut BTreeMap<String, String>,
 ) -> Result<(), CanonicalBodyError> {
     match value {
         Value::String(text) if text.len() >= INLINE_BODY_BYTES => {
             let body = StoredCanonicalBody::pack(text.as_bytes())?;
-            *value = body_ref_value(&body.content_hash);
+            refs.insert(path.to_owned(), body.content_hash.clone());
+            *value = Value::Null;
             bodies.push(body);
         }
         Value::Array(items) => {
-            for item in items {
-                slim_value(item, bodies)?;
+            for (index, item) in items.iter_mut().enumerate() {
+                slim_value(item, &format!("{path}/{index}"), bodies, refs)?;
             }
         }
-        Value::Object(map) if body_ref_hash(map).is_none() => {
-            for child in map.values_mut() {
-                slim_value(child, bodies)?;
+        Value::Object(map) => {
+            for (key, child) in map {
+                let token = key.replace('~', "~0").replace('/', "~1");
+                slim_value(child, &format!("{path}/{token}"), bodies, refs)?;
             }
         }
         _ => {}
     }
     Ok(())
-}
-
-fn hydrate_value<E>(
-    value: &mut Value,
-    load: &mut impl FnMut(&str) -> Result<Vec<u8>, E>,
-) -> Result<bool, E>
-where
-    E: From<CanonicalBodyError>,
-{
-    match value {
-        Value::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= hydrate_value(item, load)?;
-            }
-            Ok(changed)
-        }
-        Value::Object(map) => {
-            if let Some(hash) = body_ref_hash(map).map(str::to_owned) {
-                let bytes = load(&hash)?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    E::from(CanonicalBodyError::Corrupt {
-                        content_hash: hash,
-                        encoding: ENCODING_IDENTITY.to_owned(),
-                    })
-                })?;
-                *value = Value::String(text);
-                return Ok(true);
-            }
-            let mut changed = false;
-            for child in map.values_mut() {
-                changed |= hydrate_value(child, load)?;
-            }
-            Ok(changed)
-        }
-        _ => Ok(false),
-    }
-}
-
-fn collect_refs(value: &Value, hashes: &mut Vec<String>) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                collect_refs(item, hashes);
-            }
-        }
-        Value::Object(map) => {
-            if let Some(hash) = body_ref_hash(map) {
-                hashes.push(hash.to_owned());
-                return;
-            }
-            for child in map.values() {
-                collect_refs(child, hashes);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn body_ref_value(content_hash: &str) -> Value {
-    Value::Object(serde_json::Map::from_iter([(
-        BODY_REF_KEY.to_owned(),
-        Value::String(content_hash.to_owned()),
-    )]))
-}
-
-fn body_ref_hash(map: &serde_json::Map<String, Value>) -> Option<&str> {
-    if map.len() != 1 {
-        return None;
-    }
-    map.get(BODY_REF_KEY).and_then(Value::as_str)
 }
 
 fn deflate_if_smaller(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -310,10 +290,40 @@ mod tests {
         let bodies = slim_json_value(&mut value).unwrap();
         assert_eq!(bodies.len(), 1);
         assert_eq!(value["observation_id"], "obs.1");
+        assert_eq!(value[BODY_REF_KEY]["/payload/text"], bodies[0].content_hash);
+    }
+
+    #[test]
+    fn storage_refs_do_not_interpret_provider_objects_and_escape_json_paths() {
+        let original = json!({
+            "payload": {
+                "metadata": {"tracedecay.body_ref": "f".repeat(64)},
+                "reserved": {(BODY_REF_KEY): {"/not/a/storage/path": "metadata"}},
+                "slash/key~": ["large".repeat(INLINE_BODY_BYTES)],
+            },
+        });
+        let mut stored = original.clone();
+        let bodies = slim_json_value(&mut stored).unwrap();
+        assert_eq!(bodies.len(), 1);
         assert_eq!(
-            value["payload"]["text"][BODY_REF_KEY],
-            bodies[0].content_hash
+            collect_body_refs(&stored.to_string()).unwrap(),
+            vec![bodies[0].content_hash.clone()]
         );
+        hydrate_json_value(&mut stored, |hash| {
+            assert_eq!(hash, bodies[0].content_hash);
+            bodies[0].unpack()
+        })
+        .unwrap();
+        assert_eq!(stored, original);
+    }
+
+    #[test]
+    fn invalid_reference_paths_are_rejected_without_loading_a_body() {
+        let mut value = json!({(BODY_REF_KEY): {"/missing": "hash"}});
+        let result = hydrate_json_value(&mut value, |_| -> Result<Vec<u8>, CanonicalBodyError> {
+            panic!("an invalid pointer must not read body storage")
+        });
+        assert!(matches!(result, Err(CanonicalBodyError::InvalidJson)));
     }
 
     #[test]
