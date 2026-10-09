@@ -23,7 +23,7 @@ import { AutomationsPage } from "./AutomationsPage.tsx";
  * fabrication would be a configuration reading surviving a failed read.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 

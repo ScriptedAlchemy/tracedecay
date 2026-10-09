@@ -13,7 +13,7 @@ import { AgentsPage } from './AgentsPage.tsx';
  * and absent (grandchild, solo), under a tree coverage of `partial`.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 

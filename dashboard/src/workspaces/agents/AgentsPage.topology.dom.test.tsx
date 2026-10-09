@@ -15,7 +15,7 @@ import { AgentsPage } from './AgentsPage.tsx';
  * field share one selection; Escape clears inspection and nothing else.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 

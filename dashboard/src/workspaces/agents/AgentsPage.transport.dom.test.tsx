@@ -23,7 +23,7 @@ import { AgentsPage } from './AgentsPage.tsx';
  * different meanings may collapse into one reading.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 

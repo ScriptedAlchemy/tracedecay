@@ -19,7 +19,7 @@ import { KnowledgePage } from "./KnowledgePage.tsx";
  * nobody could reach, reported as a memory store holding nothing.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
