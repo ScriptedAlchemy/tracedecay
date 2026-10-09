@@ -63,10 +63,19 @@ build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
-# The shipped binary: Cargo's release profile (opt-level 3, no debug
-# assertions). Externals return to opt-level 3 over the perf overrides below.
+# Cargo `--release` equivalent (opt-level 3, no LTO/strip). Used by
+# shipped-cli and other CI, not the shipping-tuned compile. Externals
+# return to opt-level 3 over the perf overrides below.
 build:release --compilation_mode=opt
 build:release --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-level=3
+
+# Shipping compile. Matches Cargo [profile.dist]. Release and release-beta
+# pass --config=dist through build-cli. Not used by test/dev CI.
+build:dist --compilation_mode=opt
+build:dist --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-level=3
+build:dist --@rules_rust//rust/settings:lto=thin
+build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Ccodegen-units=1
+build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols
 
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going
