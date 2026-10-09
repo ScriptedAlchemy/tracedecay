@@ -47,8 +47,8 @@ mod catalog;
 mod imports;
 mod models;
 
-use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
+use self::models::{CatalogSymbol, source_key};
 pub use self::models::{
     CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
     CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
@@ -1263,9 +1263,10 @@ impl CodeGraphInteractiveReader {
     /// `[offset, offset + limit)` window of the symbols `admit` accepts (all
     /// when `None`).
     ///
-    /// ponytail: every query scans every catalog name (~150 ms on a
-    /// 200k-symbol generation); a name n-gram index built with the catalog is
-    /// the upgrade when that bites.
+    /// Walks the catalog's source-order index and stops one match past the
+    /// window, so a first page does not collect or sort the rest of the
+    /// generation. A name n-gram index is the upgrade when a unique or
+    /// missing query still has to prove there is no later containment hit.
     pub fn search_symbols(
         &self,
         query: &str,
@@ -1290,21 +1291,14 @@ impl CodeGraphInteractiveReader {
         };
         // Occurrence ids digest the repository identity, so their order differs
         // between two clones of one checkout; hits are served in source order.
-        let source_position = |occurrence: &SymbolOccurrenceId| {
-            let symbol = catalog.symbols.get(occurrence);
-            (
-                symbol
-                    .and_then(|symbol| symbol.binding.as_ref())
-                    .and_then(|binding| binding.logical_path.as_deref()),
-                symbol
-                    .and_then(|symbol| symbol.metadata.as_ref())
-                    .map(|metadata| metadata.start_line),
-            )
-        };
-        let source_order = |left: &&SymbolOccurrenceId, right: &&SymbolOccurrenceId| {
-            source_position(left)
-                .cmp(&source_position(right))
-                .then_with(|| left.cmp(right))
+        let source_order = |left: &&SymbolOccurrenceId, right: &&SymbolOccurrenceId| match (
+            catalog.symbols.get(*left),
+            catalog.symbols.get(*right),
+        ) {
+            (Some(left_symbol), Some(right_symbol)) => source_key(left_symbol)
+                .cmp(&source_key(right_symbol))
+                .then_with(|| (*left).cmp(*right)),
+            _ => (*left).cmp(*right),
         };
         let exact: BTreeSet<&SymbolOccurrenceId> = catalog
             .by_simple_name
@@ -1320,23 +1314,6 @@ impl CodeGraphInteractiveReader {
             .collect();
         let mut exact_hits: Vec<&SymbolOccurrenceId> = exact.iter().copied().collect();
         exact_hits.sort_by(source_order);
-        // ponytail: every named hit is collected and sorted before the window
-        // is cut, so a broad query costs O(hits log hits) per page; a
-        // source-ordered name index built with the catalog is the upgrade.
-        let mut named_hits = Vec::new();
-        for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
-            if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
-                return Err(CodeGraphProjectionError::Cancelled);
-            }
-            let named = symbol.metadata.as_ref().is_some_and(|metadata| {
-                contains_ignore_ascii_case(&metadata.simple_name, query)
-                    || contains_ignore_ascii_case(&metadata.qualified_name, query)
-            });
-            if named && !exact.contains(occurrence) && admitted(occurrence, symbol) {
-                named_hits.push(occurrence);
-            }
-        }
-        named_hits.sort_by(source_order);
 
         let mut symbols = Vec::new();
         let mut matched = 0_usize;
@@ -1354,9 +1331,29 @@ impl CodeGraphInteractiveReader {
             matched += 1;
             false
         };
-        for occurrence in exact_hits.into_iter().chain(named_hits) {
+        for occurrence in exact_hits {
             if accept(occurrence) {
                 break;
+            }
+        }
+        if !has_more {
+            for (index, &symbol_index) in catalog.source_order.iter().enumerate() {
+                if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                    return Err(CodeGraphProjectionError::Cancelled);
+                }
+                let Some((occurrence, symbol)) = catalog.symbols.get_index(symbol_index) else {
+                    continue;
+                };
+                if exact.contains(occurrence) {
+                    continue;
+                }
+                let named = symbol.metadata.as_ref().is_some_and(|metadata| {
+                    contains_ignore_ascii_case(&metadata.simple_name, query)
+                        || contains_ignore_ascii_case(&metadata.qualified_name, query)
+                });
+                if named && admitted(occurrence, symbol) && accept(occurrence) {
+                    break;
+                }
             }
         }
         let total = if query.is_empty() && admit.is_none() {

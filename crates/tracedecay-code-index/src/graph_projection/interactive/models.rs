@@ -276,6 +276,11 @@ impl<K: Ord, V> SortedMap<K, V> {
         self.0.len()
     }
 
+    /// The `index`th entry in this map's frozen key order.
+    pub(in crate::graph_projection) fn get_index(&self, index: usize) -> Option<(&K, &V)> {
+        self.0.get(index).map(|(key, value)| (key, value))
+    }
+
     /// This map with `edits` applied: `Some` replaces or inserts the entry,
     /// `None` removes it. Untouched entries are cloned in order, so the
     /// result is one exactly sized sorted allocation like the original.
@@ -435,6 +440,11 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     /// generation.
     pub(super) layer: Option<CatalogLayerV1>,
     pub(super) symbols: SortedMap<SymbolOccurrenceId, CatalogSymbol>,
+    /// Positions in [`Self::symbols`]' frozen slice, ordered the way search
+    /// serves hits: logical path, then start line, then occurrence id.
+    /// Search walks this and stops one match past the window, so a first
+    /// page does not collect or sort the rest of the generation.
+    pub(super) source_order: Box<[usize]>,
     pub(super) by_qualified_name: SortedMap<String, SymbolIds>,
     /// Keyed by the lowercased trailing segment of the qualified name (split
     /// on `::`, then `.`); the projection does not carry a separate simple
@@ -481,6 +491,7 @@ impl InteractiveCatalog {
         compare("generation", self.generation == other.generation);
         compare("layer", self.layer == other.layer);
         compare("symbols", self.symbols == other.symbols);
+        compare("source_order", self.source_order == other.source_order);
         compare(
             "by_qualified_name",
             self.by_qualified_name == other.by_qualified_name,
@@ -651,6 +662,8 @@ impl CatalogBuilder {
         }
         let semantic_edges = self.symbols.values().map(|symbol| symbol.outgoing).sum();
         let files: SortedMap<_, _> = self.files.into();
+        let symbols: SortedMap<_, _> = self.symbols.into();
+        let source_order = source_order_indices(&symbols);
         let symbols_by_logical_path: SortedMap<_, _> = self.symbols_by_logical_path.into();
         let dependency_edge_counts: SortedMap<_, _> = dependency_edge_counts.into();
         let file_dependencies = fold_file_dependencies(
@@ -661,7 +674,8 @@ impl CatalogBuilder {
         InteractiveCatalog {
             generation,
             layer,
-            symbols: self.symbols.into(),
+            symbols,
+            source_order,
             by_qualified_name: freeze_ids(self.by_qualified_name),
             by_simple_name: freeze_ids(self.by_simple_name),
             by_file: freeze_ids(self.by_file),
@@ -776,6 +790,7 @@ impl InteractiveCatalog {
                     .map_or(0, CatalogLayerV1::retained_bytes),
             )
             .saturating_add(self.symbols.bytes(symbol))
+            .saturating_add(self.source_order.len().saturating_mul(size_of::<usize>()))
             .saturating_add(self.by_qualified_name.bytes(named_ids))
             .saturating_add(self.by_simple_name.bytes(named_ids))
             .saturating_add(self.unresolved_call_sources.bytes(named_ids))
@@ -858,6 +873,36 @@ fn binding_heap_bytes(binding: &CodeGraphSymbolBindingV1) -> usize {
         .saturating_add(binding.logical_path.as_ref().map_or(0, String::capacity))
         .saturating_add(opt(binding.chunk.as_ref().map(|chunk| chunk.as_str())))
         .saturating_add(binding.language_descriptor_revision.as_str().len())
+}
+
+/// Search ranking key: logical path, then start line.
+pub(super) fn source_key(symbol: &CatalogSymbol) -> (Option<&str>, Option<u32>) {
+    (
+        symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref()),
+        symbol.metadata.as_ref().map(|metadata| metadata.start_line),
+    )
+}
+
+/// Positions in `symbols` in the order [`super::CodeGraphInteractiveReader::search_symbols`]
+/// serves hits.
+pub(super) fn source_order_indices(
+    symbols: &SortedMap<SymbolOccurrenceId, CatalogSymbol>,
+) -> Box<[usize]> {
+    let mut order: Vec<usize> = (0..symbols.len()).collect();
+    order.sort_unstable_by(|&left, &right| {
+        match (symbols.get_index(left), symbols.get_index(right)) {
+            (Some((left_id, left_symbol)), Some((right_id, right_symbol))) => {
+                source_key(left_symbol)
+                    .cmp(&source_key(right_symbol))
+                    .then_with(|| left_id.cmp(right_id))
+            }
+            _ => left.cmp(&right),
+        }
+    });
+    order.into_boxed_slice()
 }
 
 /// Lowercased trailing path segment of a qualified name.
