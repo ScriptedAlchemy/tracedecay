@@ -6,7 +6,8 @@
 use tracedecay_domain::HydrationStateV1;
 
 use tracedecay_lcm::contracts::{
-    LcmContentRange, LcmContentSlice, LcmError, LcmExpandResponse, LcmSourceRef,
+    LcmContentRange, LcmContentSlice, LcmError, LcmExpandResponse, LcmRawMessageOverview,
+    LcmSourceRef, LcmStorageKind,
 };
 
 #[derive(Debug)]
@@ -57,6 +58,53 @@ pub fn apply_canonical_content(
         summary.summary_text = content;
     }
     Ok(expansion)
+}
+
+pub fn apply_canonical_description_content(
+    messages: &mut Vec<LcmRawMessageOverview>,
+    hydration: &[CanonicalLcmSourceHydration],
+) -> Result<u64, CanonicalLcmSourceHydrationError> {
+    if messages.len() != hydration.len() {
+        return Err(CanonicalLcmSourceHydrationError::Cardinality);
+    }
+    let mut visible = Vec::with_capacity(messages.len());
+    let mut omitted = 0;
+    for (mut message, canonical) in messages.drain(..).zip(hydration) {
+        if canonical.source_ref
+            != (LcmSourceRef::RawMessage {
+                store_id: message.store_id,
+            })
+        {
+            return Err(CanonicalLcmSourceHydrationError::Identity);
+        }
+        match (canonical.state, canonical.content.as_deref()) {
+            (HydrationStateV1::Available, Some(content)) => {
+                let total_chars = content.chars().count() as u64;
+                // Describe keeps external payloads opaque; their bodies require expand.
+                if message.storage_kind == LcmStorageKind::Inline {
+                    message.content_preview = content
+                        .chars()
+                        .take(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+                        .collect();
+                }
+                let returned_chars = message.content_preview.chars().count() as u64;
+                message.content_range = LcmContentRange {
+                    offset: 0,
+                    limit: returned_chars,
+                    returned_chars,
+                    total_chars,
+                    truncated: returned_chars < total_chars,
+                };
+                visible.push(message);
+            }
+            (HydrationStateV1::Available, None) | (_, Some(_)) => {
+                return Err(CanonicalLcmSourceHydrationError::InvalidContentState);
+            }
+            (_, None) => omitted += 1,
+        }
+    }
+    *messages = visible;
+    Ok(omitted)
 }
 
 pub fn apply_canonical_summary_source_content(
@@ -127,7 +175,127 @@ pub fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind};
+    use tracedecay_lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage};
+
+    fn overview(store_id: i64) -> LcmRawMessageOverview {
+        LcmRawMessageOverview {
+            message_id: format!("message-{store_id}"),
+            store_id,
+            role: "assistant".to_owned(),
+            storage_kind: LcmStorageKind::Inline,
+            payload_ref: None,
+            content_preview: "stale preview canary".to_owned(),
+            content_range: LcmContentRange {
+                offset: 0,
+                limit: 20,
+                returned_chars: 20,
+                total_chars: 20,
+                truncated: false,
+            },
+        }
+    }
+
+    #[test]
+    fn canonical_description_counts_characters_and_omits_unavailable_previews() {
+        let text = "界".repeat(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS + 17);
+        let mut messages = vec![overview(1), overview(2), overview(3)];
+        let hydration = [
+            CanonicalLcmSourceHydration {
+                source_ref: LcmSourceRef::RawMessage { store_id: 1 },
+                state: HydrationStateV1::Available,
+                content: Some(text.clone()),
+            },
+            CanonicalLcmSourceHydration {
+                source_ref: LcmSourceRef::RawMessage { store_id: 2 },
+                state: HydrationStateV1::Redacted,
+                content: None,
+            },
+            CanonicalLcmSourceHydration {
+                source_ref: LcmSourceRef::RawMessage { store_id: 3 },
+                state: HydrationStateV1::RetainedButUnavailable,
+                content: None,
+            },
+        ];
+        assert_eq!(
+            apply_canonical_description_content(&mut messages, &hydration).unwrap(),
+            2
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_id, "message-1");
+        assert_eq!(
+            messages[0].content_preview,
+            "界".repeat(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+        );
+        assert_eq!(
+            messages[0].content_range.total_chars,
+            text.chars().count() as u64
+        );
+        assert_eq!(
+            messages[0].content_range.returned_chars,
+            tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS as u64
+        );
+        assert!(messages[0].content_range.truncated);
+    }
+
+    #[test]
+    fn canonical_description_preserves_external_payload_placeholder() {
+        let mut message = overview(1);
+        message.storage_kind = LcmStorageKind::External;
+        message.payload_ref = Some("payload-ref".to_owned());
+        message.content_preview = "[external payload]".to_owned();
+        let mut messages = vec![message];
+        let content = "private payload body ".repeat(100);
+        let hydration = [CanonicalLcmSourceHydration {
+            source_ref: LcmSourceRef::RawMessage { store_id: 1 },
+            state: HydrationStateV1::Available,
+            content: Some(content.clone()),
+        }];
+        assert_eq!(
+            apply_canonical_description_content(&mut messages, &hydration).unwrap(),
+            0
+        );
+        assert_eq!(messages[0].content_preview, "[external payload]");
+        assert_eq!(
+            messages[0].content_range.total_chars,
+            content.chars().count() as u64
+        );
+        assert_eq!(messages[0].content_range.returned_chars, 18);
+        assert!(messages[0].content_range.truncated);
+    }
+
+    #[test]
+    fn canonical_description_rejects_mismatched_identity_and_content_state() {
+        assert!(matches!(
+            apply_canonical_description_content(&mut vec![overview(1)], &[]),
+            Err(CanonicalLcmSourceHydrationError::Cardinality)
+        ));
+        let wrong_identity = CanonicalLcmSourceHydration {
+            source_ref: LcmSourceRef::RawMessage { store_id: 2 },
+            state: HydrationStateV1::Available,
+            content: Some("content".to_owned()),
+        };
+        assert!(matches!(
+            apply_canonical_description_content(&mut vec![overview(1)], &[wrong_identity]),
+            Err(CanonicalLcmSourceHydrationError::Identity)
+        ));
+        for (state, content) in [
+            (HydrationStateV1::Available, None),
+            (
+                HydrationStateV1::Unauthorized,
+                Some("denied canary".to_owned()),
+            ),
+        ] {
+            let hydration = CanonicalLcmSourceHydration {
+                source_ref: LcmSourceRef::RawMessage { store_id: 1 },
+                state,
+                content,
+            };
+            assert!(matches!(
+                apply_canonical_description_content(&mut vec![overview(1)], &[hydration]),
+                Err(CanonicalLcmSourceHydrationError::InvalidContentState)
+            ));
+        }
+    }
 
     fn source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {
