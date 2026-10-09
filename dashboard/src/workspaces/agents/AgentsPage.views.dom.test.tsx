@@ -12,7 +12,7 @@ import { AgentsPage } from './AgentsPage.tsx';
  * without selecting, click selects and lifts the selection's subtree.
  */
 const server = fixtureServer();
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
