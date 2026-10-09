@@ -60,7 +60,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-host-admission__db3bcd9cbff",
+    name = "tracedecay-host-admission__d6d0822c861",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_host_admission",
@@ -69,7 +69,7 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__d5cfdecc988", "//crates/tracedecay-privacy:tracedecay-privacy", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory__d0d27055803", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__d63db22736e", "//crates/tracedecay-privacy:tracedecay-privacy", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory__d0df520573f", "//crates/tracedecay-sessions:tracedecay-sessions", "//crates/tracedecay-store:tracedecay-store"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(1),
