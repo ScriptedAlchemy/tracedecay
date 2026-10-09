@@ -16,7 +16,7 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "@openai/mcp-extensions": "^0.1.0",
     "@tracedecay/sdk": "workspace:*",
