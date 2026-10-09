@@ -371,13 +371,29 @@ pub(crate) fn marker_count(database: &TestDatabase) -> i64 {
     }
 }
 
+/// Row count for `table`, or `0` when the table is absent.
+///
+/// A cancelled first write installs the runtime ledger inside the same
+/// transaction and rolls that DDL back (#3275). Callers that assert "no
+/// durable ledger residue" must treat a missing table as an empty one.
 pub(crate) fn table_count(database: &TestDatabase, table: &str) -> i64 {
-    database
-        .connect()
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-            row.get(0)
-        })
-        .unwrap()
+    let connection = database.connect();
+    let exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if exists == 0 {
+        0
+    } else {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
 }
 
 pub(crate) fn release(control: &Arc<(Mutex<bool>, Condvar)>) {
