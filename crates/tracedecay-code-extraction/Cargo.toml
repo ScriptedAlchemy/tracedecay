@@ -26,9 +26,10 @@ test-helpers = []
 # crate (byte-identical parser/scanner sources to the copy vendored in the
 # large bundle), so `lite` never links the large bundle.
 lite = ["medium-grammars", "lang-markdown", "lang-json"]
-# The two grammar bundles are the only compile-time registration points: every
-# `lang-*` feature names the bundle that ships its grammar, and `ts_provider`
-# builds the lookup from whichever bundles are enabled.
+# The two grammar bundles supply native parse tables. Every `lang-*` feature
+# names the bundle that ships its grammar, and `ts_provider` registers only the
+# languages whose features are on so unused tables can be linker-GC'd when a
+# tier omits a language. The shipping `full` set matches master.
 medium-grammars = ["dep:tracedecay-medium-treesitters"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
