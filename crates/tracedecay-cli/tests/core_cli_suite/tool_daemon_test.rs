@@ -641,6 +641,42 @@ fn assert_capture_transport_response(label: &str, output: &Output, expected_exit
 }
 
 #[test]
+fn native_capture_does_not_recreate_spools_during_profile_maintenance() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_maintenance");
+    let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+        &home_path.join(".tracedecay"),
+        "wipe",
+    )
+    .unwrap();
+    let spool_root = native_capture_spool_root(&data_root, host);
+    std::fs::remove_dir_all(&spool_root).unwrap();
+    let event = json!({
+        "conversation_id": "conv-maintenance",
+        "generation_id": "gen-maintenance",
+        "hook_event_name": "stop",
+        "model": "auto",
+        "status": "completed",
+        "loop_count": 0,
+        "workspace_roots": [project_path],
+    });
+    let output = run_native_capture_hook(&home_path, &project_path, "hook-cursor-stop", &event);
+    assert_capture_transport_response("maintenance capture", &output, 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("profile maintenance"));
+    assert!(!spool_root.exists());
+
+    drop(lease);
+    let output = run_native_capture_hook(&home_path, &project_path, "hook-cursor-stop", &event);
+    assert_capture_transport_response("capture after maintenance", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+}
+
+#[test]
 fn native_capture_is_quiet_by_default_and_emits_requested_span_timings() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
