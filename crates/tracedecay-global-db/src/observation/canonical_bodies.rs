@@ -25,7 +25,7 @@ const RESTORE_OBSERVATION_IMMUTABILITY: &str = "
         END;";
 
 pub(crate) async fn ensure_canonical_bodies_table(
-    conn: &(impl Executor + ?Sized),
+    conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(CANONICAL_BODIES_TABLE_SQL)
         .await
@@ -33,7 +33,7 @@ pub(crate) async fn ensure_canonical_bodies_table(
 }
 
 pub(crate) async fn compact_observation_bodies(
-    conn: &(impl Executor + ?Sized),
+    conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<bool> {
     ensure_canonical_bodies_table(conn).await?;
     if migration_recorded(conn, CANONICAL_BODY_MIGRATION).await? {
@@ -99,7 +99,7 @@ pub(crate) async fn compact_observation_bodies(
 }
 
 pub(crate) async fn compact_attached_lcm_bodies(
-    conn: &(impl Executor + ?Sized),
+    conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<bool> {
     if migration_recorded(conn, LCM_CANONICAL_BODY_MIGRATION).await? {
         return Ok(false);
@@ -115,7 +115,7 @@ pub(crate) async fn compact_attached_lcm_bodies(
 }
 
 pub(crate) async fn compact_lcm_bodies(
-    conn: &(impl Executor + ?Sized),
+    conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<bool> {
     ensure_canonical_bodies_table(conn).await?;
     if !table_exists(conn, "lcm_raw_messages").await? {
@@ -223,7 +223,7 @@ pub(crate) async fn load_canonical_body(
 }
 
 async fn persist_bodies(
-    conn: &(impl Executor + ?Sized),
+    conn: &impl Executor,
     bodies: &[StoredCanonicalBody],
 ) -> tracedecay_domain::errors::Result<()> {
     for body in bodies {
