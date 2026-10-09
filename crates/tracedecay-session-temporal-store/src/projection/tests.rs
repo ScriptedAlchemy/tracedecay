@@ -2706,7 +2706,7 @@ fn fixture_observation_with_text(
             role: CanonicalMessageRoleV1::Assistant,
             content: json!({"text": text}),
             model: Some("model.projector".to_owned()),
-            timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
+            timestamp: Some(1_750_000_000 + i64::try_from(unique).unwrap()),
         }],
         None,
     )
