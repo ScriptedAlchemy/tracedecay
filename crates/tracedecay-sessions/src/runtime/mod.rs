@@ -11,7 +11,6 @@ mod host_scan;
 pub mod hosts;
 pub mod ingest;
 mod native_ingest_source;
-pub(in crate::runtime) mod terminal_source;
 pub use native_ingest_source::native_ingest_source_identity;
 mod observation;
 pub use observation::snapshot_observation;

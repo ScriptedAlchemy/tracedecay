@@ -24,9 +24,6 @@ use super::scheduler::{
 };
 use super::startup::TranscriptIngestOutcome;
 use super::user_provider::UserProviderUnit;
-use crate::runtime::terminal_source::{
-    remember_non_retryable_codex_source, skip_unchanged_terminal_source,
-};
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
@@ -220,12 +217,14 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        if skip_unchanged_terminal_source(path) {
-            continue;
-        }
         let Some(pending) = codex::PendingTranscript::observe(discovery_state, path)? else {
             continue;
         };
+        if let Some(failure) = pending.cached_source_failure(path) {
+            failures.push(failure);
+            frontier_committable = false;
+            continue;
+        }
         let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
             path,
             session_id.as_deref(),
@@ -248,7 +247,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 if failure.retryable {
                     return Err(error);
                 }
-                remember_non_retryable_codex_source(pending, path, failure.retryable);
+                pending.record_source_failure(path, &error, failure)?;
                 failures.push(failure);
                 frontier_committable = false;
                 continue;

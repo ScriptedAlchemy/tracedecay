@@ -11,10 +11,6 @@ use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::run_blocking_transcript_section;
 
-use crate::runtime::terminal_source::{
-    forget_terminal_source, remember_terminal_source, skip_unchanged_terminal_source,
-};
-
 use super::DEFAULT_HERMES_SWEEP_BYTES;
 use super::coverage::{
     drain_hermes_projections_with_admission,
@@ -214,16 +210,11 @@ pub async fn ingest_homes_for_projects(
         if eligible.is_empty() {
             continue;
         }
-        if skip_unchanged_terminal_source(&source.state_db) {
-            continue;
-        }
         match try_ingest_state_db_for_projects(&source, &eligible, &mut budget).await {
             Ok(source_stats) => {
-                forget_terminal_source(&source.state_db);
                 stats = stats.merge(source_stats);
             }
             Err(error) => {
-                remember_terminal_source(&source.state_db);
                 tracing::debug!(
                     state_db = %source.state_db.display(),
                     error,
@@ -324,9 +315,6 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
             budget.defer();
             break;
         }
-        if skip_unchanged_terminal_source(&source.state_db) {
-            continue;
-        }
         match try_ingest_state_db_bounded_with_admission(
             &source,
             project_root,
@@ -338,12 +326,10 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         .await
         {
             Ok(source_stats) => {
-                forget_terminal_source(&source.state_db);
                 hermes_source_outcome_is_new(&source.state_db, None);
                 outcome.stats = outcome.stats.merge(source_stats);
             }
             Err(error) => {
-                remember_terminal_source(&source.state_db);
                 outcome.source_failures = outcome.source_failures.saturating_add(1);
                 if hermes_source_outcome_is_new(&source.state_db, Some(&error)) {
                     tracing::warn!(
@@ -455,9 +441,6 @@ async fn ingest_user_homes_capped_with_admission(
             budget.defer();
             break;
         }
-        if skip_unchanged_terminal_source(&source.state_db) {
-            continue;
-        }
         match try_ingest_user_state_db_bounded_with_admission(
             admission,
             &source,
@@ -468,12 +451,10 @@ async fn ingest_user_homes_capped_with_admission(
         .await
         {
             Ok(source_stats) => {
-                forget_terminal_source(&source.state_db);
                 hermes_source_outcome_is_new(&source.state_db, None);
                 outcome.stats = outcome.stats.merge(source_stats);
             }
             Err(error) => {
-                remember_terminal_source(&source.state_db);
                 outcome.source_failures = outcome.source_failures.saturating_add(1);
                 if hermes_source_outcome_is_new(&source.state_db, Some(&error)) {
                     tracing::warn!(
@@ -574,7 +555,6 @@ fn project_is_real(project_root: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::runtime::terminal_source::reset_terminal_source_skips_for_test;
 
     #[test]
     fn missing_home_is_typed_absence_not_empty_homes() {
@@ -582,8 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unchanged_failed_state_db_is_not_retried() {
-        reset_terminal_source_skips_for_test();
+    async fn unchanged_failed_state_db_remains_a_reported_failure() {
         let temp = tempfile::tempdir().unwrap();
         let hermes = temp.path().join(".hermes");
         std::fs::create_dir_all(&hermes).unwrap();
@@ -598,8 +577,8 @@ mod tests {
 
         let second = ingest_user_homes_capped(&admission, &[hermes], &[], None).await;
         assert_eq!(
-            second.source_failures, 0,
-            "the same corrupt state.db must be skipped until it changes"
+            second.source_failures, 1,
+            "an unchanged unreadable source must not become a successful empty sweep"
         );
     }
 }

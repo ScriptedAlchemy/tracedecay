@@ -25,9 +25,6 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     failed_observation_run, warn_transcript_catch_up_failure,
 };
-use crate::runtime::terminal_source::{
-    remember_non_retryable_codex_source, skip_unchanged_terminal_source,
-};
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Codex,
@@ -289,9 +286,6 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            if skip_unchanged_terminal_source(path) {
-                continue;
-            }
             let Some(pending) =
                 codex::PendingTranscript::observe(self.codex_discovery, path).transpose()
             else {
@@ -332,6 +326,15 @@ impl<'a> ProjectProviderRun<'a> {
                     continue;
                 }
             };
+            if let Some(failure) = pending.cached_source_failure(path) {
+                outcome.add_failure(failure);
+                frontier_committable = false;
+                if codex_source_failure_saturates_pass(outcome.failures.len(), failure.retryable) {
+                    deferred = true;
+                    break;
+                }
+                continue;
+            }
             match codex::try_admit_codex_jsonl_observations_for_project_window(
                 path,
                 self.project_root,
@@ -388,7 +391,15 @@ impl<'a> ProjectProviderRun<'a> {
                         outcome.failures.len().saturating_add(1),
                         failure.retryable,
                     );
-                    remember_non_retryable_codex_source(pending, path, failure.retryable);
+                    if let Err(record_error) = pending.record_source_failure(path, &error, failure)
+                    {
+                        outcome.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "discovery",
+                            &record_error,
+                            "project Codex source failure retention failed",
+                        ));
+                    }
                     outcome.add_failure(failure);
                     frontier_committable = false;
                     if stop {
@@ -892,10 +903,9 @@ impl<'a> ProjectProviderRun<'a> {
     }
 }
 
-/// One Hermes sweep as the scheduler sees it. A source the sweep could not
-/// open or admit is a terminal partial scan: the same bytes fail the same
-/// way, so the next pass skips that `state.db` until its mtime or length
-/// changes. An incomplete projection drain is a deferred unit.
+/// A failed Hermes source remains a retryable partial scan: destination
+/// admission and SQLite availability can recover without changing the source
+/// file. An incomplete projection drain is a deferred unit.
 pub(super) fn hermes_run_outcome(
     outcome: hermes::HermesSweepOutcome,
     byte_cap_exceeded: bool,
@@ -907,7 +917,7 @@ pub(super) fn hermes_run_outcome(
     );
     if outcome.source_failures > 0 {
         run.add_failure(TranscriptCatchUpFailure::source_scan_partial(
-            "hermes", false,
+            "hermes", true,
         ));
     }
     run.add_deferred_units(u64::from(outcome.projection_drain_deferred));
@@ -987,7 +997,7 @@ mod tests {
         assert_eq!(outcome.bytes_consumed, 12);
         assert_eq!(outcome.failures.len(), 1);
         assert_eq!(outcome.failures[0].reason_code, "source_scan_partial");
-        assert!(!outcome.failures[0].retryable);
+        assert!(outcome.failures[0].retryable);
         assert!(!outcome.succeeded());
     }
 
