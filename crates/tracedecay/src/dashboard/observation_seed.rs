@@ -182,26 +182,6 @@ fn anchored_observation_write(
         .map_err(|error| fixture_error("anchored write", error))
 }
 
-/// Persists one canonical message observation and projects it into the
-/// session-temporal observation effects the refresh scheduler discovers from.
-pub async fn seed_session_message_observation_for_test(
-    project_database: &RegisteredGlobalDb,
-    seed: DashboardSessionMessageSeedV1<'_>,
-) -> Result<()> {
-    let write = anchored_observation_write(&seed)?;
-    let observation_id = write.observation().observation_id().clone();
-    let store = project_database.observation_store();
-    store
-        .persist_observation(write)
-        .await
-        .map_err(|error| fixture_error("persist observation", error))?;
-    store
-        .project_observation(&observation_id)
-        .await
-        .map_err(|error| fixture_error("project observation", error))?;
-    Ok(())
-}
-
 /// Persists and projects a fixture observation corpus through the production
 /// batch persist/project authorities.
 pub async fn seed_session_message_observations_for_test(

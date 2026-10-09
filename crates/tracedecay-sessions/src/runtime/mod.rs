@@ -52,7 +52,7 @@ pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 pub use snapshot_observation::SnapshotCaptureOutcome;
 pub use store_access::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptPersistenceError, upsert_session_on,
+    TranscriptPersistenceError,
 };
 pub use tracedecay_lcm::{SessionMessageType, SessionSearchScope};
 

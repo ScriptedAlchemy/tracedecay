@@ -937,7 +937,7 @@ fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
         for ordinal in 1..=70_u64 {
             fixture
                 .host_runtime
-                .seed_session_message_observation_for_test(
+                .seed_session_message_observations_for_test(&[
                     tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
                         project_id: fixture.host_runtime.project_id().as_str(),
                         provider: "cursor",
@@ -949,7 +949,7 @@ fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
                         timestamp: 1_700_001_000 + ordinal as i64,
                         ordinal,
                     },
-                )
+                ])
                 .await
                 .unwrap();
         }

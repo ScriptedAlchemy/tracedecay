@@ -752,7 +752,13 @@ fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
             .collect::<Vec<_>>();
         fixture
             .host_runtime
-            .seed_session_histories_for_test(HostAdmissionScope::Project, &histories)
+            .seed_session_histories_for_test(
+                HostAdmissionScope::Project,
+                &histories
+                    .iter()
+                    .map(|(session, messages)| (session, messages.as_slice()))
+                    .collect::<Vec<_>>(),
+            )
             .await
             .unwrap_or_else(|error| panic!("seed large history: {error}"));
 

@@ -110,7 +110,7 @@ pub async fn set_parse_offset(
 /// Writes one session row with its path column in the canonical form that
 /// project-scoped reads query. `project_key` is an opaque authority and
 /// remains byte-exact; `transcript_path` remains the real display path.
-pub async fn upsert_session_on(conn: &impl Executor, session: &SessionRecord) -> bool {
+async fn upsert_session_on(conn: &impl Executor, session: &SessionRecord) -> bool {
     conn.execute(
         "INSERT INTO sessions
              (provider, session_id, project_key, project_path, title, started_at, ended_at,
