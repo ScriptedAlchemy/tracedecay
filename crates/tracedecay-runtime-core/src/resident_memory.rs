@@ -8,6 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use mach2::{
+    kern_return::KERN_SUCCESS,
+    mach_types::task_name_t,
+    message::mach_msg_type_number_t,
+    task::task_info,
+    task_info::{TASK_VM_INFO, task_vm_info},
+    traps::mach_task_self,
+};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
@@ -479,23 +488,27 @@ pub(crate) fn process_resident_sample_from_macos_vm_info_v1(
 
 #[cfg(target_os = "macos")]
 fn process_resident_sample_from_task_v1() -> Option<ProcessResidentSampleV1> {
-    let mut info = std::mem::MaybeUninit::<libc::task_vm_info>::uninit();
-    let mut count = libc::TASK_VM_INFO_COUNT;
-    // SAFETY: `info` is a live `task_vm_info` of the size `TASK_VM_INFO_COUNT`
-    // declares, and `mach_task_self` is a task port this process owns.
+    let mut info = task_vm_info::default();
+    let mut count: mach_msg_type_number_t = (std::mem::size_of::<task_vm_info>()
+        / std::mem::size_of::<i32>())
+    .try_into()
+    .ok()?;
+    let required_count = (std::mem::offset_of!(task_vm_info, phys_footprint)
+        + std::mem::size_of::<u64>())
+        / std::mem::size_of::<i32>();
+    // SAFETY: the initialized buffer has room for `count` integer fields,
+    // and the queried task port belongs to this process.
     let status = unsafe {
-        libc::task_info(
-            libc::mach_task_self(),
-            libc::TASK_VM_INFO,
-            info.as_mut_ptr().cast(),
+        task_info(
+            mach_task_self() as task_name_t,
+            TASK_VM_INFO,
+            (&raw mut info).cast(),
             &raw mut count,
         )
     };
-    if status != libc::KERN_SUCCESS {
+    if status != KERN_SUCCESS || (count as usize) < required_count {
         return None;
     }
-    // SAFETY: `task_info` wrote `count` fields of `task_vm_info` on success.
-    let info = unsafe { info.assume_init() };
     process_resident_sample_from_macos_vm_info_v1(
         info.resident_size,
         info.phys_footprint,
