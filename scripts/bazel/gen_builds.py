@@ -161,22 +161,6 @@ RUNTIME_BINARIES = (
 NO_DEFAULT_FEATURES = "!no-default-features"
 
 
-def expand_feature_names(feature_table, roots):
-    """Transitively expand Cargo feature names, ignoring dep: and dep/feat edges."""
-    seen = set()
-    stack = list(roots)
-    while stack:
-        name = stack.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        for item in feature_table.get(name, []):
-            if item.startswith("dep:") or "/" in item:
-                continue
-            stack.append(item)
-    return seen
-
-
 def normalize_default_alias(feats, feature_table):
     """Add `default` when it is only an alias for features already enabled.
 
@@ -189,8 +173,10 @@ def normalize_default_alias(feats, feature_table):
     feats = set(feats)
     if "default" in feats or "default" not in feature_table:
         return feats
-    implied = expand_feature_names(feature_table, ["default"]) - {"default"}
-    if implied and implied <= feats:
+    # Cargo already resolved every enabled local feature and its dependencies.
+    # Direct dependency edges in default are not proven by local feature names.
+    defaults = feature_table["default"]
+    if defaults and all(name in feature_table and name in feats for name in defaults):
         feats.add("default")
     return feats
 

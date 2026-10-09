@@ -54,7 +54,7 @@ class DefaultAliasNormalizationTests(unittest.TestCase):
             {"lite"},
         )
 
-    def test_ignores_dep_feature_edges_when_expanding(self) -> None:
+    def test_preserves_default_dependency_edges(self) -> None:
         table = {
             "default": ["production", "dep:optional-dep", "other/feat"],
             "production": ["lite"],
@@ -62,7 +62,17 @@ class DefaultAliasNormalizationTests(unittest.TestCase):
         }
         self.assertEqual(
             self.gen.normalize_default_alias({"production", "lite"}, table),
-            {"default", "production", "lite"},
+            {"production", "lite"},
+        )
+
+    def test_collapses_local_alias_with_resolved_dependency_edges(self) -> None:
+        table = {
+            "default": ["production"],
+            "production": ["dep:optional-dep", "other/feat"],
+        }
+        self.assertEqual(
+            self.gen.normalize_default_alias({"production"}, table),
+            {"default", "production"},
         )
 
 
