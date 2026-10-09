@@ -7,7 +7,7 @@ use tracedecay_domain::HydrationStateV1;
 
 use tracedecay_lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmError, LcmExpandResponse, LcmRawMessageOverview,
-    LcmSourceRef,
+    LcmSourceRef, LcmStorageKind,
 };
 
 #[derive(Debug)]
@@ -80,10 +80,13 @@ pub fn apply_canonical_description_content(
         match (canonical.state, canonical.content.as_deref()) {
             (HydrationStateV1::Available, Some(content)) => {
                 let total_chars = content.chars().count() as u64;
-                message.content_preview = content
-                    .chars()
-                    .take(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
-                    .collect();
+                // Describe keeps external payloads opaque; their bodies require expand.
+                if message.storage_kind == LcmStorageKind::Inline {
+                    message.content_preview = content
+                        .chars()
+                        .take(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+                        .collect();
+                }
                 let returned_chars = message.content_preview.chars().count() as u64;
                 message.content_range = LcmContentRange {
                     offset: 0,
@@ -172,7 +175,7 @@ pub fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind};
+    use tracedecay_lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage};
 
     fn overview(store_id: i64) -> LcmRawMessageOverview {
         LcmRawMessageOverview {
@@ -231,6 +234,32 @@ mod tests {
             messages[0].content_range.returned_chars,
             tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS as u64
         );
+        assert!(messages[0].content_range.truncated);
+    }
+
+    #[test]
+    fn canonical_description_preserves_external_payload_placeholder() {
+        let mut message = overview(1);
+        message.storage_kind = LcmStorageKind::External;
+        message.payload_ref = Some("payload-ref".to_owned());
+        message.content_preview = "[external payload]".to_owned();
+        let mut messages = vec![message];
+        let content = "private payload body ".repeat(100);
+        let hydration = [CanonicalLcmSourceHydration {
+            source_ref: LcmSourceRef::RawMessage { store_id: 1 },
+            state: HydrationStateV1::Available,
+            content: Some(content.clone()),
+        }];
+        assert_eq!(
+            apply_canonical_description_content(&mut messages, &hydration).unwrap(),
+            0
+        );
+        assert_eq!(messages[0].content_preview, "[external payload]");
+        assert_eq!(
+            messages[0].content_range.total_chars,
+            content.chars().count() as u64
+        );
+        assert_eq!(messages[0].content_range.returned_chars, 18);
         assert!(messages[0].content_range.truncated);
     }
 
