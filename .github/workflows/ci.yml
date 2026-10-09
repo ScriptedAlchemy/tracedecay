@@ -400,9 +400,7 @@ jobs:
   windows-test:
     name: Test Windows
     needs: scope-gate
-    # Temporary evidence lane for PR 3277 only. This token cannot
-    # workflow_dispatch (403). Remove before merge; do not land on master.
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' || (needs.scope-gate.outputs.run-heavy == 'true' && github.event.pull_request.number == 3277) }}
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
