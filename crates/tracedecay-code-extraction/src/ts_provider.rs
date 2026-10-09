@@ -160,7 +160,10 @@ fn build_language_table() -> HashMap<&'static str, Language> {
         tracedecay_large_treesitters::languages::tree_sitter_fortran::LANGUAGE.into(),
     );
     #[cfg(feature = "lang-cobol")]
-    languages.insert("cobol", tracedecay_large_treesitters::cobol::LANGUAGE.into());
+    languages.insert(
+        "cobol",
+        tracedecay_large_treesitters::cobol::LANGUAGE.into(),
+    );
     #[cfg(feature = "lang-msbasic2")]
     languages.insert(
         "msbasic2",
@@ -232,14 +235,20 @@ fn build_language_table() -> HashMap<&'static str, Language> {
         tracedecay_large_treesitters::languages::tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
     );
     #[cfg(feature = "lang-quint")]
-    languages.insert("quint", tracedecay_large_treesitters::quint::LANGUAGE.into());
+    languages.insert(
+        "quint",
+        tracedecay_large_treesitters::quint::LANGUAGE.into(),
+    );
     #[cfg(feature = "lang-toml")]
     languages.insert(
         "toml",
         tracedecay_large_treesitters::languages::tree_sitter_toml_ng::LANGUAGE.into(),
     );
     #[cfg(feature = "lang-lean")]
-    languages.insert("lean", tracedecay_large_treesitters::lean::language().into());
+    languages.insert(
+        "lean",
+        tracedecay_large_treesitters::lean::language().into(),
+    );
 
     #[cfg(feature = "lang-markdown")]
     languages.insert("markdown", markdown_grammar::LANGUAGE.into());
