@@ -732,7 +732,15 @@ pub(super) async fn require_exact_occurrence(
         "snippet_text": derived_text_for_index(text),
         "index_text": derived_text_for_index(text),
     });
-    if actual != expected {
+    if actual == expected {
+        return Ok(());
+    }
+    // Rows written before the index cap retained the full sanitized body.
+    // Their receipts bind those bytes, so validate without rewriting them.
+    let mut uncapped = expected;
+    uncapped["snippet_text"] = Value::String(text.to_owned());
+    uncapped["index_text"] = Value::String(text.to_owned());
+    if actual != uncapped {
         return Err(storage_message(
             PERSIST_OPERATION,
             format!(
