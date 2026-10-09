@@ -816,7 +816,9 @@ async fn stage_projection_rebuild_batch_transaction(
         .await
         .map_err(|error| storage("read projection rebuild batch", error))?
     {
-        page.push(decode_observation_row(conn, &row, "read projection rebuild batch").await?);
+        page.push(
+            decode_observation_row(transaction, &row, "read projection rebuild batch").await?,
+        );
     }
     drop(rows);
 
@@ -2449,7 +2451,7 @@ async fn prepare_rebuild_output_activation(
 }
 
 async fn activate_rebuild_messages(
-    conn: &(impl Executor + Sync),
+    conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
     let session_columns = MESSAGE_SESSION_JSON_FIELDS.join(", ");
