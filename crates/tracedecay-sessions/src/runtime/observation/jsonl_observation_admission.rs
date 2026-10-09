@@ -380,7 +380,9 @@ pub fn release_unpinned_shared_jsonl_pages() -> SharedJsonlPageReleaseV1 {
             index += 1;
             continue;
         }
-        let evicted = cache.pages.remove(index);
+        let Some(evicted) = cache.pages.remove(index) else {
+            break;
+        };
         cache.retained_bytes = cache
             .retained_bytes
             .saturating_sub(evicted.page.retained_bytes);
