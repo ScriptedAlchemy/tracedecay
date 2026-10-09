@@ -292,10 +292,9 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let Some(pending) =
-                codex::PendingTranscript::observe(self.codex_discovery, path)
-                    .await
-                    .transpose()
+            let Some(pending) = codex::PendingTranscript::observe(self.codex_discovery, path)
+                .await
+                .transpose()
             else {
                 continue;
             };

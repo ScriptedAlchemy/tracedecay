@@ -803,19 +803,16 @@ async fn admit_session_file(
     let canonical_session_id =
         protect_sensitive_structural_id(&header.session_id).map_err(|_| invalid_frame())?;
     let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
-    let file_identity =
-        run_blocking_transcript_section({
-            let path = path.to_path_buf();
-            move || jsonl_file_identity(&path)
-        })
-        .await
-        .map_err(|source| {
-            TranscriptIngestError::ScanIo {
-                operation: "read Pi session identity",
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
+    let file_identity = run_blocking_transcript_section({
+        let path = path.to_path_buf();
+        move || jsonl_file_identity(&path)
+    })
+    .await
+    .map_err(|source| TranscriptIngestError::ScanIo {
+        operation: "read Pi session identity",
+        path: path.to_path_buf(),
+        source,
+    })?;
     let source_key = protect_sensitive_structural_id(&format!("pi-file-{file_identity:016x}"))
         .map_err(|_| invalid_frame())?;
     let source_identity = ObservationSourceIdentityV1::for_provider_source(

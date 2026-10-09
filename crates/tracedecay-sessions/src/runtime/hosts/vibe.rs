@@ -227,7 +227,8 @@ pub async fn capture_vibe_observations(
             let source = source.clone();
             let project_root = project_root.to_path_buf();
             let session_path = path.clone();
-            let convergence = convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
+            let convergence =
+                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
             run_blocking_transcript_section(move || {
                 pending_session(
                     &source,

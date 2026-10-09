@@ -199,9 +199,7 @@ where
         + 'static,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = {
-        run_blocking_transcript_section(discover).await
-    };
+    let discovery = { run_blocking_transcript_section(discover).await };
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
@@ -271,9 +269,7 @@ impl SnapshotAdmissionRunner {
             return Ok(());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = {
-            run_blocking_transcript_section(load).await
-        }?;
+        let loaded = { run_blocking_transcript_section(load).await }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some(batches) = loaded else {
             return Ok(());
@@ -726,8 +722,8 @@ pub fn snapshot_cursor_covers_range(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::admission::HostAdmission;
     use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};

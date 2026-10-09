@@ -958,8 +958,7 @@ async fn blocking_section_request_latency_scorecard() {
     let after_pings = tokio::spawn(ping_spawned_request_runtime(after_started_rx));
     let (after_first_poll, after_latencies, after_worker) =
         after_pings.await.expect("join after pings");
-    let (after_ingest, after_work, after_thread) =
-        after_ingest.await.expect("join ingest section");
+    let (after_ingest, after_work, after_thread) = after_ingest.await.expect("join ingest section");
     assert!(after_work > 0, "ingest section must perform work");
     assert_ne!(
         after_thread, after_worker,
