@@ -53,7 +53,7 @@ pub struct BranchInfo {
 pub fn print_status_header(
     census: &GenerationCensusSnapshot,
     freshness: Option<&CodeIndexWorktreeFreshnessV1>,
-    tokens_saved: u64,
+    tokens_saved: Option<u64>,
     global_tokens_saved: Option<u64>,
     worldwide: Option<u64>,
     country_flags: &[String],
@@ -66,7 +66,9 @@ pub fn print_status_header(
 
     println!("{}", table_separator('╭', '─', '╮', cell_width, num_cols));
     print_version_flags_row(country_flags, inner_width);
-    print_tokens_row(tokens_saved, global_tokens_saved, worldwide, inner_width);
+    if let Some(tokens_saved) = tokens_saved {
+        print_tokens_row(tokens_saved, global_tokens_saved, worldwide, inner_width);
+    }
     if let Some(ci) = cost_info {
         print_cost_row(ci, inner_width);
     }
@@ -87,7 +89,7 @@ pub fn print_status_header(
 pub struct StatusTable<'a> {
     pub census: &'a GenerationCensusSnapshot,
     pub freshness: Option<&'a CodeIndexWorktreeFreshnessV1>,
-    pub tokens_saved: u64,
+    pub tokens_saved: Option<u64>,
     pub global_tokens_saved: Option<u64>,
     pub worldwide: Option<u64>,
     pub country_flags: &'a [String],
@@ -114,7 +116,9 @@ pub fn print_status_table_with(table: StatusTable<'_>) {
 
     println!("{}", table_separator('╭', '─', '╮', cell_width, num_cols));
     print_version_flags_row(country_flags, inner_width);
-    print_tokens_row(tokens_saved, global_tokens_saved, worldwide, inner_width);
+    if let Some(tokens_saved) = tokens_saved {
+        print_tokens_row(tokens_saved, global_tokens_saved, worldwide, inner_width);
+    }
     if let Some(ci) = cost_info {
         print_cost_row(ci, inner_width);
     }

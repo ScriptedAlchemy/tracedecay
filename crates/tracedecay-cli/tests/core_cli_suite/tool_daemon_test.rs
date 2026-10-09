@@ -236,6 +236,10 @@ fn minimal_status_payload() -> String {
         "last_full_sync_at": 1,
         "last_sync_duration_ms": 1,
         "serving_branch": "master",
+        "graph_statistics": {
+            "state": "unavailable",
+            "reason": "authority_unavailable",
+        },
     }))
     .expect("status payload")
 }
@@ -3099,6 +3103,58 @@ fn status_json_requests_compact_daemon_payload_noninteractively() {
     assert_eq!(args["include_storage_health"], false);
     assert_eq!(args["include_session_ingest"], false);
     assert_eq!(args["include_staleness"], false);
+}
+
+#[test]
+fn status_plain_renders_from_tracedecay_status_only() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::Complete {
+            text: minimal_status_payload(),
+        },
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .env("TERM", "dumb")
+        .args(["status", project_arg.as_str()]);
+    let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+
+    assert!(
+        output.status.success(),
+        "plain status should succeed from tracedecay_status alone\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("graph census unavailable: authority_unavailable"),
+        "plain status must render the daemon census, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Saved ~"),
+        "plain status must not invent a tokens row, got:\n{stdout}"
+    );
+
+    let request = observed
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should receive tools/call request");
+    assert_eq!(request["params"]["name"], "tracedecay_status");
+    assert!(
+        observed.try_recv().is_err(),
+        "plain status must not issue a second daemon RPC"
+    );
 }
 
 #[test]
